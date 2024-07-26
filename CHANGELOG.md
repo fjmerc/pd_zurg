@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+
+## Version [2.6.0] - 2024-07-26
+
+### Changed
+
+- [PR #62](https://github.com/I-am-PUID-0/pd_zurg/pull/62) - Allow nightly release custom versions for ZURG_VERSION
+
+
 ## Version [2.5.0] - 2024-07-22
 
 ### Added

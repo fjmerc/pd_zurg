@@ -96,7 +96,7 @@ services:
      # - JF_ADDRESS
      # - JF_API_KEY
       ## Plex Debrid Optional Settings
-     # - PD_UPDATE=true # deprecated; plex_drbrid is no longer maintained 
+     # - PD_UPDATE=true # only works when PD_REPO set
      # - PD_REPO=itsToggle,plex_debrid,main
      # - SHOW_MENU=false
      # - SEERR_API_KEY=
@@ -190,7 +190,7 @@ of this parameter has the format `<VARIABLE_NAME>=<VALUE>`.
 |`PDZURG_LOG_COUNT`| The number logs to retain. Result will be value + current log  | `2` |
 |`PDZURG_LOG_SIZE`| The size of the log file before it is rotated. Valid options are 'K' (kilobytes), 'M' (megabytes), and 'G' (gigabytes)  | `10M` |
 |`ZURG_ENABLED`| Set the value "true" to enable the Zurg process | `false ` | | | :heavy_check_mark:|
-|`ZURG_VERSION`| The version of Zurg to use. If enabled, the value should contain v0.9.x or v0.9.x-hotfix.x format | `latest` | | | |
+|`ZURG_VERSION`| The version of Zurg to use. If enabled, the value should contain v0.9.x or v0.9.x-hotfix.x format, or "nightly" if wanting the nightly builds from Zurg private repo (requires GITHUB_TOKEN) | `latest` | | | |
 |`ZURG_UPDATE`| Enable automatic updates of Zurg. Adding this variable will enable automatic updates to the latest version of Zurg locally within the container. | `false` | | | |
 |`ZURG_LOG_LEVEL`| Set the log level for Zurg | `INFO` | | | |
 |`GITHUB_TOKEN`| GitHub Personal Token for use with Zurg private repo. Requires Zurg [sponsorship](https://github.com/sponsors/debridmediamanager) | `false ` | | | |

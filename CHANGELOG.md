@@ -1,10 +1,32 @@
-# Changelog
+﻿# Changelog
 
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+
+
+## Version [2.7.0] - 2024-07-30 🚀
+
+### Changed 🔄
+
+- Refactored to use additional common functions under utils 🛠️
+- Update process: Refactored update process to apply updates to Zurg and plex_debrid before starting the processes 🔄
+
+### Added ✨
+
+- Ratelimit for GitHub API requests ⏳
+- Retries for GitHub API requests 🔁
+- plex_debrid: Debug printing for plex_debrid linked to PDZURG_LOG_LEVEL 🐞
+- Zurg: Add plex_update.sh from Zurg to working directory for Zurg use 📦
+- Shutdown: Added a shutdown function to gracefully stop the pd_zurg container; e.g., unmount the rclone mounts 🛑
+- ffmpeg: Added ffmpeg to the Dockerfile for Zurg use of ffprobe to extract media information from files, enhancing media metadata accuracy. 🎞️
+- COLOR_LOG_ENABLED: Environment variable to enable color logging; Default is false 🌈
+
+### Fixed 🐛
+
+[PR #62](https://github.com/I-am-PUID-0/pd_zurg/pull/62) - Allow nightly release custom versions for ZURG_VERSION
 
 
 ## Version [2.6.0] - 2024-07-26

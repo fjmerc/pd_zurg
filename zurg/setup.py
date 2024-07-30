@@ -9,6 +9,7 @@ def zurg_setup():
     zurg_app_base = '/zurg/zurg'
     zurg_config_override = '/config/config.yml'
     zurg_config_base = '/zurg/config.yml'
+    zurg_plex_update_base = '/zurg/plex_update.sh'
   
     try:
         if ZURGLOGLEVEL is not None:    # Needs additional testing
@@ -19,6 +20,17 @@ def zurg_setup():
             # logger.info("'ZURG_LOG_LEVEL' not set. Default log level INFO will be used for Zurg.")
     except Exception as e:
         logger.error(f"Error setting Zurg log level from 'ZURG_LOG_LEVEL': {e}")
+
+    def update_plex(file_path):
+        logger.debug(f"Disabling plex_update.sh in config file: {file_path}")
+        with open(file_path, 'r') as file:
+            lines = file.readlines()
+        with open(file_path, 'w') as file:
+            for line in lines:
+                if line.strip().startswith("on_library_update:"):
+                    file.write("# on_library_update:\n")
+                else:
+                    file.write(line)
 
     def update_token(file_path, token):
         logger.debug(f"Updating token in config file: {file_path}")
@@ -62,7 +74,7 @@ def zurg_setup():
                         file.write("# password:\n")
                     else:
                         file.write(line)
-
+                        
     def plex_refresh(file_path):
         logger.info(f"Updating Plex Refresh in config file: {file_path}")
         yaml = YAML()
@@ -90,7 +102,7 @@ def zurg_setup():
 
         with open(file_path, 'w') as file:
             yaml.dump(config, file)
-
+            
     def check_and_set_zurg_version(dir_path):
         zurg_binary_path = os.path.join(dir_path, 'zurg')
         if os.path.exists(zurg_binary_path) and not ZURGVERSION:
@@ -113,6 +125,7 @@ def zurg_setup():
         try:
             zurg_executable_path = os.path.join(config_dir, 'zurg')
             config_file_path = os.path.join(config_dir, 'config.yml')
+            plex_update_file_path = os.path.join(config_dir, 'plex_update.sh')
             refresh_file_path = os.path.join(config_dir, 'plex_refresh.py')
             logger.info(f"Preparing Zurg instance for {key_type}")
         
@@ -136,7 +149,11 @@ def zurg_setup():
                 logger.debug(f"Copying Zurg config from base: {zurg_config_base} to {config_file_path}")
                 shutil.copy(zurg_config_base, config_file_path)
             else:
-                logger.info(f"Using Zurg config found for {key_type} in {config_dir}")                
+                logger.info(f"Using Zurg config found for {key_type} in {config_dir}")
+            
+            if not os.path.exists(plex_update_file_path):
+                shutil.copy(zurg_plex_update_base,plex_update_file_path)                
+
             if ZURGPORT:
                 port = ZURGPORT
                 logger.debug(f"Setting port {port} for Zurg w/ {key_type} instance")
@@ -145,10 +162,13 @@ def zurg_setup():
                 port = random.randint(9001, 9999)
                 logger.debug(f"Selected port {port} for Zurg w/ {key_type} instance")
                 update_port(config_file_path, port)
-            update_token(config_file_path, token)                
-            update_creds(config_file_path, ZURGUSER, ZURGPASS if ZURGUSER and ZURGPASS else None)          
+                
+            update_creds(config_file_path, ZURGUSER, ZURGPASS if ZURGUSER and ZURGPASS else None)
+            
             os.environ[f'ZURG_PORT_{key_type}'] = str(port)       
             logger.debug(f"Zurg w/ {key_type} instance configured to port: {port}")
+            
+            update_token(config_file_path, token)            
             if PLEXREFRESH is not None and PLEXREFRESH.lower() == "true":
                 if PLEXADD and PLEXTOKEN and PLEXMOUNT:
                     plex_refresh(config_file_path)

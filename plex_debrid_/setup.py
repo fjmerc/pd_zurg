@@ -55,7 +55,7 @@ def pd_setup():
                 json_data["Plex library refresh"] =  []                
                 logger.info("plex_debrid configured for Jellyfin")
                 if not trakt_refresh_user:
-                    logger.info("Addtional configuration is required for Jellyfin. Please autorized and add your Trakt user by editing the Library collection service with the plex_debrid UI!")
+                    logger.info("Addtional configuration is required for Jellyfin. Please autorize and add your Trakt user by editing the Library collection service with the plex_debrid UI!")
 
             if PLEXUSER:
                 if not PLEXUSER:
@@ -109,12 +109,20 @@ def pd_setup():
                 json_data["Debrid Services"].append("Real Debrid")
             if ADAPIKEY:
                 json_data["All Debrid API Key"] = ADAPIKEY 
-                json_data["Debrid Services"].append("All Debrid")
-            if SHOWMENU:
+                json_data["Debrid Services"].append("All Debrid")    
+            if SHOWMENU is not None and str(SHOWMENU).lower() == 'false':
                 json_data["Show Menu on Startup"] = SHOWMENU.lower()
-            if LOGFILE:
-                json_data["Log to file"] = LOGFILE.lower()                        
-
+            else:
+                json_data["Show Menu on Startup"] = "true"
+            if LOGFILE is not None and str(LOGFILE).lower() == 'true':
+                json_data["Log to file"] = LOGFILE.lower()
+            else:
+                json_data["Log to file"] = "false"   
+            log_level = os.getenv('PDZURG_LOG_LEVEL', '').upper()    
+            if log_level == 'DEBUG':
+                json_data["Debug printing"] = "true"
+            else:
+                json_data["Debug printing"] = "false"                
             f.seek(0)
             dump(json_data, f, indent=4)
             f.truncate()

@@ -6,3 +6,4 @@ plexapi
 requests
 packaging
 ruamel.yaml
+colorlog

@@ -7,13 +7,14 @@ WORKDIR /
 
 ADD . / ./
 ADD https://raw.githubusercontent.com/debridmediamanager/zurg-testing/main/config.yml /zurg/
+ADD https://raw.githubusercontent.com/debridmediamanager/zurg-testing/main/plex_update.sh /zurg/
 
 ENV \
   XDG_CONFIG_HOME=/config \
   TERM=xterm
 
 RUN \
-  apk add --update --no-cache gcompat libstdc++ libxml2-utils curl tzdata nano ca-certificates wget fuse3 python3 build-base py3-pip python3-dev linux-headers && \
+  apk add --update --no-cache gcompat libstdc++ libxml2-utils curl tzdata nano ca-certificates wget fuse3 python3 build-base py3-pip python3-dev linux-headers ffmpeg && \
   ln -sf python3 /usr/bin/python && \
   mkdir /log && \
   python3 -m venv /venv && \

@@ -30,6 +30,10 @@ A prebuilt image is hosted on [docker hub](https://hub.docker.com/r/iampuid0/pd_
 ## 🏷️ GitHub Container Registry
 A prebuilt image is hosted on [GitHub Container Registry](https://github.com/I-am-PUID-0/pd_zurg/pkgs/container/pd_zurg)
 
+> [!NOTE] 
+> The below examples are not exhaustive and are intended to provide a starting point for deployment.
+> Additionally, the host directories used in the examples are based on [Define the directory structure](https://github.com/I-am-PUID-0/pd_zurg/wiki/Setup-Guides#define-the-directory-structure) and provided for illustrative purposes and can be changed to suit your needs.
+
 
 ## 🛠️ Docker-compose
 ```YAML
@@ -45,17 +49,17 @@ services:
     tty: true        # docker run -t    
     volumes:
       ## Location of configuration files. If a Zurg config.yml and/or Zurg app is placed here, it will be used to override the default configuration and/or app used at startup. 
-      - /pd_zurg/config:/config
+      - /home/username/pd_zurg/config:/config
       ## Location for logs
-      - /pd_zurg/log:/log
+      - /home/username/pd_zurg/log:/log
       ## Location for rclone cache if enabled
-      - /pd_zurg/cache:/cache
+      - /home/username/pd_zurg/cache:/cache
       ## Location for Zurg RealDebrid active configuration
-      - /pd_zurg/RD:/zurg/RD
+      - /home/username/pd_zurg/RD:/zurg/RD
       ## Location for Zurg AllDebrid active configuration -- when supported by Zurg     
-      - /pd_zurg/AD:/zurg/AD   
+      - /home/username/pd_zurg/AD:/zurg/AD   
       ## Location for rclone mount to host
-      - /pd_zurg/mnt:/data:shared       
+      - /home/username/pd_zurg/mnt:/data:shared       
     environment:
       - TZ=
       ## Zurg Required Settings
@@ -66,13 +70,15 @@ services:
      # - ZURG_VERSION=v0.9.2-hotfix.4
      # - ZURG_UPDATE=true
      # - PLEX_REFRESH=true
-     # - PLEX_MOUNT_DIR=/pd_zurg 
+     # - PLEX_MOUNT_DIR=/rclone/pd_zurg 
      # - ZURG_USER=
      # - ZURG_PASS=
      # - ZURG_PORT=8800
       ## Rclone Required Settings
       - RCLONE_MOUNT_NAME=pd_zurg
       ## Rclone Optional Settings - See rclone docs for full list
+     # - RCLONE_UID=1000
+     # - RCLONE_GID=1000
      # - NFS_ENABLED=true
      # - NFS_PORT=8000
      # - RCLONE_LOG_LEVEL=DEBUG
@@ -118,6 +124,32 @@ services:
       - apparmor:unconfined    
       - no-new-privileges
 ```
+## 🎥 Example Plex Docker-compose
+
+> [!NOTE] 
+> The Plex server must be started after the rclone mount is available.  The below example uses the ```depends_on``` parameter to delay the start of the Plex server until the rclone mount is available.  The rclone mount must be shared to the Plex container.  The rclone mount location should be added to the Plex library.  
+
+```YAML
+version: "3.8"
+
+services:
+  plex:
+    image: plexinc/pms-docker:latest
+    container_name: plex
+    devices:
+      - /dev/dri:/dev/dri    
+    volumes:
+      - /home/username/docker/plex/library:/config
+      - /home/username/docker/plex/transcode:/transcode
+      - /home/username/pd_zurg/mnt:/rclone # rclone mount location from pd_zurg must be shared to Plex container. Add to plex library  
+    environment:
+      - TZ=
+    ports:
+      - "32400:32400"
+    depends_on:  # Used to delay the startup of plex to ensure the rclone mount is available.
+      pd_zurg: # set to the name of the container running rclone
+        condition: service_healthy 
+```
 
 ## 🔨 Docker Build
 
@@ -147,9 +179,9 @@ To enable either Overseerr or Jellyseerr integration with plex_debrid, the follo
 
 
 ## 🔄 Automatic Updates
-~~If you would like to enable automatic updates for plex_debrid, utilize the ```PD_UPDATE``` environment variable. 
-Additional details can be found in the [pd_zurg Wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki#automatic-update-of-plex_debrid-to-the-latest-version)~~ \
-deprecated; plex_drbrid is no longer maintained
+If you would like to enable automatic updates for plex_debrid, utilize the ```PD_UPDATE``` environment variable. Only works when PD_REPO is set.
+Additional details can be found in the [pd_zurg Wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki#automatic-update-of-plex_debrid-to-the-latest-version) 
+
 
 If you would like to enable automatic updates for Zurg, utilize the ```ZURG_UPDATE``` environment variable. 
 Additional details can be found in the [pd_zurg Wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki#automatic-update-of-zurg-to-the-latest-version)
@@ -182,7 +214,7 @@ of this parameter has the format `<VARIABLE_NAME>=<VALUE>`.
 |`PD_ENABLED`| Set the value "true" to enable the plex_debrid process | `false ` | | :heavy_check_mark: | |
 |`PD_LOGFILE`| Log file for plex_debrid. The log file will appear in the ```/config``` as ```plex_debrid.log```. If used, the value must be ```true``` or ```false``` | `false` |
 |`PD_UPDATE`| Enable automatic updates of plex_debrid. Adding this variable will enable automatic updates to the latest version of plex_debrid locally within the container. Only enabled if PD_REPO is set| `false` |
-|`PD_REPO`| The repository to use for plex_debrid. If used, the value must be a comma seperated list for the GitHub username,repository name,and optionally the branch; e.g., "itsToggle,plex_debrid,main" | `None` |
+|`PD_REPO`| The repository to use for plex_debrid. If used, the value must be a comma seperated list for the GitHub username,repository name, and optionally the branch; e.g., "itsToggle,plex_debrid,main" | `None` |
 |`AUTO_UPDATE_INTERVAL`| Interval between automatic update checks in hours. Vaules can be any positive [whole](https://www.oxfordlearnersdictionaries.com/us/definition/english/whole-number) or [decimal](https://www.oxfordreference.com/display/10.1093/oi/authority.20110803095705740;jsessionid=3FDC96CC0D79CCE69702661D025B9E9B#:~:text=The%20separator%20used%20between%20the,number%20expressed%20in%20decimal%20representation.) point based number. Ex. a value of .5 would yield thirty minutes, and 1.5 would yield one and a half hours | `24` |
 |`DUPLICATE_CLEANUP`| Automated cleanup of duplicate content in Plex.  | `false` |
 |`CLEANUP_INTERVAL`| Interval between duplicate cleanup in hours. Values can be any positive [whole](https://www.oxfordlearnersdictionaries.com/us/definition/english/whole-number) or [decimal](https://www.oxfordreference.com/display/10.1093/oi/authority.20110803095705740;jsessionid=3FDC96CC0D79CCE69702661D025B9E9B#:~:text=The%20separator%20used%20between%20the,number%20expressed%20in%20decimal%20representation.) point based number. Ex. a value of .5 would yield thirty minutes and 1.5 would yield one and a half hours | `24` |

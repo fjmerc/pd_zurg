@@ -30,12 +30,13 @@ A prebuilt image is hosted on [docker hub](https://hub.docker.com/r/iampuid0/pd_
 ## 🏷️ GitHub Container Registry
 A prebuilt image is hosted on [GitHub Container Registry](https://github.com/I-am-PUID-0/pd_zurg/pkgs/container/pd_zurg)
 
+
+## 🛠️ Docker-compose
+
 > [!NOTE] 
 > The below examples are not exhaustive and are intended to provide a starting point for deployment.
 > Additionally, the host directories used in the examples are based on [Define the directory structure](https://github.com/I-am-PUID-0/pd_zurg/wiki/Setup-Guides#define-the-directory-structure) and provided for illustrative purposes and can be changed to suit your needs.
 
-
-## 🛠️ Docker-compose
 ```YAML
 version: "3.8"
 

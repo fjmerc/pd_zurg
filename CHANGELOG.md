@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## Version [2.8.1] - 2024-08-09 🚀
+
+## Fixed 🐛
+
+- healthcheck: Fixed healthcheck for zurg w/ armv7 🛠️
+
+
 ## Version [2.8.0] - 2024-08-09 🚀
 
 ### Changed 🔄

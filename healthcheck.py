@@ -30,12 +30,12 @@ try:
     
     process_info = {
         "zurg_rd": {
-            "regex": re.compile(rf'/zurg/RD/zurg.*--preload', re.IGNORECASE),
+            "regex": re.compile(rf'/zurg/RD/zurg', re.IGNORECASE),
             "error_message": "The Zurg RD process is not running.",
             "should_run": str(ZURG).lower() == 'true' and RDAPIKEY
         },
         "zurg_ad": {
-            "regex": re.compile(rf'/zurg/AD/zurg.*--preload', re.IGNORECASE),
+            "regex": re.compile(rf'/zurg/AD/zurg', re.IGNORECASE),
             "error_message": "The Zurg AD process is not running.",
             "should_run": str(ZURG).lower() == 'true' and ADAPIKEY
         },

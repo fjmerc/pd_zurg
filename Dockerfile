@@ -14,7 +14,7 @@ ENV \
   TERM=xterm
 
 RUN \
-  apk add --update --no-cache gcompat libstdc++ libxml2-utils curl tzdata nano ca-certificates wget fuse3 python3 build-base py3-pip python3-dev linux-headers ffmpeg && \
+  apk add --update --no-cache gcompat libstdc++ libxml2-utils curl tzdata nano ca-certificates wget fuse3 python3 build-base py3-pip python3-dev linux-headers ffmpeg rust cargo && \
   ln -sf python3 /usr/bin/python && \
   mkdir /log && \
   python3 -m venv /venv && \

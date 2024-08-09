@@ -24,7 +24,7 @@ def scrape(query, altquery):
             ui_print('[prowlarr] error: prowlarr request timed out. Reduce the number of prowlarr indexers or make sure they are healthy.')
             return []
         except :
-            ui_print('[prowlarr] error: prowlarr couldnt be reached. Make sure your prowlarr base url is correctly formatted (default: http://localhost:9696).')
+            ui_print('[prowlarr] error: prowlarr couldnt be reached. Make sure your prowlarr base url is correctly formatted (default: http://prowlarr:9696).')
             return []
         if response.status_code == 200:
             try:
@@ -36,7 +36,7 @@ def scrape(query, altquery):
                 result.title = result.title.replace(' ', '.')
                 result.title = result.title.replace(':', '').replace("'", '')
                 result.title = regex.sub(r'\.+', ".", result.title)
-                if regex.match(r'(' + altquery.replace('.', r'\.').replace(r"\.*", ".*") + ')', result.title,regex.I) and result.protocol == 'torrent':
+                if regex.match(r'(' + altquery.replace('.', '\.').replace("\.*", ".*") + ')', result.title,regex.I) and result.protocol == 'torrent':
                     if hasattr(result, 'magnetUrl'):
                         if not result.magnetUrl == None:
                             if not result.indexer == None and not result.size == None:

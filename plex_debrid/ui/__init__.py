@@ -355,8 +355,8 @@ def update_available():
     try:
         response = requests.get('https://raw.githubusercontent.com/itsToggle/plex_debrid/main/ui/ui_settings.py',timeout=0.25)
         response = response.content.decode()
-        if regex.search(r"(?<=')([0-9]+\.[0-9]+)(?=')", response):
-            v = regex.search(r"(?<=')([0-9]+\.[0-9]+)(?=')", response).group()
+        if regex.search("(?<=')([0-9]+\.[0-9]+)(?=')",response):
+            v = regex.search("(?<=')([0-9]+\.[0-9]+)(?=')",response).group()
             if float(ui_settings.version[0]) < float(v):
                 return " | [v"+v+"] available!"
             return ""
@@ -403,7 +403,7 @@ def threaded(stop):
     else:
         print("Type 'exit' to return to the main menu.")
     timeout = 5
-    regular_check = 1800
+    regular_check = int(ui_settings.loop_interval_seconds)
     timeout_counter = 0
     library = content.classes.library()[0]()
     # get entire plex_watchlist

@@ -297,7 +297,7 @@ class movie(classes.media):
 
 class library(classes.library):
     name = 'Plex Library'
-    url = 'http://localhost:32400'
+    url = 'http://plex:32400'
     check = []
 
     def setup(cls, new=False):
@@ -529,7 +529,7 @@ class library(classes.library):
 
     class lable(classes.refresh):
 
-        name = 'Plex Lables'
+        name = 'Plex Labels'
 
         def setup(cls, new=False):
             ui_cls("Options/Settings/Library Services/Library update services")
@@ -586,7 +586,7 @@ class library(classes.library):
                     retries += 1
                 library_item = next((x for x in current_library if element == x), None)
                 if library_item == None:
-                    ui_print('[plex] error: couldnt add lables - item: "' + element.query() + '" could not be found on server.')
+                    ui_print('[plex] error: couldnt add labels - item: "' + element.query() + '" could not be found on server.')
                     return
                 tags_string = ""
                 for tag in tags:
@@ -598,7 +598,7 @@ class library(classes.library):
                 response = get(url)
                 library_item.__dict__.update(response.MediaContainer.Metadata[0].__dict__)
             except Exception as e:
-                ui_print("[plex] error: couldnt add lables! Turn on debug printing for more info.")
+                ui_print("[plex] error: couldnt add labels! Turn on debug printing for more info.")
                 ui_print(str(e), debug=ui_settings.debug)
 
         def __new__(cls, element):
@@ -632,12 +632,12 @@ class library(classes.library):
                 if len(tags) == 0:
                     return
                 element.post_tags = tags
-                ui_print('[plex] adding lables: "' + '","'.join(tags) + '" to item: "' + element.query() + '"')
+                ui_print('[plex] adding labels: "' + '","'.join(tags) + '" to item: "' + element.query() + '"')
                 results = [None]
                 t = Thread(target=multi_init, args=(library.lable.call, element, results, 0))
                 t.start()
             except Exception as e:
-                ui_print("[plex] error: couldnt add lables! Turn on debug printing for more info.")
+                ui_print("[plex] error: couldnt add labels! Turn on debug printing for more info.")
                 ui_print(str(e), debug=ui_settings.debug)
 
     class ignore(classes.ignore):

@@ -8,7 +8,8 @@ def pd_setup():
     logger.info("Configuring plex_debrid")
     settings_file = "./config/settings.json"
     ignored_file = "./config/ignored.txt"
-
+    plex_debrid_env_path = './.env'
+    
     if not os.path.exists(settings_file):
         subprocess.run(
             ["touch", ignored_file], check=True
@@ -18,6 +19,18 @@ def pd_setup():
             ["cp", "./plex_debrid_/settings-default.json", settings_file], check=True
         )
 
+    if not (TRAKTCLIENTID and TRAKTCLIENTSECRET):
+        client_id = "0183a05ad97098d87287fe46da4ae286f434f32e8e951caad4cc147c947d79a3"
+        client_secret = "87109ed53fe1b4d6b0239e671f36cd2f17378384fa1ae09888a32643f83b7e6c"
+    else:
+        client_id = TRAKTCLIENTID
+        client_secret = TRAKTCLIENTSECRET
+    if not os.path.exists(os.path.dirname(plex_debrid_env_path)):
+        os.makedirs(os.path.dirname(plex_debrid_env_path), exist_ok=True)
+    with open(plex_debrid_env_path, 'w') as f:
+        f.write(f"CLIENT_ID={client_id}\n")
+        f.write(f"CLIENT_SECRET={client_secret}\n")    
+        
     try:
         with open(settings_file, "r+") as f:
             json_data = load(f)

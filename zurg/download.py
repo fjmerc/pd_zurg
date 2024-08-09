@@ -71,8 +71,16 @@ def download_and_unzip_release(repo_owner, repo_name, release_version, architect
         headers['Accept'] = 'application/octet-stream'
         logger.debug(f"Requesting {repo_name} release {release_version} from: {download_url}")
         zip_folder_name = f'zurg-{release_version}-{architecture}'
+        
         success, error = downloader.download_and_extract(download_url, 'zurg', zip_folder_name=zip_folder_name, headers=headers)
         if success:
+            if 'arm-7' in zip_folder_name:
+                try:
+                    subprocess.run(['ln', '-sf', '/lib/ld-musl-armhf.so.1', '/lib/ld-linux-armhf.so.3'], check=True)
+                    logger.info(f"Created symbolic link for arm-7 architecture")
+                except subprocess.CalledProcessError as e:
+                    logger.error(f"Failed to create symbolic link: {e}")
+                    return False
             downloader.set_permissions(os.path.join('zurg', 'zurg'), 0o755)
             os.environ['ZURG_CURRENT_VERSION'] = release_version
             return True

@@ -1,4 +1,4 @@
-﻿FROM rclone/rclone:latest as rclone-stage
+﻿FROM rclone/rclone:latest AS rclone-stage
 
 FROM python:3.11-alpine
 COPY --from=rclone-stage /usr/local/bin/rclone /usr/local/bin/rclone

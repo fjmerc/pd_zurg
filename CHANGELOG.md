@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## Version [2.8.0] - 2024-08-09 🚀
+
+### Changed 🔄
+
+- plex_debrid: Debug printing for plex_debrid no longer linked to PDZURG_LOG_LEVEL 🐞
+- Downloader: Add linux-arm-7 to get_architecture function 📦
+
+### Added ✨
+
+- PD_LOG_LEVEL: Environment variable to set the log level for plex_debrid - Only DEBUG and INFO are supported for plex_debrid ; Default is INFO 📊
+- Suppress Logs: If the LOG_LEVEL for a process is set to OFF, then logs will be suppressed for the process 🤫
+- Zurg: Check for arm-7 architecture for compatibility with armv7 devices and set `ln -sf /lib/ld-musl-armhf.so.1 /lib/ld-linux-armhf.so.3` 🛠️
+
+### Notes 📝
+
+- Setting RCLONE_LOG_LEVEL to OFF will break rclone - will patch in future release
+- Thank you @barneyphife for the support with the armV7 compatibility 🙏
+
+
 ## Version [2.7.0] - 2024-07-30 🚀
 
 ### Changed 🔄

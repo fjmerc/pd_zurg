@@ -118,7 +118,7 @@ def pd_setup():
                 json_data["Log to file"] = LOGFILE.lower()
             else:
                 json_data["Log to file"] = "false"   
-            log_level = os.getenv('PDZURG_LOG_LEVEL', '').upper()    
+            log_level = os.getenv('PD_LOG_LEVEL', '').upper()    
             if log_level == 'DEBUG':
                 json_data["Debug printing"] = "true"
             else:

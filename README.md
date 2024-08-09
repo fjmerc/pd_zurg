@@ -199,7 +199,7 @@ of this parameter has the format `<VARIABLE_NAME>=<VALUE>`.
 |`RD_API_KEY`| [RealDebrid API key](https://real-debrid.com/apitoken) |  | | :heavy_check_mark:| :heavy_check_mark:|
 |`AD_API_KEY`| [AllDebrid API key](https://alldebrid.com/apikeys/) |  | | :heavy_check_mark:| :heavy_check_mark:|
 |`RCLONE_MOUNT_NAME`| A name for the rclone mount |  | :heavy_check_mark:|
-|`RCLONE_LOG_LEVEL`| [Log level](https://rclone.org/docs/#log-level-level) for rclone | `NOTICE` |
+|`RCLONE_LOG_LEVEL`| [Log level](https://rclone.org/docs/#log-level-level) for rclone - To suppress logs set value to OFF | `NOTICE` |
 |`RCLONE_LOG_FILE`| [Log file](https://rclone.org/docs/#log-file-file) for rclone |  |
 |`RCLONE_DIR_CACHE_TIME`| [How long a directory should be considered up to date and not refreshed from the backend](https://rclone.org/commands/rclone_mount/#vfs-directory-cache) #optional, but recommended is 10s. | `5m` |
 |`RCLONE_CACHE_DIR`| [Directory used for caching](https://rclone.org/docs/#cache-dir-dir). |  |
@@ -213,6 +213,7 @@ of this parameter has the format `<VARIABLE_NAME>=<VALUE>`.
 |`PLEX_MOUNT_DIR`| Set the value to the mount location used within Plex to enable Plex library refresh called by the Zurg process  |  | | | |
 |`SHOW_MENU`| Enable the plex_debrid menu to show upon startup, requiring user interaction before the program runs. Conversely, if the plex_debrid menu is disabled, the program will automatically run upon successful startup. If used, the value must be ```true``` or ```false``` | `true` |
 |`PD_ENABLED`| Set the value "true" to enable the plex_debrid process | `false ` | | :heavy_check_mark: | |
+|`PD_LOG_LEVEL`| The level at which logs should be captured. Only DEBUG and INFO are supported for plex_debrid  - To suppress logs set value to OFF   | `INFO` |
 |`PD_LOGFILE`| Log file for plex_debrid. The log file will appear in the ```/config``` as ```plex_debrid.log```. If used, the value must be ```true``` or ```false``` | `false` |
 |`PD_UPDATE`| Enable automatic updates of plex_debrid. Adding this variable will enable automatic updates to the latest version of plex_debrid locally within the container. Only enabled if PD_REPO is set| `false` |
 |`PD_REPO`| The repository to use for plex_debrid. If used, the value must be a comma seperated list for the GitHub username,repository name, and optionally the branch; e.g., "itsToggle,plex_debrid,main" | `None` |
@@ -225,7 +226,7 @@ of this parameter has the format `<VARIABLE_NAME>=<VALUE>`.
 |`ZURG_ENABLED`| Set the value "true" to enable the Zurg process | `false ` | | | :heavy_check_mark:|
 |`ZURG_VERSION`| The version of Zurg to use. If enabled, the value should contain v0.9.x or v0.9.x-hotfix.x format, or "nightly" if wanting the nightly builds from Zurg private repo (requires GITHUB_TOKEN) | `latest` | | | |
 |`ZURG_UPDATE`| Enable automatic updates of Zurg. Adding this variable will enable automatic updates to the latest version of Zurg locally within the container. | `false` | | | |
-|`ZURG_LOG_LEVEL`| Set the log level for Zurg | `INFO` | | | |
+|`ZURG_LOG_LEVEL`| Set the log level for Zurg - To suppress logs set value to OFF | `INFO` | | | |
 |`GITHUB_TOKEN`| GitHub Personal Token for use with Zurg private repo. Requires Zurg [sponsorship](https://github.com/sponsors/debridmediamanager) | `false ` | | | |
 |`JF_API_KEY`| The Jellyfin/Emby API Key ||| ||
 |`JF_ADDRESS`| The URL of your Jellyfin/Emby server. Example: http://192.168.0.101:8096 or http://jellyfin:8096 - format must include ```http://``` or ```https://``` and have no trailing characters after the port number (8096). E.g., ```/``` ||| |

@@ -176,6 +176,7 @@ class Downloader:
                 ('arm64', 'Linux'): 'linux-arm64',
                 ('arm64', 'Darwin'): 'darwin-arm64',
                 ('aarch64', 'Linux'): 'linux-arm64',  
+                ('aarch64', 'Linux'): 'linux-arm-7',
                 ('mips64', 'Linux'): 'linux-mips64',
                 ('mips64le', 'Linux'): 'linux-mips64le',
                 ('ppc64le', 'Linux'): 'linux-ppc64le',

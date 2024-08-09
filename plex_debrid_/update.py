@@ -10,8 +10,11 @@ class PlexDebridUpdate(Update, ProcessHandler):
         Update.__init__(self)
         ProcessHandler.__init__(self, self.logger)
             
-    def start_process(self, process_name, config_dir="/"):        
-        super().start_process(process_name, config_dir, ['python', './plex_debrid/main.py', '--config-dir', '/config'])
+    def start_process(self, process_name, config_dir="/", suppress_logging=False): 
+        if str(PDLOGLEVEL).lower()=='off':
+            suppress_logging = True
+            self.logger.info(f"Suppressing {process_name} logging")
+        super().start_process(process_name, config_dir, ['python', './plex_debrid/main.py', '--config-dir', '/config'], key_type=None, suppress_logging=suppress_logging)
           
     def extract_version_from_ui_settings(self):
         file_path='./plex_debrid/ui/ui_settings.py'

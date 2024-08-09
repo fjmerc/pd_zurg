@@ -74,7 +74,7 @@ def zurg_setup():
                         file.write("# password:\n")
                     else:
                         file.write(line)
-                        
+                                    
     def plex_refresh(file_path):
         logger.info(f"Updating Plex Refresh in config file: {file_path}")
         yaml = YAML()

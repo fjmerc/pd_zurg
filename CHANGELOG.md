@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## Version [2.9.1] - 2024-09-03 🚀
+
+### Fixed 🐛
+
+- [Issue #68](https://github.com/I-am-PUID-0/pd_zurg/issues/68) Docker Compose fetches incorrect architecture binary on Raspbian arm64 🛠️
+- [Issue #69](https://github.com/I-am-PUID-0/pd_zurg/issues/69) Dockerfile pulling the wrong zurg architecture, when running on aarch64 🛠️
+
+
 ## Version [2.9.0] - 2024-08-09 🚀
 
 ### Changed 🔄

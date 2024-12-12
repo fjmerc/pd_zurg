@@ -27,6 +27,7 @@ class release:
             if regex.search(r'(?<=btih:).*?(?=&)', str(self.download[0]), regex.I):
                 self.hash = regex.findall(r'(?<=btih:).*?(?=&)', str(self.download[0]), regex.I)[0]
         self.cached = []
+        self.maybe_cached = []  # services where cached state can only be determined at time of download
         self.checked = False
         self.wanted = 0
         self.unwanted = 0
@@ -1054,8 +1055,8 @@ class sort:
                             return True
                         return False
                 else:
-                    if self.operator == "==" and float(self.value) == 0:
-                        return True
+                    if self.operator == "==":
+                        return float(self.value) == 0
                     if self.operator == ">=":
                         return False
                     if self.operator == "<=":

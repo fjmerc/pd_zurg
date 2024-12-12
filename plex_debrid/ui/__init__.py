@@ -171,7 +171,8 @@ def scrape():
                                         "There was an error adding this uncached torrent to your debrid service. Choose another release?")
                     elif choice == '0':
                         back = True
-                except:
+                except Exception as e:
+                    print("error: " + str(e))
                     back = False
         else:
             print("No releases were found!")
@@ -488,8 +489,6 @@ def threaded(stop):
                 ui_print("couldnt sort monitored media by newest, using default order.", ui_settings.debug)
             library = content.classes.library()[0]()
             timeout_counter = 0
-            if len(library) == 0:
-                continue
             ui_print('checking new content ...')
             t0 = time.time()
             for element in unique(watchlists):

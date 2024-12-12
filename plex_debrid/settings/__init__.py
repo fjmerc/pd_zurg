@@ -280,6 +280,9 @@ class setting:
             while not working:
                 print(self.name + ' - current value: ' + str(getattr(self.cls, self.key)))
                 print()
+                if not self.help == '':
+                    print(self.help)
+                    print()
                 if self.oauth:
                     device_code, user_code = self.cls.oauth()
                     print(self.prompt + str(user_code))
@@ -381,7 +384,18 @@ settings_list = [
         setting('Nyaa proxy', 'Enter a proxy to use for nyaa (default: "nyaa.si"): ',scraper.services.nyaa, 'proxy', hidden=True),
         setting('Torrentio Scraper Parameters','Please enter a valid torrentio manifest url: ',scraper.services.torrentio, 'default_opts', entry="parameter", help='This settings lets you control the torrentio scraping parameters. Visit "https://torrentio.strem.fun/configure" and configure your settings. Dont choose a debrid service. The "manifest url" will be copied to your clipboard.', hidden=True),
         setting('Zilean Base URL', 'Please specify your Zilean base URL: ', scraper.services.zilean, 'base_url', hidden=True),
-    ]
+        setting('Mediafusion Base URL', 'Please specify your Mediafusion base URL: ', scraper.services.mediafusion, 'base_url', hidden=True),
+        setting('Mediafusion API Key', 'Please specify your Mediafusion API Key: ', scraper.services.mediafusion, 'api_password', hidden=True),
+        setting('Mediafusion Request Timeout', 'Please enter the request timeout in seconds: ', scraper.services.mediafusion, 'request_timeout_sec', hidden=True),
+        setting('Mediafusion Rate Limit', 'Please enter the minimum number of seconds between requests: ', scraper.services.mediafusion, 'rate_limit_sec', hidden=True),
+        setting('Mediafusion Scraper Parameters', 'Please enter a valid Mediafusion manifest URL: ', scraper.services.mediafusion, 'manifest_json_url', entry="parameter",
+                help='This setting lets you control the mediafusion scraping parameters. Visit "https://mediafusion.elfhosted.com/configure" and configure your settings. Please choose "Direct Torrent (Free)" as the debrid service. Click on "Share Manifest URL" and paste it here.',
+                hidden=True),
+        setting('Comet Request Timeout', 'Please enter the request timeout in seconds: ', scraper.services.comet, 'request_timeout_sec', hidden=True),
+        setting('Comet Rate Limit', 'Please enter the minimum number of seconds between requests: ', scraper.services.comet, 'rate_limit_sec', hidden=True),
+        setting('Comet Scraper Parameters', 'Please enter a valid Comet manifest URL: ', scraper.services.comet, 'manifest_json_url', entry="parameter",
+                help='This setting lets you control the comet scraping parameters. Visit "https://comet.elfhosted.com/configure" and configure your settings. Click on "Copy Link" and paste it here.', hidden=True),
+            ]
         ],
     ['Debrid Services', [
         setting('Debrid Services', [''], debrid.services, 'active', required=True, preflight=True, entry="service",
@@ -407,6 +421,8 @@ settings_list = [
         setting('Put.io API Key',
                 'Please open your favorite browser, log into your put.io account and open "http://put.io/link". Enter this code: ',
                 debrid.services.putio, 'api_key', hidden=True, oauth=True),
+        setting('Torbox API Key', 'Please enter your Torbox API Key: ', debrid.services.torbox, 'api_key',
+                hidden=True),
     ]
         ],
     ['UI Settings', [

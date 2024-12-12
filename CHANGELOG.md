@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed 🐛
 
-- [Issue #85](https://github.com/I-am-PUID-0/pd_zurg/issues/8 - Updated the default plex_debrid files to the latest changes from the [elfhosted](https://github.com/elfhosted/plex_debrid)
+- [Issue #85](https://github.com/I-am-PUID-0/pd_zurg/issues/85) - Updated the default plex_debrid files to the latest changes from the [elfhosted](https://github.com/elfhosted/plex_debrid)
 
 
 ## Version [2.9.1] - 2024-09-03 🚀

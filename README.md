@@ -10,8 +10,27 @@
 ## 📜 Description
 A combined docker image for the unified deployment of **[itsToggle's](https://github.com/itsToggle)**, **[yowmamasita's](https://github.com/yowmamasita)**, and **[ncw's](https://github.com/ncw)** projects -- **[plex_debrid](https://github.com/itsToggle/plex_debrid)**, **[zurg](https://github.com/debridmediamanager/zurg-testing)**, and **[rclone](https://github.com/rclone/rclone)**
 
+> [!IMPORTANT]
+> **pd_zurg is deprecated, but may still continue to function.**
 
->⚠️ **IMPORTANT**: Docker Desktop **CANNOT** be used to run pd_zurg. 
+> [!TIP]
+> ### If you're looking for an **all-in-one solution** that includes a media server directly inside the container — fully integrated with Riven, cli_debrid, Decypharr, Zurg, rclone, and more!?
+> 
+> ### Check out [**DUMB (Debrid Unlimited Media Bridge)**](https://github.com/I-am-PUID-0/DUMB)
+>
+>⚙️ DUMB includes:
+> * A Web UI for service management, logs, and other useful features
+> * Plex Media Server, Emby, and Jellyfin
+> * Most common arr-based services (Sonarr, Radarr, Lidarr, etc.)
+> * Built-in support for Debrid workflows
+> * Single-container deployment for easier onboarding
+> * Tight integration between media prep, serving, and metadata handling
+> * [**View DUMB on GitHub **](https://github.com/I-am-PUID-0/DUMB)
+>
+
+
+>[!CAUTION]
+> Docker Desktop **CANNOT** be used to run pd_zurg. 
 >
 > Docker Desktop does not support the [mount propagation](https://docs.docker.com/storage/bind-mounts/#configure-bind-propagation) required for rclone mounts. 
 >

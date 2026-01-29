@@ -10,24 +10,27 @@
 ## 📜 Description
 A combined docker image for the unified deployment of **[itsToggle's](https://github.com/itsToggle)**, **[yowmamasita's](https://github.com/yowmamasita)**, and **[ncw's](https://github.com/ncw)** projects -- **[plex_debrid](https://github.com/itsToggle/plex_debrid)**, **[zurg](https://github.com/debridmediamanager/zurg-testing)**, and **[rclone](https://github.com/rclone/rclone)**
 
-> [!IMPORTANT]
-> **pd_zurg is deprecated, but may still continue to function.**
-
-> [!TIP]
-> ### If you're looking for an **all-in-one solution** that includes a media server directly inside the container — fully integrated with Riven, cli_debrid, Decypharr, Zurg, rclone, and more!?
-> 
-> ### Check out [**DUMB (Debrid Unlimited Media Bridge)**](https://github.com/I-am-PUID-0/DUMB)
+> [!WARNING]
+> ## ⚠️ Project Status: Deprecated
+> **pd_zurg** is now deprecated.
 >
->⚙️ DUMB includes:
-> * A Web UI for service management, logs, and other useful features
-> * Plex Media Server, Emby, and Jellyfin
-> * Most common arr-based services (Sonarr, Radarr, Lidarr, etc.)
-> * Built-in support for Debrid workflows
-> * Single-container deployment for easier onboarding
-> * Tight integration between media prep, serving, and metadata handling
-> * [**View DUMB on GitHub **](https://github.com/I-am-PUID-0/DUMB)
+> pd_zurg may continue to function, but it is no longer under active development and will not receive new features or ongoing support.
 >
-
+> **➡️ The recommended successor is DUMB (Debrid Unlimited Media Bridge):**
+> - [DUMB Docs](https://dumbarr.com/)
+> - [DUMB Repo](https://github.com/I-am-PUID-0/DUMB)
+>
+> ### 📌 What DUMB Offers
+> DUMB is a consolidated media orchestration platform delivered as a single Docker image, with optional deployment of the following components:
+>
+> - **Integrated media servers**: Plex, Jellyfin, Emby
+> - **Arr ecosystem automation**: Sonarr, Radarr, Lidarr, Prowlarr, Huntarr, Whisparr
+> - **Debrid / Usenet workflow tooling**: CLI Debrid, Riven, Decypharr, NzbDAV
+> - **Storage and mount management**: rclone, Zurg
+> - **Database services and tooling**: PostgreSQL, pgAdmin, pgAgent
+> - **Service orchestration & operations**: process supervision, health checks, embedded UIs, automatic restarts, managed updates
+>
+> DUMB is actively maintained and supersedes pd_zurg by consolidating service orchestration, automation, and operational control into a single, supported platform.
 
 >[!CAUTION]
 > Docker Desktop **CANNOT** be used to run pd_zurg. 

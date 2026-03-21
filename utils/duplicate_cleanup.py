@@ -32,116 +32,69 @@ def delete_media_with_retry(media):
 
     return continue_execution
 
-def process_tv_shows():
-    #logger = get_logger(log_name='duplicate_cleanup')
-    try:
-        plex_server = PlexServer(PLEXADD, PLEXTOKEN)        
-        tv_section = None
-        for section in plex_server.library.sections():
-            if section.type == "show":
-                tv_section = section
-                break
-
-        if tv_section is not None:
-            logger.info(f"TV show library section: {tv_section.title}")
-            duplicate_episodes = tv_section.search(duplicate=True, libtype="episode")
-            episodes_to_delete = []
-
-            for episode in duplicate_episodes:
-                has_RCLONEMN = False
-                has_other_directory = False
-                media_id = ""
-                for media in episode.media:
-                    for part in media.parts:
-                        if re.search(f"/{RCLONEMN}[0-9a-zA-Z_]*?/", part.file):
-                            has_RCLONEMN = True
-                            media_id = media.id
-                        else:
-                            has_other_directory = True
-                    if has_RCLONEMN and has_other_directory:
-                        for part in media.parts:
-                            logger.info(f"Duplicate TV show episode found: Show: {episode.show().title} - Episode: {episode.title} (Media ID: {media_id})")
-                            episodes_to_delete.append((episode, media_id))
-
-            if len(episodes_to_delete) > 0:
-                logger.info(f"Number of TV show episodes to delete: {len(episodes_to_delete)}")
-            else:
-                logger.info("No duplicate TV show episodes found.")
-
-            for episode, media_id in episodes_to_delete:
-                for media in episode.media:
-                    if media.id == media_id:
-                        for part in media.parts:
-                            logger.info(f"Deleting TV show episode from Rclone directory: {episode.show().title} - {episode.title} (Media ID: {media_id})")
-                            continue_execution = delete_media_with_retry(media)
-                            if not continue_execution:
-                                break  
-                        if not continue_execution:
-                            break  
-        else:
-            logger.error("TV show library section not found.")
-    except requests.exceptions.ConnectionError as e:
-        logger.error(f"Connection error occurred while processing TV show library section: {str(e)}")            
-    except Exception as e:
-        logger.error(f"Error occurred while processing TV show library section: {str(e)}")
+def _get_item_label(item, section_type):
+    if section_type == "show":
+        return f"Show: {item.show().title} - Episode: {item.title}"
+    return item.title
 
 
-def process_movies():
-    #logger = get_logger(log_name='duplicate_cleanup')
-    try:
-        plex_server = PlexServer(PLEXADD, PLEXTOKEN)        
-        movie_section = None
-        for section in plex_server.library.sections():
-            if section.type == "movie":
-                movie_section = section
-                break
+def _process_library(plex_server, section_type, libtype):
+    section = None
+    for s in plex_server.library.sections():
+        if s.type == section_type:
+            section = s
+            break
 
-        if movie_section is not None:
-            logger.info(f"Movie library section: {movie_section.title}")
-            duplicate_movies = movie_section.search(duplicate=True, libtype="movie")
-            movies_to_delete = []
-            encountered_404_error = False
+    if section is None:
+        logger.error(f"{section_type.capitalize()} library section not found.")
+        return
 
-            for movie in duplicate_movies:
-                if encountered_404_error:
-                    logger.warning("Skipping remaining episodes due to previous 404 error.")
+    logger.info(f"{section_type.capitalize()} library section: {section.title}")
+    duplicates = section.search(duplicate=True, libtype=libtype)
+    items_to_delete = []
+
+    for item in duplicates:
+        has_RCLONEMN = False
+        has_other_directory = False
+        media_id = ""
+        for media in item.media:
+            for part in media.parts:
+                if re.search(f"/{RCLONEMN}[0-9a-zA-Z_]*?/", part.file):
+                    has_RCLONEMN = True
+                    media_id = media.id
+                else:
+                    has_other_directory = True
+            if has_RCLONEMN and has_other_directory:
+                label = _get_item_label(item, section_type)
+                for part in media.parts:
+                    logger.info(f"Duplicate {libtype} found: {label} (Media ID: {media_id})")
+                    items_to_delete.append((item, media_id))
+
+    if items_to_delete:
+        logger.info(f"Number of {libtype}s to delete: {len(items_to_delete)}")
+    else:
+        logger.info(f"No duplicate {libtype}s found.")
+
+    for item, media_id in items_to_delete:
+        for media in item.media:
+            if media.id == media_id:
+                label = _get_item_label(item, section_type)
+                for part in media.parts:
+                    logger.info(f"Deleting {libtype} from Rclone directory: {label} (Media ID: {media_id})")
+                    continue_execution = delete_media_with_retry(media)
+                    if not continue_execution:
+                        break
+                if not continue_execution:
                     break
-                has_RCLONEMN = False
-                has_other_directory = False
-                media_id = ""
-                for media in movie.media:
-                    for part in media.parts:
-                        if re.search(f"/{RCLONEMN}[0-9a-zA-Z_]*?/", part.file):
-                            has_RCLONEMN = True
-                            media_id = media.id
-                        else:
-                            has_other_directory = True
-                    if has_RCLONEMN and has_other_directory:
-                        for part in media.parts:
-                            logger.info(f"Duplicate movie found: {movie.title} (Media ID: {media_id})")
-                            movies_to_delete.append((movie, media_id))
 
-            if len(movies_to_delete) > 0:
-                logger.info(f"Number of movies to delete: {len(movies_to_delete)}")
-            else:
-                logger.info("No duplicate movies found.")
 
-            for movie, media_id in movies_to_delete:
-                for media in movie.media:
-                    if media.id == media_id:
-                        for part in media.parts:
-                            logger.info(f"Deleting movie from Rclone directory: {movie.title} (Media ID: {media_id})")
-                            continue_execution = delete_media_with_retry(media)
-                            if not continue_execution:
-                                break  
-                        if not continue_execution:
-                            break  
-        else:
-            logger.error("Movie library section not found.")
+def process_duplicates(plex_server, section_type, libtype):
+    try:
+        _process_library(plex_server, section_type, libtype)
     except requests.exceptions.ConnectionError as e:
-        logger.error(f"Connection error occurred while processing movie library section: {str(e)}")               
+        logger.error(f"Connection error while processing {section_type} library: {e}")
     except Exception as e:
-        logger.error(f"Error occurred while processing movie library section: {str(e)}")
+        logger.error(f"Error while processing {section_type} library: {e}")
 
 def setup():
     try:
@@ -186,13 +139,19 @@ def cleanup_schedule():
         time.sleep(1)
 
 def start_cleanup():
-        logger.info("Starting duplicate cleanup")        
-        start_time = get_start_time()
-        process_tv_shows()
-        process_movies()
-        total_time = time_to_complete(start_time)
-        logger.info("Duplicate cleanup complete.")    
-        logger.info(f"Total time required: {total_time}")
+    logger.info("Starting duplicate cleanup")
+    start_time = get_start_time()
+    try:
+        plex_server = PlexServer(PLEXADD, PLEXTOKEN)
+        process_duplicates(plex_server, "show", "episode")
+        process_duplicates(plex_server, "movie", "movie")
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"Connection error creating Plex server connection: {e}")
+    except Exception as e:
+        logger.error(f"Error creating Plex server connection: {e}")
+    total_time = time_to_complete(start_time)
+    logger.info("Duplicate cleanup complete.")
+    logger.info(f"Total time required: {total_time}")
 
 def cleanup_thread():
     thread = threading.Thread(target=cleanup_schedule)

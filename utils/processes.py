@@ -2,6 +2,14 @@ from base import *
 from utils.logger import SubprocessLogger
 
 
+# Per-process shutdown timeouts (seconds). Processes not listed get the default.
+_SHUTDOWN_TIMEOUTS = {
+    'plex_debrid': 15,   # May be mid-scrape
+    'Zurg': 10,          # WebDAV server
+    'rclone': 10,        # FUSE mount
+}
+_DEFAULT_SHUTDOWN_TIMEOUT = 10
+
 # Global registry of all tracked processes for graceful shutdown
 _process_registry = []
 _registry_lock = threading.Lock()
@@ -14,20 +22,28 @@ def register_process(handler, process_name, key_type=None):
 
 def shutdown_all_processes(logger):
     with _registry_lock:
+        total_start = time.time()
         for handler, process_name, key_type in reversed(_process_registry):
             try:
                 if handler.process and handler.process.poll() is None:
                     desc = f"{process_name} w/ {key_type}" if key_type else process_name
-                    logger.info(f"Terminating {desc} (pid {handler.process.pid})...")
+                    timeout = _SHUTDOWN_TIMEOUTS.get(process_name, _DEFAULT_SHUTDOWN_TIMEOUT)
+                    logger.info(f"Terminating {desc} (pid {handler.process.pid}, timeout {timeout}s)...")
+                    proc_start = time.time()
                     handler.process.terminate()
                     try:
-                        handler.process.wait(timeout=10)
+                        handler.process.wait(timeout=timeout)
+                        elapsed = time.time() - proc_start
+                        logger.info(f"{desc} exited in {elapsed:.1f}s")
                     except subprocess.TimeoutExpired:
-                        logger.warning(f"{desc} did not exit gracefully, killing...")
+                        elapsed = time.time() - proc_start
+                        logger.warning(f"{desc} did not exit after {elapsed:.1f}s, killing...")
                         handler.process.kill()
                         handler.process.wait(timeout=5)
             except Exception as e:
                 logger.error(f"Error shutting down process: {e}")
+        total_elapsed = time.time() - total_start
+        logger.info(f"All processes shut down in {total_elapsed:.1f}s")
         _process_registry.clear()
 
 

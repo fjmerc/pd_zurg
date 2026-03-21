@@ -70,7 +70,13 @@ def setup():
         config_file_path_rd = '/zurg/RD/config.yml'
         config_file_path_ad = '/zurg/AD/config.yml'
 
-        with open("/config/rclone.config", "w") as f:
+        rclone_config_path = "/config/rclone.config"
+        if os.path.exists(rclone_config_path):
+            backup_path = rclone_config_path + ".bak"
+            shutil.copy2(rclone_config_path, backup_path)
+            logger.info(f"Backed up existing rclone config to {backup_path}")
+
+        with open(rclone_config_path, "w") as f:
             if RDAPIKEY:
                 rd_port = get_port_from_config(config_file_path_rd, 'RDAPIKEY')
                 f.write(f"[{RCLONEMN_RD}]\n")

@@ -18,7 +18,9 @@ services:
       ## Location for Zurg AllDebrid active configuration -- when supported by Zurg     
       - /pd_zurg/AD:/zurg/AD   
       ## Location for rclone mount to host
-      - /pd_zurg/mnt:/data:shared       
+      - /pd_zurg/mnt:/data:shared
+      ## Blackhole watch folder for .torrent/.magnet files (optional)
+      # - /pd_zurg/watch:/watch
     environment:
       - TZ=
       ## Zurg Required Settings
@@ -71,8 +73,28 @@ services:
      # - CLEANUP_INTERVAL=1
      # - PDZURG_LOG_LEVEL=DEBUG
      # - PDZURG_LOG_COUNT=2
-    # Example to attach to gluetun vpn container if realdebrid blocks IP address 
-    # network_mode: container:gluetun  
+     # - PDZURG_LOG_SIZE=10M
+      ## Notification Settings (supports 90+ services via Apprise)
+     # - NOTIFICATION_URL=discord://webhook_id/webhook_token
+     # - NOTIFICATION_EVENTS=startup,shutdown,mount_success,health_error
+     # - NOTIFICATION_LEVEL=info
+      ## Blackhole Watch Folder (Sonarr/Radarr integration)
+     # - BLACKHOLE_ENABLED=true
+     # - BLACKHOLE_DIR=/watch
+     # - BLACKHOLE_POLL_INTERVAL=5
+     # - BLACKHOLE_DEBRID=realdebrid
+      ## Status Web UI
+     # - STATUS_UI_ENABLED=true
+     # - STATUS_UI_PORT=8080
+     # - STATUS_UI_AUTH=admin:changeme
+      ## ffprobe Monitor (enabled by default)
+     # - FFPROBE_MONITOR_ENABLED=true
+     # - FFPROBE_STUCK_TIMEOUT=300
+    ## Status Web UI port (optional)
+    # ports:
+    #   - "8080:8080"
+    # Example to attach to gluetun vpn container if realdebrid blocks IP address
+    # network_mode: container:gluetun
     devices:
       - /dev/fuse:/dev/fuse:rwm
     cap_add:

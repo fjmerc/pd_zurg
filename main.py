@@ -1,15 +1,18 @@
 from base import *
 from utils.logger import *
 import plex_debrid_ as p
-import zurg as z 
+import zurg as z
 from rclone import rclone
 from utils import duplicate_cleanup
 from utils import auto_update
+from utils.processes import shutdown_all_processes
 
 
 def shutdown(signum, frame):
     logger = get_logger()
     logger.info("Shutdown signal received. Cleaning up...")
+
+    shutdown_all_processes(logger)
 
     for mount_point in os.listdir('/data'):
         full_path = os.path.join('/data', mount_point)
@@ -20,7 +23,7 @@ def shutdown(signum, frame):
                 logger.info(f"Successfully unmounted {full_path}")
             else:
                 logger.error(f"Failed to unmount {full_path}: {umount.stderr.strip()}")
-    
+
     sys.exit(0)
     
 def main():

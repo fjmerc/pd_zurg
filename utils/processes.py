@@ -2,6 +2,35 @@ from base import *
 from utils.logger import SubprocessLogger
 
 
+# Global registry of all tracked processes for graceful shutdown
+_process_registry = []
+_registry_lock = threading.Lock()
+
+
+def register_process(handler, process_name, key_type=None):
+    with _registry_lock:
+        _process_registry.append((handler, process_name, key_type))
+
+
+def shutdown_all_processes(logger):
+    with _registry_lock:
+        for handler, process_name, key_type in reversed(_process_registry):
+            try:
+                if handler.process and handler.process.poll() is None:
+                    desc = f"{process_name} w/ {key_type}" if key_type else process_name
+                    logger.info(f"Terminating {desc} (pid {handler.process.pid})...")
+                    handler.process.terminate()
+                    try:
+                        handler.process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        logger.warning(f"{desc} did not exit gracefully, killing...")
+                        handler.process.kill()
+                        handler.process.wait(timeout=5)
+            except Exception as e:
+                logger.error(f"Error shutting down process: {e}")
+        _process_registry.clear()
+
+
 class ProcessHandler:
     def __init__(self, logger):
         self.logger = logger
@@ -32,6 +61,7 @@ class ProcessHandler:
                 self.subprocess_logger = SubprocessLogger(self.logger, f"{process_description}")
                 self.subprocess_logger.start_logging_stdout(self.process)
                 self.subprocess_logger.start_monitoring_stderr(self.process, key_type, process_name)
+            register_process(self, process_name, key_type)
             return self.process
         except Exception as e:
             self.logger.error(f"Error running subprocess for {process_description}: {e}")

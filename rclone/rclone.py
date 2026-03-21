@@ -1,6 +1,7 @@
 from base import *
 from utils.logger import *
 from utils.processes import ProcessHandler
+from utils.network import wait_for_url
 
 logger = get_logger()
 
@@ -23,32 +24,6 @@ def obscure_password(password):
     except subprocess.CalledProcessError as e:
         logger.error(f"Error obscuring password: {e}")
         return None
-
-def wait_for_url(url, endpoint="/dav/", timeout=600):
-    start_time = time.time()
-    logger.info(f"Waiting to start the rclone process until the Zurg WebDAV {url}{endpoint} is accessible.")
-    auth = None
-    if 'ZURGUSER' in globals() and 'ZURGPASS' in globals() and ZURGUSER and ZURGPASS:
-        auth = (ZURGUSER, ZURGPASS)
-        
-    while time.time() - start_time < timeout:
-        try:
-            if auth:
-                response = requests.get(f"{url}{endpoint}", auth=auth)
-            else:
-                response = requests.get(f"{url}{endpoint}")
-            
-            if 200 <= response.status_code < 300:
-                logger.debug(f"Zurg WebDAV {url}{endpoint} is accessible with status code {response.status_code}.")
-                return True
-            else:
-                logger.debug(f"Received status code {response.status_code} while waiting for {url}{endpoint} to be accessible.")
-        except requests.ConnectionError as e:
-            logger.debug(f"Connection error while waiting for the Zurg WebDAV {url}{endpoint} to be accessible: {e}")
-        time.sleep(5)
-    
-    logger.error(f"Timeout: Zurg WebDAV {url}{endpoint} is not accessible after {timeout} seconds.")
-    return False
 
 def setup():
     logger.info("Checking rclone flags")
@@ -134,9 +109,10 @@ def setup():
                 rclone_command.append("--daemon")
 
             url = f"http://localhost:{rd_port if mn == RCLONEMN_RD else ad_port}"
+            zurg_auth = (ZURGUSER, ZURGPASS) if ZURGUSER and ZURGPASS else None
             if os.path.exists(f"/healthcheck/{mn}"):
                 os.rmdir(f"/healthcheck/{mn}")
-            if wait_for_url(url):             
+            if wait_for_url(url, endpoint="/dav/", auth=zurg_auth, description=f"Zurg WebDAV ({mn})"):
                 os.makedirs(f"/healthcheck/{mn}") # makdir for healthcheck. Don't like it, but it works for now...
                 logger.info(f"The Zurg WebDAV URL {url}/dav is accessible. Starting rclone{' daemon' if '--daemon' in rclone_command else ''} for {mn}")
                 process_name = "rclone"

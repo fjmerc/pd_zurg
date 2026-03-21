@@ -51,6 +51,7 @@ __all__ = [
     'ZURG', 'ZURGVERSION', 'ZURGLOGLEVEL', 'ZURGUPDATE',
     'PLEXREFRESH', 'PLEXMOUNT', 'NFSMOUNT', 'NFSPORT', 'ZURGPORT',
     'TRAKTCLIENTID', 'TRAKTCLIENTSECRET',
+    'STATUS_UI_ENABLED', 'STATUS_UI_PORT', 'STATUS_UI_AUTH',
 ]
 
 load_dotenv(find_dotenv('./config/.env'))
@@ -128,6 +129,9 @@ class Config:
         self.ZURGPORT = os.getenv('ZURG_PORT')
         self.TRAKTCLIENTID = os.getenv('TRAKT_CLIENT_ID')
         self.TRAKTCLIENTSECRET = os.getenv('TRAKT_CLIENT_SECRET')
+        self.STATUS_UI_ENABLED = os.getenv('STATUS_UI_ENABLED')
+        self.STATUS_UI_PORT = os.getenv('STATUS_UI_PORT')
+        self.STATUS_UI_AUTH = os.getenv('STATUS_UI_AUTH')
 
 
 # Default singleton instance — used by existing code via module-level globals
@@ -167,3 +171,6 @@ NFSPORT = config.NFSPORT
 ZURGPORT = config.ZURGPORT
 TRAKTCLIENTID = config.TRAKTCLIENTID
 TRAKTCLIENTSECRET = config.TRAKTCLIENTSECRET
+STATUS_UI_ENABLED = config.STATUS_UI_ENABLED
+STATUS_UI_PORT = config.STATUS_UI_PORT
+STATUS_UI_AUTH = config.STATUS_UI_AUTH

@@ -6,6 +6,7 @@ from rclone import rclone
 from utils import duplicate_cleanup
 from utils import auto_update
 from utils.processes import shutdown_all_processes
+from utils import status_server
 
 
 def shutdown(signum, frame):
@@ -46,6 +47,9 @@ def main():
 '''
 
     logger.info(ascii_art.format(version=version)  + "\n" + "\n")
+
+    status_server.setup()
+    status_server.status_data.add_event('main', f'pd_zurg v{version} starting')
 
     if str(ZURG).lower() == 'true':
         if not (RDAPIKEY or ADAPIKEY):

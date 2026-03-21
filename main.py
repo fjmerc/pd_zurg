@@ -7,6 +7,7 @@ from utils import duplicate_cleanup
 from utils import auto_update
 from utils.processes import shutdown_all_processes, start_process_monitor
 from utils import notifications
+from utils import blackhole
 
 
 def shutdown(signum, frame):
@@ -90,6 +91,8 @@ def main():
                 pd_updater.auto_update('plex_debrid', False)
         except Exception as e:
             logger.error(f"Error in plex_debrid setup: {e}", exc_info=True)
+
+    blackhole.setup()
 
     start_process_monitor(logger)
 

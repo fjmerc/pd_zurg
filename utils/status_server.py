@@ -7,6 +7,7 @@ http.server — no framework dependencies.
 
 import base64
 import collections
+import hmac
 import http.server
 import json
 import os
@@ -110,14 +111,20 @@ class StatusData:
                 })
 
         mounts = []
-        if os.path.exists('/data'):
-            for entry_name in os.listdir('/data'):
-                path = os.path.join('/data', entry_name)
-                mounts.append({
-                    'path': path,
-                    'mounted': os.path.ismount(path),
-                    'accessible': os.access(path, os.R_OK),
-                })
+        try:
+            if os.path.exists('/data'):
+                for entry_name in os.listdir('/data'):
+                    path = os.path.join('/data', entry_name)
+                    try:
+                        mounts.append({
+                            'path': path,
+                            'mounted': os.path.ismount(path),
+                            'accessible': os.access(path, os.R_OK),
+                        })
+                    except OSError:
+                        mounts.append({'path': path, 'mounted': False, 'accessible': False})
+        except OSError:
+            pass
 
         with self._lock:
             events = list(self.recent_events)
@@ -214,20 +221,23 @@ function fmtBytes(b){
   if(b>1048576)return(b/1048576).toFixed(0)+'M';
   return(b/1024).toFixed(0)+'K';
 }
+function esc(s){const d=document.createElement('div');d.appendChild(document.createTextNode(String(s)));return d.innerHTML;}
 function dot(ok){return '<span class="dot '+(ok?'green':'red')+'"></span>'+(ok?'Running':'Stopped');}
 function update(){
   fetch('/api/status').then(r=>r.json()).then(d=>{
     document.getElementById('version').textContent='v'+d.version;
     document.getElementById('uptime').textContent=fmt(d.uptime_seconds);
     document.getElementById('errors').textContent=d.error_count;
-    let p='';d.processes.forEach(x=>{p+='<tr><td>'+x.name+'</td><td>'+(x.pid||'-')+'</td><td>'+dot(x.running)+'</td></tr>';});
+    let p='';d.processes.forEach(x=>{p+='<tr><td>'+esc(x.name)+'</td><td>'+(x.pid||'-')+'</td><td>'+dot(x.running)+'</td></tr>';});
     document.getElementById('procs').innerHTML=p||'<tr><td colspan="3" style="color:#8b949e">No processes</td></tr>';
-    let m='';d.mounts.forEach(x=>{m+='<tr><td>'+x.path+'</td><td>'+dot(x.mounted)+'</td><td>'+dot(x.accessible)+'</td></tr>';});
+    let m='';d.mounts.forEach(x=>{m+='<tr><td>'+esc(x.path)+'</td><td>'+dot(x.mounted)+'</td><td>'+dot(x.accessible)+'</td></tr>';});
     document.getElementById('mounts').innerHTML=m||'<tr><td colspan="3" style="color:#8b949e">No mounts</td></tr>';
     if(d.system.memory_percent!==undefined)document.getElementById('mem-pct').textContent=d.system.memory_percent+'%';
     if(d.system.memory_used_bytes!==undefined)document.getElementById('mem-used').textContent=fmtBytes(d.system.memory_used_bytes);
+    const validLevels=new Set(['info','warning','error']);
     let e='';d.recent_events.forEach(x=>{
-      e+='<div class="event '+x.level+'"><span class="time">'+x.timestamp.split('T')[1]+'</span><span class="comp">'+x.component+'</span><span class="msg">'+x.message+'</span></div>';
+      const lvl=validLevels.has(x.level)?x.level:'info';
+      e+='<div class="event '+lvl+'"><span class="time">'+esc(x.timestamp.split('T')[1])+'</span><span class="comp">'+esc(x.component)+'</span><span class="msg">'+esc(x.message)+'</span></div>';
     });
     document.getElementById('events').innerHTML=e||'<div style="color:#8b949e;padding:8px 0">No events yet</div>';
   }).catch(()=>{});
@@ -248,12 +258,16 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             if not auth_header.startswith('Basic '):
                 self._send_auth_required()
                 return
+            raw = auth_header[6:]
+            if len(raw) > 256:
+                self._send_auth_required()
+                return
             try:
-                decoded = base64.b64decode(auth_header[6:]).decode()
-                if decoded != self.auth_credentials:
+                decoded = base64.b64decode(raw, validate=True).decode('utf-8')
+                if not hmac.compare_digest(decoded.encode(), self.auth_credentials.encode()):
                     self._send_auth_required()
                     return
-            except Exception:
+            except (ValueError, UnicodeDecodeError):
                 self._send_auth_required()
                 return
 
@@ -290,7 +304,13 @@ def setup():
     if not enabled:
         return
 
-    port = int(os.environ.get('STATUS_UI_PORT', '8080'))
+    try:
+        port = int(os.environ.get('STATUS_UI_PORT', '8080'))
+        if not (1 <= port <= 65535):
+            raise ValueError("port out of range")
+    except ValueError:
+        logger.error("Invalid STATUS_UI_PORT, defaulting to 8080")
+        port = 8080
     auth = os.environ.get('STATUS_UI_AUTH')
 
     StatusHandler.status_data_ref = status_data

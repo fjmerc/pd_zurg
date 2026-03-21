@@ -58,59 +58,38 @@ def main():
     thread.daemon = True
     thread.start()
        
-    try:
-        if ZURG is None or str(ZURG).lower() == 'false':
-            pass
-        elif str(ZURG).lower() == 'true':
+    if str(ZURG).lower() == 'true':
+        if not (RDAPIKEY or ADAPIKEY):
+            raise MissingAPIKeyException()
+
+        try:
+            z.setup.zurg_setup()
+            z_updater = z.update.ZurgUpdate()
+            z_updater.auto_update('Zurg', bool(ZURGUPDATE))
+        except Exception as e:
+            logger.error(f"Error in Zurg setup: {e}", exc_info=True)
+
+        if RCLONEMN:
             try:
-                if RDAPIKEY or ADAPIKEY:
-                    try:
-                        z.setup.zurg_setup() 
-                        z_updater = z.update.ZurgUpdate()
-                        if ZURGUPDATE:
-                            z_updater.auto_update('Zurg',True)
-                        else:
-                            z_updater.auto_update('Zurg',False)
-                    except Exception as e:
-                        raise Exception(f"Error in Zurg setup: {e}")
-                    try:    
-                        if RCLONEMN:
-                            try:
-                                if not DUPECLEAN:
-                                    pass
-                                elif DUPECLEAN:
-                                    duplicate_cleanup.setup()
-                                rclone.setup()      
-                            except Exception as e:
-                                logger.error(e)                         
-                    except Exception as e:
-                        raise Exception(f"Error in setup: {e}")                          
-                else:
-                    raise MissingAPIKeyException()
+                if DUPECLEAN:
+                    duplicate_cleanup.setup()
+                rclone.setup()
             except Exception as e:
-                logger.error(e)                    
-    except Exception as e:
-        logger.error(e)
-        
-    try:
-        if PLEXDEBRID is None or str(PLEXDEBRID).lower() == 'false':
-            pass
-        elif str(PLEXDEBRID).lower() == 'true':
-            try:
-                p.setup.pd_setup()
-                pd_updater = p.update.PlexDebridUpdate()
-                if PDUPDATE and PDREPO:
-                    pd_updater.auto_update('plex_debrid',True)
-                    pass
-                elif PDREPO:
-                    p.download.get_latest_release()
-                    pd_updater.auto_update('plex_debrid',False)
-                else:
-                    pd_updater.auto_update('plex_debrid',False)
-            except Exception as e:
-                logger.error(f"An error occurred in the plex_debrid setup: {e}")
-    except:
-        pass
+                logger.error(f"Error in rclone/cleanup setup: {e}", exc_info=True)
+
+    if str(PLEXDEBRID).lower() == 'true':
+        try:
+            p.setup.pd_setup()
+            pd_updater = p.update.PlexDebridUpdate()
+            if PDUPDATE and PDREPO:
+                pd_updater.auto_update('plex_debrid', True)
+            elif PDREPO:
+                p.download.get_latest_release()
+                pd_updater.auto_update('plex_debrid', False)
+            else:
+                pd_updater.auto_update('plex_debrid', False)
+        except Exception as e:
+            logger.error(f"Error in plex_debrid setup: {e}", exc_info=True)
     def perpetual_wait():
         stop_event = threading.Event()
         stop_event.wait()

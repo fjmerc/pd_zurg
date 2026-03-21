@@ -370,4 +370,9 @@ FodyWeavers.xsd
 # Implementation plans (local only)
 .plans/
 
+# pytest / coverage
+.pytest_cache/
+htmlcov/
+.coverage
+
 .claude

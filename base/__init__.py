@@ -20,13 +20,35 @@ import threading
 import glob
 import re
 import random
-import zipfile
 import platform
 import fnmatch
 import signal
 from colorlog import ColoredFormatter
 from ruamel.yaml import YAML
 
+
+__all__ = [
+    # Standard library modules
+    'load', 'dump', 'datetime', 'timedelta',
+    'logging', 'RotatingFileHandler', 'TimedRotatingFileHandler', 'BaseRotatingHandler',
+    'Version', 'parse_version',
+    'time', 'os', 'ast', 'requests', 'zipfile', 'io', 'shutil', 'regex',
+    'subprocess', 'schedule', 'psutil', 'sys', 'threading', 'glob', 're',
+    'random', 'platform', 'fnmatch', 'signal',
+    # Third-party
+    'ColoredFormatter', 'YAML',
+    # Functions
+    'load_secret_or_env',
+    # Config variables
+    'PLEXDEBRID', 'PDLOGLEVEL', 'PLEXUSER', 'PLEXTOKEN',
+    'JFADD', 'JFAPIKEY', 'RDAPIKEY', 'ADAPIKEY', 'GHTOKEN',
+    'SEERRAPIKEY', 'SEERRADD', 'PLEXADD', 'ZURGUSER', 'ZURGPASS',
+    'SHOWMENU', 'LOGFILE', 'PDUPDATE', 'PDREPO',
+    'DUPECLEAN', 'CLEANUPINT', 'RCLONEMN', 'RCLONELOGLEVEL',
+    'ZURG', 'ZURGVERSION', 'ZURGLOGLEVEL', 'ZURGUPDATE',
+    'PLEXREFRESH', 'PLEXMOUNT', 'NFSMOUNT', 'NFSPORT', 'ZURGPORT',
+    'TRAKTCLIENTID', 'TRAKTCLIENTSECRET',
+]
 
 load_dotenv(find_dotenv('./config/.env'))
 

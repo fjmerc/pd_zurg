@@ -25,42 +25,28 @@ def shutdown(signum, frame):
                 logger.error(f"Failed to unmount {full_path}: {umount.stderr.strip()}")
 
     sys.exit(0)
-    
+
 def main():
     logger = get_logger()
 
     version = '2.9.2'
 
     ascii_art = f'''
-                                                                          
- _______  ______       _______           _______  _______ 
+
+ _______  ______       _______           _______  _______
 (  ____ )(  __  \\     / ___   )|\\     /|(  ____ )(  ____ \\
 | (    )|| (  \\  )    \\/   )  || )   ( || (    )|| (    \\/
-| (____)|| |   ) |        /   )| |   | || (____)|| |      
-|  _____)| |   | |       /   / | |   | ||     __)| | ____ 
+| (____)|| |   ) |        /   )| |   | || (____)|| |
+|  _____)| |   | |       /   / | |   | ||     __)| | ____
 | (      | |   ) |      /   /  | |   | || (\\ (   | | \\_  )
 | )      | (__/  )     /   (_/\\| (___) || ) \\ \\__| (___) |
 |/       (______/_____(_______/(_______)|/   \\__/(_______)
-                (_____)                                   
-                        Version: {version}                                    
+                (_____)
+                        Version: {version}
 '''
 
     logger.info(ascii_art.format(version=version)  + "\n" + "\n")
 
-    def healthcheck():
-        while True:
-            time.sleep(10)
-            try:
-                result = subprocess.run(['python', 'healthcheck.py'], capture_output=True, text=True) 
-                if result.stderr:
-                    logger.error(result.stderr.strip())
-            except Exception as e:
-                logger.error('Error running healthcheck.py: %s', e)
-            time.sleep(50)
-    thread = threading.Thread(target=healthcheck)
-    thread.daemon = True
-    thread.start()
-       
     if str(ZURG).lower() == 'true':
         if not (RDAPIKEY or ADAPIKEY):
             raise MissingAPIKeyException()
@@ -93,12 +79,12 @@ def main():
                 pd_updater.auto_update('plex_debrid', False)
         except Exception as e:
             logger.error(f"Error in plex_debrid setup: {e}", exc_info=True)
-    def perpetual_wait():
-        stop_event = threading.Event()
-        stop_event.wait()
-    perpetual_wait()    
+
+    while True:
+        signal.pause()
+
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
-    
+
     main()

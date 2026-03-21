@@ -1,5 +1,5 @@
 ﻿<div align="center" style="max-width: 100%; height: auto;">
-  <a href="https://github.com/I-am-PUID-0/pd_zurg">
+  <a href="https://github.com/fjmerc/pd_zurg">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="https://github.com/I-am-PUID-0/pd_zurg/assets/36779668/da811d50-18bf-4498-b508-2b1a6ed848bc">
       <img alt="pd_zurg" src="https://github.com/I-am-PUID-0/pd_zurg/assets/36779668/da811d50-18bf-4498-b508-2b1a6ed848bc" style="max-width: 100%; height: auto;">
@@ -65,11 +65,8 @@ Config file updates (Zurg config.yml, rclone.config) use write-to-temp-then-rena
 #### ⏱️ Ordered Shutdown
 Per-process shutdown timeouts (plex_debrid: 15s, Zurg/rclone: 10s) with elapsed time logging to identify slow-to-stop processes.
 
-## 🐳 Docker Hub
-A prebuilt image is hosted on [docker hub](https://hub.docker.com/r/iampuid0/pd_zurg) 
-
-## 🏷️ GitHub Container Registry
-A prebuilt image is hosted on [GitHub Container Registry](https://github.com/I-am-PUID-0/pd_zurg/pkgs/container/pd_zurg)
+## 🐳 Docker Image
+Build the image locally (see [Docker Build](#-docker-build) below) or use the upstream image from [Docker Hub](https://hub.docker.com/r/iampuid0/pd_zurg) if you don't need this fork's features.
 
 
 ## 🛠️ Docker-compose
@@ -82,9 +79,7 @@ A prebuilt image is hosted on [GitHub Container Registry](https://github.com/I-a
 services:
   pd_zurg:
     container_name: pd_zurg
-    image: iampuid0/pd_zurg:latest
-    ## Optionally, specify a specific version of pd_zurg
-    # image: iampuid0/pd_zurg:2.0.0
+    image: pd_zurg:latest  # Build locally: docker build -t pd_zurg https://github.com/fjmerc/pd_zurg.git
     stdin_open: true # docker run -i
     tty: true        # docker run -t
     volumes:
@@ -215,7 +210,7 @@ services:
 ### Docker CLI
 
 ```
-docker build -t your-image-name https://github.com/I-am-PUID-0/pd_zurg.git
+docker build -t pd_zurg https://github.com/fjmerc/pd_zurg.git
 ```
 
 ## 🎥 Plex or Jellyfin/Emby deployment
@@ -348,7 +343,7 @@ To utilize docker secrets, remove the associated environment variables from the 
 ```YAML
 services:
   pd_zurg:
-    image: iampuid0/pd_zurg:latest
+    image: pd_zurg:latest
     secrets:
       - github_token
       - rd_api_key
@@ -387,22 +382,21 @@ secrets:
 
 ## 📝 TODO
 
-See the [pd_zurg roadmap](https://github.com/users/I-am-PUID-0/projects/4) for a list of planned features and enhancements.
+See the [issues](https://github.com/fjmerc/pd_zurg/issues) for planned features and bug reports.
 
 
 ## 🚀 Deployment
 
 pd_zurg allows for the simultaneous or individual deployment of plex_debrid and/or Zurg w/ rclone
 
-For additional details on deployment, see the [pd_zurg Wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki/Setup-Guides#deployment-options)
+For additional details on deployment, see the upstream [pd_zurg Wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki/Setup-Guides#deployment-options) (setup guides still apply to this fork)
 
 
 ## 🌍 Community
 
-### pd_zurg
-- For questions related to pd_zurg, see the GitHub [discussions](https://github.com/I-am-PUID-0/pd_zurg/discussions)
-- or create a new [issue](https://github.com/I-am-PUID-0/pd_zurg/issues) if you find a bug or have an idea for an improvement.
-- or join the pd_zurg [discord server](https://discord.gg/EPSWqmeeXM)
+### pd_zurg (this fork)
+- Create a new [issue](https://github.com/fjmerc/pd_zurg/issues) if you find a bug or have an idea for an improvement
+- For upstream pd_zurg questions, see the original [discussions](https://github.com/I-am-PUID-0/pd_zurg/discussions) or [discord](https://discord.gg/EPSWqmeeXM)
 
 ### plex_debrid
 - For questions related to plex_debrid, see the GitHub [discussions](https://github.com/itsToggle/plex_debrid/discussions) 
@@ -423,4 +417,4 @@ If you enjoy the underlying projects and want to buy yowmamasita a beer/coffee, 
 If you enjoy the underlying projects and want to buy Nick Craig-Wood a beer/coffee, feel free to use the website's [sponsor links](https://rclone.org/sponsor/)
 
 ## ✅ GitHub Workflow Status
-![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/I-am-PUID-0/pd_zurg/docker-image.yml)
+![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/fjmerc/pd_zurg/docker-image.yml)

@@ -1,9 +1,7 @@
 services:
   pd_zurg:
     container_name: pd_zurg
-    image: iampuid0/pd_zurg:latest
-    ## Optionally, specify a specific version of pd_zurg
-    # image: iampuid0/pd_zurg:2.0.0
+    image: pd_zurg:latest  # Build locally: docker build -t pd_zurg https://github.com/fjmerc/pd_zurg.git
     stdin_open: true # docker run -i
     tty: true        # docker run -t    
     volumes:

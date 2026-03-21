@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## Version [2.11.0] - 2026-03-21 🚀
+
+### Added ✨
+
+- **Process auto-restart**: Crashed processes are automatically detected and restarted with exponential backoff (5s → 300s), sliding window restart counting, and max restart limits 🔄
+- **Zombie reaping**: `SIGCHLD` set to `SIG_IGN` for automatic kernel-level zombie child reaping without conflicting with subprocess management 🧹
+- **Apprise notifications**: Event-driven notifications to 90+ services (Discord, Telegram, Slack, email, etc.) via `NOTIFICATION_URL` environment variable, with event and severity filtering 🔔
+- **Blackhole watch folder**: Arr-stack compatible watch directory for `.torrent` and `.magnet` files with Real-Debrid, AllDebrid, and TorBox support. Failed files quarantined to `failed/` subdirectory 📂
+- **ffprobe stuck-process recovery**: Monitors for ffprobe processes stuck in uninterruptible sleep on debrid mounts, attempts recovery via I/O poke, then kills after max attempts 🔍
+- **Status Web UI**: Lightweight dashboard at `/status` with JSON API at `/api/status`, showing process health, mount status, cgroup-aware system stats, and recent events. Optional basic auth 📊
+- **MDBList content source**: Subscribe to curated MDBList lists (IMDB Top 250, trending, custom) that feed plex_debrid's download pipeline. Configure via plex_debrid settings menu 🎬
+- **Atomic config writes**: Zurg config.yml and rclone.config updates use temp-file-then-rename to prevent corruption on crash 🔒
+- **Wait-for-URL with exponential backoff**: Extracted generic `wait_for_url()` utility from rclone module with 5s → 60s exponential backoff ⏱️
+- **Ordered shutdown**: Per-process shutdown timeouts (plex_debrid: 15s, Zurg/rclone: 10s) with elapsed time logging 🛑
+
+### Changed 🔄
+
+- Process registry changed from tuples to dicts for extensibility 📦
+- `stop_process()` now disables auto-restart to prevent spurious restarts during update cycles 🔧
+- Shutdown notification sent after critical cleanup with 5s timeout thread 🧹
+
 ## Version [2.10.0] - 2026-03-21 🚀
 
 ### Fixed 🐛

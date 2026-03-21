@@ -10,27 +10,20 @@
 ## 📜 Description
 A combined docker image for the unified deployment of **[itsToggle's](https://github.com/itsToggle)**, **[yowmamasita's](https://github.com/yowmamasita)**, and **[ncw's](https://github.com/ncw)** projects -- **[plex_debrid](https://github.com/itsToggle/plex_debrid)**, **[zurg](https://github.com/debridmediamanager/zurg-testing)**, and **[rclone](https://github.com/rclone/rclone)**
 
-> [!WARNING]
-> ## ⚠️ Project Status: Deprecated
-> **pd_zurg** is now deprecated.
+> [!NOTE]
+> ## 🔀 Fork Status: Actively Maintained
+> This is an **actively maintained fork** of the original pd_zurg by [I-am-PUID-0](https://github.com/I-am-PUID-0).
 >
-> pd_zurg may continue to function, but it is no longer under active development and will not receive new features or ongoing support.
+> The upstream project has been deprecated in favor of [DUMB](https://github.com/I-am-PUID-0/DUMB) (Debrid Unlimited Media Bridge), a ground-up rewrite supporting 30+ services. If you need a full-featured media orchestration platform, DUMB is the recommended path.
 >
-> **➡️ The recommended successor is DUMB (Debrid Unlimited Media Bridge):**
-> - [DUMB Docs](https://dumbarr.com/)
-> - [DUMB Repo](https://github.com/I-am-PUID-0/DUMB)
->
-> ### 📌 What DUMB Offers
-> DUMB is a consolidated media orchestration platform delivered as a single Docker image, with optional deployment of the following components:
->
-> - **Integrated media servers**: Plex, Jellyfin, Emby
-> - **Arr ecosystem automation**: Sonarr, Radarr, Lidarr, Prowlarr, Huntarr, Whisparr
-> - **Debrid / Usenet workflow tooling**: CLI Debrid, Riven, Decypharr, NzbDAV
-> - **Storage and mount management**: rclone, Zurg
-> - **Database services and tooling**: PostgreSQL, pgAdmin, pgAgent
-> - **Service orchestration & operations**: process supervision, health checks, embedded UIs, automatic restarts, managed updates
->
-> DUMB is actively maintained and supersedes pd_zurg by consolidating service orchestration, automation, and operational control into a single, supported platform.
+> **This fork** keeps pd_zurg's simplicity advantage (~150MB Alpine image, 3 services) while backporting key reliability and usability features from DUMB:
+> - Process auto-restart with exponential backoff
+> - Event notifications via 90+ services (Discord, Telegram, etc.)
+> - Blackhole watch folder for Sonarr/Radarr integration
+> - Stuck ffprobe recovery for debrid mounts
+> - Lightweight status dashboard
+> - MDBList content discovery
+> - Atomic config writes, ordered shutdown, and more
 
 >[!CAUTION]
 > Docker Desktop **CANNOT** be used to run pd_zurg. 
@@ -44,7 +37,33 @@ A combined docker image for the unified deployment of **[itsToggle's](https://gi
 
 ## 🌟 Features
 
-See the pd_zurg [Wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki) for a full list of features and settings
+See the pd_zurg [Wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki) for a full list of original features and settings.
+
+### New in This Fork
+
+#### 🔄 Process Auto-Restart with Health Checks
+Crashed processes (Zurg, rclone, plex_debrid) are automatically detected and restarted with exponential backoff (5s, 15s, 45s, 120s, 300s). A sliding window resets the restart counter after 1 hour of stability. Maximum 5 restarts before giving up. No configuration needed — enabled by default.
+
+#### 🔔 Apprise Notifications
+Send event notifications to 90+ services (Discord, Telegram, Slack, email, Pushover, etc.) via a single `NOTIFICATION_URL` environment variable. Events include startup, shutdown, mount success/failure, and duplicate cleanup completion. Supports event filtering and severity levels.
+
+#### 📂 Blackhole Watch Folder
+Drop `.torrent` or `.magnet` files into a watch directory and they're automatically submitted to your debrid service. Compatible with Sonarr/Radarr's blackhole download client. Supports Real-Debrid, AllDebrid, and TorBox. Failed files are quarantined to a `failed/` subdirectory.
+
+#### 🔍 ffprobe Stuck-Process Recovery
+Detects ffprobe processes stuck in uninterruptible sleep on debrid mounts (a common issue when Plex/Jellyfin scans expired links). Attempts recovery by "poking" the stuck I/O, then kills the process after 3 failed attempts. Enabled by default with a 5-minute threshold.
+
+#### 📊 Status Web UI
+Lightweight dashboard showing process health, mount status, system resources (cgroup-aware for containers), and recent events. Auto-refreshes every 10 seconds. JSON API at `/api/status` for monitoring integration. Optional basic auth.
+
+#### 🎬 MDBList Content Source
+Subscribe to curated MDBList lists (IMDB Top 250, trending, genre lists, custom lists) that automatically feed plex_debrid's download pipeline. Configure via plex_debrid's settings menu with your MDBList API key and list IDs.
+
+#### 🔒 Atomic Config Writes
+Config file updates (Zurg config.yml, rclone.config) use write-to-temp-then-rename to prevent corruption if the container is killed mid-write.
+
+#### ⏱️ Ordered Shutdown
+Per-process shutdown timeouts (plex_debrid: 15s, Zurg/rclone: 10s) with elapsed time logging to identify slow-to-stop processes.
 
 ## 🐳 Docker Hub
 A prebuilt image is hosted on [docker hub](https://hub.docker.com/r/iampuid0/pd_zurg) 
@@ -82,7 +101,9 @@ services:
       ## Location for Zurg AllDebrid active configuration -- when supported by Zurg     
       - /home/username/pd_zurg/AD:/zurg/AD   
       ## Location for rclone mount to host
-      - /home/username/pd_zurg/mnt:/data:shared       
+      - /home/username/pd_zurg/mnt:/data:shared
+      ## Blackhole watch folder for .torrent/.magnet files (optional)
+      # - /home/username/pd_zurg/watch:/watch
     environment:
       - TZ=
       ## Zurg Required Settings
@@ -137,8 +158,27 @@ services:
      # - PDZURG_LOG_LEVEL=DEBUG
      # - PDZURG_LOG_COUNT=2
      # - PDZURG_LOG_SIZE=10M
-    # Example to attach to gluetun vpn container if realdebrid blocks IP address 
-    # network_mode: container:gluetun  
+      ## Notification Settings (supports 90+ services via Apprise)
+     # - NOTIFICATION_URL=discord://webhook_id/webhook_token
+     # - NOTIFICATION_EVENTS=startup,shutdown,mount_success,health_error
+     # - NOTIFICATION_LEVEL=info
+      ## Blackhole Watch Folder (Sonarr/Radarr integration)
+     # - BLACKHOLE_ENABLED=true
+     # - BLACKHOLE_DIR=/watch
+     # - BLACKHOLE_POLL_INTERVAL=5
+     # - BLACKHOLE_DEBRID=realdebrid
+      ## Status Web UI
+     # - STATUS_UI_ENABLED=true
+     # - STATUS_UI_PORT=8080
+     # - STATUS_UI_AUTH=admin:changeme
+      ## ffprobe Monitor
+     # - FFPROBE_MONITOR_ENABLED=true
+     # - FFPROBE_STUCK_TIMEOUT=300
+    ## Status Web UI port (optional)
+    # ports:
+    #   - "8080:8080"
+    # Example to attach to gluetun vpn container if realdebrid blocks IP address
+    # network_mode: container:gluetun
     devices:
       - /dev/fuse:/dev/fuse:rwm
     cap_add:
@@ -261,6 +301,19 @@ of this parameter has the format `<VARIABLE_NAME>=<VALUE>`.
 |`ZURG_PORT`| The port to be used for the Zurg server | `random ` | | | |
 |`NFS_ENABLED`| Set the value "true" to enable the NFS server for rclone | `false ` | | | |
 |`NFS_PORT`| The port to be used for the rclone NFS server | `random ` | | | |
+|`NOTIFICATION_URL`| [Apprise](https://github.com/caronc/apprise) notification URL(s), comma-separated. Example: `discord://webhook_id/webhook_token` | | | | |
+|`NOTIFICATION_EVENTS`| Comma-separated list of events to notify on: `startup`, `shutdown`, `mount_success`, `health_error`, `download_complete`, `library_refresh` | all | | | |
+|`NOTIFICATION_LEVEL`| Minimum notification severity: `info`, `warning`, `error` | `info` | | | |
+|`BLACKHOLE_ENABLED`| Set the value "true" to enable the blackhole watch folder for .torrent/.magnet files | `false` | | | |
+|`BLACKHOLE_DIR`| Watch directory path for blackhole files | `/watch` | | | |
+|`BLACKHOLE_POLL_INTERVAL`| Seconds between folder scans | `5` | | | |
+|`BLACKHOLE_DEBRID`| Debrid service to use: `realdebrid`, `alldebrid`, `torbox`. Auto-detected from API keys if not set | auto | | | |
+|`STATUS_UI_ENABLED`| Set the value "true" to enable the status web dashboard | `false` | | | |
+|`STATUS_UI_PORT`| Port for the status web UI | `8080` | | | |
+|`STATUS_UI_AUTH`| Basic auth credentials in `user:password` format | none | | | |
+|`FFPROBE_MONITOR_ENABLED`| Set the value "false" to disable the stuck ffprobe process monitor | `true` | | | |
+|`FFPROBE_STUCK_TIMEOUT`| Seconds a ffprobe process must be in uninterruptible sleep before recovery is attempted | `300` | | | |
+|`FFPROBE_POLL_INTERVAL`| Seconds between ffprobe monitor scans | `30` | | | |
 
 
 ## 📂 Data Volumes
@@ -276,6 +329,7 @@ format: `<HOST_DIR>:<CONTAINER_DIR>[:PERMISSIONS]`.
 |`/data`| rshared  | This is where rclone will be mounted. Not required when only utilizing plex_debrid   |
 |`/zurg/RD`| rw| This is where Zurg will store the active configuration and data for RealDebrid. Not required when only utilizing plex_debrid   |
 |`/zurg/AD`| rw | This is where Zurg will store the active configuration and data for AllDebrid. Not required when only utilizing plex_debrid   |
+|`/watch`| rw | Blackhole watch folder for .torrent/.magnet files. Only required when `BLACKHOLE_ENABLED=true`   |
 
 ## 🗝️ Docker Secrets
 

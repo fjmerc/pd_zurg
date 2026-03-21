@@ -194,6 +194,56 @@ def stop_process_monitor():
     _monitor_thread = None
 
 
+def restart_service(service_name):
+    """Restart a specific service by name. For admin-triggered restarts.
+
+    Terminates the process and immediately re-launches it, resetting the
+    restart counter so no backoff delay is applied.
+
+    Args:
+        service_name: Process name to match (e.g., 'Zurg', 'rclone', 'plex_debrid')
+
+    Returns:
+        True if process was found and restarted, False otherwise.
+    """
+    from utils.logger import get_logger
+    logger = get_logger()
+
+    with _registry_lock:
+        for entry in _process_registry:
+            name = entry['process_name']
+            handler = entry['handler']
+            key_type = entry['key_type']
+            if name.lower() == service_name.lower():
+                desc = f"{name} w/ {key_type}" if key_type else name
+
+                # Terminate if running
+                if handler.process and handler.process.poll() is None:
+                    logger.info(f"[restart_service] Terminating {desc}")
+                    if handler.subprocess_logger:
+                        handler.subprocess_logger.stop_logging_stdout()
+                        handler.subprocess_logger.stop_monitoring_stderr()
+                        handler.subprocess_logger = None
+                    handler.process.terminate()
+                    try:
+                        handler.process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        handler.process.kill()
+                        handler.process.wait(timeout=5)
+
+                # Reset restart counter for clean restart
+                handler._restart_count = 0
+                handler._first_restart_time = None
+
+                # Re-launch
+                handler.restart_process()
+                logger.info(f"[restart_service] {desc} restarted successfully")
+                return True
+
+    logger.warning(f"[restart_service] Process '{service_name}' not found in registry")
+    return False
+
+
 class ProcessHandler:
     def __init__(self, logger):
         self.logger = logger

@@ -367,3 +367,7 @@ FodyWeavers.xsd
 **/log/
 *.env
 /config
+# Implementation plans (local only)
+.plans/
+
+.claude

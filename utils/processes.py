@@ -2,19 +2,46 @@ from base import *
 from utils.logger import SubprocessLogger
 
 
+class RestartPolicy:
+    """Configuration for automatic process restart behavior."""
+
+    def __init__(self, max_restarts=5, backoff_seconds=None, window_seconds=3600):
+        self.max_restarts = max_restarts
+        self.backoff_seconds = backoff_seconds or [5, 15, 45, 120, 300]
+        self.window_seconds = window_seconds
+
+
 # Global registry of all tracked processes for graceful shutdown
 _process_registry = []
 _registry_lock = threading.Lock()
+_shutting_down = False
+_monitor_stop_event = threading.Event()
+_monitor_thread = None
 
 
 def register_process(handler, process_name, key_type=None):
     with _registry_lock:
-        _process_registry.append((handler, process_name, key_type))
+        # Avoid duplicate entries for the same handler
+        for entry in _process_registry:
+            if entry['handler'] is handler:
+                return
+        _process_registry.append({
+            'handler': handler,
+            'process_name': process_name,
+            'key_type': key_type,
+        })
 
 
 def shutdown_all_processes(logger):
+    global _shutting_down
+    _shutting_down = True
+    stop_process_monitor()
+
     with _registry_lock:
-        for handler, process_name, key_type in reversed(_process_registry):
+        for entry in reversed(_process_registry):
+            handler = entry['handler']
+            process_name = entry['process_name']
+            key_type = entry['key_type']
             try:
                 if handler.process and handler.process.poll() is None:
                     desc = f"{process_name} w/ {key_type}" if key_type else process_name
@@ -31,6 +58,98 @@ def shutdown_all_processes(logger):
         _process_registry.clear()
 
 
+def _get_backoff_delay(policy, restart_count):
+    """Get the backoff delay for the given restart attempt."""
+    idx = min(restart_count, len(policy.backoff_seconds) - 1)
+    return policy.backoff_seconds[idx]
+
+
+def _handle_restart(entry, logger):
+    """Attempt to restart a dead process according to its restart policy."""
+    handler = entry['handler']
+    process_name = entry['process_name']
+    key_type = entry['key_type']
+    desc = f"{process_name} w/ {key_type}" if key_type else process_name
+
+    exit_code = handler.process.returncode
+    logger.warning(f"{desc} exited with code {exit_code}")
+
+    policy = handler.restart_policy
+    if policy is None:
+        return
+
+    now = time.time()
+
+    # Reset restart count if outside the sliding window
+    if handler._first_restart_time and (now - handler._first_restart_time) > policy.window_seconds:
+        handler._restart_count = 0
+        handler._first_restart_time = None
+
+    if handler._restart_count >= policy.max_restarts:
+        logger.error(f"{desc} has exceeded max restarts ({policy.max_restarts}). Not restarting.")
+        return
+
+    if handler._first_restart_time is None:
+        handler._first_restart_time = now
+
+    delay = _get_backoff_delay(policy, handler._restart_count)
+    handler._restart_count += 1
+
+    logger.info(f"Restarting {desc} in {delay}s (attempt {handler._restart_count}/{policy.max_restarts})...")
+
+    # Wait for backoff delay, but check for shutdown
+    if _monitor_stop_event.wait(delay):
+        return  # Shutdown requested during backoff
+
+    if _shutting_down:
+        return
+
+    handler.restart_process()
+
+
+def _monitor_loop(logger):
+    """Poll registered processes and restart any that have died."""
+    logger.info("Process monitor started")
+    while not _monitor_stop_event.is_set():
+        if not _shutting_down:
+            with _registry_lock:
+                entries_to_restart = []
+                for entry in _process_registry:
+                    handler = entry['handler']
+                    if (handler.restart_policy and
+                            handler.process and
+                            handler.process.poll() is not None):
+                        entries_to_restart.append(entry)
+
+            # Restart outside the lock to avoid holding it during backoff
+            for entry in entries_to_restart:
+                if _shutting_down:
+                    break
+                _handle_restart(entry, logger)
+
+        _monitor_stop_event.wait(10)
+    logger.info("Process monitor stopped")
+
+
+def start_process_monitor(logger):
+    """Start the background thread that monitors and restarts processes."""
+    global _monitor_thread
+    if _monitor_thread and _monitor_thread.is_alive():
+        return
+    _monitor_stop_event.clear()
+    _monitor_thread = threading.Thread(target=_monitor_loop, args=(logger,), daemon=True)
+    _monitor_thread.start()
+
+
+def stop_process_monitor():
+    """Signal the monitor thread to stop and wait for it."""
+    global _monitor_thread
+    _monitor_stop_event.set()
+    if _monitor_thread and _monitor_thread.is_alive():
+        _monitor_thread.join(timeout=15)
+    _monitor_thread = None
+
+
 class ProcessHandler:
     def __init__(self, logger):
         self.logger = logger
@@ -39,8 +158,24 @@ class ProcessHandler:
         self.stdout = ""
         self.stderr = ""
         self.returncode = None
+        # Restart support
+        self.restart_policy = None
+        self._restart_count = 0
+        self._first_restart_time = None
+        # Stored for restart_process()
+        self._command = None
+        self._config_dir = None
+        self._process_name = None
+        self._key_type = None
+        self._suppress_logging = False
 
-    def start_process(self, process_name, config_dir, command, key_type=None, suppress_logging=False):
+    _DEFAULT_RESTART = object()  # sentinel
+
+    def start_process(self, process_name, config_dir, command, key_type=None,
+                      suppress_logging=False, restart_policy=_DEFAULT_RESTART):
+        if restart_policy is self._DEFAULT_RESTART:
+            restart_policy = RestartPolicy()
+
         try:
             if key_type is not None:
                 self.logger.info(f"Starting {process_name} w/ {key_type}")
@@ -48,6 +183,15 @@ class ProcessHandler:
             else:
                 self.logger.info(f"Starting {process_name}")
                 process_description = f"{process_name}"
+
+            # Store for restart
+            self._command = command
+            self._config_dir = config_dir
+            self._process_name = process_name
+            self._key_type = key_type
+            self._suppress_logging = suppress_logging
+            self.restart_policy = restart_policy
+
             self.process = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE,
@@ -67,12 +211,41 @@ class ProcessHandler:
             self.logger.error(f"Error running subprocess for {process_description}: {e}")
             return None
 
+    def restart_process(self):
+        """Stop logging threads and re-launch the process with the same parameters."""
+        desc = f"{self._process_name} w/ {self._key_type}" if self._key_type else self._process_name
+
+        # Clean up old subprocess logger
+        if self.subprocess_logger:
+            self.subprocess_logger.stop_logging_stdout()
+            self.subprocess_logger.stop_monitoring_stderr()
+            self.subprocess_logger = None
+
+        try:
+            self.logger.info(f"Restarting {desc}")
+            self.process = subprocess.Popen(
+                self._command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+                cwd=self._config_dir,
+                universal_newlines=True,
+                bufsize=1
+            )
+            if not self._suppress_logging:
+                self.subprocess_logger = SubprocessLogger(self.logger, desc)
+                self.subprocess_logger.start_logging_stdout(self.process)
+                self.subprocess_logger.start_monitoring_stderr(self.process, self._key_type, self._process_name)
+            self.logger.info(f"{desc} restarted (pid {self.process.pid})")
+        except Exception as e:
+            self.logger.error(f"Failed to restart {desc}: {e}")
+
     def wait(self):
         if self.process:
             self.stdout, self.stderr = self.process.communicate()
             self.returncode = self.process.returncode
             self.stdout = self.stdout.strip() if self.stdout else ""
-            self.stderr = self.stderr.strip() if self.stderr else ""           
+            self.stderr = self.stderr.strip() if self.stderr else ""
             if self.subprocess_logger:
                 self.subprocess_logger.stop_logging_stdout()
                 self.subprocess_logger.stop_monitoring_stderr()

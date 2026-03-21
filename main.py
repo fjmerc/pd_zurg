@@ -5,7 +5,18 @@ import zurg as z
 from rclone import rclone
 from utils import duplicate_cleanup
 from utils import auto_update
-from utils.processes import shutdown_all_processes
+from utils.processes import shutdown_all_processes, start_process_monitor
+
+
+def reap_zombies(signum, frame):
+    """Reap zombie child processes to prevent PID table leaks."""
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+            if pid == 0:
+                break
+        except ChildProcessError:
+            break
 
 
 def shutdown(signum, frame):
@@ -80,11 +91,14 @@ def main():
         except Exception as e:
             logger.error(f"Error in plex_debrid setup: {e}", exc_info=True)
 
+    start_process_monitor(logger)
+
     while True:
         signal.pause()
 
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGCHLD, reap_zombies)
 
     main()

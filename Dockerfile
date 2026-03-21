@@ -1,13 +1,13 @@
-﻿FROM rclone/rclone:latest AS rclone-stage
+﻿FROM rclone/rclone:1.73.2 AS rclone-stage
 
-FROM python:3.11-alpine
+FROM python:3.11.12-alpine3.21
 COPY --from=rclone-stage /usr/local/bin/rclone /usr/local/bin/rclone
 
 WORKDIR /
 
 ADD . / ./
-ADD https://raw.githubusercontent.com/debridmediamanager/zurg-testing/main/config.yml /zurg/
-ADD https://raw.githubusercontent.com/debridmediamanager/zurg-testing/main/scripts/plex_update.sh /zurg/
+ADD https://raw.githubusercontent.com/debridmediamanager/zurg-testing/f41746b6f6142c773ae86c6059e6e6338d864ba0/config.yml /zurg/
+ADD https://raw.githubusercontent.com/debridmediamanager/zurg-testing/f41746b6f6142c773ae86c6059e6e6338d864ba0/scripts/plex_update.sh /zurg/
 
 ENV \
   XDG_CONFIG_HOME=/config \

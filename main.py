@@ -6,6 +6,7 @@ from rclone import rclone
 from utils import duplicate_cleanup
 from utils import auto_update
 from utils.processes import shutdown_all_processes
+from utils import blackhole
 
 
 def shutdown(signum, frame):
@@ -79,6 +80,8 @@ def main():
                 pd_updater.auto_update('plex_debrid', False)
         except Exception as e:
             logger.error(f"Error in plex_debrid setup: {e}", exc_info=True)
+
+    blackhole.setup()
 
     while True:
         signal.pause()

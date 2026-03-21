@@ -636,7 +636,7 @@ function update(){
     let p='';const hasAuth=window._hasAuth;
     d.processes.forEach(x=>{
       const svcName=x.name.split(' w/ ')[0].toLowerCase();
-      const restartBtn=hasAuth?'<td><button class="btn-restart" onclick="restartSvc(this,\''+esc(svcName)+'\')" title="Restart">Restart</button></td>':'<td></td>';
+      const restartBtn=hasAuth?'<td><button class="btn-restart" onclick="restartSvc(this,\\x27'+esc(svcName)+'\\x27)" title="Restart">Restart</button></td>':'<td></td>';
       p+='<tr><td>'+esc(x.name)+'</td><td>'+(x.pid||'-')+'</td><td>'+(x.restart_count||0)+'</td><td>'+dot(x.running)+'</td>'+restartBtn+'</tr>';
     });
     document.getElementById('procs').innerHTML=p||'<tr><td colspan="5" style="color:var(--text2)">No processes</td></tr>';

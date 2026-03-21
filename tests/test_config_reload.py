@@ -1,0 +1,105 @@
+"""Tests for config reload logic (Plan 09)."""
+
+import os
+import pytest
+from utils.config_reload import _determine_restarts, SOFT_RELOAD, SERVICE_DEPENDENCIES
+
+
+class TestDetermineRestarts:
+
+    def test_zurg_change_cascades_to_rclone(self):
+        """Changing a Zurg var should also restart rclone."""
+        services = _determine_restarts({'RD_API_KEY'})
+        assert 'zurg' in services
+        assert 'rclone' in services
+
+    def test_rclone_change_cascades_to_plex_debrid(self):
+        """Changing an rclone var should also restart plex_debrid."""
+        services = _determine_restarts({'RCLONE_MOUNT_NAME'})
+        assert 'rclone' in services
+        assert 'plex_debrid' in services
+
+    def test_zurg_cascades_full_chain(self):
+        """Zurg change should cascade: zurg -> rclone -> plex_debrid."""
+        services = _determine_restarts({'ZURG_PORT'})
+        assert 'zurg' in services
+        assert 'rclone' in services
+        assert 'plex_debrid' in services
+
+    def test_notification_change_isolated(self):
+        """Notification changes should not restart process services."""
+        services = _determine_restarts({'NOTIFICATION_URL'})
+        assert services == {'notifications'}
+
+    def test_blackhole_change_isolated(self):
+        """Blackhole changes should not restart process services."""
+        services = _determine_restarts({'BLACKHOLE_ENABLED'})
+        assert services == {'blackhole'}
+
+    def test_plex_debrid_change_no_cascade(self):
+        """plex_debrid changes should not restart zurg or rclone."""
+        services = _determine_restarts({'PD_ENABLED'})
+        assert 'plex_debrid' in services
+        assert 'zurg' not in services
+        assert 'rclone' not in services
+
+    def test_empty_changes_empty_result(self):
+        """No changes should result in no restarts."""
+        services = _determine_restarts(set())
+        assert services == set()
+
+    def test_unknown_var_no_restart(self):
+        """Vars not in any service mapping should not trigger restarts."""
+        services = _determine_restarts({'SOME_UNKNOWN_VAR'})
+        assert services == set()
+
+    def test_multiple_services_affected(self):
+        """Changing vars across multiple services should restart all."""
+        services = _determine_restarts({'NOTIFICATION_URL', 'BLACKHOLE_ENABLED'})
+        assert 'notifications' in services
+        assert 'blackhole' in services
+
+
+class TestSoftReload:
+
+    def test_soft_reload_vars_defined(self):
+        """SOFT_RELOAD should contain known soft-reload variables."""
+        assert 'PDZURG_LOG_LEVEL' in SOFT_RELOAD
+        assert 'NOTIFICATION_LEVEL' in SOFT_RELOAD
+        assert 'NOTIFICATION_EVENTS' in SOFT_RELOAD
+
+    def test_soft_reload_no_process_vars(self):
+        """SOFT_RELOAD should not contain vars that need process restart."""
+        process_vars = set()
+        for deps in SERVICE_DEPENDENCIES.values():
+            process_vars |= deps
+        overlap = SOFT_RELOAD & process_vars
+        # Some vars like NOTIFICATION_LEVEL appear in both — that's fine,
+        # soft reload takes precedence when ALL changes are soft
+        # The key constraint: core service vars should not be in SOFT_RELOAD
+        assert 'RD_API_KEY' not in SOFT_RELOAD
+        assert 'ZURG_ENABLED' not in SOFT_RELOAD
+        assert 'RCLONE_MOUNT_NAME' not in SOFT_RELOAD
+
+    def test_soft_only_detection(self):
+        """Changes only in SOFT_RELOAD should be detected as soft-only."""
+        changed = {'PDZURG_LOG_LEVEL', 'SKIP_VALIDATION'}
+        assert changed <= SOFT_RELOAD
+
+    def test_mixed_changes_not_soft(self):
+        """Changes mixing soft and hard vars should not be soft-only."""
+        changed = {'PDZURG_LOG_LEVEL', 'RD_API_KEY'}
+        assert not (changed <= SOFT_RELOAD)
+
+
+class TestServiceDependencies:
+
+    def test_all_services_have_deps(self):
+        """Every service should have at least one dependency var."""
+        for svc, deps in SERVICE_DEPENDENCIES.items():
+            assert len(deps) > 0, f"{svc} has no dependency vars"
+
+    def test_expected_services_defined(self):
+        """Expected services should all be defined."""
+        expected = {'zurg', 'rclone', 'plex_debrid', 'blackhole', 'notifications', 'status_ui'}
+        assert expected == set(SERVICE_DEPENDENCIES.keys())

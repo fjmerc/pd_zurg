@@ -88,7 +88,10 @@ services:
       ## ffprobe Monitor (enabled by default)
      # - FFPROBE_MONITOR_ENABLED=true
      # - FFPROBE_STUCK_TIMEOUT=300
-    ## Status Web UI port (optional)
+      ## Config Validation (runs on startup, set to true to skip)
+     # - SKIP_VALIDATION=false
+    ## Status Web UI and Prometheus metrics port (optional)
+    ## Prometheus scrape config: targets: ['pd_zurg:8080'], metrics_path: /metrics
     # ports:
     #   - "8080:8080"
     # Example to attach to gluetun vpn container if realdebrid blocks IP address

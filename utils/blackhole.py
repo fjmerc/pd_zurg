@@ -5,6 +5,7 @@ configured debrid service, and removes the file after processing.
 Compatible with Sonarr/Radarr blackhole download client configuration.
 """
 
+import json
 import os
 import time
 import threading
@@ -19,6 +20,54 @@ except ImportError:
     _notify = None
 
 _watcher = None
+
+# Retry configuration for failed torrent submissions
+RETRY_SCHEDULE = [300, 900, 3600]  # 5 min, 15 min, 1 hour
+MAX_RETRIES = 3
+
+
+class RetryMeta:
+    """Tracks retry state for failed blackhole files via JSON sidecar files.
+
+    State survives container restarts since it's persisted to disk.
+    """
+
+    @staticmethod
+    def meta_path(file_path):
+        return file_path + '.meta'
+
+    @staticmethod
+    def read(file_path):
+        """Read retry count and last attempt time. Returns (retries, last_attempt)."""
+        meta = RetryMeta.meta_path(file_path)
+        if os.path.exists(meta):
+            try:
+                with open(meta, 'r') as f:
+                    data = json.load(f)
+                return data.get('retries', 0), data.get('last_attempt', 0)
+            except (json.JSONDecodeError, IOError):
+                return 0, 0
+        return 0, 0
+
+    @staticmethod
+    def write(file_path, retries):
+        """Write retry count and current timestamp."""
+        meta = RetryMeta.meta_path(file_path)
+        try:
+            with open(meta, 'w') as f:
+                json.dump({'retries': retries, 'last_attempt': time.time()}, f)
+        except IOError as e:
+            logger.debug(f"[blackhole] Could not write retry meta for {file_path}: {e}")
+
+    @staticmethod
+    def remove(file_path):
+        """Clean up sidecar meta file."""
+        meta = RetryMeta.meta_path(file_path)
+        try:
+            if os.path.exists(meta):
+                os.remove(meta)
+        except OSError:
+            pass
 
 
 class BlackholeWatcher:
@@ -129,6 +178,11 @@ class BlackholeWatcher:
                     os.remove(file_path)
                 except OSError as e:
                     logger.warning(f"[blackhole] Could not remove {filename}: {e}")
+                try:
+                    from utils.metrics import metrics
+                    metrics.inc('blackhole_processed', {'status': 'success'})
+                except Exception:
+                    pass
                 if _notify:
                     _notify('download_complete', 'Blackhole: Torrent Added',
                             f'{filename} added to {self.debrid_service}')
@@ -141,8 +195,64 @@ class BlackholeWatcher:
                     base, fext = os.path.splitext(filename)
                     dest = os.path.join(error_dir, f"{base}_{int(time.time())}{fext}")
                 os.rename(file_path, dest)
+                try:
+                    from utils.metrics import metrics
+                    metrics.inc('blackhole_processed', {'status': 'failed'})
+                except Exception:
+                    pass
+                # Track retry state
+                retries, _ = RetryMeta.read(dest)
+                RetryMeta.write(dest, retries + 1)
+                if retries + 1 >= MAX_RETRIES:
+                    logger.error(f"[blackhole] {filename} has permanently failed after {MAX_RETRIES} attempts")
+                    if _notify:
+                        _notify('download_error', 'Blackhole: Permanent Failure',
+                                f'{filename} failed {MAX_RETRIES} times and will not be retried',
+                                level='error')
         except Exception as e:
             logger.error(f"[blackhole] Error processing {filename}: {e}")
+
+    def _retry_failed(self):
+        """Scan failed/ directory and retry eligible files."""
+        failed_dir = os.path.join(self.watch_dir, 'failed')
+        if not os.path.exists(failed_dir):
+            return
+
+        for filename in os.listdir(failed_dir):
+            file_path = os.path.join(failed_dir, filename)
+            if not os.path.isfile(file_path):
+                continue
+
+            ext = os.path.splitext(filename)[1].lower()
+            if ext == '.meta' or ext not in self.SUPPORTED_EXTENSIONS:
+                continue
+
+            retries, last_attempt = RetryMeta.read(file_path)
+
+            if retries >= MAX_RETRIES:
+                continue
+
+            # Determine backoff delay for this retry
+            delay_idx = min(retries, len(RETRY_SCHEDULE) - 1)
+            delay = RETRY_SCHEDULE[delay_idx]
+
+            if time.time() - last_attempt < delay:
+                continue
+
+            logger.info(f"[blackhole] Retrying failed file: {filename} (attempt {retries + 1}/{MAX_RETRIES})")
+            try:
+                from utils.metrics import metrics
+                metrics.inc('blackhole_retry')
+            except Exception:
+                pass
+
+            # Move back to watch dir for reprocessing
+            retry_path = os.path.join(self.watch_dir, filename)
+            try:
+                RetryMeta.remove(file_path)
+                os.rename(file_path, retry_path)
+            except OSError as e:
+                logger.error(f"[blackhole] Failed to move {filename} for retry: {e}")
 
     def _scan(self):
         """Scan watch directory for new files."""
@@ -180,6 +290,7 @@ class BlackholeWatcher:
         while not self._stop_event.is_set():
             try:
                 self._scan()
+                self._retry_failed()
             except Exception as e:
                 logger.error(f"[blackhole] Scan error: {e}")
             self._stop_event.wait(self.poll_interval)

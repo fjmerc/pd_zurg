@@ -80,6 +80,32 @@ def _get_backoff_delay(policy, restart_count):
     return policy.backoff_seconds[idx]
 
 
+def _on_restart_exhausted(desc, restart_count, max_restarts):
+    """Fire notification and status event when a process exhausts all restart attempts."""
+    try:
+        from utils.notifications import notify
+        notify(
+            'health_error',
+            f'Process Dead: {desc}',
+            f'{desc} has crashed {restart_count} times and exhausted all '
+            f'{max_restarts} restart attempts. The process will NOT be restarted '
+            f'automatically. Check logs and restart the container.',
+            level='error'
+        )
+    except Exception:
+        pass
+
+    try:
+        from utils.status_server import status_data
+        status_data.add_event(
+            'process_manager',
+            f'{desc} exhausted {max_restarts} restart attempts — process is dead',
+            level='error'
+        )
+    except Exception:
+        pass
+
+
 def _handle_restart(entry, logger):
     """Attempt to restart a dead process according to its restart policy."""
     handler = entry['handler']
@@ -103,6 +129,7 @@ def _handle_restart(entry, logger):
 
     if handler._restart_count >= policy.max_restarts:
         logger.error(f"{desc} has exceeded max restarts ({policy.max_restarts}). Not restarting.")
+        _on_restart_exhausted(desc, handler._restart_count, policy.max_restarts)
         return
 
     if handler._first_restart_time is None:

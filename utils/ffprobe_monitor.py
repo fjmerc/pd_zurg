@@ -22,6 +22,9 @@ from utils.logger import get_logger
 logger = get_logger()
 
 
+MAX_KILLS_PER_HOUR = 10
+
+
 class FfprobeMonitor:
     def __init__(self, stuck_timeout=300, poll_interval=30, max_poke_attempts=3, poke_cooldown=60):
         self.stuck_timeout = stuck_timeout
@@ -33,6 +36,10 @@ class FfprobeMonitor:
         self._stuck_since = {}
         # Track poke attempts per PID: {pid: (poke_count, last_poke_time)}
         self._poke_state = {}
+        # Kill throttling
+        self._kill_count = 0
+        self._kill_window_start = time.time()
+        self._throttle_warned = False
 
     def _get_process_state(self, pid):
         """Read process state from /proc/PID/stat. Returns state char or None."""
@@ -86,6 +93,44 @@ class FfprobeMonitor:
                 return arg
         return None
 
+    def _is_throttled(self):
+        """Check if we've killed too many processes recently."""
+        now = time.time()
+        if now - self._kill_window_start > 3600:
+            self._kill_count = 0
+            self._kill_window_start = now
+            self._throttle_warned = False
+
+        if self._kill_count >= MAX_KILLS_PER_HOUR:
+            if not self._throttle_warned:
+                logger.warning(
+                    f"[ffprobe_monitor] Killed {self._kill_count} processes in the last hour. "
+                    f"Throttling to prevent storm. Will resume next hour."
+                )
+                self._throttle_warned = True
+            return True
+        return False
+
+    def _kill_process(self, pid):
+        """Kill a stuck ffprobe process with proper error handling."""
+        try:
+            os.kill(pid, signal.SIGKILL)
+            self._kill_count += 1
+            logger.info(f"[ffprobe_monitor] Killed stuck ffprobe pid {pid}")
+            return True
+        except ProcessLookupError:
+            logger.debug(f"[ffprobe_monitor] Process {pid} already exited")
+            return True
+        except PermissionError:
+            logger.error(
+                f"[ffprobe_monitor] Permission denied killing pid {pid}. "
+                f"Container may need CAP_KILL capability."
+            )
+            return False
+        except OSError as e:
+            logger.error(f"[ffprobe_monitor] Error killing pid {pid}: {e}")
+            return False
+
     def _poke_process(self, pid, file_path):
         """Run a quick ffprobe on the same file to generate I/O."""
         logger.info(f"[ffprobe_monitor] Poking stuck ffprobe (pid {pid}) by probing: {file_path}")
@@ -106,6 +151,9 @@ class FfprobeMonitor:
 
     def _check_and_recover(self):
         """Scan for stuck ffprobe processes and attempt recovery."""
+        if self._is_throttled():
+            return
+
         now = time.time()
         ffprobe_pids = self._find_ffprobe_pids()
         active_pids = set()
@@ -142,10 +190,7 @@ class FfprobeMonitor:
                     f"[ffprobe_monitor] ffprobe pid {pid} stuck for {stuck_duration:.0f}s, "
                     f"exceeded {self.max_poke_attempts} poke attempts. Killing."
                 )
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                self._kill_process(pid)
                 self._stuck_since.pop(pid, None)
                 self._poke_state.pop(pid, None)
                 continue
@@ -164,10 +209,7 @@ class FfprobeMonitor:
                 logger.warning(
                     f"[ffprobe_monitor] Cannot determine file for stuck ffprobe pid {pid}, killing"
                 )
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                self._kill_process(pid)
                 self._stuck_since.pop(pid, None)
                 self._poke_state.pop(pid, None)
 

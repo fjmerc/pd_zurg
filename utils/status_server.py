@@ -241,6 +241,12 @@ class StatusData:
             })
             if level == 'error':
                 self.error_count += 1
+        # Increment metrics counter
+        try:
+            from utils.metrics import metrics
+            metrics.inc('events', {'level': level})
+        except Exception:
+            pass
 
     def to_dict(self):
         from utils.processes import _process_registry, _registry_lock
@@ -496,6 +502,22 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
     auth_credentials = None
 
     def do_GET(self):
+        # Prometheus metrics endpoint — served before auth check
+        # (scrapers don't support basic auth easily)
+        if self.path == '/metrics':
+            try:
+                from utils.metrics import metrics
+                body = metrics.format_metrics().encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain; version=0.0.4; charset=utf-8')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                self.send_response(500)
+                self.end_headers()
+            return
+
         if self.auth_credentials:
             auth_header = self.headers.get('Authorization', '')
             if not auth_header.startswith('Basic '):

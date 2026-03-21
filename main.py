@@ -10,6 +10,8 @@ from utils import notifications
 from utils import blackhole
 from utils import ffprobe_monitor
 from utils import status_server
+from utils.config_validator import run_validation
+from utils.config_reload import handle_sighup
 
 
 def shutdown(signum, frame):
@@ -57,6 +59,9 @@ def main():
 '''
 
     logger.info(ascii_art.format(version=version)  + "\n" + "\n")
+
+    if not run_validation():
+        sys.exit(1)
 
     status_server.setup()
     status_server.status_data.add_event('main', f'pd_zurg v{version} starting')
@@ -112,6 +117,7 @@ def main():
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGHUP, handle_sighup)
     # Auto-reap zombie children without a handler that conflicts with subprocess.Popen
     signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 

@@ -2,19 +2,49 @@
 from base import *
 from ui.ui_print import *
 import releases
+import requests
+import json
 
 name = "torrentio"
 
-default_opts = "https://torrentio.strem.fun/sort=qualitysize|qualityfilter=480p,scr,cam/manifest.json"
+default_opts = "https://torrentio.strem.fun/sort=qualitysize|qualityfilter=480pscrcam/manifest.json"
 
 session = custom_session()
 
+# FlareSolverr proxy for bypassing Cloudflare protection (opt-in via env var)
+FLARESOLVERR_URL = os.environ.get("FLARESOLVERR_URL")
 
 def get(url):
     headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'}
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
+    }
+
     try:
         ui_print(f"[torrentio] GET url: {url} ...", ui_settings.debug)
+
+        # Try FlareSolverr first if configured
+        if FLARESOLVERR_URL:
+            try:
+                flaresolverr_payload = {
+                    "cmd": "request.get",
+                    "url": url,
+                    "maxTimeout": 60000
+                }
+                flare_response = requests.post(FLARESOLVERR_URL, json=flaresolverr_payload, timeout=65)
+                if flare_response.status_code == 200:
+                    flare_data = flare_response.json()
+                    if flare_data.get("status") == "ok":
+                        response_content = flare_data["solution"]["response"]
+                        ui_print("done (via FlareSolverr)", ui_settings.debug)
+                        return json.loads(response_content, object_hook=lambda d: SimpleNamespace(**d))
+                    else:
+                        ui_print("[torrentio] FlareSolverr failed, falling back to direct request", ui_settings.debug)
+                else:
+                    ui_print("[torrentio] FlareSolverr error, falling back to direct request", ui_settings.debug)
+            except Exception as e:
+                ui_print(f"[torrentio] FlareSolverr error: {str(e)}, falling back to direct request", ui_settings.debug)
+
+        # Direct request (or fallback)
         response = session.get(url, headers=headers, timeout=60)
         ui_print("done", ui_settings.debug)
         if hasattr(response, "status_code") and response.status_code != 200:

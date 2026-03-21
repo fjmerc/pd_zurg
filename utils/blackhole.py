@@ -13,6 +13,13 @@ from utils.logger import get_logger
 
 logger = get_logger()
 
+try:
+    from utils.notifications import notify as _notify
+except ImportError:
+    _notify = None
+
+_watcher = None
+
 
 class BlackholeWatcher:
     SUPPORTED_EXTENSIONS = {'.torrent', '.magnet'}
@@ -30,25 +37,30 @@ class BlackholeWatcher:
         headers = {'Authorization': f'Bearer {self.debrid_api_key}'}
 
         if ext == '.magnet':
-            with open(file_path, 'r') as f:
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
                 magnet_link = f.read().strip()
             url = 'https://api.real-debrid.com/rest/1.0/torrents/addMagnet'
-            response = requests.post(url, headers=headers, data={'magnet': magnet_link})
+            response = requests.post(url, headers=headers, data={'magnet': magnet_link}, timeout=30)
         elif ext == '.torrent':
             url = 'https://api.real-debrid.com/rest/1.0/torrents/addTorrent'
             with open(file_path, 'rb') as f:
-                response = requests.put(url, headers=headers, data=f.read(),
-                                        params={'Content-Type': 'application/x-bittorrent'})
+                response = requests.put(url,
+                                        headers={**headers, 'Content-Type': 'application/x-bittorrent'},
+                                        data=f.read(), timeout=30)
         else:
             return False, f'Unsupported extension: {ext}'
 
         if response.status_code in (200, 201):
             torrent_id = response.json().get('id')
+            if not torrent_id:
+                return False, 'Real-Debrid response missing torrent id'
             select_url = f'https://api.real-debrid.com/rest/1.0/torrents/selectFiles/{torrent_id}'
-            requests.post(select_url, headers=headers, data={'files': 'all'})
+            select_resp = requests.post(select_url, headers=headers, data={'files': 'all'}, timeout=30)
+            if select_resp.status_code not in (200, 204):
+                logger.warning(f"[blackhole] selectFiles failed for {torrent_id}: HTTP {select_resp.status_code}")
             return True, torrent_id
         else:
-            return False, response.text
+            return False, response.text[:200]
 
     def _add_to_alldebrid(self, file_path):
         """Add a torrent/magnet to AllDebrid."""
@@ -56,21 +68,21 @@ class BlackholeWatcher:
         params = {'agent': 'pd_zurg', 'apikey': self.debrid_api_key}
 
         if ext == '.magnet':
-            with open(file_path, 'r') as f:
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
                 magnet_link = f.read().strip()
             url = 'https://api.alldebrid.com/v4/magnet/upload'
-            response = requests.post(url, params=params, data={'magnets[]': magnet_link})
+            response = requests.post(url, params=params, data={'magnets[]': magnet_link}, timeout=30)
         elif ext == '.torrent':
             url = 'https://api.alldebrid.com/v4/magnet/upload/file'
             with open(file_path, 'rb') as f:
-                response = requests.post(url, params=params, files={'files[]': f})
+                response = requests.post(url, params=params, files={'files[]': f}, timeout=30)
         else:
             return False, f'Unsupported extension: {ext}'
 
         if response.status_code == 200:
             return True, response.json()
         else:
-            return False, response.text
+            return False, response.text[:200]
 
     def _add_to_torbox(self, file_path):
         """Add a torrent/magnet to TorBox."""
@@ -79,19 +91,19 @@ class BlackholeWatcher:
         url = 'https://api.torbox.app/v1/api/torrents/createtorrent'
 
         if ext == '.magnet':
-            with open(file_path, 'r') as f:
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
                 magnet_link = f.read().strip()
-            response = requests.post(url, headers=headers, data={'magnet': magnet_link})
+            response = requests.post(url, headers=headers, data={'magnet': magnet_link}, timeout=30)
         elif ext == '.torrent':
             with open(file_path, 'rb') as f:
-                response = requests.post(url, headers=headers, files={'file': f})
+                response = requests.post(url, headers=headers, files={'file': f}, timeout=30)
         else:
             return False, f'Unsupported extension: {ext}'
 
         if response.status_code in (200, 201):
             return True, response.json()
         else:
-            return False, response.text
+            return False, response.text[:200]
 
     def _process_file(self, file_path):
         """Process a single torrent/magnet file."""
@@ -113,19 +125,22 @@ class BlackholeWatcher:
             success, result = handler(file_path)
             if success:
                 logger.info(f"[blackhole] Added to {self.debrid_service}: {filename}")
-                os.remove(file_path)
-                logger.debug(f"[blackhole] Removed processed file: {filename}")
                 try:
-                    from utils.notifications import notify
-                    notify('download_complete', 'Blackhole: Torrent Added',
-                           f'{filename} added to {self.debrid_service}')
-                except ImportError:
-                    pass
+                    os.remove(file_path)
+                except OSError as e:
+                    logger.warning(f"[blackhole] Could not remove {filename}: {e}")
+                if _notify:
+                    _notify('download_complete', 'Blackhole: Torrent Added',
+                            f'{filename} added to {self.debrid_service}')
             else:
                 logger.error(f"[blackhole] Failed to add {filename}: {result}")
                 error_dir = os.path.join(self.watch_dir, 'failed')
                 os.makedirs(error_dir, exist_ok=True)
-                os.rename(file_path, os.path.join(error_dir, filename))
+                dest = os.path.join(error_dir, filename)
+                if os.path.exists(dest):
+                    base, fext = os.path.splitext(filename)
+                    dest = os.path.join(error_dir, f"{base}_{int(time.time())}{fext}")
+                os.rename(file_path, dest)
         except Exception as e:
             logger.error(f"[blackhole] Error processing {filename}: {e}")
 
@@ -134,10 +149,27 @@ class BlackholeWatcher:
         if not os.path.exists(self.watch_dir):
             return
 
+        now = time.time()
+        watch_realpath = os.path.realpath(self.watch_dir)
+
         for filename in os.listdir(self.watch_dir):
             file_path = os.path.join(self.watch_dir, filename)
+
+            # Guard against symlink escapes
+            real_path = os.path.realpath(file_path)
+            if not real_path.startswith(watch_realpath + os.sep) and real_path != watch_realpath:
+                continue
+
             if not os.path.isfile(file_path):
                 continue
+
+            # Skip files still being written (modified within last 2 seconds)
+            try:
+                if now - os.path.getmtime(file_path) < 2.0:
+                    continue
+            except OSError:
+                continue
+
             ext = os.path.splitext(filename)[1].lower()
             if ext in self.SUPPORTED_EXTENSIONS:
                 self._process_file(file_path)
@@ -158,6 +190,7 @@ class BlackholeWatcher:
 
 def setup():
     """Initialize and start the blackhole watcher if enabled."""
+    global _watcher
     from base import RDAPIKEY, ADAPIKEY
 
     blackhole_enabled = os.environ.get('BLACKHOLE_ENABLED', 'false').lower() == 'true'
@@ -165,7 +198,11 @@ def setup():
         return None
 
     watch_dir = os.environ.get('BLACKHOLE_DIR', '/watch')
-    poll_interval = int(os.environ.get('BLACKHOLE_POLL_INTERVAL', '5'))
+    try:
+        poll_interval = int(os.environ.get('BLACKHOLE_POLL_INTERVAL', '5'))
+    except (ValueError, TypeError):
+        logger.warning("[blackhole] Invalid BLACKHOLE_POLL_INTERVAL, defaulting to 5s")
+        poll_interval = 5
 
     debrid_service = os.environ.get('BLACKHOLE_DEBRID', '').lower()
     debrid_api_key = None
@@ -183,6 +220,10 @@ def setup():
                 debrid_service = 'torbox'
                 debrid_api_key = torbox_key
     else:
+        valid_services = {'realdebrid', 'alldebrid', 'torbox'}
+        if debrid_service not in valid_services:
+            logger.error(f"[blackhole] Unknown BLACKHOLE_DEBRID '{debrid_service}'. Valid: {', '.join(sorted(valid_services))}")
+            return None
         key_map = {
             'realdebrid': RDAPIKEY,
             'alldebrid': ADAPIKEY,
@@ -196,7 +237,13 @@ def setup():
 
     os.makedirs(watch_dir, exist_ok=True)
 
-    watcher = BlackholeWatcher(watch_dir, debrid_api_key, debrid_service, poll_interval)
-    thread = threading.Thread(target=watcher.run, daemon=True)
+    _watcher = BlackholeWatcher(watch_dir, debrid_api_key, debrid_service, poll_interval)
+    thread = threading.Thread(target=_watcher.run, daemon=True)
     thread.start()
-    return watcher
+    return _watcher
+
+
+def stop():
+    """Stop the blackhole watcher if running."""
+    if _watcher:
+        _watcher.stop()

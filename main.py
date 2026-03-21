@@ -8,6 +8,7 @@ from utils import auto_update
 from utils.processes import shutdown_all_processes, start_process_monitor
 from utils import notifications
 from utils import blackhole
+from utils import ffprobe_monitor
 
 
 def shutdown(signum, frame):
@@ -93,6 +94,11 @@ def main():
             logger.error(f"Error in plex_debrid setup: {e}", exc_info=True)
 
     blackhole.setup()
+
+    try:
+        ffprobe_monitor.setup()
+    except Exception as e:
+        logger.error(f"Error in ffprobe monitor setup: {e}", exc_info=True)
 
     start_process_monitor(logger)
 

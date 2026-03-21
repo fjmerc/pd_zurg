@@ -81,7 +81,10 @@ def main():
         except Exception as e:
             logger.error(f"Error in plex_debrid setup: {e}", exc_info=True)
 
-    ffprobe_monitor.setup()
+    try:
+        ffprobe_monitor.setup()
+    except Exception as e:
+        logger.error(f"Error in ffprobe monitor setup: {e}", exc_info=True)
 
     while True:
         signal.pause()

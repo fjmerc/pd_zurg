@@ -32,13 +32,12 @@ def atomic_write(target_path, mode='w', encoding='utf-8'):
     except FileNotFoundError:
         pass
 
-    kwargs = {'mode': mode, 'dir': target_dir, 'delete': False}
-    if 'b' not in mode:
-        kwargs['encoding'] = encoding
-
-    fd, tmp_path = tempfile.mkstemp(**kwargs)
+    fd, tmp_path = tempfile.mkstemp(dir=target_dir)
     try:
-        with os.fdopen(fd, mode) as tmp_file:
+        fdopen_kwargs = {'mode': mode}
+        if 'b' not in mode:
+            fdopen_kwargs['encoding'] = encoding
+        with os.fdopen(fd, **fdopen_kwargs) as tmp_file:
             yield tmp_file
 
         # Preserve original permissions

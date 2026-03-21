@@ -336,6 +336,9 @@ settings_list = [
         setting('Overseerr API Key', 'Please specify your Overseerr API Key: ', content.services.overseerr, 'api_key', hidden=True),
         setting('Overseerr Base URL', 'Please specify your Overseerr base URL: ', content.services.overseerr, 'base_url',
                 hidden=True),
+        setting('MDBList API Key', 'Please specify your MDBList API Key: ', content.services.mdblist, 'api_key', hidden=True),
+        setting('MDBList List IDs', ['Please specify a MDBList list ID: '], content.services.mdblist, 'lists', entry="list", hidden=True,
+                help='Add MDBList list IDs to monitor. Find list IDs in MDBList URLs: mdblist.com/lists/{list_id}'),
     ]
         ],
     ['Library Services', [

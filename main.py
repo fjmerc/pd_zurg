@@ -12,7 +12,6 @@ from utils import notifications
 def shutdown(signum, frame):
     logger = get_logger()
     logger.info("Shutdown signal received. Cleaning up...")
-    notifications.notify('shutdown', 'pd_zurg Shutting Down', 'Received shutdown signal')
 
     shutdown_all_processes(logger)
 
@@ -25,6 +24,13 @@ def shutdown(signum, frame):
                 logger.info(f"Successfully unmounted {full_path}")
             else:
                 logger.error(f"Failed to unmount {full_path}: {umount.stderr.strip()}")
+
+    # Best-effort shutdown notification after critical cleanup
+    t = threading.Thread(target=notifications.notify,
+                         args=('shutdown', 'pd_zurg Shutting Down', 'Shutdown complete'))
+    t.daemon = True
+    t.start()
+    t.join(timeout=5)
 
     sys.exit(0)
 

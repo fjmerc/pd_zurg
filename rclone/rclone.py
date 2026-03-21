@@ -146,7 +146,7 @@ def setup():
                     suppress_logging = True
                     logger.info(f"Suppressing {process_name} logging")                     
                 rclone_process = process_handler.start_process(process_name, "/config", rclone_command, mn, suppress_logging=suppress_logging)
-                notify('startup', 'Rclone Mounted', f'Mount {mn} is ready')
+                notify('mount_success', 'Rclone Mounted', f'Mount {mn} is ready')
             else:
                 logger.error(f"The Zurg WebDav URL {url}/dav is not accessible within the timeout period. Skipping rclone setup for {mn}")
                 notify('health_error', 'Rclone Mount Failed', f'Mount {mn} failed: Zurg WebDAV timeout', level='error')

@@ -9,6 +9,7 @@ from utils.processes import shutdown_all_processes, start_process_monitor
 from utils import notifications
 from utils import blackhole
 from utils import ffprobe_monitor
+from utils import status_server
 
 
 def shutdown(signum, frame):
@@ -56,6 +57,9 @@ def main():
 '''
 
     logger.info(ascii_art.format(version=version)  + "\n" + "\n")
+
+    status_server.setup()
+    status_server.status_data.add_event('main', f'pd_zurg v{version} starting')
 
     notifications.init()
     notifications.notify('startup', 'pd_zurg Started', f'Version {version}')

@@ -3,6 +3,7 @@ from utils.logger import *
 from utils.processes import ProcessHandler
 from utils.notifications import notify
 from utils.network import wait_for_url
+from utils.file_utils import atomic_write
 
 logger = get_logger()
 
@@ -52,7 +53,7 @@ def setup():
             shutil.copy2(rclone_config_path, backup_path)
             logger.info(f"Backed up existing rclone config to {backup_path}")
 
-        with open(rclone_config_path, "w") as f:
+        with atomic_write(rclone_config_path) as f:
             if RDAPIKEY:
                 rd_port = get_port_from_config(config_file_path_rd, 'RDAPIKEY')
                 f.write(f"[{RCLONEMN_RD}]\n")

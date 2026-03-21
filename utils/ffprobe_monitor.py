@@ -72,6 +72,11 @@ class FfprobeMonitor:
             pass
         return pids
 
+    def _is_still_ffprobe(self, pid):
+        """Re-verify the PID is still an ffprobe process before killing."""
+        cmdline = self._get_cmdline(pid)
+        return cmdline and any('ffprobe' in arg for arg in cmdline[:2])
+
     def _extract_file_path(self, cmdline):
         """Extract the media file path from ffprobe command line."""
         # ffprobe typically has the file as the last argument
@@ -129,7 +134,10 @@ class FfprobeMonitor:
             poke_count, last_poke = self._poke_state.get(pid, (0, 0))
 
             if poke_count >= self.max_poke_attempts:
-                # Exceeded poke attempts — kill it
+                if not self._is_still_ffprobe(pid):
+                    self._stuck_since.pop(pid, None)
+                    self._poke_state.pop(pid, None)
+                    continue
                 logger.warning(
                     f"[ffprobe_monitor] ffprobe pid {pid} stuck for {stuck_duration:.0f}s, "
                     f"exceeded {self.max_poke_attempts} poke attempts. Killing."
@@ -149,6 +157,10 @@ class FfprobeMonitor:
                 self._poke_process(pid, file_path)
                 self._poke_state[pid] = (poke_count + 1, now)
             else:
+                if not self._is_still_ffprobe(pid):
+                    self._stuck_since.pop(pid, None)
+                    self._poke_state.pop(pid, None)
+                    continue
                 logger.warning(
                     f"[ffprobe_monitor] Cannot determine file for stuck ffprobe pid {pid}, killing"
                 )
@@ -189,8 +201,14 @@ def setup():
     if not enabled:
         return None
 
-    stuck_timeout = int(os.environ.get('FFPROBE_STUCK_TIMEOUT', '300'))
-    poll_interval = int(os.environ.get('FFPROBE_POLL_INTERVAL', '30'))
+    try:
+        stuck_timeout = int(os.environ.get('FFPROBE_STUCK_TIMEOUT', '300'))
+    except ValueError:
+        stuck_timeout = 300
+    try:
+        poll_interval = int(os.environ.get('FFPROBE_POLL_INTERVAL', '30'))
+    except ValueError:
+        poll_interval = 30
 
     monitor = FfprobeMonitor(stuck_timeout=stuck_timeout, poll_interval=poll_interval)
     thread = threading.Thread(target=monitor.run, daemon=True)

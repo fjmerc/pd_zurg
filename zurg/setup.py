@@ -158,9 +158,9 @@ def zurg_setup():
                 port = ZURGPORT
                 logger.debug(f"Setting port {port} for Zurg w/ {key_type} instance")
                 update_port(config_file_path, port)
-            else:    
-                port = random.randint(9001, 9999)
-                logger.debug(f"Selected port {port} for Zurg w/ {key_type} instance")
+            else:
+                port = find_available_port(9001, 9999)
+                logger.debug(f"Selected available port {port} for Zurg w/ {key_type} instance")
                 update_port(config_file_path, port)
                 
             update_creds(config_file_path, ZURGUSER, ZURGPASS if ZURGUSER and ZURGPASS else None)

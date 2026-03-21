@@ -25,13 +25,16 @@ def _make_entry(item):
         tmdb_id=item.get('tmdb_id'),
         ratingKey=item.get('imdb_id'),
         watchlistedAt=item.get('rank', 0),
-        user=[['mdblist', api_key]],
+        user=[['mdblist', 'mdblist']],
     )
     entry.Guid = []
+    entry.EID = []
     if item.get('imdb_id'):
         entry.Guid.append(SimpleNamespace(id=f"imdb://{item['imdb_id']}"))
+        entry.EID.append(f"imdb://{item['imdb_id']}")
     if item.get('tmdb_id'):
         entry.Guid.append(SimpleNamespace(id=f"tmdb://{item['tmdb_id']}"))
+        entry.EID.append(f"tmdb://{item['tmdb_id']}")
     return entry
 
 
@@ -50,12 +53,18 @@ class watchlist(classes.watchlist):
                 url = f"{base_url}/lists/{list_id}/items?apikey={api_key}"
                 response = session.get(url, timeout=30)
                 if response.status_code == 200:
-                    items = response.json()
+                    try:
+                        items = response.json()
+                    except (ValueError, KeyError):
+                        ui_print(f"[mdblist] invalid JSON response for list {list_id}")
+                        continue
                     for item in items:
                         if not item.get('imdb_id'):
                             continue
                         entry = _make_entry(item)
-                        if entry not in self.data:
+                        # Deduplicate by IMDB ID
+                        existing_keys = {getattr(d, 'ratingKey', None) for d in self.data}
+                        if item['imdb_id'] not in existing_keys:
                             self.data.append(entry)
                 else:
                     ui_print(f"[mdblist] error fetching list {list_id}: HTTP {response.status_code}")
@@ -72,22 +81,25 @@ class watchlist(classes.watchlist):
     def update(self):
         """Re-fetch lists and check for new items."""
         update = False
+        existing_keys = {getattr(d, 'ratingKey', None) for d in self.data}
         try:
             for list_id in lists:
                 url = f"{base_url}/lists/{list_id}/items?apikey={api_key}"
                 response = session.get(url, timeout=30)
                 if response.status_code == 200:
-                    items = response.json()
+                    try:
+                        items = response.json()
+                    except (ValueError, KeyError):
+                        continue
                     for item in items:
                         if not item.get('imdb_id'):
                             continue
-                        # Quick check by ratingKey (imdb_id)
-                        existing_keys = {getattr(d, 'ratingKey', None) for d in self.data}
-                        if item.get('imdb_id') not in existing_keys:
+                        if item['imdb_id'] not in existing_keys:
                             ui_print(f'[mdblist] new item found: "{item.get("title")}"')
+                            entry = _make_entry(item)
+                            self.data.append(entry)
+                            existing_keys.add(item['imdb_id'])
                             update = True
-                            self.__init__()
-                            return update
         except Exception as e:
             ui_print(f"[mdblist] error during update: {str(e)}")
         return update

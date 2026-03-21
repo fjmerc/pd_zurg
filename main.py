@@ -6,6 +6,7 @@ from rclone import rclone
 from utils import duplicate_cleanup
 from utils import auto_update
 from utils.processes import shutdown_all_processes, start_process_monitor
+from utils import notifications
 
 
 def shutdown(signum, frame):
@@ -23,6 +24,13 @@ def shutdown(signum, frame):
                 logger.info(f"Successfully unmounted {full_path}")
             else:
                 logger.error(f"Failed to unmount {full_path}: {umount.stderr.strip()}")
+
+    # Best-effort shutdown notification after critical cleanup
+    t = threading.Thread(target=notifications.notify,
+                         args=('shutdown', 'pd_zurg Shutting Down', 'Shutdown complete'))
+    t.daemon = True
+    t.start()
+    t.join(timeout=5)
 
     sys.exit(0)
 
@@ -46,6 +54,9 @@ def main():
 '''
 
     logger.info(ascii_art.format(version=version)  + "\n" + "\n")
+
+    notifications.init()
+    notifications.notify('startup', 'pd_zurg Started', f'Version {version}')
 
     if str(ZURG).lower() == 'true':
         if not (RDAPIKEY or ADAPIKEY):

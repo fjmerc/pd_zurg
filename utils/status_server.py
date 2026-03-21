@@ -7,13 +7,16 @@ built-in http.server — no framework dependencies.
 
 import base64
 import collections
+import glob as glob_mod
 import hmac
 import http.server
 import json
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
+from urllib.parse import urlparse, parse_qs
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -77,6 +80,123 @@ def get_system_stats():
             pass
 
     return stats
+
+
+# ---------------------------------------------------------------------------
+# Mount health history
+# ---------------------------------------------------------------------------
+
+class MountHistory:
+    """Tracks mount status changes over time for timeline display."""
+
+    def __init__(self, max_entries=500):
+        self._history = {}  # path -> deque of {timestamp, mounted, accessible}
+        self._max_entries = max_entries
+        self._lock = threading.Lock()
+
+    def record(self, path, mounted, accessible):
+        """Record mount state, but only if it changed from last recorded state."""
+        with self._lock:
+            if path not in self._history:
+                self._history[path] = collections.deque(maxlen=self._max_entries)
+
+            entries = self._history[path]
+            if entries:
+                last = entries[-1]
+                if last['mounted'] == mounted and last['accessible'] == accessible:
+                    return  # No change
+
+            entries.append({
+                'timestamp': datetime.now().isoformat(timespec='seconds'),
+                'mounted': mounted,
+                'accessible': accessible,
+            })
+
+    def to_dict(self):
+        with self._lock:
+            return {
+                path: list(entries)
+                for path, entries in self._history.items()
+            }
+
+
+mount_history = MountHistory()
+
+
+# ---------------------------------------------------------------------------
+# Log reader
+# ---------------------------------------------------------------------------
+
+def read_log_lines(lines=100, level=None, log_dir='./log'):
+    """Read last N lines from the most recent log file, optionally filtered by level."""
+    try:
+        log_files = sorted(glob_mod.glob(os.path.join(log_dir, 'PDZURG-*.log')))
+        if not log_files:
+            return []
+        log_file = log_files[-1]  # Most recent
+
+        with open(log_file, 'rb') as f:
+            f.seek(0, 2)
+            file_size = f.tell()
+            if file_size == 0:
+                return []
+
+            # Read from end in blocks
+            block_size = 8192
+            blocks = []
+            remaining = file_size
+            while remaining > 0:
+                read_size = min(block_size, remaining)
+                remaining -= read_size
+                f.seek(remaining)
+                blocks.insert(0, f.read(read_size))
+
+        all_text = b''.join(blocks).decode('utf-8', errors='replace')
+        all_lines = all_text.splitlines()
+
+        if level:
+            level_upper = level.upper()
+            all_lines = [l for l in all_lines if level_upper in l]
+
+        return all_lines[-lines:]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Config viewer
+# ---------------------------------------------------------------------------
+
+_SENSITIVE_PATTERNS = {'KEY', 'TOKEN', 'PASS', 'SECRET', 'AUTH'}
+_CONFIG_PREFIXES = (
+    'ZURG', 'RD_', 'AD_', 'RCLONE', 'PD_', 'PLEX',
+    'JF_', 'SEERR', 'BLACKHOLE', 'NOTIFICATION',
+    'STATUS_UI', 'FFPROBE', 'DUPLICATE', 'NFS',
+    'PDZURG', 'AUTO_UPDATE', 'CLEANUP', 'TORBOX',
+    'MDBLIST', 'SHOW_MENU', 'GITHUB', 'SKIP_VALIDATION',
+    'TZ',
+)
+
+
+def get_sanitized_config():
+    """Return current pd_zurg config with sensitive values masked."""
+    config = {}
+    for key in sorted(os.environ.keys()):
+        if not any(key.startswith(p) for p in _CONFIG_PREFIXES):
+            continue
+
+        value = os.environ[key]
+        if any(s in key.upper() for s in _SENSITIVE_PATTERNS):
+            if value and len(value) > 8:
+                config[key] = value[:4] + '****' + value[-4:]
+            elif value:
+                config[key] = '****'
+            else:
+                config[key] = '(not set)'
+        else:
+            config[key] = value if value else '(not set)'
+
+    return config
 
 
 # ---------------------------------------------------------------------------
@@ -277,13 +397,17 @@ class StatusData:
                 for entry_name in os.listdir('/data'):
                     path = os.path.join('/data', entry_name)
                     try:
+                        mounted = os.path.ismount(path)
+                        accessible = os.access(path, os.R_OK)
                         mounts.append({
                             'path': path,
-                            'mounted': os.path.ismount(path),
-                            'accessible': os.access(path, os.R_OK),
+                            'mounted': mounted,
+                            'accessible': accessible,
                         })
+                        mount_history.record(path, mounted, accessible)
                     except OSError:
                         mounts.append({'path': path, 'mounted': False, 'accessible': False})
+                        mount_history.record(path, False, False)
         except OSError:
             pass
 
@@ -355,6 +479,26 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .stat-value{font-size:1.8em;font-weight:600;color:var(--blue)}
 .stat-label{font-size:.75em;color:var(--text2);margin-top:2px}
 .stats-row{display:flex;gap:32px}
+.btn-restart{background:none;border:1px solid var(--border);color:var(--text2);border-radius:4px;cursor:pointer;padding:2px 8px;font-size:.8em}
+.btn-restart:hover{border-color:var(--blue);color:var(--blue)}
+.btn-restart:disabled{opacity:.4;cursor:not-allowed}
+.log-controls{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+.log-controls select{background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:.8em}
+.log-controls label{font-size:.8em;color:var(--text2)}
+#log-content{max-height:350px;overflow-y:auto;background:var(--bg);border:1px solid var(--border2);border-radius:4px;padding:8px;font-size:.75em;line-height:1.5;white-space:pre-wrap;word-break:break-all}
+.log-line.error{color:var(--red)}.log-line.warning{color:var(--yellow)}.log-line.debug{color:var(--text3)}
+details{margin-top:0}
+details summary{cursor:pointer;color:var(--text2);font-size:.8em;padding:4px 0}
+details summary:hover{color:var(--blue)}
+.cfg-table td{font-family:monospace;font-size:.8em}
+.cfg-table td:first-child{color:var(--blue);font-weight:500;white-space:nowrap;padding-right:16px}
+.mount-timeline{margin-top:8px}
+.mt-row{display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:.8em}
+.mt-path{color:var(--text2);min-width:120px;overflow:hidden;text-overflow:ellipsis}
+.mt-blocks{display:flex;gap:1px;flex:1}
+.mt-block{height:16px;min-width:3px;flex:1;border-radius:2px}
+.mt-block.ok{background:var(--green)}.mt-block.down{background:var(--red)}.mt-block.partial{background:var(--yellow)}
+.mt-block:hover{opacity:.8}
 .footer{color:var(--text3);font-size:.7em;text-align:right;margin-top:12px}
 </style>
 </head>
@@ -371,13 +515,14 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 <div class="grid">
   <div class="card">
     <h2>Processes</h2>
-    <table><thead><tr><th>Name</th><th>PID</th><th>Restarts</th><th>Status</th></tr></thead>
+    <table><thead><tr><th>Name</th><th>PID</th><th>Restarts</th><th>Status</th><th id="actions-hdr"></th></tr></thead>
     <tbody id="procs"></tbody></table>
   </div>
   <div class="card">
     <h2>Mounts</h2>
     <table><thead><tr><th>Path</th><th>Mounted</th><th>Accessible</th></tr></thead>
     <tbody id="mounts"></tbody></table>
+    <div class="mount-timeline" id="mount-timeline"></div>
   </div>
 </div>
 <div class="grid">
@@ -391,6 +536,30 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
   <div class="card">
     <h2>Recent Events</h2>
     <div class="events" id="events"></div>
+  </div>
+</div>
+<div class="grid full">
+  <div class="card">
+    <h2>Logs</h2>
+    <div class="log-controls">
+      <select id="log-level" onchange="updateLogs()">
+        <option value="">All Levels</option>
+        <option value="ERROR">Error</option>
+        <option value="WARNING">Warning</option>
+        <option value="INFO">Info</option>
+        <option value="DEBUG">Debug</option>
+      </select>
+      <label><input type="checkbox" id="log-autoscroll" checked> Auto-scroll</label>
+    </div>
+    <div id="log-content"></div>
+  </div>
+</div>
+<div class="grid full">
+  <div class="card">
+    <details>
+      <summary>Running Configuration (click to expand)</summary>
+      <table class="cfg-table" id="config-table"><tbody></tbody></table>
+    </details>
   </div>
 </div>
 <div class="footer">Auto-refreshes every 10s</div>
@@ -463,11 +632,15 @@ function update(){
     // Services
     document.getElementById('services').innerHTML=renderServices(d.services);
 
-    // Processes
-    let p='';d.processes.forEach(x=>{
-      p+='<tr><td>'+esc(x.name)+'</td><td>'+(x.pid||'-')+'</td><td>'+(x.restart_count||0)+'</td><td>'+dot(x.running)+'</td></tr>';
+    // Processes (with optional restart buttons when auth is configured)
+    let p='';const hasAuth=window._hasAuth;
+    d.processes.forEach(x=>{
+      const svcName=x.name.split(' w/ ')[0].toLowerCase();
+      const restartBtn=hasAuth?'<td><button class="btn-restart" onclick="restartSvc(this,\''+esc(svcName)+'\')" title="Restart">Restart</button></td>':'<td></td>';
+      p+='<tr><td>'+esc(x.name)+'</td><td>'+(x.pid||'-')+'</td><td>'+(x.restart_count||0)+'</td><td>'+dot(x.running)+'</td>'+restartBtn+'</tr>';
     });
-    document.getElementById('procs').innerHTML=p||'<tr><td colspan="4" style="color:var(--text2)">No processes</td></tr>';
+    document.getElementById('procs').innerHTML=p||'<tr><td colspan="5" style="color:var(--text2)">No processes</td></tr>';
+    document.getElementById('actions-hdr').textContent=hasAuth?'Actions':'';
 
     // Mounts
     let m='';d.mounts.forEach(x=>{m+='<tr><td>'+esc(x.path)+'</td><td>'+dot(x.mounted)+'</td><td>'+dot(x.accessible)+'</td></tr>';});
@@ -487,7 +660,76 @@ function update(){
     document.getElementById('events').innerHTML=e||'<div style="color:var(--text2);padding:8px 0">No events yet</div>';
   }).catch(()=>{});
 }
-update();setInterval(update,10000);
+// Detect auth by trying an auth-required endpoint
+window._hasAuth=false;
+fetch('/api/restart/test',{method:'POST'}).then(r=>{window._hasAuth=r.status!==403;}).catch(()=>{});
+
+// Restart service
+function restartSvc(btn,name){
+  if(!confirm('Restart '+name+'?'))return;
+  btn.disabled=true;btn.textContent='...';
+  fetch('/api/restart/'+name,{method:'POST'}).then(r=>r.json()).then(d=>{
+    btn.textContent=d.status==='restarting'?'OK':'Err';
+    setTimeout(()=>{btn.disabled=false;btn.textContent='Restart';},5000);
+  }).catch(()=>{btn.disabled=false;btn.textContent='Restart';});
+}
+
+// Log viewer
+function updateLogs(){
+  const level=document.getElementById('log-level').value;
+  const url='/api/logs?lines=200'+(level?'&level='+level:'');
+  fetch(url).then(r=>r.json()).then(lines=>{
+    const el=document.getElementById('log-content');
+    let h='';
+    lines.forEach(l=>{
+      let cls='';
+      if(l.includes('ERROR'))cls='error';
+      else if(l.includes('WARNING'))cls='warning';
+      else if(l.includes('DEBUG'))cls='debug';
+      h+='<div class="log-line '+cls+'">'+esc(l)+'</div>';
+    });
+    el.innerHTML=h||'<div style="color:var(--text2)">No log entries</div>';
+    if(document.getElementById('log-autoscroll').checked)el.scrollTop=el.scrollHeight;
+  }).catch(()=>{});
+}
+
+// Config viewer (load once)
+fetch('/api/config').then(r=>r.json()).then(cfg=>{
+  let h='';
+  Object.keys(cfg).forEach(k=>{
+    h+='<tr><td>'+esc(k)+'</td><td>'+esc(cfg[k])+'</td></tr>';
+  });
+  document.querySelector('#config-table tbody').innerHTML=h||'<tr><td colspan="2" style="color:var(--text2)">No config</td></tr>';
+}).catch(()=>{});
+
+// Mount history timeline
+function updateMountHistory(){
+  fetch('/api/mount-history').then(r=>r.json()).then(hist=>{
+    const el=document.getElementById('mount-timeline');
+    if(!Object.keys(hist).length){el.innerHTML='';return;}
+    let h='';
+    Object.keys(hist).forEach(path=>{
+      const entries=hist[path];
+      const shortPath=path.split('/').pop()||path;
+      h+='<div class="mt-row"><span class="mt-path" title="'+esc(path)+'">'+esc(shortPath)+'</span><div class="mt-blocks">';
+      const show=entries.slice(-60);
+      show.forEach(e=>{
+        let cls='ok';
+        if(!e.mounted)cls='down';
+        else if(!e.accessible)cls='partial';
+        h+='<div class="mt-block '+cls+'" title="'+esc(e.timestamp)+' - '+(e.mounted?'mounted':'unmounted')+', '+(e.accessible?'accessible':'inaccessible')+'"></div>';
+      });
+      h+='</div></div>';
+    });
+    el.innerHTML=h;
+  }).catch(()=>{});
+}
+
+update();updateLogs();
+setInterval(update,10000);
+setInterval(updateLogs,5000);
+setInterval(updateMountHistory,30000);
+setTimeout(updateMountHistory,1000);
 </script>
 </body>
 </html>'''
@@ -538,11 +780,21 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
 
         if self.path == '/api/status':
             data = json.dumps(self.status_data_ref.to_dict())
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Content-Length', str(len(data)))
-            self.end_headers()
-            self.wfile.write(data.encode())
+            self._send_json_response(200, data)
+        elif self.path.startswith('/api/logs'):
+            parsed = urlparse(self.path)
+            params = parse_qs(parsed.query)
+            lines = int(params.get('lines', ['100'])[0])
+            lines = min(lines, 1000)  # Cap at 1000
+            level = params.get('level', [None])[0]
+            log_lines = read_log_lines(lines=lines, level=level)
+            self._send_json_response(200, json.dumps(log_lines))
+        elif self.path == '/api/config':
+            data = json.dumps(get_sanitized_config())
+            self._send_json_response(200, data)
+        elif self.path == '/api/mount-history':
+            data = json.dumps(mount_history.to_dict())
+            self._send_json_response(200, data)
         elif self.path in ('/', '/status'):
             html = _DASHBOARD_HTML.encode()
             self.send_response(200)
@@ -554,10 +806,80 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def do_POST(self):
+        # POST endpoints always require auth
+        if not self.auth_credentials:
+            self._send_json_response(403, json.dumps({
+                'error': 'Restart requires STATUS_UI_AUTH to be configured'
+            }))
+            return
+
+        if not self._check_auth():
+            return
+
+        if self.path.startswith('/api/restart/'):
+            service = self.path.split('/')[-1]
+            allowed = {'zurg', 'rclone', 'plex_debrid'}
+            if service not in allowed:
+                self._send_json_response(400, json.dumps({
+                    'error': f'Unknown service: {service}. Must be one of: {", ".join(sorted(allowed))}'
+                }))
+                return
+
+            try:
+                from utils.processes import restart_service
+                threading.Thread(
+                    target=restart_service,
+                    args=(service,),
+                    daemon=True
+                ).start()
+                self._send_json_response(200, json.dumps({
+                    'status': 'restarting', 'service': service
+                }))
+                self.status_data_ref.add_event(
+                    'admin', f'Manual restart triggered for {service}'
+                )
+            except Exception as e:
+                self._send_json_response(500, json.dumps({'error': str(e)}))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
     def _send_auth_required(self):
         self.send_response(401)
         self.send_header('WWW-Authenticate', 'Basic realm="pd_zurg"')
         self.end_headers()
+
+    def _send_json_response(self, code, data):
+        """Send a JSON response with proper headers."""
+        body = data.encode() if isinstance(data, str) else data
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _check_auth(self):
+        """Verify basic auth credentials. Returns True if valid, sends 401 if not."""
+        if not self.auth_credentials:
+            return True
+        auth_header = self.headers.get('Authorization', '')
+        if not auth_header.startswith('Basic '):
+            self._send_auth_required()
+            return False
+        raw = auth_header[6:]
+        if len(raw) > 256:
+            self._send_auth_required()
+            return False
+        try:
+            decoded = base64.b64decode(raw, validate=True).decode('utf-8')
+            if not hmac.compare_digest(decoded.encode(), self.auth_credentials.encode()):
+                self._send_auth_required()
+                return False
+        except (ValueError, UnicodeDecodeError):
+            self._send_auth_required()
+            return False
+        return True
 
     def log_message(self, format, *args):
         pass  # Suppress default request logging

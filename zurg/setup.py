@@ -1,5 +1,6 @@
 from base import *
 from utils.logger import *
+from utils.file_utils import atomic_write
 
 
 def zurg_setup():
@@ -25,7 +26,7 @@ def zurg_setup():
         logger.debug(f"Disabling plex_update.sh in config file: {file_path}")
         with open(file_path, 'r') as file:
             lines = file.readlines()
-        with open(file_path, 'w') as file:
+        with atomic_write(file_path) as file:
             for line in lines:
                 if line.strip().startswith("on_library_update:"):
                     file.write("# on_library_update:\n")
@@ -36,7 +37,7 @@ def zurg_setup():
         logger.debug(f"Updating token in config file: {file_path}")
         with open(file_path, 'r') as file:
             lines = file.readlines()
-        with open(file_path, 'w') as file:
+        with atomic_write(file_path) as file:
             for line in lines:
                 if line.strip().startswith("token:") or line.strip().startswith("# token:"):
                     file.write(f"token: {token}\n")
@@ -47,7 +48,7 @@ def zurg_setup():
         logger.debug(f"Updating port in config file: {file_path} to {port}")
         with open(file_path, 'r') as file:
             lines = file.readlines()
-        with open(file_path, 'w') as file:
+        with atomic_write(file_path) as file:
             for line in lines:
                 if line.strip().startswith("port:") or line.strip().startswith("# port:"):
                     file.write(f"port: {port}\n")
@@ -58,7 +59,7 @@ def zurg_setup():
         logger.debug(f"Updating username and password in config file: {file_path}")
         with open(file_path, 'r') as file:
             lines = file.readlines()
-        with open(file_path, 'w') as file:
+        with atomic_write(file_path) as file:
             for line in lines:
                 if zurguser and zurgpass:
                     if line.strip().startswith("username:") or line.strip().startswith("# username:"):
@@ -100,7 +101,7 @@ def zurg_setup():
             "rm \"$tmpfile\"\n"
         )
 
-        with open(file_path, 'w') as file:
+        with atomic_write(file_path) as file:
             yaml.dump(config, file)
             
     def check_and_set_zurg_version(dir_path):

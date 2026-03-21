@@ -119,7 +119,7 @@ def setup():
                     logger.info(f"Setting up rclone NFS mount server for {mn} at 0.0.0.0:{port}")
                     rclone_command = ["rclone", "serve", "nfs", f"{mn}:", "--config", "/config/rclone.config", "--addr", f"0.0.0.0:{port}", "--vfs-cache-mode=full", "--dir-cache-time=10"]
                 else:
-                    port = random.randint(8001, 8999)
+                    port = find_available_port(8001, 8999)
                     logger.info(f"Setting up rclone NFS mount server for {mn} at 0.0.0.0:{port}")
                     rclone_command = ["rclone", "serve", "nfs", f"{mn}:", "--config", "/config/rclone.config", "--addr", f"0.0.0.0:{port}", "--vfs-cache-mode=full", "--dir-cache-time=10"]
             else:

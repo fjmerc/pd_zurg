@@ -24,6 +24,7 @@ import zipfile
 import platform
 import fnmatch
 import signal
+import socket
 from colorlog import ColoredFormatter
 from ruamel.yaml import YAML
 
@@ -72,3 +73,20 @@ NFSPORT = os.getenv('NFS_PORT')
 ZURGPORT = os.getenv('ZURG_PORT')
 TRAKTCLIENTID = os.getenv('TRAKT_CLIENT_ID')
 TRAKTCLIENTSECRET = os.getenv('TRAKT_CLIENT_SECRET')
+
+
+def is_port_available(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(('', port))
+            return True
+        except OSError:
+            return False
+
+
+def find_available_port(range_start, range_end, max_attempts=50):
+    for _ in range(max_attempts):
+        port = random.randint(range_start, range_end)
+        if is_port_available(port):
+            return port
+    raise RuntimeError(f"Could not find an available port in range {range_start}-{range_end} after {max_attempts} attempts")

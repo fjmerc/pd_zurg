@@ -111,10 +111,8 @@ def main():
                 logger.error(f"An error occurred in the plex_debrid setup: {e}")
     except:
         pass
-    def perpetual_wait():
-        stop_event = threading.Event()
-        stop_event.wait()
-    perpetual_wait()    
+    while True:
+        signal.pause()
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)

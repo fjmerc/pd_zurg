@@ -44,6 +44,8 @@ class SubprocessLogger:
 
     def monitor_stderr(self, process, mount_name, process_name):
         for line in process.stderr:
+            if self.stop_event.is_set():
+                break
             if isinstance(line, bytes):
                 line = line.decode().strip()
             else:
@@ -64,6 +66,8 @@ class SubprocessLogger:
     def log_subprocess_output(self, pipe):
         try:
             for line in iter(pipe.readline, ''):
+                if self.stop_event.is_set():
+                    break
                 if isinstance(line, bytes):
                     line = line.decode().strip()
                 else:
@@ -83,12 +87,12 @@ class SubprocessLogger:
     def stop_logging_stdout(self):
         if self.stdout_thread:
             self.stop_event.set()
-            self.stdout_thread.join()
+            self.stdout_thread.join(timeout=5)
 
     def stop_monitoring_stderr(self):
         if self.stderr_thread:
             self.stop_event.set()
-            self.stderr_thread.join()       
+            self.stderr_thread.join(timeout=5)
 
 class MissingAPIKeyException(Exception):
     def __init__(self):

@@ -63,6 +63,8 @@ services:
      # - SHOW_MENU=false
      # - SEERR_API_KEY=
      # - SEERR_ADDRESS=
+      ## Scraper Optional Settings
+     # - FLARESOLVERR_URL=http://flaresolverr:8191/v1
       ## Special Features
      # - AUTO_UPDATE_INTERVAL=12
      # - DUPLICATE_CLEANUP=true

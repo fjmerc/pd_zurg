@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## Version [2.10.0] - 2026-03-21 🚀
+
+### Fixed 🐛
+
+- Plex API: Migrated all Plex API calls from deprecated `metadata.provider.plex.tv` to `discover.provider.plex.tv` — fixes broken watchlist, metadata, scrobble, and search 🛠️
+- Torrentio: Fixed `qualityfilter` parameter format for current Torrentio API 🛠️
+- Error handling: Replaced bare `except: pass` in main.py that silently swallowed all exceptions including SystemExit and KeyboardInterrupt 🛠️
+- Error handling: Flattened 3-4 levels of nested try/except that re-wrapped exceptions and lost tracebacks 🛠️
+- Healthcheck: Removed redundant in-process healthcheck subprocess loop (Dockerfile HEALTHCHECK already handles this) 🛠️
+- Thread safety: Fixed SubprocessLogger thread join hangs by checking stop_event in read loops and adding join timeouts 🛠️
+
+### Added ✨
+
+- FLARESOLVERR_URL: Optional environment variable to enable FlareSolverr proxy for Torrentio scraping when Cloudflare protection blocks direct requests 🛡️
+- Graceful shutdown: All tracked child processes (Zurg, rclone, plex_debrid) are now terminated on SIGTERM/SIGINT before unmounting filesystems 🛑
+- Port collision detection: Random port assignment for Zurg and rclone NFS now checks availability via socket binding 🔌
+- Rclone config backup: Existing `/config/rclone.config` is backed up to `.bak` before being overwritten on startup 💾
+- Config class: Configuration variables wrapped in a `Config` class with `load()` method for testability and runtime reload ⚙️
+- `__all__` defined in `base/__init__.py` to control wildcard import scope 📦
+
+### Changed 🔄
+
+- Dependency pinning: All packages in requirements.txt pinned to specific versions 📌
+- Dockerfile: Pinned rclone to 1.73.2, Python base to 3.11.12-alpine3.21, zurg-testing files to commit SHA 📌
+- Duplicate cleanup: Merged near-identical `process_tv_shows()` and `process_movies()` into shared function with single PlexServer instance 🔄
+- docker-compose.yml: Removed deprecated `version: "3.8"` key 🧹
+- main.py: Replaced `threading.Event().wait()` with `signal.pause()` for idle loop 🧹
+- Removed duplicate `import zipfile` in `base/__init__.py` 🧹
+- Removed unused `from urllib import response` in `utils/download.py` 🧹
+
+
 ## Version [2.9.2] - 2024-12-12 🚀
 
 ### Fixed 🐛

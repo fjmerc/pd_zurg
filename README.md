@@ -79,8 +79,6 @@ A prebuilt image is hosted on [GitHub Container Registry](https://github.com/I-a
 > Additionally, the host directories used in the examples are based on [Define the directory structure](https://github.com/I-am-PUID-0/pd_zurg/wiki/Setup-Guides#define-the-directory-structure) and provided for illustrative purposes and can be changed to suit your needs.
 
 ```YAML
-version: "3.8"
-
 services:
   pd_zurg:
     container_name: pd_zurg
@@ -88,41 +86,39 @@ services:
     ## Optionally, specify a specific version of pd_zurg
     # image: iampuid0/pd_zurg:2.0.0
     stdin_open: true # docker run -i
-    tty: true        # docker run -t    
+    tty: true        # docker run -t
     volumes:
-      ## Location of configuration files. If a Zurg config.yml and/or Zurg app is placed here, it will be used to override the default configuration and/or app used at startup. 
-      - /home/username/pd_zurg/config:/config
+      ## Location of configuration files. If a Zurg config.yml and/or Zurg app is placed here, it will be used to override the default configuration and/or app used at startup.
+      - /pd_zurg/config:/config
       ## Location for logs
-      - /home/username/pd_zurg/log:/log
+      - /pd_zurg/log:/log
       ## Location for rclone cache if enabled
-      - /home/username/pd_zurg/cache:/cache
+      - /pd_zurg/cache:/cache
       ## Location for Zurg RealDebrid active configuration
-      - /home/username/pd_zurg/RD:/zurg/RD
-      ## Location for Zurg AllDebrid active configuration -- when supported by Zurg     
-      - /home/username/pd_zurg/AD:/zurg/AD   
+      - /pd_zurg/RD:/zurg/RD
+      ## Location for Zurg AllDebrid active configuration -- when supported by Zurg
+      - /pd_zurg/AD:/zurg/AD
       ## Location for rclone mount to host
-      - /home/username/pd_zurg/mnt:/data:shared
+      - /pd_zurg/mnt:/data:shared
       ## Blackhole watch folder for .torrent/.magnet files (optional)
-      # - /home/username/pd_zurg/watch:/watch
+      # - /pd_zurg/watch:/watch
     environment:
       - TZ=
       ## Zurg Required Settings
-      - ZURG_ENABLED=true      
+      - ZURG_ENABLED=true
       - RD_API_KEY=
       ## Zurg Optional Settings
      # - ZURG_LOG_LEVEL=DEBUG
      # - ZURG_VERSION=v0.9.2-hotfix.4
      # - ZURG_UPDATE=true
      # - PLEX_REFRESH=true
-     # - PLEX_MOUNT_DIR=/rclone/pd_zurg 
+     # - PLEX_MOUNT_DIR=/pd_zurg
      # - ZURG_USER=
      # - ZURG_PASS=
      # - ZURG_PORT=8800
       ## Rclone Required Settings
       - RCLONE_MOUNT_NAME=pd_zurg
       ## Rclone Optional Settings - See rclone docs for full list
-     # - RCLONE_UID=1000
-     # - RCLONE_GID=1000
      # - NFS_ENABLED=true
      # - NFS_PORT=8000
      # - RCLONE_LOG_LEVEL=DEBUG
@@ -142,15 +138,17 @@ services:
       - PLEX_USER=
       - PLEX_TOKEN=
       - PLEX_ADDRESS=
-      ## To utilize plex_debrid with Jellyfin, the following environment variables are required - Note that plex_debrid will require addtional setup befor use with Jellyfin
-     # - JF_ADDRESS
-     # - JF_API_KEY
+      ## To utilize plex_debrid with Jellyfin, the following environment variables are required - Note that plex_debrid will require addtional setup before use with Jellyfin
+     # - JF_ADDRESS=
+     # - JF_API_KEY=
       ## Plex Debrid Optional Settings
-     # - PD_UPDATE=true # only works when PD_REPO set
+     # - PD_UPDATE=true
      # - PD_REPO=itsToggle,plex_debrid,main
      # - SHOW_MENU=false
      # - SEERR_API_KEY=
      # - SEERR_ADDRESS=
+      ## Scraper Optional Settings
+     # - FLARESOLVERR_URL=http://flaresolverr:8191/v1
       ## Special Features
      # - AUTO_UPDATE_INTERVAL=12
      # - DUPLICATE_CLEANUP=true
@@ -171,7 +169,7 @@ services:
      # - STATUS_UI_ENABLED=true
      # - STATUS_UI_PORT=8080
      # - STATUS_UI_AUTH=admin:changeme
-      ## ffprobe Monitor
+      ## ffprobe Monitor (enabled by default)
      # - FFPROBE_MONITOR_ENABLED=true
      # - FFPROBE_STUCK_TIMEOUT=300
     ## Status Web UI port (optional)
@@ -182,9 +180,9 @@ services:
     devices:
       - /dev/fuse:/dev/fuse:rwm
     cap_add:
-      - SYS_ADMIN     
+      - SYS_ADMIN
     security_opt:
-      - apparmor:unconfined    
+      - apparmor:unconfined
       - no-new-privileges
 ```
 ## 🎥 Example Plex Docker-compose
@@ -193,8 +191,6 @@ services:
 > The Plex server must be started after the rclone mount is available.  The below example uses the ```depends_on``` parameter to delay the start of the Plex server until the rclone mount is available.  The rclone mount must be shared to the Plex container.  The rclone mount location should be added to the Plex library.  
 
 ```YAML
-version: "3.8"
-
 services:
   plex:
     image: plexinc/pms-docker:latest
@@ -350,8 +346,6 @@ pd_zurg supports the use of docker secrets for the following environment variabl
 
 To utilize docker secrets, remove the associated environment variables from the docker-compose, create a file with the case-sensitive naming convention identified and secret value, then reference the file in the docker-compose file as shown below:
 ```YAML
-version: '3.8'
-
 services:
   pd_zurg:
     image: iampuid0/pd_zurg:latest

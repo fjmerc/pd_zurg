@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   pd_zurg:
     container_name: pd_zurg

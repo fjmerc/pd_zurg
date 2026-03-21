@@ -44,20 +44,6 @@ def main():
 
     logger.info(ascii_art.format(version=version)  + "\n" + "\n")
 
-    def healthcheck():
-        while True:
-            time.sleep(10)
-            try:
-                result = subprocess.run(['python', 'healthcheck.py'], capture_output=True, text=True) 
-                if result.stderr:
-                    logger.error(result.stderr.strip())
-            except Exception as e:
-                logger.error('Error running healthcheck.py: %s', e)
-            time.sleep(50)
-    thread = threading.Thread(target=healthcheck)
-    thread.daemon = True
-    thread.start()
-       
     try:
         if ZURG is None or str(ZURG).lower() == 'false':
             pass

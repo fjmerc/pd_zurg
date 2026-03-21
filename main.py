@@ -6,11 +6,13 @@ from rclone import rclone
 from utils import duplicate_cleanup
 from utils import auto_update
 from utils.processes import shutdown_all_processes
+from utils import notifications
 
 
 def shutdown(signum, frame):
     logger = get_logger()
     logger.info("Shutdown signal received. Cleaning up...")
+    notifications.notify('shutdown', 'pd_zurg Shutting Down', 'Received shutdown signal')
 
     shutdown_all_processes(logger)
 
@@ -46,6 +48,9 @@ def main():
 '''
 
     logger.info(ascii_art.format(version=version)  + "\n" + "\n")
+
+    notifications.init()
+    notifications.notify('startup', 'pd_zurg Started', f'Version {version}')
 
     if str(ZURG).lower() == 'true':
         if not (RDAPIKEY or ADAPIKEY):

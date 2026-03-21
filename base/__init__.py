@@ -51,6 +51,7 @@ __all__ = [
     'ZURG', 'ZURGVERSION', 'ZURGLOGLEVEL', 'ZURGUPDATE',
     'PLEXREFRESH', 'PLEXMOUNT', 'NFSMOUNT', 'NFSPORT', 'ZURGPORT',
     'TRAKTCLIENTID', 'TRAKTCLIENTSECRET',
+    'NOTIFICATION_URL', 'NOTIFICATION_EVENTS', 'NOTIFICATION_LEVEL',
 ]
 
 load_dotenv(find_dotenv('./config/.env'))
@@ -128,6 +129,9 @@ class Config:
         self.ZURGPORT = os.getenv('ZURG_PORT')
         self.TRAKTCLIENTID = os.getenv('TRAKT_CLIENT_ID')
         self.TRAKTCLIENTSECRET = os.getenv('TRAKT_CLIENT_SECRET')
+        self.NOTIFICATION_URL = os.getenv('NOTIFICATION_URL')
+        self.NOTIFICATION_EVENTS = os.getenv('NOTIFICATION_EVENTS')
+        self.NOTIFICATION_LEVEL = os.getenv('NOTIFICATION_LEVEL')
 
 
 # Default singleton instance — used by existing code via module-level globals
@@ -167,3 +171,6 @@ NFSPORT = config.NFSPORT
 ZURGPORT = config.ZURGPORT
 TRAKTCLIENTID = config.TRAKTCLIENTID
 TRAKTCLIENTSECRET = config.TRAKTCLIENTSECRET
+NOTIFICATION_URL = config.NOTIFICATION_URL
+NOTIFICATION_EVENTS = config.NOTIFICATION_EVENTS
+NOTIFICATION_LEVEL = config.NOTIFICATION_LEVEL

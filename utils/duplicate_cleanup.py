@@ -152,6 +152,11 @@ def start_cleanup():
     total_time = time_to_complete(start_time)
     logger.info("Duplicate cleanup complete.")
     logger.info(f"Total time required: {total_time}")
+    try:
+        from utils.notifications import notify
+        notify('library_refresh', 'Duplicate Cleanup Complete', f'Cleaned up in {total_time}')
+    except ImportError:
+        pass
 
 def cleanup_thread():
     thread = threading.Thread(target=cleanup_schedule)

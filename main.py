@@ -8,17 +8,6 @@ from utils import auto_update
 from utils.processes import shutdown_all_processes, start_process_monitor
 
 
-def reap_zombies(signum, frame):
-    """Reap zombie child processes to prevent PID table leaks."""
-    while True:
-        try:
-            pid, _ = os.waitpid(-1, os.WNOHANG)
-            if pid == 0:
-                break
-        except ChildProcessError:
-            break
-
-
 def shutdown(signum, frame):
     logger = get_logger()
     logger.info("Shutdown signal received. Cleaning up...")
@@ -99,6 +88,7 @@ def main():
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
-    signal.signal(signal.SIGCHLD, reap_zombies)
+    # Auto-reap zombie children without a handler that conflicts with subprocess.Popen
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 
     main()

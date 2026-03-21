@@ -101,10 +101,11 @@ def _handle_restart(entry, logger):
     if _monitor_stop_event.wait(delay):
         return  # Shutdown requested during backoff
 
-    if _shutting_down:
-        return
-
-    handler.restart_process()
+    # Re-check shutdown under lock to close TOCTOU gap
+    with _registry_lock:
+        if _shutting_down:
+            return
+        handler.restart_process()
 
 
 def _monitor_loop(logger):
@@ -213,6 +214,10 @@ class ProcessHandler:
 
     def restart_process(self):
         """Stop logging threads and re-launch the process with the same parameters."""
+        if self._command is None:
+            self.logger.error("Cannot restart: no command recorded from initial start")
+            return
+
         desc = f"{self._process_name} w/ {self._key_type}" if self._key_type else self._process_name
 
         # Clean up old subprocess logger
@@ -251,6 +256,8 @@ class ProcessHandler:
                 self.subprocess_logger.stop_monitoring_stderr()
 
     def stop_process(self, process_name, key_type=None):
+        # Disable auto-restart for intentional stops (e.g., during updates)
+        self.restart_policy = None
         try:
             if key_type:
                 self.logger.info(f"Stopping {process_name} w/ {key_type}")

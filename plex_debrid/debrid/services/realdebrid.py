@@ -16,6 +16,10 @@ media_file_extensions = [
 api_key = ""
 # Define Variables
 session = requests.Session()
+# Hash dedup cache: prevents adding the same torrent to RD multiple times
+_torrent_cache = {}  # hash (lowercase) -> torrent_id
+_torrent_cache_time = 0
+_TORRENT_CACHE_TTL = 300  # refresh every 5 minutes
 errors = [
     [202," action already done"],
     [400," bad Request (see error message)"],
@@ -88,6 +92,39 @@ def delete(url):
         None
     return response
 
+# Hash dedup helpers
+def _extract_hash(magnet):
+    """Extract the infohash from a magnet URI."""
+    match = regex.search(r'btih:([a-fA-F0-9]{40})', magnet)
+    if match:
+        return match.group(1).lower()
+    match = regex.search(r'btih:([a-fA-F0-9]{32})', magnet)
+    if match:
+        return match.group(1).lower()
+    return None
+
+def _refresh_torrent_cache():
+    """Fetch the user's RD torrent list and cache hashes for dedup."""
+    global _torrent_cache, _torrent_cache_time
+    if time.time() - _torrent_cache_time < _TORRENT_CACHE_TTL:
+        return
+    try:
+        response = get('https://api.real-debrid.com/rest/1.0/torrents?limit=2500')
+        if response and isinstance(response, list):
+            _torrent_cache = {}
+            for t in response:
+                if hasattr(t, 'hash') and hasattr(t, 'id'):
+                    _torrent_cache[t.hash.lower()] = t.id
+            _torrent_cache_time = time.time()
+            ui_print(f'[realdebrid] refreshed torrent cache: {len(_torrent_cache)} torrents', debug=ui_settings.debug)
+    except Exception as e:
+        ui_print(f'[realdebrid] error refreshing torrent cache: {e}', debug=ui_settings.debug)
+
+def _find_existing_torrent(release_hash):
+    """Check if a hash already exists in the user's RD account. Returns torrent_id or None."""
+    _refresh_torrent_cache()
+    return _torrent_cache.get(release_hash)
+
 # Object classes
 class file:
     def __init__(self, id, name, size, wanted_list, unwanted_list):
@@ -137,19 +174,35 @@ def download(element, stream=True, query='', force=False):
     for release in cached[:]:
         try:  # if release matches query
             if regex.match(query, release.title,regex.I) or force:
-                response = post('https://api.real-debrid.com/rest/1.0/torrents/addMagnet', {'magnet': release.download[0]})
-                if hasattr(response, 'error') and response.error == 'infringing_file':
-                    ui_print(f'[realdebrid]: torrent {release.title} marked as infringing... looking for another release.')
-                    continue
-                elif hasattr(response, 'error') and response.error == 'too_many_active_downloads':
-                    ui_print(f'[realdebrid]: unable to add torrent {release.title} due to too many active downloads.')
-                    continue
-                elif not hasattr(response, "id"):
-                    ui_print(f'[realdebrid]: unexpected error when adding torrent {release.title}.')
-                    continue
-                time.sleep(1.0)
-                torrent_id = str(response.id)
-                response = get('https://api.real-debrid.com/rest/1.0/torrents/info/' + torrent_id)
+                # Check if this hash already exists in RD to prevent duplicates
+                magnet = release.download[0]
+                release_hash = _extract_hash(magnet)
+                existing_id = _find_existing_torrent(release_hash) if release_hash else None
+                if existing_id:
+                    torrent_id = str(existing_id)
+                    ui_print(f'[realdebrid] torrent already in account, reusing existing (id: {torrent_id}): {release.title}')
+                    response = get('https://api.real-debrid.com/rest/1.0/torrents/info/' + torrent_id)
+                    if response is None:
+                        # Torrent was in cache but no longer exists in RD, remove from cache and re-add
+                        _torrent_cache.pop(release_hash, None)
+                        existing_id = None
+                if not existing_id:
+                    response = post('https://api.real-debrid.com/rest/1.0/torrents/addMagnet', {'magnet': magnet})
+                    if hasattr(response, 'error') and response.error == 'infringing_file':
+                        ui_print(f'[realdebrid]: torrent {release.title} marked as infringing... looking for another release.')
+                        continue
+                    elif hasattr(response, 'error') and response.error == 'too_many_active_downloads':
+                        ui_print(f'[realdebrid]: unable to add torrent {release.title} due to too many active downloads.')
+                        continue
+                    elif not hasattr(response, "id"):
+                        ui_print(f'[realdebrid]: unexpected error when adding torrent {release.title}.')
+                        continue
+                    time.sleep(1.0)
+                    torrent_id = str(response.id)
+                    # Add to cache to prevent duplicates within the same scan cycle
+                    if release_hash:
+                        _torrent_cache[release_hash] = response.id
+                    response = get('https://api.real-debrid.com/rest/1.0/torrents/info/' + torrent_id)
                 if response.status == 'magnet_error':
                     ui_print( f'[realdebrid]: failed to add torrent {release.title}. Looking for another release.')
                     delete('https://api.real-debrid.com/rest/1.0/torrents/delete/' + torrent_id)

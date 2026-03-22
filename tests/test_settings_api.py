@@ -30,6 +30,9 @@ from utils.settings_api import (
     export_plex_debrid,
     get_plex_debrid_defaults,
     get_env_defaults,
+    VERSION_PRESETS,
+    get_version_presets,
+    get_version_editor_metadata,
 )
 from utils.settings_page import get_settings_html
 
@@ -862,3 +865,101 @@ class TestReset:
         with patch('utils.settings_api.SETTINGS_DEFAULT_FILE', '/nonexistent/x'):
             defaults = get_plex_debrid_defaults()
         assert defaults == {}
+
+
+# ===========================================================================
+# Quality profile presets and editor metadata
+# ===========================================================================
+
+class TestVersionPresets:
+
+    def test_presets_exist(self):
+        assert len(VERSION_PRESETS) >= 5
+
+    def test_preset_keys(self):
+        assert '1080p_sdr' in VERSION_PRESETS
+        assert '4k_hdr' in VERSION_PRESETS
+        assert '720p' in VERSION_PRESETS
+        assert 'any_quality' in VERSION_PRESETS
+        assert 'anime' in VERSION_PRESETS
+
+    def test_preset_structure(self):
+        for key, preset in VERSION_PRESETS.items():
+            assert 'name' in preset, f'{key} missing name'
+            assert 'description' in preset, f'{key} missing description'
+            assert 'profile' in preset, f'{key} missing profile'
+            profile = preset['profile']
+            assert isinstance(profile, list), f'{key} profile not a list'
+            assert len(profile) == 4, f'{key} profile should have 4 elements'
+            assert isinstance(profile[0], str), f'{key} profile[0] should be name string'
+            assert isinstance(profile[1], list), f'{key} profile[1] should be conditions list'
+            assert isinstance(profile[2], str), f'{key} profile[2] should be a string (language code)'
+            assert isinstance(profile[3], list), f'{key} profile[3] should be rules list'
+
+    def test_preset_rules_structure(self):
+        for key, preset in VERSION_PRESETS.items():
+            for i, rule in enumerate(preset['profile'][3]):
+                assert isinstance(rule, list), f'{key} rule {i} not a list'
+                assert len(rule) == 4, f'{key} rule {i} should have 4 elements'
+
+    def test_get_version_presets_serializable(self):
+        presets = get_version_presets()
+        serialized = json.dumps(presets)
+        roundtrip = json.loads(serialized)
+        assert len(roundtrip) == len(VERSION_PRESETS)
+
+    def test_all_presets_have_cache_rule(self):
+        """Every preset should require cached releases."""
+        for key, preset in VERSION_PRESETS.items():
+            rules = preset['profile'][3]
+            has_cache = any(r[0] == 'cache status' and r[2] == 'cached' for r in rules)
+            assert has_cache, f'{key} missing cache requirement'
+
+
+class TestVersionEditorMetadata:
+
+    def test_metadata_structure(self):
+        meta = get_version_editor_metadata()
+        assert 'rule_fields' in meta
+        assert 'rule_weights' in meta
+        assert 'condition_fields' in meta
+
+    def test_rule_fields(self):
+        meta = get_version_editor_metadata()
+        assert 'resolution' in meta['rule_fields']
+        assert 'cache status' in meta['rule_fields']
+        assert 'title' in meta['rule_fields']
+        assert 'size' in meta['rule_fields']
+
+    def test_rule_weights(self):
+        meta = get_version_editor_metadata()
+        assert 'requirement' in meta['rule_weights']
+        assert 'preference' in meta['rule_weights']
+
+    def test_schema_includes_presets(self):
+        schema = get_plex_debrid_schema()
+        assert 'version_presets' in schema
+        assert '1080p_sdr' in schema['version_presets']
+
+    def test_schema_includes_editor_metadata(self):
+        schema = get_plex_debrid_schema()
+        assert 'version_editor' in schema
+        assert 'rule_fields' in schema['version_editor']
+
+
+class TestVersionsInSettingsPage:
+
+    def test_html_contains_preset_cards(self):
+        html = get_settings_html(get_env_schema(), get_plex_debrid_schema())
+        assert 'preset-card' in html
+        assert 'preset-grid' in html
+
+    def test_html_contains_profile_editor(self):
+        html = get_settings_html(get_env_schema(), get_plex_debrid_schema())
+        assert 'profile-list' in html
+        assert 'renderVersionsEditor' in html
+
+    def test_html_contains_json_fallback(self):
+        html = get_settings_html(get_env_schema(), get_plex_debrid_schema())
+        assert 'Edit as JSON' in html
+        assert 'versions-json-textarea' in html

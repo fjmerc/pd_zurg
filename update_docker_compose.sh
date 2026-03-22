@@ -1,125 +1,91 @@
 #!/bin/bash
+#
+# pd_zurg quick setup — configures docker-compose.yml for first run.
+#
+# Sets up the web-based settings editor so you can configure everything
+# else from your browser at http://localhost:8080/settings
+#
 
 DOCKER_COMPOSE_FILE="docker-compose.yml"
 
+if [[ ! -f "$DOCKER_COMPOSE_FILE" ]]; then
+    echo "Error: $DOCKER_COMPOSE_FILE not found in current directory."
+    echo "Run this script from the directory containing your docker-compose.yml."
+    exit 1
+fi
+
+echo ""
+echo "  pd_zurg Quick Setup"
+echo "  ==================="
+echo ""
+echo "  This will configure the web-based settings editor so you can"
+echo "  manage all settings from your browser."
+echo ""
+
+# Ask for auth credentials
+read -p "  Choose a username for the web UI [admin]: " ui_user
+ui_user=${ui_user:-admin}
+
+while true; do
+    read -s -p "  Choose a password for the web UI: " ui_pass
+    echo ""
+    if [[ -z "$ui_pass" ]]; then
+        echo "  Password cannot be empty. Please try again."
+    else
+        break
+    fi
+done
+
+# Ask for the essentials — API key
+echo ""
+read -p "  Do you have a Real-Debrid API key? (y/n) [n]: " has_rd
+has_rd=$(echo "$has_rd" | tr '[:upper:]' '[:lower:]')
+
+rd_key=""
+if [[ "$has_rd" == "y" || "$has_rd" == "yes" ]]; then
+    read -p "  Enter your Real-Debrid API key: " rd_key
+fi
+
+# Apply changes to docker-compose.yml
 escape_for_sed() {
     echo "$1" | sed -e 's/[\/&]/\\&/g'
 }
 
-prompt_for_value() {
-    local variable=$1
-    local default_value=$2
-    read -p "Enter value for $variable [$default_value]: " value
-    if [[ -z "$value" ]]; then
-        echo "$default_value"
-    else
-        echo "$value"
+set_env_var() {
+    local var=$1
+    local val=$(escape_for_sed "$2")
+    if grep -q "^\([[:space:]]*\)#\s*-\s*$var=" "$DOCKER_COMPOSE_FILE"; then
+        sed -i "s|^\([[:space:]]*\)#\s*-\s*$var=.*|\1 - $var=$val|" "$DOCKER_COMPOSE_FILE"
+    elif grep -q "^\([[:space:]]*\)-\s*$var=" "$DOCKER_COMPOSE_FILE"; then
+        sed -i "s|^\([[:space:]]*\)-\s*$var=.*|\1- $var=$val|" "$DOCKER_COMPOSE_FILE"
     fi
 }
 
-update_docker_compose() {
-    local variable=$1
-    local new_value=$(escape_for_sed "$2")
-    if grep -q "^\([[:space:]]*#\s*-\s*$variable=\)" "$DOCKER_COMPOSE_FILE"; then
-        sed -i "s|^\([[:space:]]*\)#\s*-\s*$variable=.*|\1 - $variable=$new_value|" "$DOCKER_COMPOSE_FILE"
-    else
-        sed -i "s|^\([[:space:]]*\)-\s*$variable=.*|\1- $variable=$new_value|" "$DOCKER_COMPOSE_FILE"
-    fi
-}
+# Enable Status UI (should already be enabled in default compose)
+set_env_var "STATUS_UI_ENABLED" "true"
+set_env_var "STATUS_UI_AUTH" "$ui_user:$ui_pass"
 
-prompt_for_group() {
-    local group_vars=("${!1}")
-    for var in "${group_vars[@]}"; do
-        new_value=$(prompt_for_value "$var" "${env_vars[$var]}")
-        update_docker_compose "$var" "$new_value"
-    done
-}
-
-echo "Updating docker-compose.yml file..."
-
-declare -A env_vars=(
-    ["ZURG_ENABLED"]="true"
-    ["RD_API_KEY"]=""
-    ["RCLONE_MOUNT_NAME"]="pd_zurg"
-    ["PD_ENABLED"]="true"
-    ["PLEX_USER"]=""
-    ["PLEX_TOKEN"]=""
-    ["PLEX_ADDRESS"]=""
-    ["PLEX_REFRESH"]="true"
-    ["PLEX_MOUNT_DIR"]="/pd_zurg"
-    ["ZURG_UPDATE"]="true"
-    ["ZURG_VERSION"]="v0.9.2-hotfix.4"
-    ["PD_UPDATE"]="true"
-    ["SEERR_API_KEY"]=""
-    ["SEERR_ADDRESS"]=""
-)
-
-zurg_vars=("ZURG_ENABLED" "RD_API_KEY" "RCLONE_MOUNT_NAME")
-plex_debrid_vars=("PD_ENABLED" "PLEX_USER" "PLEX_TOKEN" "PLEX_ADDRESS")
-plex_refresh_vars=("PLEX_REFRESH" "PLEX_MOUNT_DIR")
-zurg_update_vars=("ZURG_UPDATE")
-zurg_version_vars=("ZURG_VERSION")
-plex_debrid_update_vars=("PD_UPDATE")
-seerr_vars=("SEERR_API_KEY" "SEERR_ADDRESS")
-additional_plex_vars=("PLEX_TOKEN" "PLEX_ADDRESS")
-
-read -p "Would you like to enable Zurg? (yes/no) " zurg_choice
-zurg_choice=$(echo "$zurg_choice" | tr '[:upper:]' '[:lower:]')
-if [[ "$zurg_choice" == "yes" || "$zurg_choice" == "y" ]]; then
-    prompt_for_group zurg_vars[@]
-else
-    env_vars["ZURG_ENABLED"]="false"
-    update_docker_compose "ZURG_ENABLED" "false"	
+# Set API key and enable Zurg if provided
+if [[ -n "$rd_key" ]]; then
+    set_env_var "ZURG_ENABLED" "true"
+    set_env_var "RD_API_KEY" "$rd_key"
 fi
 
-read -p "Would you like to enable plex_debrid? (yes/no) " plex_debrid_choice
-plex_debrid_choice=$(echo "$plex_debrid_choice" | tr '[:upper:]' '[:lower:]')
-if [[ "$plex_debrid_choice" == "yes" || "$plex_debrid_choice" == "y" ]]; then
-    prompt_for_group plex_debrid_vars[@]
-    if [[ "$zurg_choice" != "yes" && "$zurg_choice" != "y" ]]; then
-        new_value=$(prompt_for_value "RD_API_KEY" "${env_vars["RD_API_KEY"]}")
-        update_docker_compose "RD_API_KEY" "$new_value"
-    fi  
-else
-    env_vars["PD_ENABLED"]="false"
-    update_docker_compose "PD_ENABLED" "false"
+# Get the port
+ui_port=$(grep -oP 'STATUS_UI_PORT=\K[0-9]+' "$DOCKER_COMPOSE_FILE" 2>/dev/null || echo "8080")
+ui_port=${ui_port:-8080}
+
+echo ""
+echo "  Setup complete!"
+echo ""
+echo "  Next steps:"
+echo "    1. Start the container:  docker compose up -d"
+echo "    2. Open your browser:    http://localhost:$ui_port/settings"
+echo "    3. Log in with:          $ui_user / (your password)"
+echo "    4. Configure everything else from the web UI"
+echo ""
+if [[ -z "$rd_key" ]]; then
+    echo "  Note: You'll need to add your debrid API key in the web settings"
+    echo "  editor under the Zurg category before services will start."
+    echo ""
 fi
-
-if [[ "$zurg_choice" == "yes" || "$zurg_choice" == "y" ]]; then
-    read -p "Would you like to enable PLEX_REFRESH for Zurg? (yes/no) " plex_refresh_choice
-    plex_refresh_choice=$(echo "$plex_refresh_choice" | tr '[:upper:]' '[:lower:]')
-    if [[ "$plex_refresh_choice" == "yes" || "$plex_refresh_choice" == "y" ]]; then
-        prompt_for_group plex_refresh_vars[@]
-        if [[ "$plex_debrid_choice" != "yes" && "$plex_debrid_choice" != "y" ]]; then
-            prompt_for_group additional_plex_vars[@]
-        fi
-    fi
-
-    read -p "Would you like to enable automatic updates for Zurg? (yes/no) " choice
-    choice=$(echo "$choice" | tr '[:upper:]' '[:lower:]')
-    if [[ "$choice" == "yes" || "$choice" == "y" ]]; then
-        prompt_for_group zurg_update_vars[@]
-    fi
-
-    read -p "Would you like to define the version of Zurg to use? (yes/no) " choice
-    choice=$(echo "$choice" | tr '[:upper:]' '[:lower:]')
-    if [[ "$choice" == "yes" || "$choice" == "y" ]]; then
-        prompt_for_group zurg_version_vars[@]
-    fi
-fi
-
-if [[ "$plex_debrid_choice" == "yes" || "$plex_debrid_choice" == "y" ]]; then
-    read -p "Would you like to enable automatic updates for plex_debrid? (yes/no) " choice
-    choice=$(echo "$choice" | tr '[:upper:]' '[:lower:]')
-    if [[ "$choice" == "yes" || "$choice" == "y" ]]; then
-        prompt_for_group plex_debrid_update_vars[@]
-    fi
-
-    read -p "Would you like to add Overseerr/Jellyseerr for use with plex_debrid? (yes/no) " choice
-    choice=$(echo "$choice" | tr '[:upper:]' '[:lower:]')
-    if [[ "$choice" == "yes" || "$choice" == "y" ]]; then
-        prompt_for_group seerr_vars[@]
-    fi
-fi
-
-echo "docker-compose.yml updated successfully."

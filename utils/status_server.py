@@ -432,6 +432,73 @@ status_data = StatusData()
 
 
 # ---------------------------------------------------------------------------
+# Settings setup guide (shown when auth is not configured)
+# ---------------------------------------------------------------------------
+
+_SETTINGS_SETUP_HTML = '''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pd_zurg Settings - Setup</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--blue:#58a6ff;--green:#3fb950}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);padding:20px;max-width:700px;margin:40px auto}
+a{color:var(--blue);text-decoration:none}
+h1{color:var(--blue);font-size:1.5em;margin-bottom:8px}
+.subtitle{color:var(--text2);font-size:.9em;margin-bottom:32px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:20px}
+.card h2{font-size:1em;font-weight:600;margin-bottom:16px;color:var(--text)}
+.step{display:flex;gap:14px;margin-bottom:20px}
+.step-num{background:var(--blue);color:#fff;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.85em;font-weight:700;flex-shrink:0}
+.step-content{flex:1}
+.step-content p{font-size:.9em;line-height:1.6;color:var(--text2)}
+.step-content p strong{color:var(--text)}
+code{background:#0d1117;border:1px solid var(--border);border-radius:6px;padding:2px 8px;font-size:.85em;color:var(--green);font-family:monospace}
+pre{background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:14px 16px;font-size:.82em;color:var(--green);font-family:monospace;overflow-x:auto;margin:10px 0;line-height:1.6}
+.note{font-size:.8em;color:var(--text2);margin-top:20px;padding-top:16px;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+<h1>pd_zurg Settings Editor</h1>
+<p class="subtitle">Configure everything from your browser — no SSH or file editing needed.</p>
+
+<div class="card">
+  <h2>Quick Setup</h2>
+  <div class="step">
+    <div class="step-num">1</div>
+    <div class="step-content">
+      <p>Add <strong>one line</strong> to your <code>docker-compose.yml</code> environment section:</p>
+      <pre>- STATUS_UI_AUTH=admin:yourpassword</pre>
+      <p>Replace <code>yourpassword</code> with a password of your choice.</p>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">2</div>
+    <div class="step-content">
+      <p>Restart the container:</p>
+      <pre>docker compose up -d</pre>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-num">3</div>
+    <div class="step-content">
+      <p>Reload this page. You'll be prompted to log in, then the full settings editor will be available.</p>
+    </div>
+  </div>
+</div>
+
+<div class="note">
+  The settings editor lets you configure all pd_zurg environment variables and plex_debrid settings through the browser, with live validation and reload — no container restart needed for most changes.
+  <br><br>
+  <a href="/status">&larr; Back to Dashboard</a>
+</div>
+</body>
+</html>'''
+
+
+# ---------------------------------------------------------------------------
 # HTML Dashboard
 # ---------------------------------------------------------------------------
 
@@ -505,7 +572,8 @@ details summary:hover{color:var(--blue)}
 </head>
 <body>
 <div class="header"><h1>pd_zurg</h1><span class="meta" id="header-meta"></span><a href="/settings" style="font-size:.85em;margin-left:auto;margin-right:12px">Settings</a></div>
-<div class="meta">Uptime: <span id="uptime"></span> &bull; Errors: <span id="errors">0</span></div>
+<div class="meta">Uptime: <span id="uptime"></span></div>
+<div class="meta" id="error-line" style="display:none;color:var(--red)">Errors: <span id="errors">0</span></div>
 <div class="banner" id="banner"></div>
 <div class="grid full">
   <div class="card">
@@ -530,8 +598,7 @@ details summary:hover{color:var(--blue)}
   <div class="card">
     <h2>System</h2>
     <div class="stats-row">
-      <div><div class="stat-value" id="mem-pct">-</div><div class="stat-label">Memory</div></div>
-      <div><div class="stat-value" id="mem-used">-</div><div class="stat-label">Used</div></div>
+      <div><div class="stat-value" id="mem-used">-</div><div class="stat-label" id="mem-label">Memory Used</div></div>
     </div>
   </div>
   <div class="card">
@@ -579,6 +646,7 @@ function fmtBytes(b){
 }
 function esc(s){const d=document.createElement('div');d.appendChild(document.createTextNode(String(s)));return d.innerHTML;}
 function dot(ok){return '<span class="dot '+(ok?'green':'red')+'"></span>'+(ok?'Running':'Stopped');}
+function mdot(ok,yes,no){return '<span class="dot '+(ok?'green':'red')+'"></span>'+(ok?(yes||'Yes'):(no||'No'));}
 function sdot(s){return '<span class="dot '+(s==='ok'?'green':'red')+'"></span>';}
 
 function renderServices(svcs){
@@ -615,6 +683,7 @@ function update(){
     document.getElementById('header-meta').textContent='v'+d.version;
     document.getElementById('uptime').textContent=fmt(d.uptime_seconds);
     document.getElementById('errors').textContent=d.error_count;
+    document.getElementById('error-line').style.display=d.error_count>0?'block':'none';
 
     // Banner for RD premium expiry
     const banner=document.getElementById('banner');
@@ -644,18 +713,19 @@ function update(){
     document.getElementById('actions-hdr').textContent=hasAuth?'Actions':'';
 
     // Mounts
-    let m='';d.mounts.forEach(x=>{m+='<tr><td>'+esc(x.path)+'</td><td>'+dot(x.mounted)+'</td><td>'+dot(x.accessible)+'</td></tr>';});
+    let m='';d.mounts.forEach(x=>{m+='<tr><td>'+esc(x.path)+'</td><td>'+mdot(x.mounted,'Yes','No')+'</td><td>'+mdot(x.accessible,'Yes','No')+'</td></tr>';});
     document.getElementById('mounts').innerHTML=m||'<tr><td colspan="3" style="color:var(--text2)">No mounts</td></tr>';
 
     // System
-    if(d.system.memory_percent!==undefined){
-      document.getElementById('mem-pct').textContent=d.system.memory_percent+'%';
-    }else if(d.system.memory_used_bytes!==undefined){
-      document.getElementById('mem-pct').textContent='No limit';
-      document.getElementById('mem-pct').style.fontSize='1.2em';
-      document.getElementById('mem-pct').style.color='var(--text2)';
+    if(d.system.memory_used_bytes!==undefined){
+      if(d.system.memory_percent!==undefined&&d.system.memory_limit_bytes!==undefined){
+        document.getElementById('mem-used').textContent=fmtBytes(d.system.memory_used_bytes)+' / '+fmtBytes(d.system.memory_limit_bytes);
+        document.getElementById('mem-label').textContent='Memory ('+d.system.memory_percent+'%)';
+      }else{
+        document.getElementById('mem-used').textContent=fmtBytes(d.system.memory_used_bytes);
+        document.getElementById('mem-label').textContent='Memory Used (no limit)';
+      }
     }
-    if(d.system.memory_used_bytes!==undefined)document.getElementById('mem-used').textContent=fmtBytes(d.system.memory_used_bytes);
 
     // Events
     const validLevels=new Set(['info','warning','error']);
@@ -724,26 +794,21 @@ fetch('/api/config').then(r=>r.json()).then(cfg=>{
   document.querySelector('#config-table tbody').innerHTML=h||'<tr><td colspan="2" style="color:var(--text2)">No config</td></tr>';
 }).catch(()=>{});
 
-// Mount history timeline
+// Mount history timeline — only shown when state changes have occurred
 function updateMountHistory(){
   fetch('/api/mount-history').then(r=>r.json()).then(hist=>{
     const el=document.getElementById('mount-timeline');
     if(!Object.keys(hist).length){el.innerHTML='';return;}
-    let h='';
+    // Check if any mount has more than 2 entries (actual state changes)
+    let hasChanges=false;
+    Object.keys(hist).forEach(path=>{if(hist[path].length>2)hasChanges=true;});
+    if(!hasChanges){el.innerHTML='';return;}
+    // Show timeline for mounts with state changes
+    let h='<div style="font-size:.75em;color:var(--text2);margin-top:8px;padding-top:8px;border-top:1px solid var(--border2)">Mount History</div>';
     Object.keys(hist).forEach(path=>{
       const entries=hist[path];
+      if(entries.length<=2)return;
       const shortPath=path.split('/').pop()||path;
-      // If only 1 entry (no state changes), show text status instead of a meaningless bar
-      if(entries.length<=2){
-        const last=entries[entries.length-1];
-        const since=last.timestamp.split('T')[1]||last.timestamp;
-        let status,cls;
-        if(!last.mounted){status='Down';cls='red';}
-        else if(!last.accessible){status='Degraded';cls='yellow';}
-        else{status='Healthy';cls='green';}
-        h+='<div class="mt-row"><span class="mt-path" title="'+esc(path)+'">'+esc(shortPath)+'</span><span style="font-size:.8em"><span class="dot '+cls+'"></span>'+status+' since '+esc(since)+'</span></div>';
-        return;
-      }
       h+='<div class="mt-row"><span class="mt-path" title="'+esc(path)+'">'+esc(shortPath)+'</span><div class="mt-blocks">';
       const show=entries.slice(-60);
       show.forEach(e=>{
@@ -754,7 +819,7 @@ function updateMountHistory(){
       });
       h+='</div></div>';
     });
-    h+='<div style="font-size:.7em;color:var(--text3);margin-top:8px;display:flex;gap:10px;align-items:center"><span class="dot green"></span>Healthy <span class="dot yellow"></span>Degraded <span class="dot red"></span>Down</div>';
+    h+='<div style="font-size:.7em;color:var(--text3);margin-top:4px;display:flex;gap:10px;align-items:center"><span class="dot green"></span>Healthy <span class="dot yellow"></span>Degraded <span class="dot red"></span>Down</div>';
     el.innerHTML=h;
   }).catch(()=>{});
 }
@@ -832,9 +897,12 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == '/settings':
             # Settings editor — requires auth
             if not self.auth_credentials:
-                self._send_json_response(403, json.dumps({
-                    'error': 'Settings editor requires STATUS_UI_AUTH to be configured'
-                }))
+                html = _SETTINGS_SETUP_HTML.encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(html)))
+                self.end_headers()
+                self.wfile.write(html)
                 return
             from utils.settings_api import get_env_schema, get_plex_debrid_schema
             from utils.settings_page import get_settings_html

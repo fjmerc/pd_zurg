@@ -94,7 +94,7 @@ textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;l
 /* Checkbox / toggle */
 .toggle-wrap{display:flex;align-items:center;gap:8px;padding-top:4px}
 .toggle{position:relative;width:40px;height:22px;flex-shrink:0}
-.toggle input{opacity:0;width:0;height:0}
+.toggle input{position:absolute;opacity:0;width:0;height:0;pointer-events:none}
 .toggle .slider{position:absolute;inset:0;background:var(--border);border-radius:22px;cursor:pointer;transition:.2s}
 .toggle .slider:before{content:'';position:absolute;height:16px;width:16px;left:3px;bottom:3px;background:var(--text2);border-radius:50%;transition:.2s}
 .toggle input:checked+.slider{background:var(--green)}
@@ -159,6 +159,30 @@ textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;l
 .btn-oauth:disabled{opacity:.4;cursor:not-allowed}
 .btn-cancel{border-color:var(--red);color:var(--red)}
 .btn-cancel:hover{background:#f851491a}
+
+/* Version/Quality profile editor */
+.preset-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-bottom:12px}
+.preset-card{background:var(--bg);border:1px solid var(--border2);border-radius:8px;padding:10px 12px;cursor:pointer;transition:border-color .15s,background .15s}
+.preset-card:hover{border-color:var(--blue);background:#58a6ff08}
+.preset-card .preset-name{font-size:.85em;font-weight:600;color:var(--text);margin-bottom:3px}
+.preset-card .preset-desc{font-size:.72em;color:var(--text2);line-height:1.4}
+.profile-list{display:flex;flex-direction:column;gap:8px}
+.profile-card{background:var(--bg);border:1px solid var(--border2);border-radius:8px;padding:12px;transition:border-color .15s}
+.profile-card.expanded{border-color:var(--blue)}
+.profile-header{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.profile-header input[type="text"]{flex:1;min-width:120px;max-width:250px;font-weight:600}
+.profile-header .toggle{flex-shrink:0}
+.profile-summary{font-size:.75em;color:var(--text2);margin-top:6px;line-height:1.5}
+.profile-actions{display:flex;gap:6px;margin-left:auto}
+.profile-rules{margin-top:10px;padding-top:10px;border-top:1px solid var(--border2)}
+.rule-row{display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap}
+.rule-row select,.rule-row input{font-size:.8em;padding:5px 8px}
+.rule-row select{min-width:100px;max-width:150px}
+.rule-row input[type="text"]{flex:1;min-width:80px}
+.rule-section-label{font-size:.72em;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin:8px 0 4px;font-weight:600}
+.profile-json{margin-top:10px}
+.profile-json textarea{font-size:.75em}
+.versions-toolbar{display:flex;gap:8px;margin-top:10px;align-items:center}
 
 /* Tab toolbar */
 .tab-toolbar{display:flex;gap:8px;margin-bottom:12px;justify-content:flex-end;flex-wrap:wrap}
@@ -289,7 +313,7 @@ function renderEnvField(field, value) {
   if (field.type === 'boolean') {
     const isTrue = String(value).toLowerCase() === 'true';
     const checked = isTrue ? ' checked' : '';
-    inputHtml = `<div class="toggle-wrap"><label class="toggle"><input type="checkbox" id="${id}" data-key="${esc(field.key)}" data-type="boolean"${checked}><span class="slider"></span></label><span style="font-size:.85em;color:var(--text2)">${isTrue ? 'true' : 'false'}</span></div>`;
+    inputHtml = `<div class="toggle-wrap"><label class="toggle"><input type="checkbox" id="${id}" data-key="${esc(field.key)}" data-type="boolean"${checked}><span class="slider"></span></label></div>`;
   } else if (field.type === 'secret') {
     inputHtml = `<div class="secret-wrap"><input type="password" id="${id}" data-key="${esc(field.key)}" data-type="secret" value="${esc(value || '')}"><button type="button" class="btn-show" onclick="toggleSecret(this)">Show</button></div>`;
   } else if (field.type.startsWith('select:')) {
@@ -325,12 +349,6 @@ function renderEnvCategories(values) {
     html += `<div class="category"><div class="cat-header${openClass}" onclick="toggleCategory(this)"><h2>${esc(cat.name)} <span class="desc">\u2014 ${esc(cat.description)}</span></h2><span class="arrow">&#9660;</span></div><div class="cat-body${openClass}">${fieldsHtml}</div></div>`;
   });
   container.innerHTML = html;
-  // Wire boolean toggles
-  container.querySelectorAll('input[data-type="boolean"]').forEach(cb => {
-    cb.addEventListener('change', function() {
-      this.closest('.toggle-wrap').querySelector('span:last-child').textContent = this.checked ? 'true' : 'false';
-    });
-  });
 }
 
 function collectEnvData() {
@@ -441,7 +459,7 @@ function renderPdField(field, value) {
     case 'boolean_str': {
       const isTrue = String(value).toLowerCase() === 'true';
       const checked = isTrue ? ' checked' : '';
-      inputHtml = `<div class="toggle-wrap"><label class="toggle"><input type="checkbox" id="${id}" data-pdkey="${esc(field.key)}" data-pdtype="boolean_str"${checked}><span class="slider"></span></label><span style="font-size:.85em;color:var(--text2)">${isTrue ? 'true' : 'false'}</span></div>`;
+      inputHtml = `<div class="toggle-wrap"><label class="toggle"><input type="checkbox" id="${id}" data-pdkey="${esc(field.key)}" data-pdtype="boolean_str"${checked}><span class="slider"></span></label></div>`;
       break;
     }
     case 'secret': {
@@ -486,8 +504,13 @@ function renderPdField(field, value) {
       break;
     }
     case 'json': {
-      const jsonStr = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-      inputHtml = `<textarea id="${id}" data-pdkey="${esc(field.key)}" data-pdtype="json" rows="8">${esc(jsonStr)}</textarea>`;
+      if (field.key === 'Versions') {
+        // Render the visual quality profile editor
+        inputHtml = renderVersionsEditor(id, field.key, value);
+      } else {
+        const jsonStr = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+        inputHtml = `<textarea id="${id}" data-pdkey="${esc(field.key)}" data-pdtype="json" rows="8">${esc(jsonStr)}</textarea>`;
+      }
       break;
     }
     case 'hidden':
@@ -539,12 +562,6 @@ function renderPdCategories(values) {
       this.closest('.check-item').classList.toggle('checked', this.checked);
     });
   });
-  // Wire boolean toggle labels
-  container.querySelectorAll('input[data-pdtype="boolean_str"]').forEach(cb => {
-    cb.addEventListener('change', function() {
-      this.closest('.toggle-wrap').querySelector('span:last-child').textContent = this.checked ? 'true' : 'false';
-    });
-  });
 }
 
 // List manipulation
@@ -569,6 +586,335 @@ function addListPairRow(container) {
 
 function removeListRow(btn) {
   btn.closest('.list-row').remove();
+}
+
+// -----------------------------------------------------------------------
+// Versions / Quality Profile Editor
+// -----------------------------------------------------------------------
+let _versionsData = []; // Current profiles array, kept in sync
+
+const _ruleFields = PD_SCHEMA.version_editor ? PD_SCHEMA.version_editor.rule_fields : {};
+const _ruleWeights = PD_SCHEMA.version_editor ? PD_SCHEMA.version_editor.rule_weights : [];
+const _condFields = PD_SCHEMA.version_editor ? PD_SCHEMA.version_editor.condition_fields : {};
+const _presets = PD_SCHEMA.version_presets || {};
+
+function summarizeProfile(profile) {
+  if (!Array.isArray(profile) || profile.length < 4) return 'Invalid profile';
+  const conditions = profile[1] || [];
+  const rules = profile[3] || [];
+  const parts = [];
+  // Summarize conditions
+  conditions.forEach(c => {
+    if (c[0] === 'media type' && c[1] !== 'all') parts.push(c[1]);
+  });
+  // Summarize rules
+  rules.forEach(r => {
+    if (r[0] === 'resolution' && r[1] === 'requirement' && (r[2] === '<=' || r[2] === '=='))
+      parts.push('Up to ' + r[3] + 'p');
+    if (r[0] === 'cache status' && r[1] === 'requirement' && r[2] === 'cached')
+      parts.push('Cached');
+    if (r[0] === 'bitrate' && r[1] === 'requirement')
+      parts.push('Bitrate ' + r[2] + ' ' + r[3] + ' Mbit/s');
+    if (r[0] === 'size' && r[1] === 'requirement' && r[2] === '<=')
+      parts.push('Max ' + r[3] + 'GB');
+    if (r[0] === 'title' && r[1] === 'requirement' && r[2] === 'exclude') {
+      if (r[3].includes('CAM')) parts.push('No CAM/TS');
+      else if (r[3].includes('HDR')) parts.push('No HDR');
+      else if (r[3].includes('DV') || r[3].includes('DOVI')) parts.push('No DV');
+    }
+    if (r[0] === 'title' && r[1] === 'preference' && r[2] === 'include') {
+      if (r[3].includes('HDR')) parts.push('Prefer HDR/DV');
+      else if (r[3].toLowerCase().includes('x265') || r[3].toLowerCase().includes('hevc')) parts.push('Prefer x265');
+    }
+  });
+  if (!parts.length) parts.push(rules.length + ' rules');
+  return parts.join(', ');
+}
+
+function renderRuleRow(rule, idx, profileIdx) {
+  const field = rule[0] || '';
+  const weight = rule[1] || 'requirement';
+  const op = rule[2] || '';
+  const val = rule[3] || '';
+
+  let fieldOpts = '';
+  Object.keys(_ruleFields).forEach(f => {
+    fieldOpts += `<option value="${esc(f)}"${f===field?' selected':''}>${esc(f)}</option>`;
+  });
+
+  let weightOpts = '';
+  _ruleWeights.forEach(w => {
+    weightOpts += `<option value="${esc(w)}"${w===weight?' selected':''}>${esc(w)}</option>`;
+  });
+
+  const fieldMeta = _ruleFields[field] || {operators:[], has_value:true};
+  let opOpts = '';
+  fieldMeta.operators.forEach(o => {
+    opOpts += `<option value="${esc(o)}"${o===op?' selected':''}>${esc(o)}</option>`;
+  });
+
+  const valInput = fieldMeta.has_value !== false
+    ? `<input type="text" value="${esc(val)}" placeholder="${esc(fieldMeta.unit||fieldMeta.value_type||'value')}" onchange="updateRule(${profileIdx},${idx},this.closest('.rule-row'))">`
+    : '';
+
+  return `<div class="rule-row" data-ridx="${idx}">
+    <select onchange="ruleFieldChanged(${profileIdx},${idx},this)">${fieldOpts}</select>
+    <select onchange="updateRule(${profileIdx},${idx},this.closest('.rule-row'))">${weightOpts}</select>
+    <select onchange="updateRule(${profileIdx},${idx},this.closest('.rule-row'))">${opOpts}</select>
+    ${valInput}
+    <button type="button" class="btn-list" onclick="deleteRule(${profileIdx},${idx})" title="Remove">&times;</button>
+  </div>`;
+}
+
+function renderConditionRow(cond, idx, profileIdx) {
+  const field = cond[0] || '';
+  const op = cond[1] || '';
+  const val = cond[2] || '';
+
+  let fieldOpts = '';
+  Object.keys(_condFields).forEach(f => {
+    fieldOpts += `<option value="${esc(f)}"${f===field?' selected':''}>${esc(f)}</option>`;
+  });
+
+  const meta = _condFields[field] || {operators:[], has_value:true};
+  let opOpts = '';
+  meta.operators.forEach(o => {
+    opOpts += `<option value="${esc(o)}"${o===op?' selected':''}>${esc(o)}</option>`;
+  });
+
+  const valInput = meta.has_value !== false
+    ? `<input type="text" value="${esc(val)}" placeholder="value" onchange="updateCondition(${profileIdx},${idx},this.closest('.rule-row'))">`
+    : '';
+
+  return `<div class="rule-row" data-cidx="${idx}">
+    <select onchange="condFieldChanged(${profileIdx},${idx},this)">${fieldOpts}</select>
+    <select onchange="updateCondition(${profileIdx},${idx},this.closest('.rule-row'))">${opOpts}</select>
+    ${valInput}
+    <button type="button" class="btn-list" onclick="deleteCondition(${profileIdx},${idx})" title="Remove">&times;</button>
+  </div>`;
+}
+
+function renderProfileCard(profile, idx) {
+  const name = profile[0] || 'Unnamed';
+  const lang = profile[2] || 'en';
+  const summary = summarizeProfile(profile);
+  const conditions = profile[1] || [];
+  const rules = profile[3] || [];
+
+  let condHtml = '';
+  conditions.forEach((c, ci) => { condHtml += renderConditionRow(c, ci, idx); });
+
+  let rulesHtml = '';
+  rules.forEach((r, ri) => { rulesHtml += renderRuleRow(r, ri, idx); });
+
+  // Language options
+  const langs = ['en','de','fr','es','it','pt','nl','pl','ru','ja','ko','zh','ar','hi',''];
+  let langOpts = '';
+  langs.forEach(l => {
+    const label = l || 'any';
+    langOpts += `<option value="${esc(l)}"${l===lang?' selected':''}>${esc(label)}</option>`;
+  });
+
+  return `<div class="profile-card" id="profile-${idx}">
+    <div class="profile-header">
+      <input type="text" value="${esc(name)}" onchange="_versionsData[${idx}][0]=this.value;isDirty=true" placeholder="Profile name">
+      <select style="max-width:70px;font-size:.8em" onchange="_versionsData[${idx}][2]=this.value;isDirty=true" title="Language">${langOpts}</select>
+      <div class="profile-actions">
+        <button type="button" class="btn-sm" onclick="toggleProfileRules(${idx})">Edit</button>
+        <button type="button" class="btn-sm" onclick="duplicateProfile(${idx})" title="Duplicate">Dup</button>
+        <button type="button" class="btn-list" onclick="deleteProfile(${idx})" title="Delete profile">&times;</button>
+      </div>
+    </div>
+    <div class="profile-summary">${esc(summary)}</div>
+    <div class="profile-rules" id="profile-rules-${idx}" style="display:none">
+      <div class="rule-section-label">Conditions (${conditions.length})</div>
+      ${condHtml}
+      <button type="button" class="btn-sm" onclick="addCondition(${idx})" style="margin-top:4px;color:var(--green);border-color:var(--green)">+ Add Condition</button>
+      <div class="rule-section-label" style="margin-top:12px">Rules (${rules.length})</div>
+      ${rulesHtml}
+      <button type="button" class="btn-sm" onclick="addRule(${idx})" style="margin-top:4px;color:var(--green);border-color:var(--green)">+ Add Rule</button>
+    </div>
+  </div>`;
+}
+
+function renderVersionsEditor(id, key, value) {
+  _versionsData = Array.isArray(value) ? JSON.parse(JSON.stringify(value)) : [];
+
+  // Preset buttons
+  let presetsHtml = '<div class="preset-grid">';
+  Object.keys(_presets).forEach(k => {
+    const p = _presets[k];
+    presetsHtml += `<div class="preset-card" onclick="addPreset('${esc(k)}')"><div class="preset-name">${esc(p.name)}</div><div class="preset-desc">${esc(p.description)}</div></div>`;
+  });
+  presetsHtml += '</div>';
+
+  // Profile cards
+  let profilesHtml = '<div class="profile-list" id="versions-profiles">';
+  _versionsData.forEach((p, i) => { profilesHtml += renderProfileCard(p, i); });
+  profilesHtml += '</div>';
+
+  // Toolbar
+  const toolbarHtml = `<div class="versions-toolbar">
+    <button type="button" class="btn-sm" onclick="addEmptyProfile()" style="color:var(--green);border-color:var(--green)">+ New Profile</button>
+    <button type="button" class="btn-sm" onclick="toggleVersionsJson()">Edit as JSON</button>
+  </div>
+  <div id="versions-json-editor" style="display:none;margin-top:8px">
+    <textarea id="versions-json-textarea" data-pdkey="${esc(key)}" data-pdtype="json" rows="12">${esc(JSON.stringify(_versionsData, null, 2))}</textarea>
+    <button type="button" class="btn-sm" onclick="applyVersionsJson()" style="margin-top:4px">Apply JSON</button>
+  </div>`;
+
+  return `<div id="${id}" data-pdkey="${esc(key)}" data-pdtype="versions">
+    <div style="font-size:.8em;color:var(--text2);margin-bottom:8px">Add a preset or build your own profile:</div>
+    ${presetsHtml}${profilesHtml}${toolbarHtml}
+  </div>`;
+}
+
+function refreshVersionsUI() {
+  const container = document.getElementById('versions-profiles');
+  if (!container) return;
+  let h = '';
+  _versionsData.forEach((p, i) => { h += renderProfileCard(p, i); });
+  container.innerHTML = h;
+  // Update JSON textarea if visible
+  const ta = document.getElementById('versions-json-textarea');
+  if (ta) ta.value = JSON.stringify(_versionsData, null, 2);
+  isDirty = true;
+}
+
+function addPreset(key) {
+  const preset = _presets[key];
+  if (!preset) return;
+  // Deep clone the preset profile
+  _versionsData.push(JSON.parse(JSON.stringify(preset.profile)));
+  refreshVersionsUI();
+}
+
+function addEmptyProfile() {
+  _versionsData.push([
+    'New Profile',
+    [['retries', '<=', '48'], ['media type', 'all', '']],
+    'en',
+    [['cache status', 'requirement', 'cached', '']]
+  ]);
+  refreshVersionsUI();
+  // Expand the new profile's rules
+  const idx = _versionsData.length - 1;
+  setTimeout(() => toggleProfileRules(idx), 50);
+}
+
+function deleteProfile(idx) {
+  if (!confirm('Delete profile "' + (_versionsData[idx]?.[0] || '') + '"?')) return;
+  _versionsData.splice(idx, 1);
+  refreshVersionsUI();
+}
+
+function toggleProfileRules(idx) {
+  const el = document.getElementById('profile-rules-' + idx);
+  const card = document.getElementById('profile-' + idx);
+  if (!el) return;
+  const show = el.style.display === 'none';
+  el.style.display = show ? 'block' : 'none';
+  if (card) card.classList.toggle('expanded', show);
+}
+
+function addRule(profileIdx) {
+  _versionsData[profileIdx][3].push(['resolution', 'requirement', '<=', '1080']);
+  refreshVersionsUI();
+  // Re-expand the rules
+  const el = document.getElementById('profile-rules-' + profileIdx);
+  if (el) { el.style.display = 'block'; document.getElementById('profile-' + profileIdx)?.classList.add('expanded'); }
+}
+
+function deleteRule(profileIdx, ruleIdx) {
+  _versionsData[profileIdx][3].splice(ruleIdx, 1);
+  refreshVersionsUI();
+  const el = document.getElementById('profile-rules-' + profileIdx);
+  if (el) { el.style.display = 'block'; document.getElementById('profile-' + profileIdx)?.classList.add('expanded'); }
+}
+
+function updateRule(profileIdx, ruleIdx, row) {
+  const selects = row.querySelectorAll('select');
+  const input = row.querySelector('input[type="text"]');
+  const field = selects[0]?.value || '';
+  const weight = selects[1]?.value || '';
+  const op = selects[2]?.value || '';
+  const val = input?.value || '';
+  _versionsData[profileIdx][3][ruleIdx] = [field, weight, op, val];
+  isDirty = true;
+}
+
+function ruleFieldChanged(profileIdx, ruleIdx, select) {
+  const field = select.value;
+  const meta = _ruleFields[field] || {operators:[]};
+  _versionsData[profileIdx][3][ruleIdx] = [field, 'requirement', meta.operators[0] || '', ''];
+  refreshVersionsUI();
+  const el = document.getElementById('profile-rules-' + profileIdx);
+  if (el) { el.style.display = 'block'; document.getElementById('profile-' + profileIdx)?.classList.add('expanded'); }
+}
+
+// Condition manipulation
+function addCondition(profileIdx) {
+  _versionsData[profileIdx][1].push(['media type', 'all', '']);
+  refreshVersionsUI();
+  const el = document.getElementById('profile-rules-' + profileIdx);
+  if (el) { el.style.display = 'block'; document.getElementById('profile-' + profileIdx)?.classList.add('expanded'); }
+}
+
+function deleteCondition(profileIdx, condIdx) {
+  _versionsData[profileIdx][1].splice(condIdx, 1);
+  refreshVersionsUI();
+  const el = document.getElementById('profile-rules-' + profileIdx);
+  if (el) { el.style.display = 'block'; document.getElementById('profile-' + profileIdx)?.classList.add('expanded'); }
+}
+
+function updateCondition(profileIdx, condIdx, row) {
+  const selects = row.querySelectorAll('select');
+  const input = row.querySelector('input[type="text"]');
+  _versionsData[profileIdx][1][condIdx] = [
+    selects[0]?.value || '',
+    selects[1]?.value || '',
+    input?.value || ''
+  ];
+  isDirty = true;
+}
+
+function condFieldChanged(profileIdx, condIdx, select) {
+  const field = select.value;
+  const meta = _condFields[field] || {operators:[]};
+  _versionsData[profileIdx][1][condIdx] = [field, meta.operators[0] || '', ''];
+  refreshVersionsUI();
+  const el = document.getElementById('profile-rules-' + profileIdx);
+  if (el) { el.style.display = 'block'; document.getElementById('profile-' + profileIdx)?.classList.add('expanded'); }
+}
+
+function duplicateProfile(idx) {
+  const copy = JSON.parse(JSON.stringify(_versionsData[idx]));
+  copy[0] = copy[0] + ' (copy)';
+  _versionsData.splice(idx + 1, 0, copy);
+  refreshVersionsUI();
+}
+
+function toggleVersionsJson() {
+  const el = document.getElementById('versions-json-editor');
+  if (!el) return;
+  const show = el.style.display === 'none';
+  el.style.display = show ? 'block' : 'none';
+  if (show) {
+    document.getElementById('versions-json-textarea').value = JSON.stringify(_versionsData, null, 2);
+  }
+}
+
+function applyVersionsJson() {
+  const ta = document.getElementById('versions-json-textarea');
+  try {
+    const parsed = JSON.parse(ta.value);
+    if (!Array.isArray(parsed)) { alert('Versions must be a JSON array'); return; }
+    _versionsData = parsed;
+    refreshVersionsUI();
+    showBanner('success', 'JSON applied to profile editor');
+  } catch (e) {
+    alert('Invalid JSON: ' + e.message);
+  }
 }
 
 function collectPdData() {
@@ -614,8 +960,13 @@ function collectPdData() {
       }
     });
   });
-  // JSON
+  // Versions (visual editor)
+  document.querySelectorAll('#tab-pd [data-pdtype="versions"]').forEach(el => {
+    data[el.dataset.pdkey] = JSON.parse(JSON.stringify(_versionsData));
+  });
+  // JSON (other json fields, excluding versions textarea)
   document.querySelectorAll('#tab-pd [data-pdtype="json"]').forEach(ta => {
+    if (ta.id === 'versions-json-textarea') return; // Handled above
     try {
       data[ta.dataset.pdkey] = JSON.parse(ta.value);
     } catch (e) {

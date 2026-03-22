@@ -200,7 +200,9 @@ def get_env_schema():
 def read_env_values():
     """Read current .env file and return key-value dict.
 
-    Returns all known schema keys — missing ones come back as empty string.
+    Reads from the .env file first, then falls back to os.environ for
+    values set via docker-compose or other mechanisms. This ensures the
+    form shows what's actually active, not just what's in the file.
     """
     file_values = {}
     if os.path.exists(ENV_FILE):
@@ -208,7 +210,10 @@ def read_env_values():
 
     result = {}
     for key in sorted(_ALL_KEYS):
-        result[key] = file_values.get(key, '')
+        if key in file_values:
+            result[key] = file_values[key] or ''
+        else:
+            result[key] = os.environ.get(key, '')
     return result
 
 
@@ -484,6 +489,188 @@ def validate_env_values(values):
 SETTINGS_JSON_FILE = '/config/settings.json'
 SETTINGS_DEFAULT_FILE = '/app/plex_debrid_/settings-default.json'
 
+# ---------------------------------------------------------------------------
+# Quality profile presets and rule metadata
+# ---------------------------------------------------------------------------
+
+# Common exclusion regexes
+_EXCLUDE_CAM = r'([^A-Z0-9]|HD|HQ)(CAM|T(ELE)?(S(YNC)?|C(INE)?)|ADS|HINDI)([^A-Z0-9]|RIP|$)'
+_EXCLUDE_3D = r'(3D)'
+_EXCLUDE_DV = r'(DO?VI?)'
+_EXCLUDE_HDR = r'(HDR)'
+_PREFER_EDITIONS = (
+    r'(EXTENDED|REMASTERED|DIRECTORS|THEATRICAL|UNRATED|UNCUT|CRITERION|'
+    r'ANNIVERSARY|COLLECTORS|LIMITED|SPECIAL|DELUXE|SUPERBIT|RESTORED|REPACK)'
+)
+_DEFAULT_CONDITIONS = [['retries', '<=', '48'], ['media type', 'all', '']]
+
+VERSION_PRESETS = {
+    '1080p_sdr': {
+        'name': '1080p SDR',
+        'description': 'Up to 1080p, no HDR/DV. Good default for most setups.',
+        'profile': [
+            '1080p SDR',
+            _DEFAULT_CONDITIONS,
+            'en',
+            [
+                ['cache status', 'requirement', 'cached', ''],
+                ['resolution', 'requirement', '<=', '1080'],
+                ['resolution', 'preference', 'highest', ''],
+                ['title', 'requirement', 'exclude', _EXCLUDE_CAM],
+                ['title', 'requirement', 'exclude', _EXCLUDE_3D],
+                ['title', 'requirement', 'exclude', _EXCLUDE_DV],
+                ['title', 'requirement', 'exclude', _EXCLUDE_HDR],
+                ['title', 'preference', 'include', _PREFER_EDITIONS],
+                ['size', 'preference', 'highest', ''],
+                ['seeders', 'preference', 'highest', ''],
+                ['size', 'requirement', '>=', '0.1'],
+            ],
+        ],
+    },
+    '4k_hdr': {
+        'name': '4K HDR',
+        'description': 'Up to 4K, prefer HDR/Dolby Vision. For premium setups.',
+        'profile': [
+            '4K HDR',
+            _DEFAULT_CONDITIONS,
+            'en',
+            [
+                ['cache status', 'requirement', 'cached', ''],
+                ['resolution', 'requirement', '<=', '2160'],
+                ['resolution', 'preference', 'highest', ''],
+                ['title', 'requirement', 'exclude', _EXCLUDE_CAM],
+                ['title', 'requirement', 'exclude', _EXCLUDE_3D],
+                ['title', 'preference', 'include', r'(HDR|HDR10|HDR10.|DOLBY.?VISION|DO?VI?)'],
+                ['title', 'preference', 'include', _PREFER_EDITIONS],
+                ['size', 'preference', 'highest', ''],
+                ['seeders', 'preference', 'highest', ''],
+                ['size', 'requirement', '>=', '0.1'],
+            ],
+        ],
+    },
+    '4k_sdr': {
+        'name': '4K SDR',
+        'description': 'Up to 4K, no HDR/DV. High resolution without HDR.',
+        'profile': [
+            '4K SDR',
+            _DEFAULT_CONDITIONS,
+            'en',
+            [
+                ['cache status', 'requirement', 'cached', ''],
+                ['resolution', 'requirement', '<=', '2160'],
+                ['resolution', 'preference', 'highest', ''],
+                ['title', 'requirement', 'exclude', _EXCLUDE_CAM],
+                ['title', 'requirement', 'exclude', _EXCLUDE_3D],
+                ['title', 'requirement', 'exclude', _EXCLUDE_DV],
+                ['title', 'requirement', 'exclude', _EXCLUDE_HDR],
+                ['title', 'preference', 'include', _PREFER_EDITIONS],
+                ['size', 'preference', 'highest', ''],
+                ['seeders', 'preference', 'highest', ''],
+                ['size', 'requirement', '>=', '0.1'],
+            ],
+        ],
+    },
+    '720p': {
+        'name': '720p',
+        'description': 'Up to 720p. Lower bandwidth and storage usage.',
+        'profile': [
+            '720p',
+            _DEFAULT_CONDITIONS,
+            'en',
+            [
+                ['cache status', 'requirement', 'cached', ''],
+                ['resolution', 'requirement', '<=', '720'],
+                ['resolution', 'preference', 'highest', ''],
+                ['title', 'requirement', 'exclude', _EXCLUDE_CAM],
+                ['title', 'preference', 'include', _PREFER_EDITIONS],
+                ['size', 'preference', 'highest', ''],
+                ['seeders', 'preference', 'highest', ''],
+                ['size', 'requirement', '>=', '0.1'],
+            ],
+        ],
+    },
+    'any_quality': {
+        'name': 'Any Quality',
+        'description': 'No resolution filter. Grabs the best available cached release.',
+        'profile': [
+            'Any Quality',
+            _DEFAULT_CONDITIONS,
+            'en',
+            [
+                ['cache status', 'requirement', 'cached', ''],
+                ['resolution', 'preference', 'highest', ''],
+                ['title', 'requirement', 'exclude', _EXCLUDE_CAM],
+                ['title', 'preference', 'include', _PREFER_EDITIONS],
+                ['size', 'preference', 'highest', ''],
+                ['seeders', 'preference', 'highest', ''],
+                ['size', 'requirement', '>=', '0.1'],
+            ],
+        ],
+    },
+    'anime': {
+        'name': 'Anime',
+        'description': 'Up to 1080p, optimized for anime releases.',
+        'profile': [
+            'Anime',
+            [['retries', '<=', '48'], ['media type', 'shows', '']],
+            'en',
+            [
+                ['cache status', 'requirement', 'cached', ''],
+                ['resolution', 'requirement', '<=', '1080'],
+                ['resolution', 'preference', 'highest', ''],
+                ['title', 'requirement', 'exclude', _EXCLUDE_CAM],
+                ['source', 'preference', 'include', r'(nyaa|subsplease|erai|judas|ember)'],
+                ['title', 'preference', 'include', r'(10.?bit|x265|HEVC|BDRip|BluRay)'],
+                ['seeders', 'preference', 'highest', ''],
+                ['size', 'requirement', '>=', '0.05'],
+            ],
+        ],
+    },
+}
+
+# Rule field definitions for the visual editor
+VERSION_RULE_FIELDS = {
+    'cache status': {'operators': ['cached', 'uncached'], 'has_value': False},
+    'resolution': {'operators': ['==', '>=', '<=', 'highest', 'lowest'], 'has_value': True, 'unit': 'px'},
+    'size': {'operators': ['==', '>=', '<=', 'highest', 'lowest'], 'has_value': True, 'unit': 'GB'},
+    'seeders': {'operators': ['==', '>=', '<=', 'highest', 'lowest'], 'has_value': True},
+    'bitrate': {'operators': ['==', '>=', '<=', 'highest', 'lowest'], 'has_value': True, 'unit': 'Mbit/s'},
+    'title': {'operators': ['==', 'include', 'exclude'], 'has_value': True, 'value_type': 'regex'},
+    'source': {'operators': ['==', 'include', 'exclude'], 'has_value': True, 'value_type': 'regex'},
+    'file names': {'operators': ['include', 'exclude'], 'has_value': True, 'value_type': 'regex'},
+    'file sizes': {'operators': ['all files >=', 'all files <=', 'video files >=', 'video files <='],
+                   'has_value': True, 'unit': 'GB'},
+}
+
+VERSION_RULE_WEIGHTS = ['requirement', 'preference']
+
+VERSION_CONDITION_FIELDS = {
+    'retries': {'operators': ['==', '>=', '<='], 'has_value': True},
+    'media type': {'operators': ['all', 'movies', 'shows'], 'has_value': False},
+    'year': {'operators': ['==', '>=', '<='], 'has_value': True},
+    'title': {'operators': ['==', 'include', 'exclude'], 'has_value': True},
+    'user': {'operators': ['==', 'include', 'exclude'], 'has_value': True},
+    'genre': {'operators': ['==', 'include', 'exclude'], 'has_value': True},
+}
+
+
+def get_version_presets():
+    """Return presets as a JSON-serializable dict."""
+    return {
+        key: {'name': p['name'], 'description': p['description'], 'profile': p['profile']}
+        for key, p in VERSION_PRESETS.items()
+    }
+
+
+def get_version_editor_metadata():
+    """Return rule field definitions for the visual editor."""
+    return {
+        'rule_fields': VERSION_RULE_FIELDS,
+        'rule_weights': VERSION_RULE_WEIGHTS,
+        'condition_fields': VERSION_CONDITION_FIELDS,
+    }
+
+
 # Field types for plex_debrid schema:
 #   multiselect  — checkbox group, value is list of selected option names
 #   radio        — radio group, value is list with 0 or 1 element
@@ -678,7 +865,11 @@ def get_plex_debrid_schema():
             'description': cat['description'],
             'fields': fields,
         })
-    return {'categories': categories}
+    return {
+        'categories': categories,
+        'version_presets': get_version_presets(),
+        'version_editor': get_version_editor_metadata(),
+    }
 
 
 def read_plex_debrid_values():

@@ -81,19 +81,19 @@ services:
      # - BLACKHOLE_DIR=/watch
      # - BLACKHOLE_POLL_INTERVAL=5
      # - BLACKHOLE_DEBRID=realdebrid
-      ## Status Web UI & Settings Editor (AUTH required for settings editor)
-     # - STATUS_UI_ENABLED=true
+      ## Status Web UI & Settings Editor
+      - STATUS_UI_ENABLED=true
      # - STATUS_UI_PORT=8080
+      ## Uncomment and set a password to enable the settings editor at /settings
      # - STATUS_UI_AUTH=admin:changeme
       ## ffprobe Monitor (enabled by default)
      # - FFPROBE_MONITOR_ENABLED=true
      # - FFPROBE_STUCK_TIMEOUT=300
       ## Config Validation (runs on startup, set to true to skip)
      # - SKIP_VALIDATION=false
-    ## Status Web UI and Prometheus metrics port (optional)
-    ## Prometheus scrape config: targets: ['pd_zurg:8080'], metrics_path: /metrics
-    # ports:
-    #   - "8080:8080"
+    ## Status Web UI
+    ports:
+      - "8080:8080"
     # Example to attach to gluetun vpn container if realdebrid blocks IP address
     # network_mode: container:gluetun
     devices:

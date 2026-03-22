@@ -115,9 +115,17 @@ ENV_SCHEMA = [
             ('BLACKHOLE_DEBRID', 'Debrid Service', 'select:realdebrid,alldebrid,torbox', False, 'Which debrid service to use'),
         ],
     },
-    # Note: STATUS_UI_ENABLED, STATUS_UI_PORT, and STATUS_UI_AUTH are intentionally
-    # excluded from the settings editor. They control access to the editor itself
-    # and must be managed via docker-compose.yml to prevent lockout scenarios.
+    {
+        'name': 'Status UI',
+        'description': 'Web dashboard and API settings',
+        'fields': [
+            ('STATUS_UI_ENABLED', 'Enable Status UI', 'boolean', False, 'Enable the web status dashboard'),
+            ('STATUS_UI_PORT', 'Port', 'number:1-65535', False, 'Port for the status web server'),
+            ('STATUS_UI_AUTH', 'Authentication', 'string', False,
+             'Basic auth credentials (username:password). '
+             'If you forget this password, edit /config/.env on the host volume to recover'),
+        ],
+    },
     {
         'name': 'Monitoring',
         'description': 'ffprobe monitoring and auto-update',

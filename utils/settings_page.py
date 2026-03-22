@@ -592,6 +592,7 @@ function removeListRow(btn) {
 // Versions / Quality Profile Editor
 // -----------------------------------------------------------------------
 let _versionsData = []; // Current profiles array, kept in sync
+let _expandedProfile = -1; // Which profile has rules visible (-1 = none)
 
 const _ruleFields = PD_SCHEMA.version_editor ? PD_SCHEMA.version_editor.rule_fields : {};
 const _ruleWeights = PD_SCHEMA.version_editor ? PD_SCHEMA.version_editor.rule_weights : [];
@@ -720,13 +721,13 @@ function renderProfileCard(profile, idx) {
       <input type="text" value="${esc(name)}" onchange="_versionsData[${idx}][0]=this.value;isDirty=true" placeholder="Profile name">
       <select style="max-width:70px;font-size:.8em" onchange="_versionsData[${idx}][2]=this.value;isDirty=true" title="Language">${langOpts}</select>
       <div class="profile-actions">
-        <button type="button" class="btn-sm" onclick="toggleProfileRules(${idx})">Edit</button>
-        <button type="button" class="btn-sm" onclick="duplicateProfile(${idx})" title="Duplicate">Dup</button>
+        <button type="button" class="btn-sm" id="profile-edit-btn-${idx}" onclick="toggleProfileRules(${idx})">${_expandedProfile===idx?'Close':'Edit'}</button>
+        <button type="button" class="btn-sm" onclick="duplicateProfile(${idx})">Duplicate</button>
         <button type="button" class="btn-list" onclick="deleteProfile(${idx})" title="Delete profile">&times;</button>
       </div>
     </div>
     <div class="profile-summary">${esc(summary)}</div>
-    <div class="profile-rules" id="profile-rules-${idx}" style="display:none">
+    <div class="profile-rules" id="profile-rules-${idx}" style="display:${_expandedProfile===idx?'block':'none'}">
       <div class="rule-section-label">Conditions (${conditions.length})</div>
       ${condHtml}
       <button type="button" class="btn-sm" onclick="addCondition(${idx})" style="margin-top:4px;color:var(--green);border-color:var(--green)">+ Add Condition</button>
@@ -756,7 +757,7 @@ function renderVersionsEditor(id, key, value) {
   // Toolbar
   const toolbarHtml = `<div class="versions-toolbar">
     <button type="button" class="btn-sm" onclick="addEmptyProfile()" style="color:var(--green);border-color:var(--green)">+ New Profile</button>
-    <button type="button" class="btn-sm" onclick="toggleVersionsJson()">Edit as JSON</button>
+    <button type="button" class="btn-sm" id="versions-json-btn" onclick="toggleVersionsJson()">Edit as JSON</button>
   </div>
   <div id="versions-json-editor" style="display:none;margin-top:8px">
     <textarea id="versions-json-textarea" data-pdkey="${esc(key)}" data-pdtype="json" rows="12">${esc(JSON.stringify(_versionsData, null, 2))}</textarea>
@@ -796,10 +797,8 @@ function addEmptyProfile() {
     'en',
     [['cache status', 'requirement', 'cached', '']]
   ]);
+  _expandedProfile = _versionsData.length - 1;
   refreshVersionsUI();
-  // Expand the new profile's rules
-  const idx = _versionsData.length - 1;
-  setTimeout(() => toggleProfileRules(idx), 50);
 }
 
 function deleteProfile(idx) {
@@ -811,25 +810,25 @@ function deleteProfile(idx) {
 function toggleProfileRules(idx) {
   const el = document.getElementById('profile-rules-' + idx);
   const card = document.getElementById('profile-' + idx);
+  const btn = document.getElementById('profile-edit-btn-' + idx);
   if (!el) return;
   const show = el.style.display === 'none';
   el.style.display = show ? 'block' : 'none';
   if (card) card.classList.toggle('expanded', show);
+  if (btn) btn.textContent = show ? 'Close' : 'Edit';
+  _expandedProfile = show ? idx : -1;
 }
 
 function addRule(profileIdx) {
   _versionsData[profileIdx][3].push(['resolution', 'requirement', '<=', '1080']);
+  _expandedProfile = profileIdx;
   refreshVersionsUI();
-  // Re-expand the rules
-  const el = document.getElementById('profile-rules-' + profileIdx);
-  if (el) { el.style.display = 'block'; document.getElementById('profile-' + profileIdx)?.classList.add('expanded'); }
 }
 
 function deleteRule(profileIdx, ruleIdx) {
   _versionsData[profileIdx][3].splice(ruleIdx, 1);
+  _expandedProfile = profileIdx;
   refreshVersionsUI();
-  const el = document.getElementById('profile-rules-' + profileIdx);
-  if (el) { el.style.display = 'block'; document.getElementById('profile-' + profileIdx)?.classList.add('expanded'); }
 }
 
 function updateRule(profileIdx, ruleIdx, row) {
@@ -847,24 +846,21 @@ function ruleFieldChanged(profileIdx, ruleIdx, select) {
   const field = select.value;
   const meta = _ruleFields[field] || {operators:[]};
   _versionsData[profileIdx][3][ruleIdx] = [field, 'requirement', meta.operators[0] || '', ''];
+  _expandedProfile = profileIdx;
   refreshVersionsUI();
-  const el = document.getElementById('profile-rules-' + profileIdx);
-  if (el) { el.style.display = 'block'; document.getElementById('profile-' + profileIdx)?.classList.add('expanded'); }
 }
 
 // Condition manipulation
 function addCondition(profileIdx) {
   _versionsData[profileIdx][1].push(['media type', 'all', '']);
+  _expandedProfile = profileIdx;
   refreshVersionsUI();
-  const el = document.getElementById('profile-rules-' + profileIdx);
-  if (el) { el.style.display = 'block'; document.getElementById('profile-' + profileIdx)?.classList.add('expanded'); }
 }
 
 function deleteCondition(profileIdx, condIdx) {
   _versionsData[profileIdx][1].splice(condIdx, 1);
+  _expandedProfile = profileIdx;
   refreshVersionsUI();
-  const el = document.getElementById('profile-rules-' + profileIdx);
-  if (el) { el.style.display = 'block'; document.getElementById('profile-' + profileIdx)?.classList.add('expanded'); }
 }
 
 function updateCondition(profileIdx, condIdx, row) {
@@ -882,6 +878,7 @@ function condFieldChanged(profileIdx, condIdx, select) {
   const field = select.value;
   const meta = _condFields[field] || {operators:[]};
   _versionsData[profileIdx][1][condIdx] = [field, meta.operators[0] || '', ''];
+  _expandedProfile = profileIdx;
   refreshVersionsUI();
   const el = document.getElementById('profile-rules-' + profileIdx);
   if (el) { el.style.display = 'block'; document.getElementById('profile-' + profileIdx)?.classList.add('expanded'); }
@@ -896,9 +893,11 @@ function duplicateProfile(idx) {
 
 function toggleVersionsJson() {
   const el = document.getElementById('versions-json-editor');
+  const btn = document.getElementById('versions-json-btn');
   if (!el) return;
   const show = el.style.display === 'none';
   el.style.display = show ? 'block' : 'none';
+  if (btn) btn.textContent = show ? 'Close JSON' : 'Edit as JSON';
   if (show) {
     document.getElementById('versions-json-textarea').value = JSON.stringify(_versionsData, null, 2);
   }

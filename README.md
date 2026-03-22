@@ -50,6 +50,9 @@ Send event notifications to 90+ services (Discord, Telegram, Slack, email, Pusho
 #### 📂 Blackhole Watch Folder
 Drop `.torrent` or `.magnet` files into a watch directory and they're automatically submitted to your debrid service. Compatible with Sonarr/Radarr's blackhole download client. Supports Real-Debrid, AllDebrid, and TorBox. Failed files are quarantined to a `failed/` subdirectory.
 
+#### 🌐 Cross-Machine Setup
+If pd_zurg and Sonarr/Radarr run on different machines, expose Zurg's WebDAV port (`ZURG_PORT`) and mount it on the arr machine using rclone. This is simpler and more reliable than NFS re-export. Pin `ZURG_PORT` to a fixed value and expose it in docker-compose, then mount via `rclone mount :webdav:` on the remote machine with `--umask 000 --allow-other`.
+
 #### 🔍 ffprobe Stuck-Process Recovery
 Detects ffprobe processes stuck in uninterruptible sleep on debrid mounts (a common issue when Plex/Jellyfin scans expired links). Attempts recovery by "poking" the stuck I/O, then kills the process after 3 failed attempts. Enabled by default with a 5-minute threshold.
 
@@ -297,8 +300,8 @@ of this parameter has the format `<VARIABLE_NAME>=<VALUE>`.
 |`SEERR_ADDRESS`| The URL of your Jellyseerr or Overseerr server. Example: http://192.168.0.102:5055 or http://Overseerr:5055 - format must include ```http://``` or ```https://``` and have no trailing characters after the port number (8096). E.g., ```/``` ||| |
 |`ZURG_USER`| The username to be used for protecting the Zurg endpoints.  | `none `| | | |
 |`ZURG_PASS`| The password to be used for protecting the Zurg endpoints.  | `none `  | | | |
-|`ZURG_PORT`| The port to be used for the Zurg server | `random ` | | | |
-|`NFS_ENABLED`| Set the value "true" to enable the NFS server for rclone | `false ` | | | |
+|`ZURG_PORT`| The port to be used for the Zurg server. **Recommended:** set a fixed port if exposing WebDAV to other machines | `random ` | | | |
+|`NFS_ENABLED`| Set the value "true" to enable the NFS server for rclone. **Warning:** this uses `rclone serve nfs` which does NOT create a local mount — if Plex is on the same machine, it will lose access to files. For cross-machine setups, use FUSE mode (default) and expose `ZURG_PORT` instead | `false ` | | | |
 |`NFS_PORT`| The port to be used for the rclone NFS server | `random ` | | | |
 |`NOTIFICATION_URL`| [Apprise](https://github.com/caronc/apprise) notification URL(s), comma-separated. Example: `discord://webhook_id/webhook_token` | | | | |
 |`NOTIFICATION_EVENTS`| Comma-separated list of events to notify on: `startup`, `shutdown`, `mount_success`, `health_error`, `download_complete`, `library_refresh` | all | | | |

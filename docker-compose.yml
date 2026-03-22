@@ -3,9 +3,9 @@ services:
     container_name: pd_zurg
     image: pd_zurg:latest  # Build locally: docker build -t pd_zurg https://github.com/fjmerc/pd_zurg.git
     stdin_open: true # docker run -i
-    tty: true        # docker run -t    
+    tty: true        # docker run -t
     volumes:
-      ## Location of configuration files. If a Zurg config.yml and/or Zurg app is placed here, it will be used to override the default configuration and/or app used at startup. 
+      ## Location of configuration files
       - /pd_zurg/config:/config
       ## Location for logs
       - /pd_zurg/log:/log
@@ -13,93 +13,98 @@ services:
       - /pd_zurg/cache:/cache
       ## Location for Zurg RealDebrid active configuration
       - /pd_zurg/RD:/zurg/RD
-      ## Location for Zurg AllDebrid active configuration -- when supported by Zurg     
-      - /pd_zurg/AD:/zurg/AD   
+      ## Location for Zurg AllDebrid active configuration
+      - /pd_zurg/AD:/zurg/AD
       ## Location for rclone mount to host
       - /pd_zurg/mnt:/data:shared
-      ## Blackhole watch folder for .torrent/.magnet files (optional)
+      ## Blackhole watch folder for .torrent/.magnet files (uncomment to enable)
       # - /pd_zurg/watch:/watch
     environment:
-      - TZ=
-      ## Zurg Required Settings
-      - ZURG_ENABLED=true      
-      - RD_API_KEY=
-      ## Zurg Optional Settings
-     # - ZURG_LOG_LEVEL=DEBUG
-     # - ZURG_VERSION=v0.9.2-hotfix.4
-     # - ZURG_UPDATE=true
-     # - PLEX_REFRESH=true
-     # - PLEX_MOUNT_DIR=/pd_zurg 
-     # - ZURG_USER=
-     # - ZURG_PASS=
-     # - ZURG_PORT=8800
-      ## Rclone Required Settings
-      - RCLONE_MOUNT_NAME=pd_zurg
-      ## Rclone Optional Settings - See rclone docs for full list
-     # - NFS_ENABLED=true
-     # - NFS_PORT=8000
-     # - RCLONE_LOG_LEVEL=DEBUG
-     # - RCLONE_CACHE_DIR=/cache
-     # - RCLONE_DIR_CACHE_TIME=10s
-     # - RCLONE_VFS_CACHE_MODE=full
-     # - RCLONE_VFS_CACHE_MAX_SIZE=100G
-     # - RCLONE_ATTR_TIMEOUT=8700h
-     # - RCLONE_BUFFER_SIZE=32M
-     # - RCLONE_VFS_CACHE_MAX_AGE=4h
-     # - RCLONE_VFS_READ_CHUNK_SIZE=32M
-     # - RCLONE_VFS_READ_CHUNK_SIZE_LIMIT=1G
-     # - RCLONE_TRANSFERS=8
-      ## Plex Debrid Required Settings
-      - PD_ENABLED=true
-      ## To utilize plex_debrid with Plex, the following environment variables are required
-      - PLEX_USER=
-      - PLEX_TOKEN=
-      - PLEX_ADDRESS=
-      ## To utilize plex_debrid with Jellyfin, the following environment variables are required - Note that plex_debrid will require addtional setup befor use with Jellyfin
-     # - JF_ADDRESS
-     # - JF_API_KEY
-      ## Plex Debrid Optional Settings
-     # - PD_UPDATE=true   
-     # - SHOW_MENU=false
-     # - SEERR_API_KEY=
-     # - SEERR_ADDRESS=
-      ## Scraper Optional Settings
-     # - FLARESOLVERR_URL=http://flaresolverr:8191/v1
-      ## Special Features
-     # - AUTO_UPDATE_INTERVAL=12
-     # - DUPLICATE_CLEANUP=true
-     # - CLEANUP_INTERVAL=1
-     # - PDZURG_LOG_LEVEL=DEBUG
-     # - PDZURG_LOG_COUNT=2
-     # - PDZURG_LOG_SIZE=10M
-      ## Notification Settings (supports 90+ services via Apprise)
-     # - NOTIFICATION_URL=discord://webhook_id/webhook_token
-     # - NOTIFICATION_EVENTS=startup,shutdown,mount_success,health_error
-     # - NOTIFICATION_LEVEL=info
-      ## Blackhole Watch Folder (Sonarr/Radarr integration)
-     # - BLACKHOLE_ENABLED=true
-     # - BLACKHOLE_DIR=/watch
-     # - BLACKHOLE_POLL_INTERVAL=5
-     # - BLACKHOLE_DEBRID=realdebrid
+      ## ---------------------------------------------------------------
+      ## All values are read from your .env file (see .env.example)
+      ## You can safely pull updates without losing your configuration.
+      ## To get started: cp .env.example .env && edit .env
+      ## ---------------------------------------------------------------
+      ## Timezone
+      - TZ=${TZ:-}
+      ## Zurg
+      - ZURG_ENABLED=${ZURG_ENABLED:-true}
+      - RD_API_KEY=${RD_API_KEY:-}
+      - AD_API_KEY=${AD_API_KEY:-}
+      - TORBOX_API_KEY=${TORBOX_API_KEY:-}
+      - ZURG_VERSION=${ZURG_VERSION:-}
+      - ZURG_UPDATE=${ZURG_UPDATE:-}
+      - ZURG_LOG_LEVEL=${ZURG_LOG_LEVEL:-}
+      - ZURG_PORT=${ZURG_PORT:-}
+      - ZURG_USER=${ZURG_USER:-}
+      - ZURG_PASS=${ZURG_PASS:-}
+      ## rclone
+      - RCLONE_MOUNT_NAME=${RCLONE_MOUNT_NAME:-pd_zurg}
+      - RCLONE_LOG_LEVEL=${RCLONE_LOG_LEVEL:-}
+      - NFS_ENABLED=${NFS_ENABLED:-}
+      - NFS_PORT=${NFS_PORT:-}
+      - RCLONE_CACHE_DIR=${RCLONE_CACHE_DIR:-}
+      - RCLONE_DIR_CACHE_TIME=${RCLONE_DIR_CACHE_TIME:-}
+      - RCLONE_VFS_READ_CHUNK_SIZE=${RCLONE_VFS_READ_CHUNK_SIZE:-}
+      - RCLONE_VFS_READ_CHUNK_SIZE_LIMIT=${RCLONE_VFS_READ_CHUNK_SIZE_LIMIT:-}
+      - RCLONE_BUFFER_SIZE=${RCLONE_BUFFER_SIZE:-}
+      - RCLONE_TRANSFERS=${RCLONE_TRANSFERS:-}
+      ## plex_debrid
+      - PD_ENABLED=${PD_ENABLED:-}
+      - PLEX_USER=${PLEX_USER:-}
+      - PLEX_TOKEN=${PLEX_TOKEN:-}
+      - PLEX_ADDRESS=${PLEX_ADDRESS:-}
+      - SHOW_MENU=${SHOW_MENU:-}
+      - PD_UPDATE=${PD_UPDATE:-}
+      - PD_LOG_LEVEL=${PD_LOG_LEVEL:-}
+      - SEERR_API_KEY=${SEERR_API_KEY:-}
+      - SEERR_ADDRESS=${SEERR_ADDRESS:-}
+      - TRAKT_CLIENT_ID=${TRAKT_CLIENT_ID:-}
+      - TRAKT_CLIENT_SECRET=${TRAKT_CLIENT_SECRET:-}
+      - FLARESOLVERR_URL=${FLARESOLVERR_URL:-}
+      ## Jellyfin
+      - JF_ADDRESS=${JF_ADDRESS:-}
+      - JF_API_KEY=${JF_API_KEY:-}
+      ## Plex Library
+      - PLEX_REFRESH=${PLEX_REFRESH:-}
+      - PLEX_MOUNT_DIR=${PLEX_MOUNT_DIR:-}
+      - DUPLICATE_CLEANUP=${DUPLICATE_CLEANUP:-}
+      - CLEANUP_INTERVAL=${CLEANUP_INTERVAL:-}
+      ## Notifications
+      - NOTIFICATION_URL=${NOTIFICATION_URL:-}
+      - NOTIFICATION_EVENTS=${NOTIFICATION_EVENTS:-}
+      - NOTIFICATION_LEVEL=${NOTIFICATION_LEVEL:-}
+      ## Blackhole
+      - BLACKHOLE_ENABLED=${BLACKHOLE_ENABLED:-}
+      - BLACKHOLE_DIR=${BLACKHOLE_DIR:-}
+      - BLACKHOLE_POLL_INTERVAL=${BLACKHOLE_POLL_INTERVAL:-}
+      - BLACKHOLE_DEBRID=${BLACKHOLE_DEBRID:-}
       ## Status Web UI & Settings Editor
-      - STATUS_UI_ENABLED=true
-     # - STATUS_UI_PORT=8080
-      ## Uncomment and set a password to enable the settings editor at /settings
-     # - STATUS_UI_AUTH=admin:changeme
-      ## ffprobe Monitor (enabled by default)
-     # - FFPROBE_MONITOR_ENABLED=true
-     # - FFPROBE_STUCK_TIMEOUT=300
-      ## Config Validation (runs on startup, set to true to skip)
-     # - SKIP_VALIDATION=false
-    ## Status Web UI
+      - STATUS_UI_ENABLED=${STATUS_UI_ENABLED:-true}
+      - STATUS_UI_PORT=${STATUS_UI_PORT:-8080}
+      - STATUS_UI_AUTH=${STATUS_UI_AUTH:-}
+      ## Monitoring
+      - FFPROBE_MONITOR_ENABLED=${FFPROBE_MONITOR_ENABLED:-}
+      - FFPROBE_STUCK_TIMEOUT=${FFPROBE_STUCK_TIMEOUT:-}
+      - FFPROBE_POLL_INTERVAL=${FFPROBE_POLL_INTERVAL:-}
+      - AUTO_UPDATE_INTERVAL=${AUTO_UPDATE_INTERVAL:-}
+      ## Logging
+      - PDZURG_LOG_LEVEL=${PDZURG_LOG_LEVEL:-}
+      - PDZURG_LOG_COUNT=${PDZURG_LOG_COUNT:-}
+      - PDZURG_LOG_SIZE=${PDZURG_LOG_SIZE:-}
+      - COLOR_LOG_ENABLED=${COLOR_LOG_ENABLED:-}
+      ## Advanced
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - SKIP_VALIDATION=${SKIP_VALIDATION:-}
+    ## Status Web UI & Prometheus metrics
     ports:
-      - "8080:8080"
-    # Example to attach to gluetun vpn container if realdebrid blocks IP address
+      - "${STATUS_UI_PORT:-8080}:${STATUS_UI_PORT:-8080}"
+    # Uncomment to route traffic through a VPN container (e.g., gluetun)
     # network_mode: container:gluetun
     devices:
       - /dev/fuse:/dev/fuse:rwm
     cap_add:
-      - SYS_ADMIN     
+      - SYS_ADMIN
     security_opt:
-      - apparmor:unconfined    
+      - apparmor:unconfined
       - no-new-privileges

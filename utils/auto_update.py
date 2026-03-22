@@ -17,11 +17,13 @@ class Update(ProcessHandler):
             time.sleep(1)
 
     def auto_update_interval(self):
-        if os.getenv('AUTO_UPDATE_INTERVAL') is None:
-            interval = 24
-        else:
-            interval = float(os.getenv('AUTO_UPDATE_INTERVAL'))
-        return interval
+        val = os.getenv('AUTO_UPDATE_INTERVAL', '').strip()
+        if not val:
+            return 24
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return 24
 
     def auto_update(self, process_name, enable_update):
         if enable_update:

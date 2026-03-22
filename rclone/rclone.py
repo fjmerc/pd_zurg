@@ -97,14 +97,9 @@ def setup():
             os.makedirs(f"/data/{mn}", exist_ok=True)
 
             if NFSMOUNT is not None and NFSMOUNT.lower() == "true":
-                if NFSPORT:
-                    port = NFSPORT
-                    logger.info(f"Setting up rclone NFS mount server for {mn} at 0.0.0.0:{port}")
-                    rclone_command = ["rclone", "serve", "nfs", f"{mn}:", "--config", "/config/rclone.config", "--addr", f"0.0.0.0:{port}", "--vfs-cache-mode=full", "--dir-cache-time=10"]
-                else:
-                    port = find_available_port(8001, 8999)
-                    logger.info(f"Setting up rclone NFS mount server for {mn} at 0.0.0.0:{port}")
-                    rclone_command = ["rclone", "serve", "nfs", f"{mn}:", "--config", "/config/rclone.config", "--addr", f"0.0.0.0:{port}", "--vfs-cache-mode=full", "--dir-cache-time=10"]
+                port = NFSPORT if NFSPORT else find_available_port(8001, 8999)
+                logger.info(f"Setting up rclone NFS mount for {mn} at /data/{mn} (NFS server on 0.0.0.0:{port})")
+                rclone_command = ["rclone", "nfsmount", f"{mn}:", f"/data/{mn}", "--config", "/config/rclone.config", "--addr", f"0.0.0.0:{port}", "--vfs-cache-mode=full", "--dir-cache-time=10"]
             else:
                 rclone_command = ["rclone", "mount", f"{mn}:", f"/data/{mn}", "--config", "/config/rclone.config", "--allow-other", "--poll-interval=0", "--dir-cache-time=10"]
             if not PLEXDEBRID or idx != len(mount_names) - 1:

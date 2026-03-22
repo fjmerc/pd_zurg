@@ -447,7 +447,7 @@ _DASHBOARD_HTML = '''<!DOCTYPE html>
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);padding:20px;max-width:1200px;margin:0 auto}
 a{color:var(--blue);text-decoration:none}
 h1{color:var(--blue);margin-bottom:4px;font-size:1.6em;font-weight:600}
-.header{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px}
+.header{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;gap:10px}
 .meta{color:var(--text2);font-size:.85em;margin-bottom:20px}
 .banner{padding:12px 16px;border-radius:8px;margin-bottom:16px;font-size:.9em;font-weight:500;display:none}
 .banner.warn{display:block;background:#d299221a;border:1px solid var(--yellow);color:var(--yellow)}
@@ -460,6 +460,7 @@ h1{color:var(--blue);margin-bottom:4px;font-size:1.6em;font-weight:600}
 table{width:100%;border-collapse:collapse}
 th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border2);font-size:.85em}
 th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;letter-spacing:.05em}
+#procs td:nth-child(2),#procs td:nth-child(3){text-align:center}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
 .dot.green{background:var(--green)}.dot.red{background:var(--red)}.dot.yellow{background:var(--yellow)}
 .svc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
@@ -515,7 +516,7 @@ details summary:hover{color:var(--blue)}
 <div class="grid">
   <div class="card">
     <h2>Processes</h2>
-    <table><thead><tr><th>Name</th><th>PID</th><th>Restarts</th><th>Status</th><th id="actions-hdr"></th></tr></thead>
+    <table><thead><tr><th>Name</th><th style="text-align:center">PID</th><th style="text-align:center">Restarts</th><th>Status</th><th id="actions-hdr"></th></tr></thead>
     <tbody id="procs"></tbody></table>
   </div>
   <div class="card">
@@ -728,7 +729,7 @@ function updateMountHistory(){
   fetch('/api/mount-history').then(r=>r.json()).then(hist=>{
     const el=document.getElementById('mount-timeline');
     if(!Object.keys(hist).length){el.innerHTML='';return;}
-    let h='<div style="font-size:.75em;color:var(--text3);margin-bottom:6px;display:flex;gap:12px;align-items:center">Mount History <span class="dot green" style="margin-left:4px"></span>Healthy <span class="dot yellow"></span>Degraded <span class="dot red"></span>Down</div>';
+    let h='';
     Object.keys(hist).forEach(path=>{
       const entries=hist[path];
       const shortPath=path.split('/').pop()||path;
@@ -753,6 +754,7 @@ function updateMountHistory(){
       });
       h+='</div></div>';
     });
+    h+='<div style="font-size:.7em;color:var(--text3);margin-top:8px;display:flex;gap:10px;align-items:center"><span class="dot green"></span>Healthy <span class="dot yellow"></span>Degraded <span class="dot red"></span>Down</div>';
     el.innerHTML=h;
   }).catch(()=>{});
 }

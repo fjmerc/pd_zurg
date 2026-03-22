@@ -149,6 +149,13 @@ ENV_SCHEMA = [
         ],
     },
     {
+        'name': 'General',
+        'description': 'General container settings',
+        'fields': [
+            ('TZ', 'Timezone', 'string', False, 'Container timezone (e.g., America/New_York, Europe/London)'),
+        ],
+    },
+    {
         'name': 'Advanced',
         'description': 'Rarely changed options',
         'fields': [
@@ -904,6 +911,7 @@ _SETTINGS_JSON_TO_ENV = {
     'All Debrid API Key':       'AD_API_KEY',
     'Show Menu on Startup':     'SHOW_MENU',
     'Log to file':              'PD_LOGFILE',
+    'Torbox API Key':           'TORBOX_API_KEY',
 }
 
 # Lock to prevent concurrent .env writes from racing
@@ -1064,6 +1072,43 @@ def _sync_env_to_plex_debrid(env_values):
         if settings.get('Debug printing', '') != new_debug:
             settings['Debug printing'] = new_debug
             changed = True
+
+    # Rebuild "Debrid Services" based on which API keys are present
+    _KEY_TO_SERVICE = {
+        'RD_API_KEY': 'Real Debrid',
+        'AD_API_KEY': 'All Debrid',
+        'TORBOX_API_KEY': 'Torbox',
+    }
+    debrid_services = list(settings.get('Debrid Services', []))
+    for env_key, svc_name in _KEY_TO_SERVICE.items():
+        has_key = bool(env_values.get(env_key, ''))
+        in_list = svc_name in debrid_services
+        if has_key and not in_list:
+            debrid_services.append(svc_name)
+            changed = True
+        elif not has_key and in_list:
+            debrid_services.remove(svc_name)
+            changed = True
+    if debrid_services != settings.get('Debrid Services', []):
+        settings['Debrid Services'] = debrid_services
+
+    # Plex/Jellyfin mutual exclusion (mirrors pd_setup() behavior)
+    jf_key = env_values.get('JF_API_KEY', '')
+    jf_addr = env_values.get('JF_ADDRESS', '')
+    plex_user = env_values.get('PLEX_USER', '')
+    if jf_key and jf_addr and not plex_user:
+        # Jellyfin mode: clear Plex settings
+        for field, default in [('Plex users', []), ('Plex server address', 'http://localhost:32400'),
+                               ('Plex library refresh', [])]:
+            if settings.get(field) != default:
+                settings[field] = default
+                changed = True
+    elif plex_user and not (jf_key and jf_addr):
+        # Plex mode: clear Jellyfin settings
+        for field, default in [('Jellyfin API Key', ''), ('Jellyfin server address', 'http://localhost:8096')]:
+            if settings.get(field) != default:
+                settings[field] = default
+                changed = True
 
     if not changed:
         return

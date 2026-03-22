@@ -103,3 +103,65 @@ class TestServiceDependencies:
         """Expected services should all be defined."""
         expected = {'zurg', 'rclone', 'plex_debrid', 'blackhole', 'notifications', 'status_ui'}
         assert expected == set(SERVICE_DEPENDENCIES.keys())
+
+    def test_plex_debrid_deps_include_debrid_keys(self):
+        """Debrid API key changes should trigger plex_debrid restart."""
+        pd_deps = SERVICE_DEPENDENCIES['plex_debrid']
+        assert 'RD_API_KEY' in pd_deps
+        assert 'AD_API_KEY' in pd_deps
+        assert 'TORBOX_API_KEY' in pd_deps
+
+    def test_plex_debrid_deps_include_jellyfin(self):
+        """Jellyfin config changes should trigger plex_debrid restart."""
+        pd_deps = SERVICE_DEPENDENCIES['plex_debrid']
+        assert 'JF_API_KEY' in pd_deps
+        assert 'JF_ADDRESS' in pd_deps
+
+    def test_plex_debrid_deps_include_trakt_and_flaresolverr(self):
+        """Trakt and Flaresolverr changes should trigger plex_debrid restart."""
+        pd_deps = SERVICE_DEPENDENCIES['plex_debrid']
+        assert 'TRAKT_CLIENT_ID' in pd_deps
+        assert 'TRAKT_CLIENT_SECRET' in pd_deps
+        assert 'FLARESOLVERR_URL' in pd_deps
+
+    def test_debrid_key_change_restarts_both_zurg_and_plex_debrid(self):
+        """RD_API_KEY should trigger zurg (+ cascade) and plex_debrid."""
+        services = _determine_restarts({'RD_API_KEY'})
+        assert 'zurg' in services
+        assert 'plex_debrid' in services
+
+
+class TestRefreshGlobals:
+
+    def test_refreshes_config_values(self):
+        """refresh_globals() should update a dict with fresh config values."""
+        from base import refresh_globals, config
+        target = {'RDAPIKEY': 'stale_value', 'PLEXADD': 'stale_plex'}
+        refresh_globals(target)
+        assert target['RDAPIKEY'] == config.RDAPIKEY
+        assert target['PLEXADD'] == config.PLEXADD
+
+    def test_does_not_add_non_config_keys(self):
+        """refresh_globals() should not inject keys that aren't in __all__."""
+        from base import refresh_globals
+        target = {'my_custom_var': 'untouched'}
+        refresh_globals(target)
+        assert target['my_custom_var'] == 'untouched'
+
+    def test_updates_after_config_load(self):
+        """After config.load(), refresh_globals should reflect new values."""
+        from base import refresh_globals, config
+        import os
+        old_val = os.environ.get('SEERR_ADDRESS', '')
+        try:
+            os.environ['SEERR_ADDRESS'] = 'http://test-refresh:5055'
+            config.load()
+            target = {'SEERRADD': 'old'}
+            refresh_globals(target)
+            assert target['SEERRADD'] == 'http://test-refresh:5055'
+        finally:
+            if old_val:
+                os.environ['SEERR_ADDRESS'] = old_val
+            else:
+                os.environ.pop('SEERR_ADDRESS', None)
+            config.load()

@@ -111,6 +111,14 @@ def main():
 
     start_process_monitor(logger)
 
+    # Watch settings.json for changes from the plex_debrid interactive menu
+    # or manual edits, and sync them back to .env
+    try:
+        from utils import settings_watcher
+        settings_watcher.start()
+    except Exception as e:
+        logger.error(f"Error starting settings watcher: {e}", exc_info=True)
+
     while True:
         signal.pause()
 

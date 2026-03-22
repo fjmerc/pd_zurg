@@ -33,6 +33,9 @@ SERVICE_DEPENDENCIES = {
     'plex_debrid': {
         'PD_ENABLED', 'PLEX_USER', 'PLEX_TOKEN', 'PLEX_ADDRESS',
         'SHOW_MENU', 'SEERR_API_KEY', 'SEERR_ADDRESS',
+        'JF_API_KEY', 'JF_ADDRESS', 'RD_API_KEY', 'AD_API_KEY',
+        'TORBOX_API_KEY', 'TRAKT_CLIENT_ID', 'TRAKT_CLIENT_SECRET',
+        'FLARESOLVERR_URL', 'PD_LOGFILE',
     },
     'blackhole': {
         'BLACKHOLE_ENABLED', 'BLACKHOLE_DIR', 'BLACKHOLE_POLL_INTERVAL',
@@ -73,6 +76,17 @@ def _reload_env():
                 logger.info(f"[reload] {key} changed: '{old_val}' -> '{new_val}'")
             os.environ[key] = new_val if new_val is not None else ''
             changed.add(key)
+
+    # Detect keys removed from .env (present in os.environ but absent from file)
+    try:
+        from utils.settings_api import _ALL_KEYS
+        for key in _ALL_KEYS:
+            if key not in new_values and os.environ.get(key, ''):
+                logger.info(f"[reload] {key} removed from .env")
+                os.environ[key] = ''
+                changed.add(key)
+    except ImportError:
+        pass
 
     return changed
 
@@ -148,6 +162,39 @@ def _do_reload():
                                 logger.info(f"[reload] Stopping {desc}")
                                 handler.stop_process(name, entry['key_type'])
                             start_entries.append(entry)
+
+            # Re-run setup functions to regenerate config files before restart
+            if 'zurg' in process_services:
+                try:
+                    from zurg.setup import zurg_setup
+                    logger.info("[reload] Regenerating zurg config")
+                    zurg_setup()
+                except Exception as e:
+                    logger.error(f"[reload] Failed to regenerate zurg config: {e}")
+
+            if 'rclone' in process_services:
+                try:
+                    from rclone.rclone import regenerate_config
+                    logger.info("[reload] Regenerating rclone config")
+                    regenerate_config()
+                except Exception as e:
+                    logger.error(f"[reload] Failed to regenerate rclone config: {e}")
+
+            # Rewrite the plex_debrid Trakt .env if credentials changed
+            if 'plex_debrid' in process_services and changed & {'TRAKT_CLIENT_ID', 'TRAKT_CLIENT_SECRET'}:
+                try:
+                    client_id = os.environ.get('TRAKT_CLIENT_ID', '')
+                    client_secret = os.environ.get('TRAKT_CLIENT_SECRET', '')
+                    if not (client_id and client_secret):
+                        client_id = '0183a05ad97098d87287fe46da4ae286f434f32e8e951caad4cc147c947d79a3'
+                        client_secret = '87109ed53fe1b4d6b0239e671f36cd2f17378384fa1ae09888a32643f83b7e6c'
+                    env_path = './.env'
+                    with open(env_path, 'w') as f:
+                        f.write(f'CLIENT_ID={client_id}\n')
+                        f.write(f'CLIENT_SECRET={client_secret}\n')
+                    logger.info("[reload] Rewrote plex_debrid Trakt .env")
+                except Exception as e:
+                    logger.error(f"[reload] Failed to rewrite Trakt .env: {e}")
 
             # Start affected services (forward dependency order)
             for svc_name in reversed(stop_order):

@@ -27,7 +27,65 @@ def obscure_password(password):
         logger.error(f"Error obscuring password: {e}")
         return None
 
+def regenerate_config():
+    """Regenerate rclone.config from current config values.
+
+    Separated from setup() so config_reload can regenerate the config
+    file without re-launching processes.
+    """
+    refresh_globals(globals())
+
+    if not RCLONEMN:
+        raise Exception("Please set a name for the rclone mount")
+    if not RDAPIKEY and not ADAPIKEY:
+        raise Exception("Please set the API Key for the rclone mount")
+
+    config_file_path_rd = '/zurg/RD/config.yml'
+    config_file_path_ad = '/zurg/AD/config.yml'
+
+    if RDAPIKEY and ADAPIKEY:
+        RCLONEMN_RD = f"{RCLONEMN}_RD"
+        RCLONEMN_AD = f"{RCLONEMN}_AD"
+    else:
+        RCLONEMN_RD = RCLONEMN_AD = RCLONEMN
+
+    rclone_config_path = "/config/rclone.config"
+    if os.path.exists(rclone_config_path):
+        backup_path = rclone_config_path + ".bak"
+        shutil.copy2(rclone_config_path, backup_path)
+
+    with atomic_write(rclone_config_path) as f:
+        if RDAPIKEY:
+            rd_port = get_port_from_config(config_file_path_rd, 'RDAPIKEY')
+            f.write(f"[{RCLONEMN_RD}]\n")
+            f.write("type = webdav\n")
+            f.write(f"url = http://localhost:{rd_port}/dav\n")
+            f.write("vendor = other\n")
+            f.write("pacer_min_sleep = 0\n")
+            if ZURGUSER and ZURGPASS:
+                obscured_password = obscure_password(ZURGPASS)
+                if obscured_password:
+                    f.write(f"user = {ZURGUSER}\n")
+                    f.write(f"pass = {obscured_password}\n")
+
+        if ADAPIKEY:
+            ad_port = get_port_from_config(config_file_path_ad, 'ADAPIKEY')
+            f.write(f"[{RCLONEMN_AD}]\n")
+            f.write("type = webdav\n")
+            f.write(f"url = http://localhost:{ad_port}/dav\n")
+            f.write("vendor = other\n")
+            f.write("pacer_min_sleep = 0\n")
+            if ZURGUSER and ZURGPASS:
+                obscured_password = obscure_password(ZURGPASS)
+                if obscured_password:
+                    f.write(f"user = {ZURGUSER}\n")
+                    f.write(f"pass = {obscured_password}\n")
+
+    logger.info("Regenerated rclone.config")
+
+
 def setup():
+    refresh_globals(globals())
     logger.info("Checking rclone flags")
 
     try:

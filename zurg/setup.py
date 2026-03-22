@@ -4,6 +4,7 @@ from utils.file_utils import atomic_write
 
 
 def zurg_setup():
+    refresh_globals(globals())
     logger = get_logger()
     logger.info("Setting up Zurg")
     zurg_app_override = '/config/zurg'

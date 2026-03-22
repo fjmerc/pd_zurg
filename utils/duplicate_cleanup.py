@@ -131,18 +131,22 @@ def cleanup_interval():
 
 def cleanup_schedule():
     time.sleep(60)
-    interval = cleanup_interval()
-    interval_minutes = int(interval * 60)
-    schedule.every(interval_minutes).minutes.do(start_cleanup)
     while True:
-        schedule.run_pending()
-        time.sleep(1)
+        start_cleanup()
+        # Re-read interval each cycle so WebUI changes take effect
+        from base import config
+        interval_hours = float(config.CLEANUPINT) if config.CLEANUPINT else 24
+        interval_seconds = int(interval_hours * 3600)
+        logger.debug(f"Next duplicate cleanup in {interval_hours}h")
+        time.sleep(interval_seconds)
 
 def start_cleanup():
     logger.info("Starting duplicate cleanup")
     start_time = get_start_time()
     try:
-        plex_server = PlexServer(PLEXADD, PLEXTOKEN)
+        # Read fresh values from config singleton (module globals may be stale after reload)
+        from base import config
+        plex_server = PlexServer(config.PLEXADD, config.PLEXTOKEN)
         process_duplicates(plex_server, "show", "episode")
         process_duplicates(plex_server, "movie", "movie")
     except requests.exceptions.ConnectionError as e:

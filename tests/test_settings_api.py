@@ -1139,14 +1139,14 @@ class TestSyncEnvToPlexDebrid:
         assert written['Overseerr Base URL'] == 'http://new:5055'
         assert written['Overseerr API Key'] == 'newkey'
 
-    def test_syncs_all_simple_mappings(self, tmp_path):
+    def test_syncs_all_simple_mappings_plex_mode(self, tmp_path):
         sf = self._make_settings(tmp_path, {})
         env_values = {
             'SEERR_ADDRESS': 'http://seerr:5055',
             'SEERR_API_KEY': 'seerrkey',
             'PLEX_ADDRESS': 'http://plex:32400',
-            'JF_API_KEY': 'jfkey',
-            'JF_ADDRESS': 'http://jf:8096',
+            'PLEX_USER': 'testuser',
+            'PLEX_TOKEN': 'testtoken',
             'RD_API_KEY': 'rdkey',
             'AD_API_KEY': 'adkey',
             'SHOW_MENU': 'false',
@@ -1158,12 +1158,26 @@ class TestSyncEnvToPlexDebrid:
         assert written['Overseerr Base URL'] == 'http://seerr:5055'
         assert written['Overseerr API Key'] == 'seerrkey'
         assert written['Plex server address'] == 'http://plex:32400'
-        assert written['Jellyfin API Key'] == 'jfkey'
-        assert written['Jellyfin server address'] == 'http://jf:8096'
         assert written['Real Debrid API Key'] == 'rdkey'
         assert written['All Debrid API Key'] == 'adkey'
         assert written['Show Menu on Startup'] == 'false'
         assert written['Log to file'] == 'true'
+
+    def test_syncs_all_simple_mappings_jellyfin_mode(self, tmp_path):
+        sf = self._make_settings(tmp_path, {})
+        env_values = {
+            'SEERR_ADDRESS': 'http://seerr:5055',
+            'SEERR_API_KEY': 'seerrkey',
+            'JF_API_KEY': 'jfkey',
+            'JF_ADDRESS': 'http://jf:8096',
+            'RD_API_KEY': 'rdkey',
+            'SHOW_MENU': 'false',
+        }
+        with patch('utils.settings_api.SETTINGS_JSON_FILE', sf):
+            _sync_env_to_plex_debrid(env_values)
+        written = json.loads(open(sf).read())
+        assert written['Jellyfin API Key'] == 'jfkey'
+        assert written['Jellyfin server address'] == 'http://jf:8096'
 
     def test_syncs_plex_user_token(self, tmp_path):
         sf = self._make_settings(tmp_path, {'Plex users': []})
@@ -1230,3 +1244,49 @@ class TestSyncEnvToPlexDebrid:
              patch('os.kill'):
             write_env_values(values)
         mock_sync.assert_called_once()
+
+    def test_rebuilds_debrid_services_on_key_add(self, tmp_path):
+        sf = self._make_settings(tmp_path, {'Debrid Services': []})
+        env_values = {'RD_API_KEY': 'rdkey', 'AD_API_KEY': 'adkey'}
+        with patch('utils.settings_api.SETTINGS_JSON_FILE', sf):
+            _sync_env_to_plex_debrid(env_values)
+        written = json.loads(open(sf).read())
+        assert 'Real Debrid' in written['Debrid Services']
+        assert 'All Debrid' in written['Debrid Services']
+
+    def test_rebuilds_debrid_services_on_key_remove(self, tmp_path):
+        sf = self._make_settings(tmp_path, {
+            'Debrid Services': ['Real Debrid', 'All Debrid'],
+            'Real Debrid API Key': 'rdkey',
+        })
+        env_values = {'RD_API_KEY': 'rdkey', 'AD_API_KEY': ''}
+        with patch('utils.settings_api.SETTINGS_JSON_FILE', sf):
+            _sync_env_to_plex_debrid(env_values)
+        written = json.loads(open(sf).read())
+        assert 'Real Debrid' in written['Debrid Services']
+        assert 'All Debrid' not in written['Debrid Services']
+
+    def test_jellyfin_mode_clears_plex(self, tmp_path):
+        sf = self._make_settings(tmp_path, {
+            'Plex users': [['user', 'token']],
+            'Plex server address': 'http://plex:32400',
+        })
+        env_values = {'JF_API_KEY': 'jfkey', 'JF_ADDRESS': 'http://jf:8096'}
+        with patch('utils.settings_api.SETTINGS_JSON_FILE', sf):
+            _sync_env_to_plex_debrid(env_values)
+        written = json.loads(open(sf).read())
+        assert written['Plex users'] == []
+        assert written['Plex server address'] == 'http://localhost:32400'
+        assert written['Jellyfin API Key'] == 'jfkey'
+
+    def test_plex_mode_clears_jellyfin(self, tmp_path):
+        sf = self._make_settings(tmp_path, {
+            'Jellyfin API Key': 'jfkey',
+            'Jellyfin server address': 'http://jf:8096',
+        })
+        env_values = {'PLEX_USER': 'user', 'PLEX_TOKEN': 'token', 'PLEX_ADDRESS': 'http://plex:32400'}
+        with patch('utils.settings_api.SETTINGS_JSON_FILE', sf):
+            _sync_env_to_plex_debrid(env_values)
+        written = json.loads(open(sf).read())
+        assert written['Jellyfin API Key'] == ''
+        assert written['Plex server address'] == 'http://plex:32400'

@@ -49,12 +49,17 @@ def pd_setup():
                         existing_services.append(value)
                 json_data[service_type] = existing_services
 
-            if (PLEXUSER) and (JFAPIKEY or JFADD):
+            # Jellyfin is only "configured" when the API key is set —
+            # a default/leftover server address alone doesn't count
+            jf_configured = bool(JFAPIKEY)
+            plex_configured = bool(PLEXUSER)
+
+            if plex_configured and jf_configured:
                 raise Exception("Plex and Jellyfin cannot be configured at the same time. Please choose one.")
-            if not PLEXUSER and not (JFAPIKEY and JFADD): 
+            if not plex_configured and not jf_configured:
                 raise Exception("Please set either PLEX_USER or JF_API_KEY and JF_ADDRESS to enable plex_debrid")
 
-            if JFAPIKEY or JFADD:
+            if jf_configured:
                 if not JFAPIKEY:
                     raise MissingEnvironmentVariable("JF_API_KEY") 
                 if not JFADD:                  

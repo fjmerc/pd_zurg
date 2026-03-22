@@ -30,20 +30,23 @@ class ZurgUpdate(Update, ProcessHandler):
             self.logger.debug(f"No matching {process_name} w/ {key_type} processes found")
         
     def start_process(self, process_name, config_dir=None, suppress_logging=False):
+        from base import config
         if str(ZURGLOGLEVEL).lower()=='off':
             suppress_logging = True
             self.logger.info(f"Suppressing {process_name} logging")
-        directories_to_check = ["/zurg/RD", "/zurg/AD"]
 
-        for dir_to_check in directories_to_check:
+        # Only start instances whose API key is actually set
+        instances = []
+        if config.RDAPIKEY:
+            instances.append(("/zurg/RD", "RealDebrid"))
+        if config.ADAPIKEY:
+            instances.append(("/zurg/AD", "AllDebrid"))
+
+        for dir_to_check, key_type in instances:
             zurg_executable = os.path.join(dir_to_check, 'zurg')
             if os.path.exists(zurg_executable):
-                if dir_to_check == "/zurg/RD":
-                    key_type = "RealDebrid"
-                elif dir_to_check == "/zurg/AD":
-                    key_type = "AllDebrid"
                 command = [zurg_executable]
-                super().start_process(process_name, dir_to_check, command, key_type, suppress_logging=suppress_logging)    
+                super().start_process(process_name, dir_to_check, command, key_type, suppress_logging=suppress_logging)
                 
     def update_check(self, process_name):
         self.logger.info(f"Checking for available {process_name} updates")
@@ -90,12 +93,16 @@ class ZurgUpdate(Update, ProcessHandler):
                 if not success:
                     raise Exception(f"Failed to download and extract the release for {process_name}.")
 
-                directories_to_check = ["/zurg/RD", "/zurg/AD"]
-                zurg_presence = {dir_to_check: os.path.exists(os.path.join(dir_to_check, 'zurg')) for dir_to_check in directories_to_check}
+                from base import config
+                instances = []
+                if config.RDAPIKEY:
+                    instances.append(("/zurg/RD", "RealDebrid"))
+                if config.ADAPIKEY:
+                    instances.append(("/zurg/AD", "AllDebrid"))
+                zurg_presence = {d: os.path.exists(os.path.join(d, 'zurg')) for d, _ in instances}
 
-                for dir_to_check in directories_to_check:
-                    if zurg_presence[dir_to_check]:
-                        key_type = "RealDebrid" if dir_to_check == "/zurg/RD" else "AllDebrid"
+                for dir_to_check, key_type in instances:
+                    if zurg_presence.get(dir_to_check):
                         zurg_app_base = '/zurg/zurg'
                         zurg_executable_path = os.path.join(dir_to_check, 'zurg')
                         self.stop_process(process_name, key_type)

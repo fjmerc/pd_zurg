@@ -192,6 +192,14 @@ def zurg_setup():
             raise Exception("Please set the API Key for the debrid service")
         logger.debug("Configuring the debrid API key for Zurg")
 
+        # Clean up stale instance directories when an API key is removed
+        if not RDAPIKEY and os.path.exists('/zurg/RD/zurg'):
+            logger.info("RD_API_KEY not set — removing stale /zurg/RD/ instance")
+            shutil.rmtree('/zurg/RD/', ignore_errors=True)
+        if not ADAPIKEY and os.path.exists('/zurg/AD/zurg'):
+            logger.info("AD_API_KEY not set — removing stale /zurg/AD/ instance")
+            shutil.rmtree('/zurg/AD/', ignore_errors=True)
+
         if RDAPIKEY:
             rd_dir = '/zurg/RD/'
             logger.info(f"Setting up Zurg w/ RealDebrid instance in directory: {rd_dir}")

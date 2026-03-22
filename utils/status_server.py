@@ -642,12 +642,15 @@ details summary:hover{color:var(--blue)}
 .wf-node.green{border-color:var(--green);color:var(--green)}.wf-node.blue{border-color:var(--blue);color:var(--blue)}.wf-node.yellow{border-color:var(--yellow);color:var(--yellow)}.wf-node.orange{border-color:var(--orange);color:var(--orange)}.wf-node.purple{border-color:#bc8cff;color:#bc8cff}.wf-node.muted{border-color:var(--border);color:var(--text2)}
 .wf-arrow{color:var(--text3);font-size:1.1em;padding:0 6px;flex-shrink:0}
 .wf-label{font-size:.65em;color:var(--text3);text-align:center;margin-top:-4px;margin-bottom:2px;padding:0 6px}
-.wf-branch{display:flex;gap:20px;margin:8px 0 0 0;flex-wrap:wrap}
-.wf-branch>div{flex:1;min-width:280px;padding:12px;border-radius:8px;border:1px solid var(--border2);background:var(--bg)}
+.wf-branch{display:flex;flex-direction:column;gap:10px;margin:8px 0 0 0}
+.wf-branch>div{padding:12px;border-radius:8px;border:1px solid var(--border2);background:var(--bg)}
 .wf-branch>div>.wf-branch-title{font-size:.75em;font-weight:600;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--border2)}
 .wf-branch>div>.wf-branch-title.local{color:var(--text2)}.wf-branch>div>.wf-branch-title.debrid{color:var(--yellow)}
-.wf-desc{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border2);font-size:.78em;color:var(--text2);line-height:1.5}
-.wf-desc strong{color:var(--text)}
+.wf-glossary{margin-top:16px;padding-top:14px;border-top:1px solid var(--border2)}
+.wf-glossary-title{font-size:.8em;font-weight:600;color:var(--text);margin-bottom:10px}
+.wf-glossary dl{margin:0;font-size:.78em;line-height:1.6}
+.wf-glossary dt{color:var(--text);font-weight:600;margin-top:8px}
+.wf-glossary dd{color:var(--text2);margin:0 0 0 0;padding:0 0 8px 0;border-bottom:1px solid var(--border2)}
 @media(max-width:600px){.wf-row{gap:2px}.wf-node{padding:6px 8px;font-size:.72em;min-width:60px}.wf-arrow{font-size:.9em;padding:0 3px}}
       </style>
 
@@ -707,18 +710,31 @@ details summary:hover{color:var(--blue)}
         </div>
       </div>
 
-      <!-- Component descriptions -->
-      <div class="wf-desc">
-        <div><strong style="color:var(--green)">Plex / Jellyfin</strong> &mdash; Media server that streams your library to any device. Scans local disks and rclone mounts for content.</div>
-        <div><strong style="color:var(--text)">Overseerr</strong> &mdash; Request management UI. Users browse and request movies/shows, which get routed to Sonarr/Radarr for automated downloading.</div>
-        <div><strong style="color:var(--text)">Sonarr / Radarr</strong> &mdash; Automated TV show and movie managers. Monitor indexers, manage quality profiles, rename files, and track new episodes. Route downloads to different clients using tags.</div>
-        <div><strong style="color:var(--green)">plex_debrid</strong> &mdash; Monitors Plex/Trakt/Overseerr watchlists. Searches torrent indexers for cached releases matching your quality profile and sends the best match to your debrid service.</div>
-        <div><strong style="color:var(--yellow)">Real-Debrid / AllDebrid</strong> &mdash; Cloud torrent cache. Stores popular torrents on fast servers. Instant access via HTTPS &mdash; no seeding, no VPN needed on this path.</div>
-        <div><strong style="color:var(--blue)">Zurg</strong> &mdash; Connects to your debrid API and serves your cached content as a WebDAV file server. Makes your cloud library look like local files.</div>
-        <div><strong style="color:var(--blue)">rclone</strong> &mdash; Mounts the Zurg WebDAV server as a local directory at <code style="color:var(--green);font-size:.9em">/data/pd_zurg</code> so your media server can access the files.</div>
-        <div><strong style="color:var(--orange)">Blackhole</strong> &mdash; Watches a folder for .torrent/.magnet files dropped by Sonarr/Radarr. Sends them to Real-Debrid automatically. Sonarr continues monitoring for new episodes.</div>
-        <div><strong style="color:var(--text)">qBittorrent / Usenet</strong> &mdash; Traditional download clients for the local path. qBittorrent handles torrents, SABnzbd/NZBGet handle Usenet NZBs. Both store files to local disk.</div>
-        <div><strong style="color:#bc8cff">VPN</strong> &mdash; Encrypts torrent/Usenet traffic and hides your IP. Required for the local download path (gluetun, Mullvad, etc). Not needed for the debrid path &mdash; that&rsquo;s just HTTPS to Real-Debrid&rsquo;s API.</div>
+      <!-- Component glossary -->
+      <div class="wf-glossary">
+        <div class="wf-glossary-title">Glossary</div>
+        <dl>
+          <dt style="color:var(--green)">Plex / Jellyfin</dt>
+          <dd>Media server that streams your library to any device. Scans local disks and rclone mounts for content.</dd>
+          <dt style="color:var(--text)">Overseerr</dt>
+          <dd>Request management UI. Users browse and request movies/shows, which get routed to Sonarr/Radarr for automated downloading.</dd>
+          <dt style="color:var(--text)">Sonarr / Radarr</dt>
+          <dd>Automated TV show and movie managers. Monitor indexers, manage quality profiles, rename files, and track new episodes. Route downloads to different clients using tags.</dd>
+          <dt style="color:var(--green)">plex_debrid</dt>
+          <dd>Monitors Plex/Trakt/Overseerr watchlists. Searches torrent indexers for cached releases matching your quality profile and sends the best match to your debrid service.</dd>
+          <dt style="color:var(--yellow)">Real-Debrid / AllDebrid</dt>
+          <dd>Cloud torrent cache. Stores popular torrents on fast servers. Instant access via HTTPS &mdash; no seeding, no VPN needed on this path.</dd>
+          <dt style="color:var(--blue)">Zurg</dt>
+          <dd>Connects to your debrid API and serves your cached content as a WebDAV file server. Makes your cloud library look like local files.</dd>
+          <dt style="color:var(--blue)">rclone</dt>
+          <dd>Mounts the Zurg WebDAV server as a local directory at <code style="color:var(--green);font-size:.95em">/data/pd_zurg</code> so your media server can access the files.</dd>
+          <dt style="color:var(--orange)">Blackhole</dt>
+          <dd>Watches a folder for .torrent/.magnet files dropped by Sonarr/Radarr. Sends them to Real-Debrid automatically. Sonarr continues monitoring for new episodes.</dd>
+          <dt>qBittorrent / Usenet</dt>
+          <dd>Traditional download clients for the local path. qBittorrent handles torrents, SABnzbd/NZBGet handle Usenet NZBs. Both store files to local disk.</dd>
+          <dt style="color:#bc8cff">VPN</dt>
+          <dd>Encrypts torrent/Usenet traffic and hides your IP. Required for the local download path (gluetun, Mullvad, etc). Not needed for the debrid path &mdash; that&rsquo;s just HTTPS to Real-Debrid&rsquo;s API.</dd>
+        </dl>
       </div>
     </details>
   </div>

@@ -479,7 +479,7 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .event.error .msg{color:var(--red)}.event.warning .msg{color:var(--yellow)}
 .stat-value{font-size:1.8em;font-weight:600;color:var(--blue)}
 .stat-label{font-size:.75em;color:var(--text2);margin-top:2px}
-.stats-row{display:flex;gap:32px}
+.stats-row{display:flex;gap:32px}.stats-row>div{flex:1;text-align:center}
 .btn-restart{background:none;border:1px solid var(--border);color:var(--text2);border-radius:4px;cursor:pointer;padding:2px 8px;font-size:.8em}
 .btn-restart:hover{border-color:var(--blue);color:var(--blue)}
 .btn-restart:disabled{opacity:.4;cursor:not-allowed}

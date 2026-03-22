@@ -209,6 +209,7 @@ textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;l
 <div class="tab-content active" id="tab-env">
   <div class="tab-toolbar">
     <a class="btn-sm" href="/api/settings/export/env" download=".env">Export .env</a>
+    <label class="btn-sm" style="cursor:pointer">Import .env<input type="file" accept=".env,text/plain" style="display:none" onchange="envImport(this)"></label>
     <button type="button" class="btn-sm" onclick="envResetDefaults()">Reset All to Defaults</button>
   </div>
   <div id="env-categories"></div>
@@ -1214,6 +1215,39 @@ async function pdResetDefaults() {
     renderPdCategories(defaults);
     showBanner('info', 'Form reset to defaults. Click <strong>Save &amp; Restart plex_debrid</strong> to write changes.');
   } catch (e) { showBanner('error', 'Reset failed: ' + esc(e.message)); }
+}
+
+function envImport(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const lines = e.target.result.split('\n');
+    const imported = {};
+    lines.forEach(line => {
+      line = line.trim();
+      if (!line || line.startsWith('#')) return;
+      const eq = line.indexOf('=');
+      if (eq < 1) return;
+      let key = line.substring(0, eq).trim();
+      let val = line.substring(eq + 1).trim();
+      // Strip surrounding quotes
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      imported[key] = val;
+    });
+    if (!Object.keys(imported).length) {
+      showBanner('error', 'No valid settings found in file');
+      return;
+    }
+    // Merge imported values into current form
+    const merged = Object.assign({}, envValues, imported);
+    renderEnvCategories(merged);
+    showBanner('info', 'Imported ' + Object.keys(imported).length + ' settings into form. Review and click <strong>Save &amp; Apply</strong> to write changes.');
+  };
+  reader.readAsText(file);
+  input.value = '';
 }
 
 function pdImport(input) {

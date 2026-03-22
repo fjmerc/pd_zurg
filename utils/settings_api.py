@@ -320,6 +320,13 @@ def write_env_values(values):
                 'warnings': [],
             }
 
+    # Sync relevant .env changes into settings.json so plex_debrid picks
+    # them up immediately on restart (not just on container restart)
+    try:
+        _sync_env_to_plex_debrid(merged)
+    except Exception as e:
+        logger.warning(f'[settings] settings.json sync failed (.env still saved): {e}')
+
     # Trigger SIGHUP for config reload
     # Note: 'restarted' is a best-effort preview based on pre-reload os.environ.
     # The actual SIGHUP handler independently re-computes which services restart.
@@ -996,6 +1003,80 @@ def _sync_plex_debrid_to_env(values):
         f'[settings] Synced {len(changed)} plex_debrid setting(s) back to .env: '
         f'{", ".join(sorted(changed.keys()))}'
     )
+
+
+# Reverse mapping: .env variable → settings.json key
+_ENV_TO_SETTINGS_JSON = {v: k for k, v in _SETTINGS_JSON_TO_ENV.items()}
+
+
+def _sync_env_to_plex_debrid(env_values):
+    """Sync .env values into settings.json so plex_debrid picks them up on restart.
+
+    Without this, changing e.g. SEERR_ADDRESS in the env tab and clicking
+    Save & Apply would restart plex_debrid, but it would still read the old
+    value from settings.json (pd_setup() only runs on container startup).
+
+    Only updates keys that actually changed.  Called from write_env_values()
+    before the SIGHUP trigger.
+    """
+    if not os.path.exists(SETTINGS_JSON_FILE):
+        return
+
+    try:
+        with open(SETTINGS_JSON_FILE, 'r') as f:
+            settings = _json.load(f)
+    except (ValueError, OSError):
+        return
+
+    changed = False
+
+    # Simple 1:1 mappings
+    for env_key, json_key in _ENV_TO_SETTINGS_JSON.items():
+        if env_key not in env_values:
+            continue
+        new_val = env_values.get(env_key, '')
+        old_val = settings.get(json_key, '')
+        if new_val != old_val:
+            settings[json_key] = new_val
+            changed = True
+
+    # Special: PLEX_USER + PLEX_TOKEN → "Plex users" (first pair)
+    plex_user = env_values.get('PLEX_USER', '')
+    plex_token = env_values.get('PLEX_TOKEN', '')
+    if plex_user and plex_token:
+        plex_users = settings.get('Plex users', [])
+        new_pair = [plex_user, plex_token]
+        if not any(pair == new_pair for pair in plex_users):
+            # Update first pair or append
+            if plex_users:
+                if plex_users[0] != new_pair:
+                    plex_users[0] = new_pair
+                    changed = True
+            else:
+                plex_users.append(new_pair)
+                changed = True
+            settings['Plex users'] = plex_users
+
+    # Special: PD_LOG_LEVEL → "Debug printing"
+    pd_log_level = env_values.get('PD_LOG_LEVEL', '')
+    if pd_log_level:
+        new_debug = 'true' if pd_log_level.upper() == 'DEBUG' else 'false'
+        if settings.get('Debug printing', '') != new_debug:
+            settings['Debug printing'] = new_debug
+            changed = True
+
+    if not changed:
+        return
+
+    try:
+        with atomic_write(SETTINGS_JSON_FILE) as f:
+            _json.dump(settings, f, indent=4, ensure_ascii=False)
+            f.write('\n')
+    except Exception as e:
+        logger.error(f'[settings] Failed to sync .env values to settings.json: {e}')
+        return
+
+    logger.info('[settings] Synced .env changes into settings.json')
 
 
 def read_plex_debrid_values():

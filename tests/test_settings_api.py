@@ -21,7 +21,9 @@ from utils.settings_api import (
     write_plex_debrid_values,
     validate_plex_debrid_values,
     _sync_plex_debrid_to_env,
+    _sync_env_to_plex_debrid,
     _SETTINGS_JSON_TO_ENV,
+    _ENV_TO_SETTINGS_JSON,
     PLEX_DEBRID_SCHEMA,
     _PD_ALL_KEYS,
     OAUTH_SERVICES,
@@ -1110,3 +1112,121 @@ class TestSyncPlexDebridToEnv:
              patch('threading.Thread'):
             write_plex_debrid_values(values)
         mock_sync.assert_called_once_with(values)
+
+
+# ---------------------------------------------------------------------------
+# Reverse sync: .env → settings.json
+# ---------------------------------------------------------------------------
+
+class TestSyncEnvToPlexDebrid:
+    """Tests for _sync_env_to_plex_debrid — ensures .env changes are written
+    into settings.json so plex_debrid picks them up on SIGHUP restart."""
+
+    def _make_settings(self, tmp_path, data):
+        settings_file = tmp_path / 'settings.json'
+        settings_file.write_text(json.dumps(data, indent=4))
+        return str(settings_file)
+
+    def test_syncs_overseerr_to_settings_json(self, tmp_path):
+        sf = self._make_settings(tmp_path, {
+            'Overseerr Base URL': 'http://old:5055',
+            'Overseerr API Key': 'oldkey',
+        })
+        env_values = {'SEERR_ADDRESS': 'http://new:5055', 'SEERR_API_KEY': 'newkey'}
+        with patch('utils.settings_api.SETTINGS_JSON_FILE', sf):
+            _sync_env_to_plex_debrid(env_values)
+        written = json.loads(open(sf).read())
+        assert written['Overseerr Base URL'] == 'http://new:5055'
+        assert written['Overseerr API Key'] == 'newkey'
+
+    def test_syncs_all_simple_mappings(self, tmp_path):
+        sf = self._make_settings(tmp_path, {})
+        env_values = {
+            'SEERR_ADDRESS': 'http://seerr:5055',
+            'SEERR_API_KEY': 'seerrkey',
+            'PLEX_ADDRESS': 'http://plex:32400',
+            'JF_API_KEY': 'jfkey',
+            'JF_ADDRESS': 'http://jf:8096',
+            'RD_API_KEY': 'rdkey',
+            'AD_API_KEY': 'adkey',
+            'SHOW_MENU': 'false',
+            'PD_LOGFILE': 'true',
+        }
+        with patch('utils.settings_api.SETTINGS_JSON_FILE', sf):
+            _sync_env_to_plex_debrid(env_values)
+        written = json.loads(open(sf).read())
+        assert written['Overseerr Base URL'] == 'http://seerr:5055'
+        assert written['Overseerr API Key'] == 'seerrkey'
+        assert written['Plex server address'] == 'http://plex:32400'
+        assert written['Jellyfin API Key'] == 'jfkey'
+        assert written['Jellyfin server address'] == 'http://jf:8096'
+        assert written['Real Debrid API Key'] == 'rdkey'
+        assert written['All Debrid API Key'] == 'adkey'
+        assert written['Show Menu on Startup'] == 'false'
+        assert written['Log to file'] == 'true'
+
+    def test_syncs_plex_user_token(self, tmp_path):
+        sf = self._make_settings(tmp_path, {'Plex users': []})
+        env_values = {'PLEX_USER': 'myuser', 'PLEX_TOKEN': 'mytoken'}
+        with patch('utils.settings_api.SETTINGS_JSON_FILE', sf):
+            _sync_env_to_plex_debrid(env_values)
+        written = json.loads(open(sf).read())
+        assert ['myuser', 'mytoken'] in written['Plex users']
+
+    def test_updates_existing_first_plex_user(self, tmp_path):
+        sf = self._make_settings(tmp_path, {
+            'Plex users': [['olduser', 'oldtoken'], ['other', 'othertoken']],
+        })
+        env_values = {'PLEX_USER': 'newuser', 'PLEX_TOKEN': 'newtoken'}
+        with patch('utils.settings_api.SETTINGS_JSON_FILE', sf):
+            _sync_env_to_plex_debrid(env_values)
+        written = json.loads(open(sf).read())
+        assert written['Plex users'][0] == ['newuser', 'newtoken']
+        assert written['Plex users'][1] == ['other', 'othertoken']
+
+    def test_syncs_debug_level(self, tmp_path):
+        sf = self._make_settings(tmp_path, {'Debug printing': 'false'})
+        env_values = {'PD_LOG_LEVEL': 'DEBUG'}
+        with patch('utils.settings_api.SETTINGS_JSON_FILE', sf):
+            _sync_env_to_plex_debrid(env_values)
+        written = json.loads(open(sf).read())
+        assert written['Debug printing'] == 'true'
+
+    def test_no_write_when_unchanged(self, tmp_path):
+        sf = self._make_settings(tmp_path, {'Overseerr Base URL': 'http://same:5055'})
+        env_values = {'SEERR_ADDRESS': 'http://same:5055'}
+        with patch('utils.settings_api.SETTINGS_JSON_FILE', sf), \
+             patch('utils.settings_api.atomic_write') as mock_write:
+            _sync_env_to_plex_debrid(env_values)
+        mock_write.assert_not_called()
+
+    def test_no_crash_when_settings_file_missing(self, tmp_path):
+        sf = str(tmp_path / 'nonexistent.json')
+        env_values = {'SEERR_ADDRESS': 'http://new:5055'}
+        with patch('utils.settings_api.SETTINGS_JSON_FILE', sf):
+            _sync_env_to_plex_debrid(env_values)  # Should not raise
+
+    def test_preserves_unrelated_keys(self, tmp_path):
+        sf = self._make_settings(tmp_path, {
+            'Overseerr Base URL': 'http://old:5055',
+            'Content Services': ['Plex'],
+            'Trakt lists': ['my-list'],
+        })
+        env_values = {'SEERR_ADDRESS': 'http://new:5055'}
+        with patch('utils.settings_api.SETTINGS_JSON_FILE', sf):
+            _sync_env_to_plex_debrid(env_values)
+        written = json.loads(open(sf).read())
+        assert written['Overseerr Base URL'] == 'http://new:5055'
+        assert written['Content Services'] == ['Plex']
+        assert written['Trakt lists'] == ['my-list']
+
+    def test_write_env_values_triggers_sync(self, tmp_path):
+        """write_env_values() should call _sync_env_to_plex_debrid."""
+        env_file = tmp_path / '.env'
+        env_file.write_text('')
+        values = {'SEERR_ADDRESS': 'http://test:5055'}
+        with patch('utils.settings_api.ENV_FILE', str(env_file)), \
+             patch('utils.settings_api._sync_env_to_plex_debrid') as mock_sync, \
+             patch('os.kill'):
+            write_env_values(values)
+        mock_sync.assert_called_once()

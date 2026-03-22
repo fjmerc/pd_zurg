@@ -40,6 +40,7 @@ __all__ = [
     'ColoredFormatter', 'YAML',
     # Functions
     'load_secret_or_env', 'is_port_available', 'find_available_port',
+    'refresh_globals',
     # Config
     'Config', 'config',
     # Config variables
@@ -83,6 +84,23 @@ def find_available_port(range_start, range_end, max_attempts=50):
         if is_port_available(port):
             return port
     raise RuntimeError(f"Could not find an available port in range {range_start}-{range_end} after {max_attempts} attempts")
+
+
+def refresh_globals(target_globals):
+    """Refresh a module's config globals from the Config singleton.
+
+    After a SIGHUP config reload, modules that used ``from base import *``
+    still hold stale values because Python copied them at import time.
+    Call this at the top of any setup/init function that may be re-invoked
+    after a reload::
+
+        def setup():
+            refresh_globals(globals())
+            # RDAPIKEY, PLEXADD, etc. are now up-to-date
+    """
+    for name in __all__:
+        if hasattr(config, name):
+            target_globals[name] = getattr(config, name)
 
 
 class Config:

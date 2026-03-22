@@ -302,7 +302,9 @@ class BlackholeWatcher:
 def setup():
     """Initialize and start the blackhole watcher if enabled."""
     global _watcher
-    from base import RDAPIKEY, ADAPIKEY
+    from base import config
+    RDAPIKEY = config.RDAPIKEY
+    ADAPIKEY = config.ADAPIKEY
 
     blackhole_enabled = os.environ.get('BLACKHOLE_ENABLED', 'false').lower() == 'true'
     if not blackhole_enabled:

@@ -503,7 +503,7 @@ details summary:hover{color:var(--blue)}
 </style>
 </head>
 <body>
-<div class="header"><h1>pd_zurg</h1><span class="meta" id="header-meta"></span></div>
+<div class="header"><h1>pd_zurg</h1><span class="meta" id="header-meta"></span><a href="/settings" style="font-size:.85em;margin-left:auto;margin-right:12px">Settings</a></div>
 <div class="meta">Uptime: <span id="uptime"></span> &bull; Errors: <span id="errors">0</span></div>
 <div class="banner" id="banner"></div>
 <div class="grid full">
@@ -647,7 +647,13 @@ function update(){
     document.getElementById('mounts').innerHTML=m||'<tr><td colspan="3" style="color:var(--text2)">No mounts</td></tr>';
 
     // System
-    if(d.system.memory_percent!==undefined)document.getElementById('mem-pct').textContent=d.system.memory_percent+'%';
+    if(d.system.memory_percent!==undefined){
+      document.getElementById('mem-pct').textContent=d.system.memory_percent+'%';
+    }else if(d.system.memory_used_bytes!==undefined){
+      document.getElementById('mem-pct').textContent='No limit';
+      document.getElementById('mem-pct').style.fontSize='1.2em';
+      document.getElementById('mem-pct').style.color='var(--text2)';
+    }
     if(d.system.memory_used_bytes!==undefined)document.getElementById('mem-used').textContent=fmtBytes(d.system.memory_used_bytes);
 
     // Events
@@ -657,7 +663,22 @@ function update(){
       const t=x.timestamp.split('T')[1]||x.timestamp;
       e+='<div class="event '+lvl+'"><span class="time">'+esc(t)+'</span><span class="comp">'+esc(x.component)+'</span><span class="msg">'+esc(x.message)+'</span></div>';
     });
-    document.getElementById('events').innerHTML=e||'<div style="color:var(--text2);padding:8px 0">No events yet</div>';
+    if(!e){
+      e='<div style="color:var(--text2);padding:8px 0">No events yet</div>';
+    }else if(d.recent_events.length&&d.recent_events.length<=3){
+      // If only startup events, add a reassuring note
+      const newest=d.recent_events[0];
+      if(newest){
+        try{
+          const evtTime=new Date(newest.timestamp);
+          const ageMin=Math.floor((Date.now()-evtTime.getTime())/60000);
+          if(ageMin>30){
+            e+='<div style="color:var(--text3);padding:6px 0;font-size:.75em;border-top:1px solid var(--border2);margin-top:4px">No issues for '+fmt(ageMin*60)+' \u2014 all systems running normally</div>';
+          }
+        }catch(ex){}
+      }
+    }
+    document.getElementById('events').innerHTML=e;
   }).catch(()=>{});
 }
 // Detect auth by trying an auth-required endpoint
@@ -707,10 +728,21 @@ function updateMountHistory(){
   fetch('/api/mount-history').then(r=>r.json()).then(hist=>{
     const el=document.getElementById('mount-timeline');
     if(!Object.keys(hist).length){el.innerHTML='';return;}
-    let h='';
+    let h='<div style="font-size:.75em;color:var(--text3);margin-bottom:6px;display:flex;gap:12px;align-items:center">Mount History <span class="dot green" style="margin-left:4px"></span>Healthy <span class="dot yellow"></span>Degraded <span class="dot red"></span>Down</div>';
     Object.keys(hist).forEach(path=>{
       const entries=hist[path];
       const shortPath=path.split('/').pop()||path;
+      // If only 1 entry (no state changes), show text status instead of a meaningless bar
+      if(entries.length<=2){
+        const last=entries[entries.length-1];
+        const since=last.timestamp.split('T')[1]||last.timestamp;
+        let status,cls;
+        if(!last.mounted){status='Down';cls='red';}
+        else if(!last.accessible){status='Degraded';cls='yellow';}
+        else{status='Healthy';cls='green';}
+        h+='<div class="mt-row"><span class="mt-path" title="'+esc(path)+'">'+esc(shortPath)+'</span><span style="font-size:.8em"><span class="dot '+cls+'"></span>'+status+' since '+esc(since)+'</span></div>';
+        return;
+      }
       h+='<div class="mt-row"><span class="mt-path" title="'+esc(path)+'">'+esc(shortPath)+'</span><div class="mt-blocks">';
       const show=entries.slice(-60);
       show.forEach(e=>{
@@ -795,6 +827,69 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == '/api/mount-history':
             data = json.dumps(mount_history.to_dict())
             self._send_json_response(200, data)
+        elif self.path == '/settings':
+            # Settings editor — requires auth
+            if not self.auth_credentials:
+                self._send_json_response(403, json.dumps({
+                    'error': 'Settings editor requires STATUS_UI_AUTH to be configured'
+                }))
+                return
+            from utils.settings_api import get_env_schema, get_plex_debrid_schema
+            from utils.settings_page import get_settings_html
+            html = get_settings_html(get_env_schema(), get_plex_debrid_schema()).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(html)))
+            self.end_headers()
+            self.wfile.write(html)
+        elif self.path == '/api/settings/env':
+            # Read current env values — requires auth to be configured
+            if not self.auth_credentials:
+                self._send_json_response(403, json.dumps({
+                    'error': 'Settings API requires STATUS_UI_AUTH to be configured'
+                }))
+                return
+            from utils.settings_api import read_env_values
+            data = json.dumps(read_env_values())
+            self._send_json_response(200, data)
+        elif self.path == '/api/settings/plex-debrid':
+            # Read plex_debrid settings — requires auth to be configured
+            if not self.auth_credentials:
+                self._send_json_response(403, json.dumps({
+                    'error': 'Settings API requires STATUS_UI_AUTH to be configured'
+                }))
+                return
+            from utils.settings_api import read_plex_debrid_values
+            data = json.dumps(read_plex_debrid_values())
+            self._send_json_response(200, data)
+        elif self.path == '/api/settings/export/env':
+            if not self.auth_credentials:
+                self._send_json_response(403, json.dumps({
+                    'error': 'Settings API requires STATUS_UI_AUTH to be configured'
+                }))
+                return
+            from utils.settings_api import export_env
+            content = export_env().encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.send_header('Content-Disposition', 'attachment; filename=".env"')
+            self.send_header('Content-Length', str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+        elif self.path == '/api/settings/export/plex-debrid':
+            if not self.auth_credentials:
+                self._send_json_response(403, json.dumps({
+                    'error': 'Settings API requires STATUS_UI_AUTH to be configured'
+                }))
+                return
+            from utils.settings_api import export_plex_debrid
+            content = export_plex_debrid().encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Disposition', 'attachment; filename="settings.json"')
+            self.send_header('Content-Length', str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
         elif self.path in ('/', '/status'):
             html = _DASHBOARD_HTML.encode()
             self.send_response(200)
@@ -810,11 +905,135 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
         # POST endpoints always require auth
         if not self.auth_credentials:
             self._send_json_response(403, json.dumps({
-                'error': 'Restart requires STATUS_UI_AUTH to be configured'
+                'error': 'This endpoint requires STATUS_UI_AUTH to be configured'
             }))
             return
 
         if not self._check_auth():
+            return
+
+        if self.path == '/api/settings/env':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 1_000_000:  # 1MB max
+                    self._send_json_response(400, json.dumps({'error': 'Request body too large'}))
+                    return
+                body = self.rfile.read(content_length)
+                values = json.loads(body.decode('utf-8'))
+                if not isinstance(values, dict):
+                    self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
+                    return
+
+                from utils.settings_api import write_env_values
+                result = write_env_values(values)
+                self._send_json_response(200, json.dumps(result))
+
+                if result.get('status') == 'saved':
+                    self.status_data_ref.add_event(
+                        'settings', 'Environment settings saved via web UI'
+                    )
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception as e:
+                self._send_json_response(500, json.dumps({'error': str(e)}))
+            return
+
+        if self.path == '/api/settings/validate':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 1_000_000:
+                    self._send_json_response(400, json.dumps({'error': 'Request body too large'}))
+                    return
+                body = self.rfile.read(content_length)
+                values = json.loads(body.decode('utf-8'))
+                if not isinstance(values, dict):
+                    self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
+                    return
+
+                from utils.settings_api import validate_env_values
+                result = validate_env_values(values)
+                self._send_json_response(200, json.dumps(result))
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception as e:
+                self._send_json_response(500, json.dumps({'error': str(e)}))
+            return
+
+        if self.path == '/api/settings/plex-debrid':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 5_000_000:  # 5MB max (settings.json can be large)
+                    self._send_json_response(400, json.dumps({'error': 'Request body too large'}))
+                    return
+                body = self.rfile.read(content_length)
+                values = json.loads(body.decode('utf-8'))
+                if not isinstance(values, dict):
+                    self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
+                    return
+
+                from utils.settings_api import write_plex_debrid_values
+                result = write_plex_debrid_values(values)
+                self._send_json_response(200, json.dumps(result))
+
+                if result.get('status') == 'saved':
+                    self.status_data_ref.add_event(
+                        'settings', 'plex_debrid settings saved via web UI'
+                    )
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception as e:
+                self._send_json_response(500, json.dumps({'error': str(e)}))
+            return
+
+        if self.path == '/api/settings/oauth/start':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(content_length)
+                data = json.loads(body.decode('utf-8'))
+                service = data.get('service', '')
+
+                from utils.settings_api import oauth_start
+                result = oauth_start(service)
+                self._send_json_response(200, json.dumps(result))
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception as e:
+                self._send_json_response(500, json.dumps({'error': str(e)}))
+            return
+
+        if self.path == '/api/settings/oauth/poll':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(content_length)
+                data = json.loads(body.decode('utf-8'))
+                service = data.get('service', '')
+                device_code = data.get('device_code', '')
+
+                from utils.settings_api import oauth_poll
+                result = oauth_poll(service, device_code)
+                self._send_json_response(200, json.dumps(result))
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception as e:
+                self._send_json_response(500, json.dumps({'error': str(e)}))
+            return
+
+        if self.path == '/api/settings/reset/plex-debrid':
+            try:
+                from utils.settings_api import get_plex_debrid_defaults
+                defaults = get_plex_debrid_defaults()
+                self._send_json_response(200, json.dumps(defaults))
+            except Exception as e:
+                self._send_json_response(500, json.dumps({'error': str(e)}))
+            return
+
+        if self.path == '/api/settings/reset/env':
+            try:
+                from utils.settings_api import get_env_defaults
+                defaults = get_env_defaults()
+                self._send_json_response(200, json.dumps(defaults))
+            except Exception as e:
+                self._send_json_response(500, json.dumps({'error': str(e)}))
             return
 
         if self.path.startswith('/api/restart/'):

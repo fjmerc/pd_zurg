@@ -20,8 +20,9 @@ ENV_FILE = '/config/.env'
 # Which env vars affect which services
 SERVICE_DEPENDENCIES = {
     'zurg': {
-        'RD_API_KEY', 'AD_API_KEY', 'ZURG_ENABLED', 'ZURG_VERSION',
-        'ZURG_LOG_LEVEL', 'ZURG_USER', 'ZURG_PASS', 'ZURG_PORT',
+        'RD_API_KEY', 'AD_API_KEY', 'TORBOX_API_KEY', 'ZURG_ENABLED',
+        'ZURG_VERSION', 'ZURG_LOG_LEVEL', 'ZURG_USER', 'ZURG_PASS',
+        'ZURG_PORT',
     },
     'rclone': {
         'RCLONE_MOUNT_NAME', 'RCLONE_LOG_LEVEL', 'RCLONE_CACHE_DIR',

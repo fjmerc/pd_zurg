@@ -21,7 +21,7 @@ A combined docker image for the unified deployment of **[itsToggle's](https://gi
 > - Event notifications via 90+ services (Discord, Telegram, etc.)
 > - Blackhole watch folder for Sonarr/Radarr integration
 > - Stuck ffprobe recovery for debrid mounts
-> - Lightweight status dashboard
+> - Lightweight status dashboard with web-based settings editor
 > - MDBList content discovery
 > - Atomic config writes, ordered shutdown, and more
 
@@ -53,8 +53,16 @@ Drop `.torrent` or `.magnet` files into a watch directory and they're automatica
 #### 🔍 ffprobe Stuck-Process Recovery
 Detects ffprobe processes stuck in uninterruptible sleep on debrid mounts (a common issue when Plex/Jellyfin scans expired links). Attempts recovery by "poking" the stuck I/O, then kills the process after 3 failed attempts. Enabled by default with a 5-minute threshold.
 
-#### 📊 Status Web UI
-Lightweight dashboard showing process health, mount status, system resources (cgroup-aware for containers), and recent events. Auto-refreshes every 10 seconds. JSON API at `/api/status` for monitoring integration. Optional basic auth.
+#### 📊 Status Web UI & Settings Editor
+Lightweight dashboard at `/status` showing process health, mount status, system resources (cgroup-aware for containers), and recent events. Auto-refreshes every 10 seconds. JSON API at `/api/status` for monitoring integration.
+
+The built-in **settings editor** at `/settings` lets you configure everything through the browser — no SSH or file editing required:
+- **pd_zurg tab**: Edit all environment variables with proper input types (toggles, dropdowns, password fields), inline validation, and SIGHUP reload (no container restart needed)
+- **plex_debrid tab**: Edit settings.json with multi-select service pickers, list editors, and quality profile JSON editor — saves and restarts plex_debrid automatically
+- **OAuth**: Connect Trakt, Debrid Link, Put.io, and Orionoid accounts via device code flow directly from the browser
+- **Import/Export**: Download or upload settings files for backup and migration
+
+Requires `STATUS_UI_AUTH` to be set (e.g., `admin:changeme`) — the settings editor is not accessible without authentication.
 
 #### 🎬 MDBList Content Source
 Subscribe to curated MDBList lists (IMDB Top 250, trending, genre lists, custom lists) that automatically feed plex_debrid's download pipeline. Configure via plex_debrid's settings menu with your MDBList API key and list IDs.
@@ -301,7 +309,7 @@ of this parameter has the format `<VARIABLE_NAME>=<VALUE>`.
 |`BLACKHOLE_DEBRID`| Debrid service to use: `realdebrid`, `alldebrid`, `torbox`. Auto-detected from API keys if not set | auto | | | |
 |`STATUS_UI_ENABLED`| Set the value "true" to enable the status web dashboard | `false` | | | |
 |`STATUS_UI_PORT`| Port for the status web UI | `8080` | | | |
-|`STATUS_UI_AUTH`| Basic auth credentials in `user:password` format | none | | | |
+|`STATUS_UI_AUTH`| Basic auth credentials in `user:password` format. **Required** for the settings editor and restart buttons | none | | | |
 |`FFPROBE_MONITOR_ENABLED`| Set the value "false" to disable the stuck ffprobe process monitor | `true` | | | |
 |`FFPROBE_STUCK_TIMEOUT`| Seconds a ffprobe process must be in uninterruptible sleep before recovery is attempted | `300` | | | |
 |`FFPROBE_POLL_INTERVAL`| Seconds between ffprobe monitor scans | `30` | | | |

@@ -630,6 +630,92 @@ details summary:hover{color:var(--blue)}
     </details>
   </div>
 </div>
+<div class="grid full">
+  <div class="card">
+    <details>
+      <summary>How it works (click to expand)</summary>
+      <style>
+.wf{margin:16px 0 8px}.wf-title{font-size:.8em;font-weight:600;color:var(--text);margin-bottom:10px;display:flex;align-items:center;gap:8px}.wf-title span{font-size:.85em;font-weight:400;color:var(--text3)}
+.wf-row{display:flex;align-items:center;flex-wrap:wrap;gap:0;margin-bottom:6px}
+.wf-node{padding:8px 14px;border-radius:8px;background:var(--bg);border:1.5px solid var(--border);font-size:.8em;font-weight:600;text-align:center;white-space:nowrap;min-width:80px}
+.wf-node small{display:block;font-weight:400;color:var(--text2);font-size:.85em;margin-top:2px}
+.wf-node.green{border-color:var(--green);color:var(--green)}.wf-node.blue{border-color:var(--blue);color:var(--blue)}.wf-node.yellow{border-color:var(--yellow);color:var(--yellow)}.wf-node.orange{border-color:var(--orange);color:var(--orange)}.wf-node.muted{border-color:var(--border);color:var(--text2)}
+.wf-arrow{color:var(--text3);font-size:1.1em;padding:0 6px;flex-shrink:0}
+.wf-label{font-size:.65em;color:var(--text3);text-align:center;margin-top:-4px;margin-bottom:2px;padding:0 6px}
+.wf-branch{display:flex;gap:20px;margin:8px 0 0 0;flex-wrap:wrap}
+.wf-branch>div{flex:1;min-width:280px;padding:12px;border-radius:8px;border:1px solid var(--border2);background:var(--bg)}
+.wf-branch>div>.wf-branch-title{font-size:.75em;font-weight:600;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--border2)}
+.wf-branch>div>.wf-branch-title.local{color:var(--text2)}.wf-branch>div>.wf-branch-title.debrid{color:var(--yellow)}
+.wf-desc{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border2);font-size:.78em;color:var(--text2);line-height:1.5}
+.wf-desc strong{color:var(--text)}
+@media(max-width:600px){.wf-row{gap:2px}.wf-node{padding:6px 8px;font-size:.72em;min-width:60px}.wf-arrow{font-size:.9em;padding:0 3px}}
+      </style>
+
+      <!-- Workflow 1: Watchlist / plex_debrid flow -->
+      <div class="wf">
+        <div class="wf-title">Watchlist Flow <span>&mdash; plex_debrid monitors your watchlists automatically</span></div>
+        <div class="wf-row">
+          <div class="wf-node muted">Watchlist<small>Plex / Trakt / Overseerr</small></div>
+          <div class="wf-arrow">&rarr;</div>
+          <div class="wf-node green">plex_debrid<small>Search &amp; Match</small></div>
+          <div class="wf-arrow">&rarr;</div>
+          <div class="wf-node yellow">Real-Debrid<small>Cloud Cache</small></div>
+          <div class="wf-arrow">&rarr;</div>
+          <div class="wf-node blue">Zurg<small>WebDAV</small></div>
+          <div class="wf-arrow">&rarr;</div>
+          <div class="wf-node blue">rclone<small>/data mount</small></div>
+          <div class="wf-arrow">&rarr;</div>
+          <div class="wf-node green">Plex / Jellyfin<small>Stream</small></div>
+        </div>
+      </div>
+
+      <!-- Workflow 2: Arr + Blackhole flow -->
+      <div class="wf">
+        <div class="wf-title">Arr + Blackhole Flow <span>&mdash; Sonarr/Radarr with tag-based routing</span></div>
+        <div class="wf-row">
+          <div class="wf-node muted">Overseerr<small>Requests</small></div>
+          <div class="wf-arrow">&rarr;</div>
+          <div class="wf-node muted">Sonarr / Radarr<small>Tag-based routing</small></div>
+        </div>
+        <div class="wf-branch">
+          <div>
+            <div class="wf-branch-title local">Local Path &mdash; no debrid tag</div>
+            <div class="wf-row">
+              <div class="wf-node muted">qBittorrent<small>Download</small></div>
+              <div class="wf-arrow">&rarr;</div>
+              <div class="wf-node muted">Local Disk<small>Storage</small></div>
+              <div class="wf-arrow">&rarr;</div>
+              <div class="wf-node green">Plex<small>Stream</small></div>
+            </div>
+          </div>
+          <div>
+            <div class="wf-branch-title debrid">Debrid Path &mdash; tag: debrid</div>
+            <div class="wf-row">
+              <div class="wf-node orange">Blackhole<small>/watch folder</small></div>
+              <div class="wf-arrow">&rarr;</div>
+              <div class="wf-node orange">pd_zurg<small>Send to RD</small></div>
+              <div class="wf-arrow">&rarr;</div>
+              <div class="wf-node yellow">Real-Debrid<small>Cache</small></div>
+              <div class="wf-arrow">&rarr;</div>
+              <div class="wf-node blue">Zurg / rclone<small>Mount</small></div>
+              <div class="wf-arrow">&rarr;</div>
+              <div class="wf-node green">Plex<small>Stream</small></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Component descriptions -->
+      <div class="wf-desc">
+        <div><strong style="color:var(--green)">plex_debrid</strong> &mdash; Monitors Plex/Trakt/Overseerr watchlists. Searches torrent indexers for cached releases matching your quality profile and sends the best match to your debrid service.</div>
+        <div><strong style="color:var(--yellow)">Real-Debrid / AllDebrid</strong> &mdash; Cloud torrent cache. Stores popular torrents on fast servers. Instant access via HTTPS, no seeding or VPN required.</div>
+        <div><strong style="color:var(--blue)">Zurg</strong> &mdash; Connects to your debrid API and serves your cached content as a WebDAV file server. Makes your cloud library look like local files.</div>
+        <div><strong style="color:var(--blue)">rclone</strong> &mdash; Mounts the Zurg WebDAV server as a local directory at <code style="color:var(--green);font-size:.9em">/data/pd_zurg</code> so your media server can access the files.</div>
+        <div><strong style="color:var(--orange)">Blackhole</strong> &mdash; Watches a folder for .torrent/.magnet files dropped by Sonarr/Radarr. Sends them to Real-Debrid automatically. Sonarr monitors for new episodes.</div>
+      </div>
+    </details>
+  </div>
+</div>
 <div class="footer">Auto-refreshes every 10s</div>
 <script>
 function fmt(s){

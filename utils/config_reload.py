@@ -179,6 +179,15 @@ def _do_reload():
             except Exception as e:
                 logger.error(f"[reload] Failed to restart blackhole: {e}")
 
+        if 'status_ui' in services:
+            try:
+                from utils.status_server import StatusHandler
+                auth = os.environ.get('STATUS_UI_AUTH')
+                StatusHandler.auth_credentials = auth if auth and ':' in auth else None
+                logger.info("[reload] Status UI auth credentials updated")
+            except Exception as e:
+                logger.error(f"[reload] Failed to update Status UI auth: {e}")
+
         logger.info("[reload] Config reload complete")
         _notify_reload(changed, services)
 

@@ -20,6 +20,8 @@ from utils.settings_api import (
     read_plex_debrid_values,
     write_plex_debrid_values,
     validate_plex_debrid_values,
+    _sync_plex_debrid_to_env,
+    _SETTINGS_JSON_TO_ENV,
     PLEX_DEBRID_SCHEMA,
     _PD_ALL_KEYS,
     OAUTH_SERVICES,
@@ -963,3 +965,148 @@ class TestVersionsInSettingsPage:
         html = get_settings_html(get_env_schema(), get_plex_debrid_schema())
         assert 'Edit as JSON' in html
         assert 'versions-json-textarea' in html
+
+
+# ---------------------------------------------------------------------------
+# Bidirectional sync: settings.json → .env
+# ---------------------------------------------------------------------------
+
+class TestSyncPlexDebridToEnv:
+    """Tests for _sync_plex_debrid_to_env — ensures plex_debrid settings
+    are written back to .env so pd_setup() doesn't overwrite them on restart."""
+
+    def _make_env(self, tmp_path, content=''):
+        env_file = tmp_path / '.env'
+        env_file.write_text(content)
+        return str(env_file)
+
+    def test_syncs_overseerr_to_env(self, tmp_path):
+        env_file = self._make_env(tmp_path, 'SEERR_ADDRESS=http://old:5055\nSEERR_API_KEY=oldkey\n')
+        values = {
+            'Overseerr Base URL': 'http://new:5055',
+            'Overseerr API Key': 'newkey',
+        }
+        with patch('utils.settings_api.ENV_FILE', env_file), \
+             patch.dict(os.environ, {'SEERR_ADDRESS': 'http://old:5055', 'SEERR_API_KEY': 'oldkey'}):
+            _sync_plex_debrid_to_env(values)
+
+        from dotenv import dotenv_values
+        written = dotenv_values(env_file)
+        assert written['SEERR_ADDRESS'] == 'http://new:5055'
+        assert written['SEERR_API_KEY'] == 'newkey'
+
+    def test_syncs_all_simple_mappings(self, tmp_path):
+        env_file = self._make_env(tmp_path, '')
+        values = {
+            'Overseerr Base URL': 'http://seerr:5055',
+            'Overseerr API Key': 'seerrkey',
+            'Plex server address': 'http://plex:32400',
+            'Jellyfin API Key': 'jfkey',
+            'Jellyfin server address': 'http://jf:8096',
+            'Real Debrid API Key': 'rdkey',
+            'All Debrid API Key': 'adkey',
+            'Show Menu on Startup': 'false',
+            'Log to file': 'true',
+        }
+        with patch('utils.settings_api.ENV_FILE', env_file), \
+             patch.dict(os.environ, {}, clear=False):
+            _sync_plex_debrid_to_env(values)
+
+        from dotenv import dotenv_values
+        written = dotenv_values(env_file)
+        assert written.get('SEERR_ADDRESS') == 'http://seerr:5055'
+        assert written.get('SEERR_API_KEY') == 'seerrkey'
+        assert written.get('PLEX_ADDRESS') == 'http://plex:32400'
+        assert written.get('JF_API_KEY') == 'jfkey'
+        assert written.get('JF_ADDRESS') == 'http://jf:8096'
+        assert written.get('RD_API_KEY') == 'rdkey'
+        assert written.get('AD_API_KEY') == 'adkey'
+        assert written.get('SHOW_MENU') == 'false'
+        assert written.get('PD_LOGFILE') == 'true'
+
+    def test_syncs_plex_users_first_pair(self, tmp_path):
+        env_file = self._make_env(tmp_path, '')
+        values = {
+            'Plex users': [['myuser', 'mytoken'], ['other', 'othertoken']],
+        }
+        with patch('utils.settings_api.ENV_FILE', env_file), \
+             patch.dict(os.environ, {}, clear=False):
+            _sync_plex_debrid_to_env(values)
+
+        from dotenv import dotenv_values
+        written = dotenv_values(env_file)
+        assert written.get('PLEX_USER') == 'myuser'
+        assert written.get('PLEX_TOKEN') == 'mytoken'
+
+    def test_syncs_debug_printing_true_to_debug(self, tmp_path):
+        env_file = self._make_env(tmp_path, 'PD_LOG_LEVEL=INFO\n')
+        values = {'Debug printing': 'true'}
+        with patch('utils.settings_api.ENV_FILE', env_file), \
+             patch.dict(os.environ, {'PD_LOG_LEVEL': 'INFO'}):
+            _sync_plex_debrid_to_env(values)
+
+        from dotenv import dotenv_values
+        written = dotenv_values(env_file)
+        assert written.get('PD_LOG_LEVEL') == 'DEBUG'
+
+    def test_syncs_debug_printing_false_downgrades_from_debug(self, tmp_path):
+        env_file = self._make_env(tmp_path, 'PD_LOG_LEVEL=DEBUG\n')
+        values = {'Debug printing': 'false'}
+        with patch('utils.settings_api.ENV_FILE', env_file), \
+             patch.dict(os.environ, {'PD_LOG_LEVEL': 'DEBUG'}):
+            _sync_plex_debrid_to_env(values)
+
+        from dotenv import dotenv_values
+        written = dotenv_values(env_file)
+        assert written.get('PD_LOG_LEVEL') == 'INFO'
+
+    def test_debug_printing_false_preserves_non_debug_level(self, tmp_path):
+        """Turning off debug shouldn't overwrite WARNING/ERROR levels."""
+        env_file = self._make_env(tmp_path, 'PD_LOG_LEVEL=WARNING\n')
+        values = {'Debug printing': 'false'}
+        with patch('utils.settings_api.ENV_FILE', env_file), \
+             patch.dict(os.environ, {'PD_LOG_LEVEL': 'WARNING'}):
+            _sync_plex_debrid_to_env(values)
+
+        from dotenv import dotenv_values
+        written = dotenv_values(env_file)
+        assert written.get('PD_LOG_LEVEL') == 'WARNING'
+
+    def test_no_write_when_values_unchanged(self, tmp_path):
+        env_file = self._make_env(tmp_path, 'SEERR_ADDRESS=http://same:5055\n')
+        values = {'Overseerr Base URL': 'http://same:5055'}
+        with patch('utils.settings_api.ENV_FILE', env_file), \
+             patch.dict(os.environ, {'SEERR_ADDRESS': 'http://same:5055'}), \
+             patch('utils.settings_api.atomic_write') as mock_write:
+            _sync_plex_debrid_to_env(values)
+        mock_write.assert_not_called()
+
+    def test_updates_os_environ(self, tmp_path):
+        env_file = self._make_env(tmp_path, 'SEERR_ADDRESS=http://old:5055\n')
+        values = {'Overseerr Base URL': 'http://new:5055'}
+        with patch('utils.settings_api.ENV_FILE', env_file), \
+             patch.dict(os.environ, {'SEERR_ADDRESS': 'http://old:5055'}):
+            _sync_plex_debrid_to_env(values)
+            assert os.environ['SEERR_ADDRESS'] == 'http://new:5055'
+
+    def test_boolean_values_lowercased(self, tmp_path):
+        """Python bool True/False should become 'true'/'false' in .env."""
+        env_file = self._make_env(tmp_path, '')
+        values = {'Show Menu on Startup': True}
+        with patch('utils.settings_api.ENV_FILE', env_file), \
+             patch.dict(os.environ, {}, clear=False):
+            _sync_plex_debrid_to_env(values)
+
+        from dotenv import dotenv_values
+        written = dotenv_values(env_file)
+        assert written.get('SHOW_MENU') == 'true'
+
+    def test_write_plex_debrid_triggers_sync(self, tmp_path):
+        """write_plex_debrid_values() should call _sync_plex_debrid_to_env."""
+        settings_file = tmp_path / 'settings.json'
+        values = {'Overseerr Base URL': 'http://test:5055'}
+        with patch('utils.settings_api.SETTINGS_JSON_FILE', str(settings_file)), \
+             patch('utils.settings_api._sync_plex_debrid_to_env') as mock_sync, \
+             patch('threading.Thread'):
+            write_plex_debrid_values(values)
+        mock_sync.assert_called_once_with(values)

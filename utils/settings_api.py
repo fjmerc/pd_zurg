@@ -10,6 +10,7 @@ import json as _json
 import os
 import re
 import signal
+import threading
 from dotenv import dotenv_values
 from urllib.parse import urlparse
 from utils.file_utils import atomic_write
@@ -279,43 +280,45 @@ def write_env_values(values):
         }
 
     # Merge with existing values (preserve keys not in the form submission)
-    existing = read_env_values()
-    merged = {**existing, **filtered}
+    # Lock to prevent races with _sync_plex_debrid_to_env
+    with _env_write_lock:
+        existing = read_env_values()
+        merged = {**existing, **filtered}
 
-    # Validate before writing
-    validation = validate_env_values(merged)
-    if validation['errors']:
-        return {
-            'status': 'error',
-            'errors': validation['errors'],
-            'warnings': validation['warnings'],
-        }
+        # Validate before writing
+        validation = validate_env_values(merged)
+        if validation['errors']:
+            return {
+                'status': 'error',
+                'errors': validation['errors'],
+                'warnings': validation['warnings'],
+            }
 
-    # Write .env file atomically
-    try:
-        with atomic_write(ENV_FILE) as f:
-            f.write('# pd_zurg configuration — managed by settings editor\n')
-            f.write('# Manual edits are preserved on next save\n\n')
-            for cat in ENV_SCHEMA:
-                cat_has_values = False
-                lines = []
-                for key, label, ftype, required, help_text in cat['fields']:
-                    val = merged.get(key, '')
-                    if val:
-                        cat_has_values = True
-                    lines.append(_format_env_line(key, val))
-                if cat_has_values:
-                    f.write(f'# --- {cat["name"]} ---\n')
-                    for line in lines:
-                        f.write(line + '\n')
-                    f.write('\n')
-    except Exception as e:
-        logger.error(f'[settings] Failed to write .env: {e}')
-        return {
-            'status': 'error',
-            'errors': [f'Failed to write config file: {e}'],
-            'warnings': [],
-        }
+        # Write .env file atomically
+        try:
+            with atomic_write(ENV_FILE) as f:
+                f.write('# pd_zurg configuration — managed by settings editor\n')
+                f.write('# Manual edits are preserved on next save\n\n')
+                for cat in ENV_SCHEMA:
+                    cat_has_values = False
+                    lines = []
+                    for key, label, ftype, required, help_text in cat['fields']:
+                        val = merged.get(key, '')
+                        if val:
+                            cat_has_values = True
+                        lines.append(_format_env_line(key, val))
+                    if cat_has_values:
+                        f.write(f'# --- {cat["name"]} ---\n')
+                        for line in lines:
+                            f.write(line + '\n')
+                        f.write('\n')
+        except Exception as e:
+            logger.error(f'[settings] Failed to write .env: {e}')
+            return {
+                'status': 'error',
+                'errors': [f'Failed to write config file: {e}'],
+                'warnings': [],
+            }
 
     # Trigger SIGHUP for config reload
     # Note: 'restarted' is a best-effort preview based on pre-reload os.environ.
@@ -874,6 +877,127 @@ def get_plex_debrid_schema():
     }
 
 
+# ---------------------------------------------------------------------------
+# Bidirectional sync: settings.json → .env
+#
+# pd_setup() seeds settings.json from .env on container startup.  Without
+# syncing the other direction, WebUI edits to plex_debrid settings are
+# overwritten on the next container restart.  This mapping lets us write
+# changed values back to .env so both stay consistent.
+# ---------------------------------------------------------------------------
+
+# Simple 1:1 mappings: settings.json key → .env variable name
+_SETTINGS_JSON_TO_ENV = {
+    'Overseerr Base URL':       'SEERR_ADDRESS',
+    'Overseerr API Key':        'SEERR_API_KEY',
+    'Plex server address':      'PLEX_ADDRESS',
+    'Jellyfin API Key':         'JF_API_KEY',
+    'Jellyfin server address':  'JF_ADDRESS',
+    'Real Debrid API Key':      'RD_API_KEY',
+    'All Debrid API Key':       'AD_API_KEY',
+    'Show Menu on Startup':     'SHOW_MENU',
+    'Log to file':              'PD_LOGFILE',
+}
+
+# Lock to prevent concurrent .env writes from racing
+_env_write_lock = threading.Lock()
+
+
+def _sync_plex_debrid_to_env(values):
+    """Sync plex_debrid settings back to .env so pd_setup() stays consistent.
+
+    Only updates keys that actually changed.  Does NOT trigger SIGHUP
+    because the caller already handles the plex_debrid restart.
+    """
+    env_updates = {}
+
+    # Simple 1:1 mappings
+    for json_key, env_key in _SETTINGS_JSON_TO_ENV.items():
+        if json_key in values:
+            val = values[json_key]
+            if val is None:
+                env_updates[env_key] = ''
+            elif isinstance(val, bool):
+                env_updates[env_key] = str(val).lower()
+            else:
+                try:
+                    env_updates[env_key] = _sanitize_value(val)
+                except ValueError as e:
+                    logger.warning(f'[settings] Skipping .env sync for {env_key}: {e}')
+
+    # Special: "Plex users" → PLEX_USER + PLEX_TOKEN (first pair)
+    plex_users = values.get('Plex users')
+    if isinstance(plex_users, list) and plex_users:
+        first = plex_users[0]
+        if isinstance(first, list) and len(first) >= 2:
+            env_updates['PLEX_USER'] = str(first[0]) if first[0] else ''
+            env_updates['PLEX_TOKEN'] = str(first[1]) if first[1] else ''
+
+    # Special: "Debug printing" → PD_LOG_LEVEL (lossy: only DEBUG vs non-DEBUG)
+    debug_printing = values.get('Debug printing')
+    if debug_printing is not None:
+        if str(debug_printing).lower() == 'true':
+            env_updates['PD_LOG_LEVEL'] = 'DEBUG'
+        else:
+            # Only downgrade from DEBUG; don't overwrite other levels
+            current_level = os.environ.get('PD_LOG_LEVEL', '')
+            if current_level.upper() == 'DEBUG':
+                env_updates['PD_LOG_LEVEL'] = 'INFO'
+
+    if not env_updates:
+        return
+
+    with _env_write_lock:
+        # Read current .env values to detect actual changes
+        current = {}
+        if os.path.exists(ENV_FILE):
+            current = dotenv_values(ENV_FILE)
+
+        changed = {}
+        for key, new_val in env_updates.items():
+            file_val = current.get(key)
+            old_val = file_val if file_val is not None else os.environ.get(key, '')
+            if old_val != new_val:
+                changed[key] = new_val
+
+        if not changed:
+            return
+
+        # Merge and rewrite .env (preserves all existing keys)
+        existing = read_env_values()
+        merged = {**existing, **changed}
+
+        try:
+            with atomic_write(ENV_FILE) as f:
+                f.write('# pd_zurg configuration — managed by settings editor\n')
+                f.write('# Manual edits are preserved on next save\n\n')
+                for cat in ENV_SCHEMA:
+                    cat_has_values = False
+                    lines = []
+                    for key, label, ftype, required, help_text in cat['fields']:
+                        val = merged.get(key, '')
+                        if val:
+                            cat_has_values = True
+                        lines.append(_format_env_line(key, val))
+                    if cat_has_values:
+                        f.write(f'# --- {cat["name"]} ---\n')
+                        for line in lines:
+                            f.write(line + '\n')
+                        f.write('\n')
+        except Exception as e:
+            logger.error(f'[settings] Failed to sync plex_debrid settings to .env: {e}')
+            return
+
+    # Update os.environ so in-process reads are consistent
+    for key, val in changed.items():
+        os.environ[key] = val
+
+    logger.info(
+        f'[settings] Synced {len(changed)} plex_debrid setting(s) back to .env: '
+        f'{", ".join(sorted(changed.keys()))}'
+    )
+
+
 def read_plex_debrid_values():
     """Read current plex_debrid settings.json. Returns the parsed dict."""
     if os.path.exists(SETTINGS_JSON_FILE):
@@ -927,6 +1051,13 @@ def write_plex_debrid_values(values):
             'errors': [f'Failed to write settings file: {e}'],
             'warnings': [],
         }
+
+    # Sync changed values back to .env so pd_setup() stays consistent
+    # on container restart (must happen before the service restart)
+    try:
+        _sync_plex_debrid_to_env(values)
+    except Exception as e:
+        logger.warning(f'[settings] .env sync failed (settings.json still saved): {e}')
 
     # Restart plex_debrid to pick up changes
     restarted = False

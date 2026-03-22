@@ -1,0 +1,919 @@
+"""HTML template for the web-based settings editor.
+
+Generates a single-page settings form with two tabs (pd_zurg env vars
+and plex_debrid settings.json). Communicates with /api/settings/* endpoints.
+"""
+
+import json
+
+
+def get_settings_html(env_schema, pd_schema):
+    """Return the complete settings editor HTML page.
+
+    Args:
+        env_schema: The env var schema dict from get_env_schema()
+        pd_schema: The plex_debrid schema dict from get_plex_debrid_schema()
+    """
+    # Escape </ to prevent script tag breakout in JSON-in-HTML context
+    env_json = json.dumps(env_schema).replace('</', '<\\/')
+    pd_json = json.dumps(pd_schema).replace('</', '<\\/')
+    html = _SETTINGS_HTML.replace('__ENV_SCHEMA_JSON__', env_json)
+    html = html.replace('__PD_SCHEMA_JSON__', pd_json)
+    return html
+
+
+_SETTINGS_HTML = r'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pd_zurg Settings</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--border2:#21262d;--text:#c9d1d9;--text2:#8b949e;--text3:#484f58;--blue:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#d29922;--orange:#db6d28;--input-bg:#0d1117;--input-border:#30363d;--input-focus:#58a6ff}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);padding:20px;max-width:900px;margin:0 auto}
+a{color:var(--blue);text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* Header */
+.header{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:16px;flex-wrap:wrap;gap:8px}
+.header h1{color:var(--blue);font-size:1.5em;font-weight:600}
+.nav{display:flex;gap:12px;font-size:.85em}
+
+/* Tabs */
+.tabs{display:flex;gap:0;margin-bottom:16px;border-bottom:2px solid var(--border)}
+.tab{padding:10px 20px;cursor:pointer;color:var(--text2);font-size:.9em;font-weight:500;border-bottom:2px solid transparent;margin-bottom:-2px;transition:color .15s,border-color .15s;user-select:none}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--blue);border-bottom-color:var(--blue)}
+.tab-content{display:none}
+.tab-content.active{display:block}
+
+/* Status banner */
+.banner{padding:12px 16px;border-radius:8px;margin-bottom:16px;font-size:.9em;font-weight:500;display:none;line-height:1.5}
+.banner.success{display:block;background:#3fb9501a;border:1px solid var(--green);color:var(--green)}
+.banner.error{display:block;background:#f851491a;border:1px solid var(--red);color:var(--red)}
+.banner.warning{display:block;background:#d299221a;border:1px solid var(--yellow);color:var(--yellow)}
+.banner.info{display:block;background:#58a6ff1a;border:1px solid var(--blue);color:var(--blue)}
+
+/* Category sections */
+.category{background:var(--card);border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden}
+.cat-header{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;cursor:pointer;user-select:none;transition:background .15s}
+.cat-header:hover{background:#1c2129}
+.cat-header h2{font-size:.9em;font-weight:600;color:var(--text);display:flex;align-items:center;gap:8px}
+.cat-header .desc{font-size:.8em;color:var(--text2);font-weight:400}
+.cat-header .arrow{color:var(--text3);font-size:.8em;transition:transform .2s}
+.cat-header.open .arrow{transform:rotate(180deg)}
+.cat-body{padding:0 16px 16px;display:none}
+.cat-body.open{display:block}
+
+/* Hidden fields toggle */
+.advanced-toggle{font-size:.8em;color:var(--text3);cursor:pointer;padding:8px 0 4px;border-top:1px solid var(--border2);margin-top:8px;user-select:none}
+.advanced-toggle:hover{color:var(--blue)}
+.advanced-fields{display:none}
+.advanced-fields.open{display:block}
+
+/* Form fields */
+.field{display:grid;grid-template-columns:200px 1fr;gap:8px 16px;align-items:start;padding:10px 0;border-bottom:1px solid var(--border2)}
+.field:last-child{border-bottom:none}
+.field-label{font-size:.85em;color:var(--text);padding-top:6px;display:flex;flex-direction:column;gap:3px}
+.field-label .key{font-family:monospace;font-size:.75em;color:var(--text3)}
+.field-label .required{color:var(--red);margin-left:2px}
+.field-help{font-size:.75em;color:var(--text2);margin-top:4px}
+.field-input{display:flex;flex-direction:column;gap:4px}
+.field-error{font-size:.75em;color:var(--red);display:none}
+.field-error.show{display:block}
+
+input[type="text"],input[type="password"],input[type="number"],input[type="url"],select,textarea{
+  width:100%;background:var(--input-bg);border:1px solid var(--input-border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:.85em;font-family:inherit;outline:none;transition:border-color .15s
+}
+input:focus,select:focus,textarea:focus{border-color:var(--input-focus)}
+input.invalid,select.invalid,textarea.invalid{border-color:var(--red)}
+select{cursor:pointer;appearance:auto}
+textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;line-height:1.5}
+
+/* Checkbox / toggle */
+.toggle-wrap{display:flex;align-items:center;gap:8px;padding-top:4px}
+.toggle{position:relative;width:40px;height:22px;flex-shrink:0}
+.toggle input{opacity:0;width:0;height:0}
+.toggle .slider{position:absolute;inset:0;background:var(--border);border-radius:22px;cursor:pointer;transition:.2s}
+.toggle .slider:before{content:'';position:absolute;height:16px;width:16px;left:3px;bottom:3px;background:var(--text2);border-radius:50%;transition:.2s}
+.toggle input:checked+.slider{background:var(--green)}
+.toggle input:checked+.slider:before{transform:translateX(18px);background:#fff}
+
+/* Checkbox/radio groups */
+.check-group{display:flex;flex-wrap:wrap;gap:6px;padding-top:4px}
+.check-item{display:flex;align-items:center;gap:6px;padding:5px 10px;background:var(--bg);border:1px solid var(--border2);border-radius:6px;font-size:.83em;cursor:pointer;transition:border-color .15s}
+.check-item:hover{border-color:var(--blue)}
+.check-item input{accent-color:var(--blue)}
+.check-item.checked{border-color:var(--green);background:#3fb9500d}
+
+/* Password field with toggle */
+.secret-wrap{display:flex;gap:6px}
+.secret-wrap input{flex:1}
+.btn-show{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;padding:0 10px;cursor:pointer;font-size:.8em;white-space:nowrap}
+.btn-show:hover{border-color:var(--blue);color:var(--blue)}
+
+/* List inputs */
+.list-container{display:flex;flex-direction:column;gap:6px}
+.list-row{display:flex;gap:6px;align-items:center}
+.list-row input{flex:1}
+.list-row .pair-input{display:flex;gap:6px;flex:1}
+.list-row .pair-input input{flex:1}
+.btn-list{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;width:28px;height:28px;cursor:pointer;font-size:.9em;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.btn-list:hover{border-color:var(--red);color:var(--red)}
+.btn-list.add{color:var(--green)}
+.btn-list.add:hover{border-color:var(--green);color:var(--green)}
+.list-labels{display:flex;gap:6px;font-size:.75em;color:var(--text3);margin-bottom:2px}
+.list-labels span{flex:1}
+.list-labels .spacer{width:28px;flex-shrink:0}
+
+/* Buttons */
+.actions{display:flex;gap:10px;margin-top:20px;flex-wrap:wrap}
+.btn{padding:10px 20px;border-radius:8px;font-size:.9em;font-weight:500;cursor:pointer;border:none;transition:opacity .15s}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn-primary{background:var(--green);color:#fff}
+.btn-primary:hover:not(:disabled){opacity:.85}
+.btn-secondary{background:transparent;border:1px solid var(--border);color:var(--text)}
+.btn-secondary:hover:not(:disabled){border-color:var(--blue);color:var(--blue)}
+
+/* Responsive */
+@media(max-width:768px){
+  .field{grid-template-columns:1fr;gap:4px}
+  .field-label{padding-top:0}
+  .header{flex-direction:column}
+  .tabs{overflow-x:auto}
+}
+
+/* Spinner */
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:spin .6s linear infinite;margin-right:6px;vertical-align:middle}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* OAuth panel */
+.oauth-panel{background:var(--bg);border:1px solid var(--blue);border-radius:8px;padding:16px;margin-top:8px}
+.oauth-panel .oauth-code{font-size:1.8em;font-weight:700;color:var(--blue);letter-spacing:.15em;font-family:monospace;margin:10px 0}
+.oauth-panel .oauth-url{font-size:.85em}
+.oauth-panel .oauth-url a{color:var(--blue)}
+.oauth-panel .oauth-status{font-size:.8em;color:var(--text2);margin-top:8px}
+.btn-oauth{background:none;border:1px solid var(--blue);color:var(--blue);border-radius:6px;padding:6px 14px;cursor:pointer;font-size:.8em;font-weight:500;margin-top:6px}
+.btn-oauth:hover{background:#58a6ff1a}
+.btn-oauth:disabled{opacity:.4;cursor:not-allowed}
+.btn-cancel{border-color:var(--red);color:var(--red)}
+.btn-cancel:hover{background:#f851491a}
+
+/* Tab toolbar */
+.tab-toolbar{display:flex;gap:8px;margin-bottom:12px;justify-content:flex-end;flex-wrap:wrap}
+.btn-sm{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:.78em}
+.btn-sm:hover{border-color:var(--blue);color:var(--blue)}
+
+.footer{color:var(--text3);font-size:.7em;text-align:right;margin-top:16px}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>pd_zurg Settings</h1>
+  <div class="nav"><a href="/status">Dashboard</a></div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('env')">pd_zurg</div>
+  <div class="tab" onclick="switchTab('pd')">plex_debrid</div>
+</div>
+
+<div class="banner" id="banner"></div>
+
+<!-- pd_zurg env vars tab -->
+<div class="tab-content active" id="tab-env">
+  <div class="tab-toolbar">
+    <a class="btn-sm" href="/api/settings/export/env" download=".env">Export .env</a>
+    <button type="button" class="btn-sm" onclick="envResetDefaults()">Reset All to Defaults</button>
+  </div>
+  <div id="env-categories"></div>
+  <div class="actions">
+    <button type="button" class="btn btn-primary" id="btn-env-save" onclick="envSave()">Save &amp; Apply</button>
+    <button type="button" class="btn btn-secondary" id="btn-env-validate" onclick="envValidate()">Validate</button>
+    <button type="button" class="btn btn-secondary" onclick="envReset()">Undo Changes</button>
+  </div>
+</div>
+
+<!-- plex_debrid settings tab -->
+<div class="tab-content" id="tab-pd">
+  <div class="tab-toolbar">
+    <a class="btn-sm" href="/api/settings/export/plex-debrid" download="settings.json">Export settings.json</a>
+    <label class="btn-sm" style="cursor:pointer">Import settings.json<input type="file" accept=".json,application/json" style="display:none" onchange="pdImport(this)"></label>
+    <button type="button" class="btn-sm" onclick="pdResetDefaults()">Reset to Defaults</button>
+  </div>
+  <div id="pd-categories"></div>
+  <div class="actions">
+    <button type="button" class="btn btn-primary" id="btn-pd-save" onclick="pdSave()">Save &amp; Restart plex_debrid</button>
+    <button type="button" class="btn btn-secondary" id="btn-pd-validate" onclick="pdValidate()">Validate</button>
+    <button type="button" class="btn btn-secondary" onclick="pdReset()">Undo Changes</button>
+  </div>
+</div>
+
+<div class="footer">pd_zurg changes apply via SIGHUP reload. plex_debrid changes trigger a service restart.</div>
+
+<script>
+const ENV_SCHEMA = __ENV_SCHEMA_JSON__;
+const PD_SCHEMA = __PD_SCHEMA_JSON__;
+let envValues = {};
+let pdValues = {};
+let isDirty = false;
+
+// -----------------------------------------------------------------------
+// Shared helpers
+// -----------------------------------------------------------------------
+function esc(s) {
+  const d = document.createElement('div');
+  d.appendChild(document.createTextNode(String(s ?? '')));
+  return d.innerHTML;
+}
+
+let _bannerTimer = null;
+function showBanner(type, html) {
+  const b = document.getElementById('banner');
+  b.className = 'banner ' + type;
+  b.innerHTML = html;
+  b.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  if (_bannerTimer) clearTimeout(_bannerTimer);
+  if (type === 'success') { _bannerTimer = setTimeout(hideBanner, 8000); }
+}
+
+function hideBanner() {
+  document.getElementById('banner').className = 'banner';
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  if (name === 'env') {
+    document.querySelector('.tab:nth-child(1)').classList.add('active');
+    document.getElementById('tab-env').classList.add('active');
+  } else {
+    document.querySelector('.tab:nth-child(2)').classList.add('active');
+    document.getElementById('tab-pd').classList.add('active');
+  }
+  hideBanner();
+}
+
+function toggleCategory(header) {
+  header.classList.toggle('open');
+  header.nextElementSibling.classList.toggle('open');
+}
+
+function toggleSecret(btn) {
+  const input = btn.previousElementSibling;
+  if (input.type === 'password') { input.type = 'text'; btn.textContent = 'Hide'; }
+  else { input.type = 'password'; btn.textContent = 'Show'; }
+}
+
+function toggleAdvanced(el) {
+  const fields = el.nextElementSibling;
+  fields.classList.toggle('open');
+  el.textContent = fields.classList.contains('open') ? 'Hide advanced settings' : 'Show advanced settings';
+}
+
+function setButtonLoading(id, loading, text) {
+  const btn = document.getElementById(id);
+  if (!btn) return;
+  btn.disabled = loading;
+  btn.innerHTML = loading ? '<span class="spinner"></span>' + esc(text || 'Working...') : (text || btn.textContent);
+}
+
+// -----------------------------------------------------------------------
+// pd_zurg env var tab
+// -----------------------------------------------------------------------
+function renderEnvField(field, value) {
+  const id = 'env-' + field.key;
+  let inputHtml = '';
+
+  if (field.type === 'boolean') {
+    const isTrue = String(value).toLowerCase() === 'true';
+    const checked = isTrue ? ' checked' : '';
+    inputHtml = `<div class="toggle-wrap"><label class="toggle"><input type="checkbox" id="${id}" data-key="${esc(field.key)}" data-type="boolean"${checked}><span class="slider"></span></label><span style="font-size:.85em;color:var(--text2)">${isTrue ? 'true' : 'false'}</span></div>`;
+  } else if (field.type === 'secret') {
+    inputHtml = `<div class="secret-wrap"><input type="password" id="${id}" data-key="${esc(field.key)}" data-type="secret" value="${esc(value || '')}"><button type="button" class="btn-show" onclick="toggleSecret(this)">Show</button></div>`;
+  } else if (field.type.startsWith('select:')) {
+    const options = field.type.slice(7).split(',');
+    let opts = '<option value="">— select —</option>';
+    options.forEach(o => {
+      const sel = (value || '').toLowerCase() === o.toLowerCase() ? ' selected' : '';
+      opts += `<option value="${esc(o)}"${sel}>${esc(o)}</option>`;
+    });
+    inputHtml = `<select id="${id}" data-key="${esc(field.key)}" data-type="select">${opts}</select>`;
+  } else if (field.type.startsWith('number:')) {
+    const range = field.type.slice(7).split('-');
+    inputHtml = `<input type="number" id="${id}" data-key="${esc(field.key)}" data-type="number" value="${esc(value || '')}" min="${range[0]}" max="${range[1]}" placeholder="${range[0]}-${range[1]}">`;
+  } else if (field.type === 'url') {
+    inputHtml = `<input type="url" id="${id}" data-key="${esc(field.key)}" data-type="url" value="${esc(value || '')}" placeholder="http://...">`;
+  } else {
+    inputHtml = `<input type="text" id="${id}" data-key="${esc(field.key)}" data-type="string" value="${esc(value || '')}">`;
+  }
+
+  const helpHtml = field.help ? `<div class="field-help">${esc(field.help)}</div>` : '';
+  const reqMark = field.required ? '<span class="required">*</span>' : '';
+
+  return `<div class="field" id="row-${field.key}"><div class="field-label"><span>${esc(field.label)}${reqMark}</span><span class="key">${esc(field.key)}</span></div><div class="field-input">${inputHtml}${helpHtml}<div class="field-error" id="err-${field.key}"></div></div></div>`;
+}
+
+function renderEnvCategories(values) {
+  const container = document.getElementById('env-categories');
+  let html = '';
+  ENV_SCHEMA.categories.forEach((cat, i) => {
+    const openClass = i === 0 ? ' open' : '';
+    let fieldsHtml = '';
+    cat.fields.forEach(f => { fieldsHtml += renderEnvField(f, values[f.key] || ''); });
+    html += `<div class="category"><div class="cat-header${openClass}" onclick="toggleCategory(this)"><h2>${esc(cat.name)} <span class="desc">\u2014 ${esc(cat.description)}</span></h2><span class="arrow">&#9660;</span></div><div class="cat-body${openClass}">${fieldsHtml}</div></div>`;
+  });
+  container.innerHTML = html;
+  // Wire boolean toggles
+  container.querySelectorAll('input[data-type="boolean"]').forEach(cb => {
+    cb.addEventListener('change', function() {
+      this.closest('.toggle-wrap').querySelector('span:last-child').textContent = this.checked ? 'true' : 'false';
+    });
+  });
+}
+
+function collectEnvData() {
+  const data = {};
+  document.querySelectorAll('#tab-env [data-key]').forEach(el => {
+    data[el.dataset.key] = el.dataset.type === 'boolean' ? (el.checked ? 'true' : 'false') : el.value;
+  });
+  return data;
+}
+
+function clearFieldErrors(container) {
+  (container || document).querySelectorAll('.field-error').forEach(el => { el.className = 'field-error'; el.textContent = ''; });
+  (container || document).querySelectorAll('.invalid').forEach(el => { el.classList.remove('invalid'); });
+}
+
+function highlightErrors(errors) {
+  errors.forEach(msg => {
+    const match = msg.match(/^["']?([A-Z_]+)[=:'"]/);
+    if (match) {
+      const errEl = document.getElementById('err-' + match[1]);
+      if (errEl) { errEl.textContent = msg; errEl.className = 'field-error show'; }
+      const input = document.getElementById('env-' + match[1]);
+      if (input) input.classList.add('invalid');
+    }
+  });
+}
+
+async function envValidate() {
+  const tab = document.getElementById('tab-env');
+  clearFieldErrors(tab);
+  hideBanner();
+  setButtonLoading('btn-env-validate', true, 'Validating...');
+  try {
+    const resp = await fetch('/api/settings/validate', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(collectEnvData()) });
+    const result = await resp.json();
+    if (result.errors && result.errors.length) {
+      showBanner('error', '<strong>Validation failed:</strong><br>' + result.errors.map(e => '&bull; ' + esc(e)).join('<br>') + (result.warnings && result.warnings.length ? '<br><br><strong>Warnings:</strong><br>' + result.warnings.map(w => '&bull; ' + esc(w)).join('<br>') : ''));
+      highlightErrors(result.errors);
+    } else if (result.warnings && result.warnings.length) {
+      showBanner('warning', '<strong>Passed with warnings:</strong><br>' + result.warnings.map(w => '&bull; ' + esc(w)).join('<br>'));
+    } else {
+      showBanner('success', 'Validation passed');
+    }
+  } catch (e) { showBanner('error', 'Failed: ' + esc(e.message)); }
+  finally { setButtonLoading('btn-env-validate', false, 'Validate'); }
+}
+
+async function envSave() {
+  const tab = document.getElementById('tab-env');
+  clearFieldErrors(tab);
+  hideBanner();
+  setButtonLoading('btn-env-save', true, 'Saving...');
+  try {
+    const resp = await fetch('/api/settings/env', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(collectEnvData()) });
+    const result = await resp.json();
+    if (result.status === 'error') {
+      showBanner('error', '<strong>Save failed:</strong><br>' + result.errors.map(e => '&bull; ' + esc(e)).join('<br>'));
+      highlightErrors(result.errors);
+    } else if (result.status === 'saved') {
+      let html = '<strong>Settings saved and applied!</strong>';
+      if (result.restarted && result.restarted.length) html += '<br>Services restarting: ' + result.restarted.map(s => esc(s)).join(', ');
+      if (result.warnings && result.warnings.length) html += '<br><br><strong>Warnings:</strong><br>' + result.warnings.map(w => '&bull; ' + esc(w)).join('<br>');
+      showBanner('success', html);
+      envValues = collectEnvData();
+      isDirty = false;
+    } else {
+      showBanner('warning', '<strong>Saved</strong> (reload failed \u2014 restart container to apply)');
+    }
+  } catch (e) { showBanner('error', 'Failed: ' + esc(e.message)); }
+  finally { setButtonLoading('btn-env-save', false, 'Save & Apply'); }
+}
+
+function envReset() { clearFieldErrors(document.getElementById('tab-env')); hideBanner(); renderEnvCategories(envValues); }
+
+// -----------------------------------------------------------------------
+// plex_debrid settings tab
+// -----------------------------------------------------------------------
+
+function pdFieldId(key) { return 'pd-' + key.replace(/[^a-zA-Z0-9]/g, '_'); }
+
+function renderPdField(field, value) {
+  const id = pdFieldId(field.key);
+  let inputHtml = '';
+
+  switch (field.type) {
+    case 'multiselect': {
+      const selected = Array.isArray(value) ? value : [];
+      let items = '';
+      (field.options || []).forEach(opt => {
+        const chk = selected.includes(opt) ? ' checked' : '';
+        const cls = selected.includes(opt) ? ' checked' : '';
+        items += `<label class="check-item${cls}"><input type="checkbox" data-pdkey="${esc(field.key)}" data-pdtype="multiselect" value="${esc(opt)}"${chk}>${esc(opt)}</label>`;
+      });
+      inputHtml = `<div class="check-group" id="${id}">${items}</div>`;
+      break;
+    }
+    case 'radio': {
+      const selected = Array.isArray(value) && value.length ? value[0] : '';
+      let items = '';
+      (field.options || []).forEach(opt => {
+        const chk = selected === opt ? ' checked' : '';
+        const cls = selected === opt ? ' checked' : '';
+        items += `<label class="check-item${cls}"><input type="radio" name="${id}" data-pdkey="${esc(field.key)}" data-pdtype="radio" value="${esc(opt)}"${chk}>${esc(opt)}</label>`;
+      });
+      inputHtml = `<div class="check-group" id="${id}">${items}</div>`;
+      break;
+    }
+    case 'boolean_str': {
+      const isTrue = String(value).toLowerCase() === 'true';
+      const checked = isTrue ? ' checked' : '';
+      inputHtml = `<div class="toggle-wrap"><label class="toggle"><input type="checkbox" id="${id}" data-pdkey="${esc(field.key)}" data-pdtype="boolean_str"${checked}><span class="slider"></span></label><span style="font-size:.85em;color:var(--text2)">${isTrue ? 'true' : 'false'}</span></div>`;
+      break;
+    }
+    case 'secret': {
+      inputHtml = `<div class="secret-wrap"><input type="password" id="${id}" data-pdkey="${esc(field.key)}" data-pdtype="secret" value="${esc(value || '')}"><button type="button" class="btn-show" onclick="toggleSecret(this)">Show</button></div>`;
+      if (field.oauth) {
+        inputHtml += `<button type="button" class="btn-oauth" onclick="oauthConnect('${esc(field.oauth)}','${id}')" id="oauth-btn-${id}">Connect ${esc(field.label.replace(' API Key','').replace(' Key',''))}</button><div id="oauth-panel-${id}"></div>`;
+      }
+      break;
+    }
+    case 'select': {
+      let opts = '<option value="">— select —</option>';
+      (field.options || []).forEach(o => {
+        const sel = (value || '').toLowerCase() === o.toLowerCase() ? ' selected' : '';
+        opts += `<option value="${esc(o)}"${sel}>${esc(o)}</option>`;
+      });
+      inputHtml = `<select id="${id}" data-pdkey="${esc(field.key)}" data-pdtype="select">${opts}</select>`;
+      break;
+    }
+    case 'list_strings': {
+      const items = Array.isArray(value) ? value : [];
+      let rows = '';
+      items.forEach((v, i) => {
+        rows += `<div class="list-row"><input type="text" value="${esc(v)}" data-pdkey="${esc(field.key)}" data-pdtype="list_strings"><button type="button" class="btn-list" onclick="removeListRow(this)" title="Remove">&times;</button></div>`;
+      });
+      inputHtml = `<div class="list-container" id="${id}">${rows}<button type="button" class="btn-list add" onclick="addListStringRow(this.parentElement,'${esc(field.key)}')" title="Add">+</button></div>`;
+      break;
+    }
+    case 'list_pairs': {
+      const items = Array.isArray(value) ? value : [];
+      const cols = field.options || ['Column 1', 'Column 2'];
+      let labels = `<div class="list-labels"><span>${esc(cols[0])}</span><span>${esc(cols[1])}</span><span class="spacer"></span></div>`;
+      let rows = '';
+      items.forEach((pair, i) => {
+        const a = Array.isArray(pair) ? (pair[0] || '') : '';
+        const b = Array.isArray(pair) ? (pair[1] || '') : '';
+        rows += `<div class="list-row"><div class="pair-input"><input type="text" value="${esc(a)}" placeholder="${esc(cols[0])}"><input type="text" value="${esc(b)}" placeholder="${esc(cols[1])}"></div><button type="button" class="btn-list" onclick="removeListRow(this)" title="Remove">&times;</button></div>`;
+      });
+      inputHtml = `<div class="list-container" id="${id}" data-pdkey="${esc(field.key)}" data-pdtype="list_pairs" data-cols="${esc(JSON.stringify(cols))}">${labels}${rows}<button type="button" class="btn-list add" onclick="addListPairRow(this.parentElement)" title="Add">+</button></div>`;
+      if (field.oauth) {
+        inputHtml += `<button type="button" class="btn-oauth" onclick="oauthConnectPair('${esc(field.oauth)}','${id}')" id="oauth-btn-${id}">Connect via OAuth</button><div id="oauth-panel-${id}"></div>`;
+      }
+      break;
+    }
+    case 'json': {
+      const jsonStr = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+      inputHtml = `<textarea id="${id}" data-pdkey="${esc(field.key)}" data-pdtype="json" rows="8">${esc(jsonStr)}</textarea>`;
+      break;
+    }
+    case 'hidden':
+      return ''; // Don't render hidden fields
+    default: {
+      inputHtml = `<input type="text" id="${id}" data-pdkey="${esc(field.key)}" data-pdtype="string" value="${esc(value || '')}">`;
+    }
+  }
+
+  const helpHtml = field.help ? `<div class="field-help">${esc(field.help)}</div>` : '';
+  return `<div class="field" id="pdrow-${id}"><div class="field-label"><span>${esc(field.label)}</span><span class="key">${esc(field.key)}</span></div><div class="field-input">${inputHtml}${helpHtml}<div class="field-error" id="pderr-${id}"></div></div></div>`;
+}
+
+function renderPdCategories(values) {
+  const container = document.getElementById('pd-categories');
+  let html = '';
+  PD_SCHEMA.categories.forEach((cat, i) => {
+    const openClass = i === 0 ? ' open' : '';
+    let mainFields = '';
+    let advFields = '';
+    let hasAdvanced = false;
+
+    cat.fields.forEach(f => {
+      const rendered = renderPdField(f, values[f.key]);
+      if (!rendered) return;
+      if (f.hidden) {
+        advFields += rendered;
+        hasAdvanced = true;
+      } else {
+        mainFields += rendered;
+      }
+    });
+
+    let advHtml = '';
+    if (hasAdvanced) {
+      advHtml = `<div class="advanced-toggle" onclick="toggleAdvanced(this)">Show advanced settings</div><div class="advanced-fields">${advFields}</div>`;
+    }
+
+    html += `<div class="category"><div class="cat-header${openClass}" onclick="toggleCategory(this)"><h2>${esc(cat.name)} <span class="desc">\u2014 ${esc(cat.description)}</span></h2><span class="arrow">&#9660;</span></div><div class="cat-body${openClass}">${mainFields}${advHtml}</div></div>`;
+  });
+  container.innerHTML = html;
+
+  // Wire up checkbox/radio styling
+  container.querySelectorAll('.check-item input').forEach(inp => {
+    inp.addEventListener('change', function() {
+      if (this.type === 'radio') {
+        this.closest('.check-group').querySelectorAll('.check-item').forEach(ci => ci.classList.remove('checked'));
+      }
+      this.closest('.check-item').classList.toggle('checked', this.checked);
+    });
+  });
+  // Wire boolean toggle labels
+  container.querySelectorAll('input[data-pdtype="boolean_str"]').forEach(cb => {
+    cb.addEventListener('change', function() {
+      this.closest('.toggle-wrap').querySelector('span:last-child').textContent = this.checked ? 'true' : 'false';
+    });
+  });
+}
+
+// List manipulation
+function addListStringRow(container, key) {
+  const addBtn = container.querySelector('.btn-list.add');
+  const row = document.createElement('div');
+  row.className = 'list-row';
+  row.innerHTML = `<input type="text" value="" data-pdkey="${esc(key)}" data-pdtype="list_strings"><button type="button" class="btn-list" onclick="removeListRow(this)" title="Remove">&times;</button>`;
+  container.insertBefore(row, addBtn);
+  row.querySelector('input').focus();
+}
+
+function addListPairRow(container) {
+  const addBtn = container.querySelector('.btn-list.add');
+  const cols = JSON.parse(container.dataset.cols || '["",""]');
+  const row = document.createElement('div');
+  row.className = 'list-row';
+  row.innerHTML = `<div class="pair-input"><input type="text" value="" placeholder="${esc(cols[0])}"><input type="text" value="" placeholder="${esc(cols[1])}"></div><button type="button" class="btn-list" onclick="removeListRow(this)" title="Remove">&times;</button>`;
+  container.insertBefore(row, addBtn);
+  row.querySelector('input').focus();
+}
+
+function removeListRow(btn) {
+  btn.closest('.list-row').remove();
+}
+
+function collectPdData() {
+  const data = {};
+  // Multiselect
+  const multiKeys = new Set();
+  document.querySelectorAll('#tab-pd [data-pdtype="multiselect"]').forEach(inp => {
+    const key = inp.dataset.pdkey;
+    if (!multiKeys.has(key)) { multiKeys.add(key); data[key] = []; }
+    if (inp.checked) data[key].push(inp.value);
+  });
+  // Radio
+  document.querySelectorAll('#tab-pd [data-pdtype="radio"]:checked').forEach(inp => {
+    data[inp.dataset.pdkey] = [inp.value];
+  });
+  // Ensure radio keys exist even if nothing selected
+  document.querySelectorAll('#tab-pd [data-pdtype="radio"]').forEach(inp => {
+    if (!(inp.dataset.pdkey in data)) data[inp.dataset.pdkey] = [];
+  });
+  // Boolean string
+  document.querySelectorAll('#tab-pd [data-pdtype="boolean_str"]').forEach(inp => {
+    data[inp.dataset.pdkey] = inp.checked ? 'true' : 'false';
+  });
+  // String, secret, select
+  document.querySelectorAll('#tab-pd [data-pdtype="string"], #tab-pd [data-pdtype="secret"], #tab-pd [data-pdtype="select"]').forEach(inp => {
+    data[inp.dataset.pdkey] = inp.value;
+  });
+  // List of strings
+  const listKeys = new Set();
+  document.querySelectorAll('#tab-pd [data-pdtype="list_strings"]').forEach(inp => {
+    const key = inp.dataset.pdkey;
+    if (!listKeys.has(key)) { listKeys.add(key); data[key] = []; }
+    if (inp.value.trim()) data[key].push(inp.value.trim());
+  });
+  // List of pairs
+  document.querySelectorAll('#tab-pd [data-pdtype="list_pairs"]').forEach(container => {
+    const key = container.dataset.pdkey;
+    data[key] = [];
+    container.querySelectorAll('.list-row').forEach(row => {
+      const inputs = row.querySelectorAll('input');
+      if (inputs.length >= 2) {
+        data[key].push([inputs[0].value, inputs[1].value]);
+      }
+    });
+  });
+  // JSON
+  document.querySelectorAll('#tab-pd [data-pdtype="json"]').forEach(ta => {
+    try {
+      data[ta.dataset.pdkey] = JSON.parse(ta.value);
+    } catch (e) {
+      data[ta.dataset.pdkey] = ta.value; // Will fail validation
+    }
+  });
+  // Preserve hidden/version fields from original values
+  if (pdValues.version !== undefined && !('version' in data)) {
+    data.version = pdValues.version;
+  }
+  // Preserve Watchlist loop interval if not collected (it's a string field)
+  return data;
+}
+
+async function pdValidate() {
+  clearFieldErrors(document.getElementById('tab-pd'));
+  hideBanner();
+  setButtonLoading('btn-pd-validate', true, 'Validating...');
+  try {
+    const data = collectPdData();
+    // Client-side type checks first
+    let errors = []; let warnings = [];
+    PD_SCHEMA.categories.forEach(cat => cat.fields.forEach(f => {
+      const v = data[f.key];
+      if (f.type === 'multiselect' || f.type === 'radio' || f.type === 'list_strings' || f.type === 'list_pairs') {
+        if (v !== undefined && !Array.isArray(v)) errors.push(`"${f.key}" must be a list`);
+      }
+      if (f.type === 'json' && f.key === 'Versions' && v !== undefined && !Array.isArray(v)) errors.push('"Versions" must be a list');
+    }));
+    if (errors.length) {
+      showBanner('error', '<strong>Validation failed:</strong><br>' + errors.map(e => '&bull; ' + esc(e)).join('<br>'));
+    } else {
+      showBanner('success', 'Validation passed \u2014 no structural errors found');
+    }
+  } catch (e) { showBanner('error', 'Validation error: ' + esc(e.message)); }
+  finally { setButtonLoading('btn-pd-validate', false, 'Validate'); }
+}
+
+async function pdSave() {
+  if (!confirm('This will save settings and restart plex_debrid. Active downloads may be interrupted. Continue?')) return;
+  clearFieldErrors(document.getElementById('tab-pd'));
+  hideBanner();
+  setButtonLoading('btn-pd-save', true, 'Saving...');
+  try {
+    const data = collectPdData();
+    const resp = await fetch('/api/settings/plex-debrid', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) });
+    const result = await resp.json();
+    if (result.status === 'error') {
+      showBanner('error', '<strong>Save failed:</strong><br>' + result.errors.map(e => '&bull; ' + esc(e)).join('<br>'));
+    } else if (result.status === 'saved') {
+      let html = '<strong>plex_debrid settings saved!</strong>';
+      if (result.restarted) html += ' Service is restarting.';
+      if (result.warnings && result.warnings.length) html += '<br><br><strong>Warnings:</strong><br>' + result.warnings.map(w => '&bull; ' + esc(w)).join('<br>');
+      showBanner('success', html);
+      pdValues = data;
+      isDirty = false;
+    } else {
+      showBanner('warning', '<strong>Saved</strong> (restart failed \u2014 restart container manually)');
+    }
+  } catch (e) { showBanner('error', 'Failed: ' + esc(e.message)); }
+  finally { setButtonLoading('btn-pd-save', false, 'Save & Restart plex_debrid'); }
+}
+
+function pdReset() { clearFieldErrors(document.getElementById('tab-pd')); hideBanner(); renderPdCategories(pdValues); }
+
+// -----------------------------------------------------------------------
+// OAuth
+// -----------------------------------------------------------------------
+let oauthPollers = {};
+
+async function oauthConnect(service, fieldId) {
+  const btn = document.getElementById('oauth-btn-' + fieldId);
+  const panelEl = document.getElementById('oauth-panel-' + fieldId);
+  if (!btn || !panelEl) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Connecting...';
+  panelEl.innerHTML = '';
+
+  try {
+    const resp = await fetch('/api/settings/oauth/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({service})
+    });
+    const result = await resp.json();
+
+    if (result.error) {
+      panelEl.innerHTML = `<div class="oauth-panel" style="border-color:var(--red)"><div style="color:var(--red)">${esc(result.error)}</div></div>`;
+      btn.disabled = false;
+      btn.textContent = 'Retry';
+      return;
+    }
+
+    panelEl.innerHTML = `<div class="oauth-panel">
+      <div class="oauth-url">Visit <a href="${esc(result.verification_url)}" target="_blank" rel="noopener">${esc(result.verification_url)}</a> and enter this code:</div>
+      <div class="oauth-code">${esc(result.user_code)}</div>
+      <div class="oauth-status"><span class="spinner"></span>Waiting for authorization...</div>
+      <button type="button" class="btn-oauth btn-cancel" onclick="oauthCancel('${esc(service)}','${fieldId}')">Cancel</button>
+    </div>`;
+
+    // Start polling
+    const interval = (result.interval || 5) * 1000;
+    oauthPollers[fieldId] = setInterval(async () => {
+      try {
+        const pr = await fetch('/api/settings/oauth/poll', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({service, device_code: result.device_code})
+        });
+        const poll = await pr.json();
+
+        if (poll.error) {
+          oauthCancel(service, fieldId);
+          panelEl.innerHTML = `<div class="oauth-panel" style="border-color:var(--red)"><div style="color:var(--red)">${esc(poll.error)}</div></div>`;
+          return;
+        }
+
+        if (poll.status === 'complete' && poll.token) {
+          oauthCancel(service, fieldId);
+          // Fill the input field
+          const input = document.getElementById(fieldId);
+          if (input) {
+            input.value = poll.token;
+            if (input.type === 'password') input.type = 'text';
+          }
+          panelEl.innerHTML = `<div class="oauth-panel" style="border-color:var(--green)"><div style="color:var(--green)">Connected! Token received.</div></div>`;
+          setTimeout(() => { panelEl.innerHTML = ''; }, 5000);
+        }
+      } catch (e) { /* keep polling */ }
+    }, interval);
+
+  } catch (e) {
+    panelEl.innerHTML = `<div class="oauth-panel" style="border-color:var(--red)"><div style="color:var(--red)">${esc(e.message)}</div></div>`;
+    btn.disabled = false;
+    btn.textContent = 'Retry';
+  }
+}
+
+async function oauthConnectPair(service, containerId) {
+  // For list_pairs (e.g., Trakt users): prompt for name, then OAuth for token
+  const name = prompt('Enter a name for this user:');
+  if (!name) return;
+
+  const btn = document.getElementById('oauth-btn-' + containerId);
+  const panelEl = document.getElementById('oauth-panel-' + containerId);
+  if (!btn || !panelEl) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Connecting...';
+
+  try {
+    const resp = await fetch('/api/settings/oauth/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({service})
+    });
+    const result = await resp.json();
+
+    if (result.error) {
+      panelEl.innerHTML = `<div class="oauth-panel" style="border-color:var(--red)"><div style="color:var(--red)">${esc(result.error)}</div></div>`;
+      btn.disabled = false;
+      btn.textContent = 'Connect via OAuth';
+      return;
+    }
+
+    panelEl.innerHTML = `<div class="oauth-panel">
+      <div class="oauth-url">Visit <a href="${esc(result.verification_url)}" target="_blank" rel="noopener">${esc(result.verification_url)}</a> and enter this code:</div>
+      <div class="oauth-code">${esc(result.user_code)}</div>
+      <div class="oauth-status"><span class="spinner"></span>Waiting for authorization...</div>
+      <button type="button" class="btn-oauth btn-cancel" onclick="oauthCancel('${esc(service)}','${containerId}')">Cancel</button>
+    </div>`;
+
+    const interval = (result.interval || 5) * 1000;
+    oauthPollers[containerId] = setInterval(async () => {
+      try {
+        const pr = await fetch('/api/settings/oauth/poll', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({service, device_code: result.device_code})
+        });
+        const poll = await pr.json();
+
+        if (poll.error) {
+          oauthCancel(service, containerId);
+          panelEl.innerHTML = `<div class="oauth-panel" style="border-color:var(--red)"><div style="color:var(--red)">${esc(poll.error)}</div></div>`;
+          return;
+        }
+
+        if (poll.status === 'complete' && poll.token) {
+          oauthCancel(service, containerId);
+          // Add a new pair row with [name, token]
+          const container = document.getElementById(containerId);
+          if (container) {
+            const addBtn = container.querySelector('.btn-list.add');
+            const cols = JSON.parse(container.dataset.cols || '["",""]');
+            const row = document.createElement('div');
+            row.className = 'list-row';
+            row.innerHTML = `<div class="pair-input"><input type="text" value="${esc(name)}" placeholder="${esc(cols[0])}"><input type="text" value="${esc(poll.token)}" placeholder="${esc(cols[1])}"></div><button type="button" class="btn-list" onclick="removeListRow(this)" title="Remove">&times;</button>`;
+            container.insertBefore(row, addBtn);
+          }
+          panelEl.innerHTML = `<div class="oauth-panel" style="border-color:var(--green)"><div style="color:var(--green)">Connected! User "${esc(name)}" added.</div></div>`;
+          setTimeout(() => { panelEl.innerHTML = ''; }, 5000);
+        }
+      } catch (e) { /* keep polling */ }
+    }, interval);
+
+  } catch (e) {
+    panelEl.innerHTML = `<div class="oauth-panel" style="border-color:var(--red)"><div style="color:var(--red)">${esc(e.message)}</div></div>`;
+    btn.disabled = false;
+    btn.textContent = 'Connect via OAuth';
+  }
+}
+
+function oauthCancel(service, fieldId) {
+  if (oauthPollers[fieldId]) {
+    clearInterval(oauthPollers[fieldId]);
+    delete oauthPollers[fieldId];
+  }
+  const btn = document.getElementById('oauth-btn-' + fieldId);
+  if (btn) {
+    btn.disabled = false;
+    const isList = btn.textContent.includes('OAuth');
+    btn.textContent = isList ? 'Connect via OAuth' : 'Connect';
+  }
+}
+
+// -----------------------------------------------------------------------
+// Import / Export / Reset
+// -----------------------------------------------------------------------
+async function envResetDefaults() {
+  if (!confirm('Reset all pd_zurg settings to empty defaults? You will still need to click Save to apply.')) return;
+  try {
+    const resp = await fetch('/api/settings/reset/env', {method: 'POST'});
+    const defaults = await resp.json();
+    renderEnvCategories(defaults);
+    showBanner('info', 'Form reset to defaults. Click <strong>Save &amp; Apply</strong> to write changes.');
+  } catch (e) { showBanner('error', 'Reset failed: ' + esc(e.message)); }
+}
+
+async function pdResetDefaults() {
+  if (!confirm('Reset plex_debrid settings to defaults? You will still need to click Save to apply.')) return;
+  try {
+    const resp = await fetch('/api/settings/reset/plex-debrid', {method: 'POST'});
+    const defaults = await resp.json();
+    renderPdCategories(defaults);
+    showBanner('info', 'Form reset to defaults. Click <strong>Save &amp; Restart plex_debrid</strong> to write changes.');
+  } catch (e) { showBanner('error', 'Reset failed: ' + esc(e.message)); }
+}
+
+function pdImport(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const imported = JSON.parse(e.target.result);
+      if (typeof imported !== 'object' || Array.isArray(imported)) {
+        showBanner('error', 'Invalid settings file: must be a JSON object');
+        return;
+      }
+      renderPdCategories(imported);
+      showBanner('info', 'Settings imported into form. Review and click <strong>Save &amp; Restart plex_debrid</strong> to apply.');
+    } catch (err) {
+      showBanner('error', 'Failed to parse JSON: ' + esc(err.message));
+    }
+  };
+  reader.readAsText(file);
+  input.value = ''; // Allow re-importing same file
+}
+
+// -----------------------------------------------------------------------
+// Init
+// -----------------------------------------------------------------------
+async function init() {
+  // Load env values
+  try {
+    const resp = await fetch('/api/settings/env');
+    if (resp.ok) { envValues = await resp.json(); }
+  } catch (e) {}
+  renderEnvCategories(envValues);
+
+  // Load plex_debrid values
+  try {
+    const resp = await fetch('/api/settings/plex-debrid');
+    if (resp.ok) { pdValues = await resp.json(); }
+  } catch (e) {}
+  renderPdCategories(pdValues);
+}
+
+init();
+
+// Track dirty state
+document.addEventListener('input', () => { isDirty = true; });
+document.addEventListener('change', () => { isDirty = true; });
+window.addEventListener('beforeunload', (e) => {
+  if (isDirty) { e.preventDefault(); e.returnValue = ''; }
+});
+</script>
+</body>
+</html>'''

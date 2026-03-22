@@ -81,7 +81,7 @@ services:
      # - BLACKHOLE_DIR=/watch
      # - BLACKHOLE_POLL_INTERVAL=5
      # - BLACKHOLE_DEBRID=realdebrid
-      ## Status Web UI
+      ## Status Web UI & Settings Editor (AUTH required for settings editor)
      # - STATUS_UI_ENABLED=true
      # - STATUS_UI_PORT=8080
      # - STATUS_UI_AUTH=admin:changeme

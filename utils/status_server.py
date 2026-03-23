@@ -130,10 +130,10 @@ mount_history = MountHistory()
 def read_log_lines(lines=100, level=None, log_dir='./log'):
     """Read last N lines from the most recent log file, optionally filtered by level."""
     try:
-        log_files = sorted(glob_mod.glob(os.path.join(log_dir, 'PDZURG-*.log')))
+        log_files = glob_mod.glob(os.path.join(log_dir, 'PDZURG-*.log'))
         if not log_files:
             return []
-        log_file = log_files[-1]  # Most recent
+        log_file = max(log_files, key=os.path.getmtime)  # Most recently modified
 
         with open(log_file, 'rb') as f:
             f.seek(0, 2)

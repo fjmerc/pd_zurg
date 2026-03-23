@@ -95,6 +95,7 @@ ENV_SCHEMA = [
             ('PLEX_MOUNT_DIR', 'Plex Mount Directory', 'string', False, 'Path where Plex sees the rclone mount'),
             ('DUPLICATE_CLEANUP', 'Duplicate Cleanup', 'boolean', False, 'Automatically remove duplicate media entries'),
             ('CLEANUP_INTERVAL', 'Cleanup Interval (hours)', 'number:1-168', False, 'How often to run duplicate cleanup'),
+            ('DUPLICATE_CLEANUP_KEEP', 'Keep Copy From', 'select:local,zurg', False, 'Which copy to keep: "local" (default, logs Zurg dupes) or "zurg" (deletes local copies)'),
         ],
     },
     {
@@ -457,6 +458,13 @@ def validate_env_values(values):
         errors.append(
             'DUPLICATE_CLEANUP=true but PLEX_TOKEN is not set. '
             'Duplicate cleanup requires Plex API access.'
+        )
+
+    keep_val = values.get('DUPLICATE_CLEANUP_KEEP', '').lower()
+    if keep_val and keep_val not in ('local', 'zurg'):
+        errors.append(
+            f'DUPLICATE_CLEANUP_KEEP={keep_val!r} is not valid. '
+            "Must be 'local' (default) or 'zurg'."
         )
 
     if _truthy('PLEX_REFRESH') and not values.get('PLEX_TOKEN'):

@@ -117,7 +117,7 @@ class Config:
         self.load()
 
     def load(self):
-        load_dotenv(find_dotenv('./config/.env'), override=True)
+        load_dotenv(find_dotenv('./config/.env'), override=False)
 
         self.PLEXDEBRID = os.getenv("PD_ENABLED")
         self.PDLOGLEVEL = os.getenv("PD_LOG_LEVEL")

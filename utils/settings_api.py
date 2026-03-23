@@ -115,6 +115,13 @@ ENV_SCHEMA = [
             ('BLACKHOLE_DIR', 'Watch Directory', 'string', False, 'Directory to watch for torrent files'),
             ('BLACKHOLE_POLL_INTERVAL', 'Poll Interval (seconds)', 'number:1-3600', False, 'How often to check for new files'),
             ('BLACKHOLE_DEBRID', 'Debrid Service', 'select:realdebrid,alldebrid,torbox', False, 'Which debrid service to use'),
+            ('BLACKHOLE_SYMLINK_ENABLED', 'Enable Symlinks', 'boolean', False, 'Create symlinks in completed dir after debrid download finishes'),
+            ('BLACKHOLE_COMPLETED_DIR', 'Completed Directory', 'string', False, 'Directory for completed symlinks (container path, default: /completed)'),
+            ('BLACKHOLE_RCLONE_MOUNT', 'rclone Mount Path', 'string', False, 'rclone mount path inside container (default: /data)'),
+            ('BLACKHOLE_SYMLINK_TARGET_BASE', 'Symlink Target Base', 'string', False, 'Mount path as seen on Sonarr/Radarr host (e.g., /mnt/debrid)'),
+            ('BLACKHOLE_MOUNT_POLL_TIMEOUT', 'Mount Poll Timeout (seconds)', 'number:30-3600', False, 'Max time to wait for content on mount (default: 300)'),
+            ('BLACKHOLE_MOUNT_POLL_INTERVAL', 'Mount Poll Interval (seconds)', 'number:5-120', False, 'How often to check for content on mount (default: 10)'),
+            ('BLACKHOLE_SYMLINK_MAX_AGE', 'Symlink Max Age (hours)', 'number:0-720', False, 'Remove symlink dirs older than this (0=disabled, default: 72)'),
         ],
     },
     {
@@ -436,6 +443,9 @@ def validate_env_values(values):
         'CLEANUP_INTERVAL': (1, 168),
         'FFPROBE_STUCK_TIMEOUT': (10, 600),
         'FFPROBE_POLL_INTERVAL': (5, 300),
+        'BLACKHOLE_MOUNT_POLL_TIMEOUT': (30, 3600),
+        'BLACKHOLE_MOUNT_POLL_INTERVAL': (5, 120),
+        'BLACKHOLE_SYMLINK_MAX_AGE': (0, 720),
     }
     for var, (lo, hi) in numeric_ranges.items():
         val = values.get(var, '')
@@ -479,6 +489,18 @@ def validate_env_values(values):
             errors.append(
                 'BLACKHOLE_ENABLED=true but no debrid API key found. '
                 'Set RD_API_KEY, AD_API_KEY, or TORBOX_API_KEY.'
+            )
+
+    if _truthy('BLACKHOLE_SYMLINK_ENABLED'):
+        if not blackhole_enabled:
+            errors.append(
+                'BLACKHOLE_SYMLINK_ENABLED=true but BLACKHOLE_ENABLED is not true. '
+                'Symlinks require the blackhole watcher to be enabled.'
+            )
+        if not values.get('BLACKHOLE_SYMLINK_TARGET_BASE'):
+            errors.append(
+                'BLACKHOLE_SYMLINK_ENABLED=true but BLACKHOLE_SYMLINK_TARGET_BASE is not set. '
+                'This must be the mount path as seen on the Sonarr/Radarr host (e.g., /mnt/debrid).'
             )
 
     # Auth format

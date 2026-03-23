@@ -19,6 +19,8 @@ services:
       - /pd_zurg/mnt:/data:shared
       ## Blackhole watch folder for .torrent/.magnet files (uncomment to enable)
       # - /pd_zurg/watch:/watch
+      ## Completed symlinks directory for Sonarr/Radarr import (uncomment to enable)
+      # - /pd_zurg/completed:/completed
     environment:
       ## ---------------------------------------------------------------
       ## All values are read from your .env file (see .env.example)
@@ -80,6 +82,14 @@ services:
       - BLACKHOLE_DIR=${BLACKHOLE_DIR:-}
       - BLACKHOLE_POLL_INTERVAL=${BLACKHOLE_POLL_INTERVAL:-}
       - BLACKHOLE_DEBRID=${BLACKHOLE_DEBRID:-}
+      ## Blackhole Symlink (creates symlinks in completed dir for Sonarr/Radarr import)
+      - BLACKHOLE_SYMLINK_ENABLED=${BLACKHOLE_SYMLINK_ENABLED:-}
+      - BLACKHOLE_COMPLETED_DIR=${BLACKHOLE_COMPLETED_DIR:-/completed}
+      - BLACKHOLE_RCLONE_MOUNT=${BLACKHOLE_RCLONE_MOUNT:-/data}
+      - BLACKHOLE_SYMLINK_TARGET_BASE=${BLACKHOLE_SYMLINK_TARGET_BASE:-}
+      - BLACKHOLE_MOUNT_POLL_TIMEOUT=${BLACKHOLE_MOUNT_POLL_TIMEOUT:-300}
+      - BLACKHOLE_MOUNT_POLL_INTERVAL=${BLACKHOLE_MOUNT_POLL_INTERVAL:-10}
+      - BLACKHOLE_SYMLINK_MAX_AGE=${BLACKHOLE_SYMLINK_MAX_AGE:-72}
       ## Status Web UI & Settings Editor
       - STATUS_UI_ENABLED=${STATUS_UI_ENABLED:-true}
       - STATUS_UI_PORT=${STATUS_UI_PORT:-8080}

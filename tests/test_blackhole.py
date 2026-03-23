@@ -4,7 +4,10 @@ import json
 import os
 import time
 import pytest
-from utils.blackhole import RetryMeta, BlackholeWatcher, RETRY_SCHEDULE, MAX_RETRIES
+from utils.blackhole import (
+    RetryMeta, BlackholeWatcher, RETRY_SCHEDULE, MAX_RETRIES,
+    MEDIA_EXTENSIONS, MOUNT_CATEGORIES,
+)
 
 
 class TestRetryMeta:
@@ -132,3 +135,535 @@ class TestRetrySchedule:
     def test_schedule_first_retry_reasonable(self):
         """First retry should be at least 60 seconds."""
         assert RETRY_SCHEDULE[0] >= 60
+
+
+class TestSymlinkConstants:
+
+    def test_media_extensions_include_common_video(self):
+        """MEDIA_EXTENSIONS should include common video formats."""
+        for ext in ['.mkv', '.mp4', '.avi', '.ts', '.webm']:
+            assert ext in MEDIA_EXTENSIONS
+
+    def test_media_extensions_exclude_non_video(self):
+        """MEDIA_EXTENSIONS should not include non-video formats."""
+        for ext in ['.nfo', '.txt', '.jpg', '.png', '.srt', '.sub']:
+            assert ext not in MEDIA_EXTENSIONS
+
+    def test_mount_categories(self):
+        """MOUNT_CATEGORIES should include the standard Zurg categories."""
+        assert 'shows' in MOUNT_CATEGORIES
+        assert 'movies' in MOUNT_CATEGORIES
+        assert 'anime' in MOUNT_CATEGORIES
+
+
+class TestExtractTorrentId:
+
+    def test_realdebrid_string_id(self):
+        """RD returns torrent_id as a plain string."""
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid')
+        assert watcher._extract_torrent_id('TGLXHJIH2IFL6') == 'TGLXHJIH2IFL6'
+
+    def test_alldebrid_json_response(self):
+        """AD returns full JSON; extract magnet ID."""
+        watcher = BlackholeWatcher('/tmp', 'key', 'alldebrid')
+        result = {'data': {'magnets': [{'id': 12345}]}}
+        assert watcher._extract_torrent_id(result) == '12345'
+
+    def test_torbox_json_response(self):
+        """TorBox returns full JSON; extract torrent_id."""
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        result = {'data': {'torrent_id': 67890}}
+        assert watcher._extract_torrent_id(result) == '67890'
+
+    def test_torbox_fallback_to_id(self):
+        """TorBox should fallback to 'id' if 'torrent_id' is missing."""
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        result = {'data': {'id': 11111}}
+        assert watcher._extract_torrent_id(result) == '11111'
+
+    def test_alldebrid_malformed_response(self):
+        """Should return None for malformed AD response."""
+        watcher = BlackholeWatcher('/tmp', 'key', 'alldebrid')
+        assert watcher._extract_torrent_id({}) is None
+        assert watcher._extract_torrent_id({'data': {}}) is None
+
+    def test_torbox_malformed_response(self):
+        """Should return None for malformed TorBox response."""
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        # Empty data with no torrent_id or id returns empty string which is falsy
+        result = watcher._extract_torrent_id({'data': {}})
+        assert not result  # empty string or None
+
+
+class TestFindOnMount:
+
+    def test_finds_in_shows(self, tmp_dir):
+        """Should find content in the shows category."""
+        shows_dir = os.path.join(tmp_dir, 'shows', 'My.Show.S01')
+        os.makedirs(shows_dir)
+        with open(os.path.join(shows_dir, 'ep01.mkv'), 'w') as f:
+            f.write('video')
+
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid', rclone_mount=tmp_dir)
+        path, category = watcher._find_on_mount('My.Show.S01')
+        assert path == shows_dir
+        assert category == 'shows'
+
+    def test_finds_in_movies(self, tmp_dir):
+        """Should find content in the movies category."""
+        movies_dir = os.path.join(tmp_dir, 'movies', 'My.Movie.2024')
+        os.makedirs(movies_dir)
+
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid', rclone_mount=tmp_dir)
+        path, category = watcher._find_on_mount('My.Movie.2024')
+        assert path == movies_dir
+        assert category == 'movies'
+
+    def test_finds_in_anime(self, tmp_dir):
+        """Should find content in the anime category."""
+        anime_dir = os.path.join(tmp_dir, 'anime', 'My.Anime.S01')
+        os.makedirs(anime_dir)
+
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid', rclone_mount=tmp_dir)
+        path, category = watcher._find_on_mount('My.Anime.S01')
+        assert path == anime_dir
+        assert category == 'anime'
+
+    def test_fallback_to_all(self, tmp_dir):
+        """Should fall back to __all__ if not in categorized dirs."""
+        all_dir = os.path.join(tmp_dir, '__all__', 'Random.Content')
+        os.makedirs(all_dir)
+
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid', rclone_mount=tmp_dir)
+        path, category = watcher._find_on_mount('Random.Content')
+        assert path == all_dir
+        assert category == '__all__'
+
+    def test_not_found(self, tmp_dir):
+        """Should return (None, None) when content is not on mount."""
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid', rclone_mount=tmp_dir)
+        path, category = watcher._find_on_mount('Nonexistent.Release')
+        assert path is None
+        assert category is None
+
+    def test_prefers_categorized_over_all(self, tmp_dir):
+        """Categorized dirs should be checked before __all__."""
+        # Create in both shows and __all__
+        for cat in ['shows', '__all__']:
+            d = os.path.join(tmp_dir, cat, 'My.Show.S01')
+            os.makedirs(d)
+
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid', rclone_mount=tmp_dir)
+        path, category = watcher._find_on_mount('My.Show.S01')
+        assert category == 'shows'
+
+
+class TestCreateSymlinks:
+
+    def _make_watcher(self, tmp_dir):
+        """Create a watcher configured for symlink testing."""
+        completed = os.path.join(tmp_dir, 'completed')
+        mount = os.path.join(tmp_dir, 'mount')
+        os.makedirs(completed)
+        os.makedirs(mount)
+        watcher = BlackholeWatcher(
+            os.path.join(tmp_dir, 'watch'), 'key', 'realdebrid',
+            symlink_enabled=True,
+            completed_dir=completed,
+            rclone_mount=mount,
+            symlink_target_base='/mnt/debrid',
+        )
+        return watcher, completed, mount
+
+    def test_creates_symlinks_for_media_files(self, tmp_dir):
+        """Should create symlinks only for media files."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        # Create mock content on mount
+        release = 'My.Show.S01E01'
+        release_dir = os.path.join(mount, 'shows', release)
+        os.makedirs(release_dir)
+        for name in ['episode.mkv', 'episode.nfo', 'poster.jpg', 'sample.mkv']:
+            with open(os.path.join(release_dir, name), 'w') as f:
+                f.write('data')
+
+        count = watcher._create_symlinks(release, 'shows', release_dir)
+        # Only episode.mkv — sample.mkv is skipped, .nfo and .jpg are non-media
+        assert count == 1
+
+        symlink = os.path.join(completed, release, 'episode.mkv')
+        assert os.path.islink(symlink)
+        target = os.readlink(symlink)
+        assert target == f'/mnt/debrid/shows/{release}/episode.mkv'
+
+    def test_skips_sample_files(self, tmp_dir):
+        """Files with 'sample' in the name should be skipped."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        release = 'Movie.2024'
+        release_dir = os.path.join(mount, 'movies', release)
+        os.makedirs(release_dir)
+        for name in ['Movie.2024.mkv', 'Sample.mkv', 'movie-sample.mp4']:
+            with open(os.path.join(release_dir, name), 'w') as f:
+                f.write('data')
+
+        count = watcher._create_symlinks(release, 'movies', release_dir)
+        assert count == 1  # Only Movie.2024.mkv
+
+    def test_skips_existing_symlinks(self, tmp_dir):
+        """Should not recreate existing symlinks."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        release = 'Movie.2024'
+        release_dir = os.path.join(mount, 'movies', release)
+        os.makedirs(release_dir)
+        with open(os.path.join(release_dir, 'movie.mkv'), 'w') as f:
+            f.write('data')
+
+        # Create first time
+        count1 = watcher._create_symlinks(release, 'movies', release_dir)
+        assert count1 == 1
+
+        # Try again — should skip existing
+        count2 = watcher._create_symlinks(release, 'movies', release_dir)
+        assert count2 == 0
+
+    def test_handles_nested_directories(self, tmp_dir):
+        """Should handle files in subdirectories within a release."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        release = 'Show.S01.Complete'
+        release_dir = os.path.join(mount, 'shows', release)
+        sub = os.path.join(release_dir, 'Season 01')
+        os.makedirs(sub)
+        with open(os.path.join(sub, 'S01E01.mkv'), 'w') as f:
+            f.write('data')
+        with open(os.path.join(sub, 'S01E02.mkv'), 'w') as f:
+            f.write('data')
+
+        count = watcher._create_symlinks(release, 'shows', release_dir)
+        assert count == 2
+
+        symlink = os.path.join(completed, release, 'Season 01', 'S01E01.mkv')
+        assert os.path.islink(symlink)
+        target = os.readlink(symlink)
+        assert target == f'/mnt/debrid/shows/{release}/Season 01/S01E01.mkv'
+
+    def test_symlink_target_uses_configured_base(self, tmp_dir):
+        """Symlink targets should use the configured target base path."""
+        completed = os.path.join(tmp_dir, 'completed')
+        mount = os.path.join(tmp_dir, 'mount')
+        os.makedirs(completed)
+        os.makedirs(mount)
+        watcher = BlackholeWatcher(
+            os.path.join(tmp_dir, 'watch'), 'key', 'realdebrid',
+            symlink_enabled=True,
+            completed_dir=completed,
+            rclone_mount=mount,
+            symlink_target_base='/custom/path',
+        )
+
+        release = 'Movie.2024'
+        release_dir = os.path.join(mount, 'movies', release)
+        os.makedirs(release_dir)
+        with open(os.path.join(release_dir, 'movie.mp4'), 'w') as f:
+            f.write('data')
+
+        watcher._create_symlinks(release, 'movies', release_dir)
+        target = os.readlink(os.path.join(completed, release, 'movie.mp4'))
+        assert target.startswith('/custom/path/')
+
+    def test_path_traversal_blocked(self, tmp_dir):
+        """Release names with path traversal should be handled safely."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        release = 'Normal.Release'
+        release_dir = os.path.join(mount, 'movies', release)
+        # Create a file with a path-traversal relative path
+        sub = os.path.join(release_dir, '..', '..', 'escape')
+        os.makedirs(sub, exist_ok=True)
+        with open(os.path.join(sub, 'evil.mkv'), 'w') as f:
+            f.write('data')
+
+        # The traversal should be caught by the guard
+        count = watcher._create_symlinks(release, 'movies', release_dir)
+        # Should not create symlinks outside the completed release dir
+        assert not os.path.exists(os.path.join(completed, 'escape'))
+
+
+class TestPendingMonitors:
+
+    def test_add_and_load_pending(self, tmp_dir):
+        """Should persist pending monitors to disk."""
+        completed = os.path.join(tmp_dir, 'completed')
+        os.makedirs(completed)
+        watcher = BlackholeWatcher(
+            tmp_dir, 'key', 'realdebrid',
+            symlink_enabled=True, completed_dir=completed,
+        )
+
+        watcher._add_pending('torrent123', 'movie.torrent')
+        entries = watcher._load_pending()
+        assert len(entries) == 1
+        assert entries[0]['torrent_id'] == 'torrent123'
+        assert entries[0]['filename'] == 'movie.torrent'
+        assert entries[0]['service'] == 'realdebrid'
+
+    def test_add_pending_deduplicates(self, tmp_dir):
+        """Should not add duplicate torrent IDs."""
+        completed = os.path.join(tmp_dir, 'completed')
+        os.makedirs(completed)
+        watcher = BlackholeWatcher(
+            tmp_dir, 'key', 'realdebrid',
+            symlink_enabled=True, completed_dir=completed,
+        )
+
+        watcher._add_pending('torrent123', 'movie.torrent')
+        watcher._add_pending('torrent123', 'movie.torrent')
+        entries = watcher._load_pending()
+        assert len(entries) == 1
+
+    def test_remove_pending(self, tmp_dir):
+        """Should remove a specific torrent from pending."""
+        completed = os.path.join(tmp_dir, 'completed')
+        os.makedirs(completed)
+        watcher = BlackholeWatcher(
+            tmp_dir, 'key', 'realdebrid',
+            symlink_enabled=True, completed_dir=completed,
+        )
+
+        watcher._add_pending('torrent1', 'file1.torrent')
+        watcher._add_pending('torrent2', 'file2.torrent')
+        watcher._remove_pending('torrent1')
+        entries = watcher._load_pending()
+        assert len(entries) == 1
+        assert entries[0]['torrent_id'] == 'torrent2'
+
+    def test_load_pending_missing_file(self, tmp_dir):
+        """Should return empty list when no pending file exists."""
+        completed = os.path.join(tmp_dir, 'completed')
+        os.makedirs(completed)
+        watcher = BlackholeWatcher(
+            tmp_dir, 'key', 'realdebrid',
+            symlink_enabled=True, completed_dir=completed,
+        )
+        assert watcher._load_pending() == []
+
+    def test_load_pending_corrupt_file(self, tmp_dir):
+        """Should return empty list for corrupt pending file."""
+        completed = os.path.join(tmp_dir, 'completed')
+        os.makedirs(completed)
+        watcher = BlackholeWatcher(
+            tmp_dir, 'key', 'realdebrid',
+            symlink_enabled=True, completed_dir=completed,
+        )
+        with open(watcher._pending_file, 'w') as f:
+            f.write('not valid json')
+        assert watcher._load_pending() == []
+
+    def test_pending_file_in_completed_dir(self, tmp_dir):
+        """Pending file should be stored in completed_dir, not watch_dir."""
+        completed = os.path.join(tmp_dir, 'completed')
+        os.makedirs(completed)
+        watcher = BlackholeWatcher(
+            tmp_dir, 'key', 'realdebrid',
+            symlink_enabled=True, completed_dir=completed,
+        )
+        assert watcher._pending_file.startswith(completed)
+
+
+class TestSymlinkCleanup:
+
+    def test_removes_broken_symlinks(self, tmp_dir):
+        """Should remove symlinks whose targets no longer exist."""
+        completed = os.path.join(tmp_dir, 'completed')
+        release_dir = os.path.join(completed, 'Old.Release')
+        os.makedirs(release_dir)
+
+        # Create a broken symlink
+        symlink = os.path.join(release_dir, 'episode.mkv')
+        os.symlink('/nonexistent/path/episode.mkv', symlink)
+        assert os.path.islink(symlink)
+        assert not os.path.exists(symlink)  # broken
+
+        watcher = BlackholeWatcher(
+            tmp_dir, 'key', 'realdebrid',
+            symlink_enabled=True, completed_dir=completed,
+        )
+        watcher._cleanup_symlinks()
+
+        # Broken symlink should be removed, and empty dir cleaned up
+        assert not os.path.islink(symlink)
+        assert not os.path.exists(release_dir)
+
+    def test_preserves_valid_symlinks(self, tmp_dir):
+        """Should not remove directories with valid symlinks."""
+        completed = os.path.join(tmp_dir, 'completed')
+        release_dir = os.path.join(completed, 'Good.Release')
+        os.makedirs(release_dir)
+
+        # Create a valid symlink target
+        target_file = os.path.join(tmp_dir, 'real_file.mkv')
+        with open(target_file, 'w') as f:
+            f.write('video data')
+
+        symlink = os.path.join(release_dir, 'episode.mkv')
+        os.symlink(target_file, symlink)
+        assert os.path.exists(symlink)
+
+        watcher = BlackholeWatcher(
+            tmp_dir, 'key', 'realdebrid',
+            symlink_enabled=True, completed_dir=completed,
+            symlink_max_age=0,  # Disable age-based cleanup
+        )
+        watcher._cleanup_symlinks()
+
+        assert os.path.islink(symlink)
+        assert os.path.isdir(release_dir)
+
+    def test_age_based_cleanup(self, tmp_dir):
+        """Should remove directories older than max age."""
+        completed = os.path.join(tmp_dir, 'completed')
+        release_dir = os.path.join(completed, 'Old.Release')
+        os.makedirs(release_dir)
+
+        # Create a valid symlink
+        target_file = os.path.join(tmp_dir, 'real_file.mkv')
+        with open(target_file, 'w') as f:
+            f.write('data')
+        symlink = os.path.join(release_dir, 'ep.mkv')
+        os.symlink(target_file, symlink)
+
+        # Set mtime to 100 hours ago
+        old_time = time.time() - (100 * 3600)
+        os.utime(release_dir, (old_time, old_time))
+
+        watcher = BlackholeWatcher(
+            tmp_dir, 'key', 'realdebrid',
+            symlink_enabled=True, completed_dir=completed,
+            symlink_max_age=72,  # 72 hours
+        )
+        watcher._cleanup_symlinks()
+
+        assert not os.path.exists(release_dir)
+
+    def test_age_zero_disables_age_cleanup(self, tmp_dir):
+        """symlink_max_age=0 should disable age-based removal."""
+        completed = os.path.join(tmp_dir, 'completed')
+        release_dir = os.path.join(completed, 'Old.Release')
+        os.makedirs(release_dir)
+
+        target_file = os.path.join(tmp_dir, 'real_file.mkv')
+        with open(target_file, 'w') as f:
+            f.write('data')
+        symlink = os.path.join(release_dir, 'ep.mkv')
+        os.symlink(target_file, symlink)
+
+        # Set very old mtime
+        old_time = time.time() - (1000 * 3600)
+        os.utime(release_dir, (old_time, old_time))
+
+        watcher = BlackholeWatcher(
+            tmp_dir, 'key', 'realdebrid',
+            symlink_enabled=True, completed_dir=completed,
+            symlink_max_age=0,
+        )
+        watcher._cleanup_symlinks()
+
+        assert os.path.exists(release_dir)
+
+    def test_cleanup_skipped_when_disabled(self, tmp_dir):
+        """Cleanup should do nothing when symlinks are disabled."""
+        watcher = BlackholeWatcher(tmp_dir, 'key', 'realdebrid', symlink_enabled=False)
+        # Should not raise even with no completed_dir
+        watcher._cleanup_symlinks()
+
+
+class TestTorrentStatusHelpers:
+
+    def test_is_torrent_ready_realdebrid(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid')
+        assert watcher._is_torrent_ready('downloaded') is True
+        assert watcher._is_torrent_ready('downloading') is False
+        assert watcher._is_torrent_ready('queued') is False
+
+    def test_is_torrent_ready_alldebrid(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'alldebrid')
+        assert watcher._is_torrent_ready('Ready') is True
+        assert watcher._is_torrent_ready('Downloading') is False
+
+    def test_is_torrent_ready_torbox(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        assert watcher._is_torrent_ready('completed') is True
+        assert watcher._is_torrent_ready('downloading') is False
+
+    def test_is_terminal_error_realdebrid(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid')
+        assert watcher._is_terminal_error('magnet_error') is True
+        assert watcher._is_terminal_error('error') is True
+        assert watcher._is_terminal_error('virus') is True
+        assert watcher._is_terminal_error('dead') is True
+        assert watcher._is_terminal_error('downloading') is False
+
+    def test_is_terminal_error_alldebrid(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'alldebrid')
+        assert watcher._is_terminal_error('Error') is True
+        assert watcher._is_terminal_error('Ready') is False
+
+    def test_is_terminal_error_torbox(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        assert watcher._is_terminal_error('error') is True
+        assert watcher._is_terminal_error('failed') is True
+        assert watcher._is_terminal_error('completed') is False
+
+
+class TestExtractReleaseName:
+
+    def test_realdebrid(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid')
+        info = {'filename': 'Landman.S01.1080p'}
+        assert watcher._extract_release_name(info) == 'Landman.S01.1080p'
+
+    def test_alldebrid(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'alldebrid')
+        info = {'data': {'magnets': {'filename': 'Movie.2024'}}}
+        assert watcher._extract_release_name(info) == 'Movie.2024'
+
+    def test_torbox(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        info = {'data': {'name': 'Show.S02'}}
+        assert watcher._extract_release_name(info) == 'Show.S02'
+
+    def test_missing_data(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid')
+        assert watcher._extract_release_name({}) == ''
+
+
+class TestWatcherSymlinkInit:
+
+    def test_default_symlink_disabled(self):
+        """Symlink should be disabled by default."""
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid')
+        assert watcher.symlink_enabled is False
+
+    def test_symlink_config_passed_through(self, tmp_dir):
+        """All symlink config should be stored on the watcher."""
+        completed = os.path.join(tmp_dir, 'completed')
+        os.makedirs(completed)
+        watcher = BlackholeWatcher(
+            tmp_dir, 'key', 'realdebrid',
+            symlink_enabled=True,
+            completed_dir=completed,
+            rclone_mount='/data',
+            symlink_target_base='/mnt/debrid',
+            mount_poll_timeout=600,
+            mount_poll_interval=15,
+            symlink_max_age=48,
+        )
+        assert watcher.symlink_enabled is True
+        assert watcher.completed_dir == completed
+        assert watcher.rclone_mount == '/data'
+        assert watcher.symlink_target_base == '/mnt/debrid'
+        assert watcher.mount_poll_timeout == 600
+        assert watcher.mount_poll_interval == 15
+        assert watcher.symlink_max_age == 48

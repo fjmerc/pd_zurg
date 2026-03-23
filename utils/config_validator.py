@@ -120,6 +120,9 @@ def validate_config():
         'CLEANUP_INTERVAL': (1, 168),
         'FFPROBE_STUCK_TIMEOUT': (10, 600),
         'FFPROBE_POLL_INTERVAL': (5, 300),
+        'BLACKHOLE_MOUNT_POLL_TIMEOUT': (30, 3600),
+        'BLACKHOLE_MOUNT_POLL_INTERVAL': (5, 120),
+        'BLACKHOLE_SYMLINK_MAX_AGE': (0, 720),
     }
     for var, (lo, hi) in numeric_vars.items():
         val = os.environ.get(var, '')
@@ -166,6 +169,19 @@ def validate_config():
             result.error(
                 "BLACKHOLE_ENABLED=true but no debrid API key found. "
                 "Set RD_API_KEY, AD_API_KEY, or TORBOX_API_KEY."
+            )
+
+    symlink_enabled = os.environ.get('BLACKHOLE_SYMLINK_ENABLED', 'false').lower() == 'true'
+    if symlink_enabled:
+        if not blackhole_enabled:
+            result.error(
+                "BLACKHOLE_SYMLINK_ENABLED=true but BLACKHOLE_ENABLED is not true. "
+                "Symlinks require the blackhole watcher to be enabled."
+            )
+        if not os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', ''):
+            result.error(
+                "BLACKHOLE_SYMLINK_ENABLED=true but BLACKHOLE_SYMLINK_TARGET_BASE is not set. "
+                "This must be the mount path as seen on the Sonarr/Radarr host (e.g., /mnt/debrid)."
             )
 
     # --- Auth Format ---

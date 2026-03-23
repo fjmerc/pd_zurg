@@ -295,18 +295,27 @@ class BlackholeWatcher:
     def _find_on_mount(self, release_name):
         """Search the rclone mount for a release folder.
 
-        Returns (full_path, category) or (None, None) if not found.
+        Returns (full_path, category, matched_name) or (None, None, None) if not found.
         Checks categorized directories first, then __all__ as fallback.
+        Also tries stripping video file extensions since Zurg strips them
+        from single-file torrent folder names.
         """
-        for category in MOUNT_CATEGORIES:
-            path = os.path.join(self.rclone_mount, category, release_name)
+        # Try both the original name and with video extension stripped
+        candidates = [release_name]
+        base, ext = os.path.splitext(release_name)
+        if ext.lower() in MEDIA_EXTENSIONS and base:
+            candidates.append(base)
+
+        for name in candidates:
+            for category in MOUNT_CATEGORIES:
+                path = os.path.join(self.rclone_mount, category, name)
+                if os.path.isdir(path):
+                    return path, category, name
+            # Fallback to __all__
+            path = os.path.join(self.rclone_mount, '__all__', name)
             if os.path.isdir(path):
-                return path, category
-        # Fallback to __all__
-        path = os.path.join(self.rclone_mount, '__all__', release_name)
-        if os.path.isdir(path):
-            return path, '__all__'
-        return None, None
+                return path, '__all__', name
+        return None, None, None
 
     # ── Symlink creation ─────────────────────────────────────────────
 
@@ -562,7 +571,7 @@ class BlackholeWatcher:
                 self._remove_pending(torrent_id)
                 return
 
-            mount_path, category = self._find_on_mount(release_name)
+            mount_path, category, matched_name = self._find_on_mount(release_name)
             if mount_path:
                 logger.info(f"[blackhole] Found on mount: {mount_path} (category: {category})")
                 break
@@ -575,7 +584,7 @@ class BlackholeWatcher:
 
         # Phase 3: Create symlinks
         try:
-            count = self._create_symlinks(release_name, category, mount_path)
+            count = self._create_symlinks(matched_name, category, mount_path)
             if count > 0:
                 logger.info(f"[blackhole] Created {count} symlink(s) for {release_name}")
                 try:
@@ -838,6 +847,13 @@ def setup():
     symlink_enabled = os.environ.get('BLACKHOLE_SYMLINK_ENABLED', 'false').lower() == 'true'
     completed_dir = os.environ.get('BLACKHOLE_COMPLETED_DIR', '/completed')
     rclone_mount = os.environ.get('BLACKHOLE_RCLONE_MOUNT', '/data')
+    # Auto-detect mount name subdirectory if not explicitly configured
+    if rclone_mount == '/data' and os.environ.get('RCLONE_MOUNT_NAME'):
+        mount_name = os.environ.get('RCLONE_MOUNT_NAME')
+        candidate = os.path.join('/data', mount_name)
+        if os.path.isdir(os.path.join(candidate, '__all__')) or os.path.isdir(os.path.join(candidate, 'shows')):
+            rclone_mount = candidate
+            logger.info(f"[blackhole] Auto-detected rclone mount: {rclone_mount}")
     symlink_target_base = os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', '')
 
     try:

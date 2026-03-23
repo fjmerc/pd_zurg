@@ -205,9 +205,10 @@ class TestFindOnMount:
             f.write('video')
 
         watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid', rclone_mount=tmp_dir)
-        path, category = watcher._find_on_mount('My.Show.S01')
+        path, category, matched = watcher._find_on_mount('My.Show.S01')
         assert path == shows_dir
         assert category == 'shows'
+        assert matched == 'My.Show.S01'
 
     def test_finds_in_movies(self, tmp_dir):
         """Should find content in the movies category."""
@@ -215,9 +216,10 @@ class TestFindOnMount:
         os.makedirs(movies_dir)
 
         watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid', rclone_mount=tmp_dir)
-        path, category = watcher._find_on_mount('My.Movie.2024')
+        path, category, matched = watcher._find_on_mount('My.Movie.2024')
         assert path == movies_dir
         assert category == 'movies'
+        assert matched == 'My.Movie.2024'
 
     def test_finds_in_anime(self, tmp_dir):
         """Should find content in the anime category."""
@@ -225,9 +227,10 @@ class TestFindOnMount:
         os.makedirs(anime_dir)
 
         watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid', rclone_mount=tmp_dir)
-        path, category = watcher._find_on_mount('My.Anime.S01')
+        path, category, matched = watcher._find_on_mount('My.Anime.S01')
         assert path == anime_dir
         assert category == 'anime'
+        assert matched == 'My.Anime.S01'
 
     def test_fallback_to_all(self, tmp_dir):
         """Should fall back to __all__ if not in categorized dirs."""
@@ -235,16 +238,18 @@ class TestFindOnMount:
         os.makedirs(all_dir)
 
         watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid', rclone_mount=tmp_dir)
-        path, category = watcher._find_on_mount('Random.Content')
+        path, category, matched = watcher._find_on_mount('Random.Content')
         assert path == all_dir
         assert category == '__all__'
+        assert matched == 'Random.Content'
 
     def test_not_found(self, tmp_dir):
-        """Should return (None, None) when content is not on mount."""
+        """Should return (None, None, None) when content is not on mount."""
         watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid', rclone_mount=tmp_dir)
-        path, category = watcher._find_on_mount('Nonexistent.Release')
+        path, category, matched = watcher._find_on_mount('Nonexistent.Release')
         assert path is None
         assert category is None
+        assert matched is None
 
     def test_prefers_categorized_over_all(self, tmp_dir):
         """Categorized dirs should be checked before __all__."""
@@ -254,8 +259,44 @@ class TestFindOnMount:
             os.makedirs(d)
 
         watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid', rclone_mount=tmp_dir)
-        path, category = watcher._find_on_mount('My.Show.S01')
+        path, category, matched = watcher._find_on_mount('My.Show.S01')
         assert category == 'shows'
+        assert matched == 'My.Show.S01'
+
+    def test_strips_video_extension(self, tmp_dir):
+        """Should find folder when release name has video extension that Zurg strips."""
+        # Zurg creates folder without .mkv extension
+        shows_dir = os.path.join(tmp_dir, 'shows', 'Bad.Monkey.S01E01.1080p')
+        os.makedirs(shows_dir)
+        with open(os.path.join(shows_dir, 'Bad.Monkey.S01E01.1080p.mkv'), 'w') as f:
+            f.write('video')
+
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid', rclone_mount=tmp_dir)
+        # RD returns filename WITH .mkv extension
+        path, category, matched = watcher._find_on_mount('Bad.Monkey.S01E01.1080p.mkv')
+        assert path == shows_dir
+        assert category == 'shows'
+        assert matched == 'Bad.Monkey.S01E01.1080p'
+
+    def test_prefers_exact_name_over_stripped(self, tmp_dir):
+        """Should prefer exact name match over extension-stripped match."""
+        # Both exist: exact match (with .mkv in folder name) and stripped
+        exact_dir = os.path.join(tmp_dir, 'shows', 'Release.Name.mkv')
+        stripped_dir = os.path.join(tmp_dir, 'shows', 'Release.Name')
+        os.makedirs(exact_dir)
+        os.makedirs(stripped_dir)
+
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid', rclone_mount=tmp_dir)
+        path, category, matched = watcher._find_on_mount('Release.Name.mkv')
+        assert path == exact_dir
+        assert matched == 'Release.Name.mkv'
+
+    def test_no_strip_for_non_media_extension(self, tmp_dir):
+        """Should not strip non-media extensions like .nfo."""
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid', rclone_mount=tmp_dir)
+        path, category, matched = watcher._find_on_mount('Release.Name.nfo')
+        assert path is None
+        assert matched is None
 
 
 class TestCreateSymlinks:

@@ -123,13 +123,25 @@ def _process_library(plex_server, section_type, libtype):
         # to attempt file removal via rclone, which returns 501. The file
         # stays on the mount and Plex rediscovers it on next scan, creating
         # an endless delete-rediscover loop that floods logs.
+        group_counts = {}
         for item, label, rclone_media_ids, local_media_ids in found:
-            logger.info(
-                f"Duplicate {libtype} found: {label} — "
-                f"{len(rclone_media_ids)} Zurg copy(s), {len(local_media_ids)} local copy(s). "
-                f"Skipping: Zurg mount is read-only, cannot delete files. "
-                f"Set DUPLICATE_CLEANUP_KEEP=zurg to delete local copies instead."
+            logger.debug(
+                f"Duplicate {libtype}: {label} — "
+                f"{len(rclone_media_ids)} Zurg, {len(local_media_ids)} local. Skipping."
             )
+            if section_type == "show":
+                show_name = label.split(" - Episode: ")[0].replace("Show: ", "", 1)
+            else:
+                show_name = label
+            group_counts[show_name] = group_counts.get(show_name, 0) + 1
+
+        total = sum(group_counts.values())
+        detail = ", ".join(f"{name} ({count})" for name, count in group_counts.items())
+        logger.info(
+            f"{total} duplicate {libtype}(s) found across {len(group_counts)} title(s): {detail}. "
+            f"Skipping: Zurg mount is read-only. "
+            f"Set DUPLICATE_CLEANUP_KEEP=zurg to delete local copies instead."
+        )
 
 
 def process_duplicates(plex_server, section_type, libtype):

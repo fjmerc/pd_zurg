@@ -10,8 +10,8 @@ logger = get_logger()
 max_retry_attempts = 5
 retry_interval = 10
 
+
 def delete_media_with_retry(media):
-    #logger = get_logger(log_name='duplicate_cleanup')
     retry_attempt = 0
     continue_execution = True
 
@@ -32,13 +32,54 @@ def delete_media_with_retry(media):
 
     return continue_execution
 
+
 def _get_item_label(item, section_type):
     if section_type == "show":
         return f"Show: {item.show().title} - Episode: {item.title}"
     return item.title
 
 
+def _find_duplicates(duplicates, section_type, libtype):
+    """Find duplicate items that have both rclone-mounted and local copies.
+
+    Returns a list of (item, label, rclone_media_ids, local_media_ids) tuples.
+    Each entry represents a Plex item with at least one copy on the rclone mount
+    and at least one copy on local storage.
+    """
+    from base import config
+    rclonemn = config.RCLONEMN
+    results = []
+
+    for item in duplicates:
+        rclone_media_ids = []
+        local_media_ids = []
+
+        for media in item.media:
+            is_rclone = False
+            is_local = False
+            for part in media.parts:
+                if re.search(f"/{rclonemn}[0-9a-zA-Z_]*?/", part.file):
+                    is_rclone = True
+                else:
+                    is_local = True
+
+            if is_rclone and not is_local:
+                rclone_media_ids.append(media.id)
+            elif is_local and not is_rclone:
+                local_media_ids.append(media.id)
+            # Mixed (parts on both) — skip, ambiguous
+
+        if rclone_media_ids and local_media_ids:
+            label = _get_item_label(item, section_type)
+            results.append((item, label, rclone_media_ids, local_media_ids))
+
+    return results
+
+
 def _process_library(plex_server, section_type, libtype):
+    from base import config
+    keep_mode = (config.DUPECLEANKEEP or 'local').lower()
+
     section = None
     for s in plex_server.library.sections():
         if s.type == section_type:
@@ -51,41 +92,44 @@ def _process_library(plex_server, section_type, libtype):
 
     logger.info(f"{section_type.capitalize()} library section: {section.title}")
     duplicates = section.search(duplicate=True, libtype=libtype)
-    items_to_delete = []
+    found = _find_duplicates(duplicates, section_type, libtype)
 
-    for item in duplicates:
-        has_RCLONEMN = False
-        has_other_directory = False
-        media_id = ""
-        for media in item.media:
-            for part in media.parts:
-                if re.search(f"/{RCLONEMN}[0-9a-zA-Z_]*?/", part.file):
-                    has_RCLONEMN = True
-                    media_id = media.id
-                else:
-                    has_other_directory = True
-            if has_RCLONEMN and has_other_directory:
-                label = _get_item_label(item, section_type)
-                for part in media.parts:
-                    logger.info(f"Duplicate {libtype} found: {label} (Media ID: {media_id})")
-                    items_to_delete.append((item, media_id))
-
-    if items_to_delete:
-        logger.info(f"Number of {libtype}s to delete: {len(items_to_delete)}")
-    else:
+    if not found:
         logger.info(f"No duplicate {libtype}s found.")
+        return
 
-    for item, media_id in items_to_delete:
-        for media in item.media:
-            if media.id == media_id:
-                label = _get_item_label(item, section_type)
-                for part in media.parts:
-                    logger.info(f"Deleting {libtype} from Rclone directory: {label} (Media ID: {media_id})")
+    if keep_mode == 'zurg':
+        # Delete local copies, keep Zurg — file deletion works on local storage
+        delete_ids = []
+        for item, label, rclone_media_ids, local_media_ids in found:
+            for mid in local_media_ids:
+                logger.info(f"Duplicate {libtype} found: {label} — keeping Zurg copy, deleting local (Media ID: {mid})")
+                delete_ids.append((item, mid, label))
+
+        if delete_ids:
+            logger.info(f"Number of local {libtype} copies to delete: {len(delete_ids)}")
+
+        for item, media_id, label in delete_ids:
+            for media in item.media:
+                if media.id == media_id:
+                    logger.info(f"Deleting local {libtype}: {label} (Media ID: {media_id})")
                     continue_execution = delete_media_with_retry(media)
                     if not continue_execution:
                         break
-                if not continue_execution:
-                    break
+                    break  # found the matching media, no need to keep iterating
+    else:
+        # Default (keep_mode == 'local'): detect but skip Zurg copies
+        # Zurg's WebDAV is read-only — calling media.delete() triggers Plex
+        # to attempt file removal via rclone, which returns 501. The file
+        # stays on the mount and Plex rediscovers it on next scan, creating
+        # an endless delete-rediscover loop that floods logs.
+        for item, label, rclone_media_ids, local_media_ids in found:
+            logger.info(
+                f"Duplicate {libtype} found: {label} — "
+                f"{len(rclone_media_ids)} Zurg copy(s), {len(local_media_ids)} local copy(s). "
+                f"Skipping: Zurg mount is read-only, cannot delete files. "
+                f"Set DUPLICATE_CLEANUP_KEEP=zurg to delete local copies instead."
+            )
 
 
 def process_duplicates(plex_server, section_type, libtype):

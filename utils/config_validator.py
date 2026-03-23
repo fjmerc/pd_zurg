@@ -146,6 +146,13 @@ def validate_config():
             "Duplicate cleanup requires Plex API access."
         )
 
+    dupeclean_keep = (config.DUPECLEANKEEP or '').lower()
+    if dupeclean_keep and dupeclean_keep not in ('local', 'zurg'):
+        result.error(
+            f"DUPLICATE_CLEANUP_KEEP={dupeclean_keep!r} is not valid. "
+            "Must be 'local' (default) or 'zurg'."
+        )
+
     if _is_truthy(PLEXREFRESH) and not PLEXTOKEN:
         result.error(
             "PLEX_REFRESH=true but PLEX_TOKEN is not set. "

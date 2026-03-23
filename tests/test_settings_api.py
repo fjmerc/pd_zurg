@@ -332,6 +332,18 @@ class TestValidateEnvValues:
         result = validate_env_values({'DUPLICATE_CLEANUP': 'true'})
         assert any('PLEX_TOKEN' in e for e in result['errors'])
 
+    def test_duplicate_cleanup_keep_valid_local(self):
+        result = validate_env_values({'DUPLICATE_CLEANUP_KEEP': 'local'})
+        assert result['errors'] == []
+
+    def test_duplicate_cleanup_keep_valid_zurg(self):
+        result = validate_env_values({'DUPLICATE_CLEANUP_KEEP': 'zurg'})
+        assert result['errors'] == []
+
+    def test_duplicate_cleanup_keep_invalid(self):
+        result = validate_env_values({'DUPLICATE_CLEANUP_KEEP': 'invalid'})
+        assert any('DUPLICATE_CLEANUP_KEEP' in e for e in result['errors'])
+
     def test_pd_enabled_without_zurg_warns(self):
         result = validate_env_values({'PD_ENABLED': 'true', 'ZURG_ENABLED': 'false'})
         assert any('PD_ENABLED' in w for w in result['warnings'])

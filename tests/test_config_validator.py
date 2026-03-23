@@ -145,6 +145,27 @@ class TestConfigValidation:
         assert any('ZURG_LOG_LEVEL' in w for w in result.warnings)
         assert not any('ZURG_LOG_LEVEL' in e for e in result.errors)
 
+    def test_duplicate_cleanup_keep_valid_local(self, clean_env, env_vars):
+        """DUPLICATE_CLEANUP_KEEP=local should pass."""
+        env_vars(DUPLICATE_CLEANUP_KEEP='local')
+        result = _validate_with_reload()
+        keep_errors = [e for e in result.errors if 'DUPLICATE_CLEANUP_KEEP' in e]
+        assert len(keep_errors) == 0
+
+    def test_duplicate_cleanup_keep_valid_zurg(self, clean_env, env_vars):
+        """DUPLICATE_CLEANUP_KEEP=zurg should pass."""
+        env_vars(DUPLICATE_CLEANUP_KEEP='zurg')
+        result = _validate_with_reload()
+        keep_errors = [e for e in result.errors if 'DUPLICATE_CLEANUP_KEEP' in e]
+        assert len(keep_errors) == 0
+
+    def test_duplicate_cleanup_keep_invalid(self, clean_env, env_vars):
+        """Invalid DUPLICATE_CLEANUP_KEEP should error."""
+        env_vars(DUPLICATE_CLEANUP_KEEP='remote')
+        result = _validate_with_reload()
+        keep_errors = [e for e in result.errors if 'DUPLICATE_CLEANUP_KEEP' in e]
+        assert len(keep_errors) == 1
+
     def test_rclone_mount_name_special_chars(self, clean_env, env_vars):
         """Mount name with special characters should warn."""
         env_vars(RCLONE_MOUNT_NAME='my mount/name')

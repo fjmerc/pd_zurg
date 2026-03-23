@@ -132,9 +132,9 @@ Host A (Sonarr/Radarr)                    Host B (pd_zurg)
 sudo mkdir -p /opt/blackhole /opt/completed
 sudo chmod 777 /opt/blackhole /opt/completed
 
-# Export via NFS (replace 192.168.1.8 with your pd_zurg host IP)
-echo "/opt/blackhole 192.168.1.8(rw,sync,no_subtree_check,no_root_squash)" | sudo tee -a /etc/exports
-echo "/opt/completed 192.168.1.8(rw,sync,no_subtree_check,no_root_squash)" | sudo tee -a /etc/exports
+# Export via NFS (replace 10.0.0.2 with your pd_zurg host's IP)
+echo "/opt/blackhole 10.0.0.2(rw,sync,no_subtree_check,no_root_squash)" | sudo tee -a /etc/exports
+echo "/opt/completed 10.0.0.2(rw,sync,no_subtree_check,no_root_squash)" | sudo tee -a /etc/exports
 sudo exportfs -ra
 ```
 
@@ -143,13 +143,13 @@ sudo exportfs -ra
 # Create mount points
 sudo mkdir -p /mnt/blackhole /mnt/completed
 
-# Mount (replace 192.168.254.11 with your Sonarr/Radarr host IP)
-sudo mount -t nfs 192.168.254.11:/opt/blackhole /mnt/blackhole
-sudo mount -t nfs 192.168.254.11:/opt/completed /mnt/completed
+# Mount (replace 10.0.0.1 with your Sonarr/Radarr host's IP)
+sudo mount -t nfs 10.0.0.1:/opt/blackhole /mnt/blackhole
+sudo mount -t nfs 10.0.0.1:/opt/completed /mnt/completed
 
 # Add to fstab for persistence
-echo "192.168.254.11:/opt/blackhole /mnt/blackhole nfs defaults,_netdev 0 0" | sudo tee -a /etc/fstab
-echo "192.168.254.11:/opt/completed /mnt/completed nfs defaults,_netdev 0 0" | sudo tee -a /etc/fstab
+echo "10.0.0.1:/opt/blackhole /mnt/blackhole nfs defaults,_netdev 0 0" | sudo tee -a /etc/fstab
+echo "10.0.0.1:/opt/completed /mnt/completed nfs defaults,_netdev 0 0" | sudo tee -a /etc/fstab
 ```
 
 ## Configuration

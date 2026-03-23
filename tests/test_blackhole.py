@@ -6,7 +6,7 @@ import time
 import pytest
 from utils.blackhole import (
     RetryMeta, BlackholeWatcher, RETRY_SCHEDULE, MAX_RETRIES,
-    MEDIA_EXTENSIONS, MOUNT_CATEGORIES,
+    MEDIA_EXTENSIONS, MOUNT_CATEGORIES, parse_release_name,
 )
 
 
@@ -708,3 +708,134 @@ class TestWatcherSymlinkInit:
         assert watcher.mount_poll_timeout == 600
         assert watcher.mount_poll_interval == 15
         assert watcher.symlink_max_age == 48
+
+
+class TestParseReleaseName:
+
+    def test_tv_episode(self):
+        name, season, is_tv = parse_release_name('Bad.Monkey.S01E01.1080p.ATVP.WEB-DL.DDP5.1.H.264-NTb.torrent')
+        assert name == 'Bad Monkey'
+        assert season == 1
+        assert is_tv is True
+
+    def test_tv_season_pack(self):
+        name, season, is_tv = parse_release_name('Fargo.S05.COMPLETE.1080p.torrent')
+        assert name == 'Fargo'
+        assert season == 5
+        assert is_tv is True
+
+    def test_tv_with_year(self):
+        name, season, is_tv = parse_release_name('Fargo.2014.S03E01.720p.torrent')
+        assert name == 'Fargo'
+        assert season == 3
+        assert is_tv is True
+
+    def test_movie(self):
+        name, season, is_tv = parse_release_name('Gattaca.1997.1080p.BluRay.torrent')
+        assert name == 'Gattaca'
+        assert season is None
+        assert is_tv is False
+
+    def test_movie_no_year(self):
+        name, season, is_tv = parse_release_name('Some.Movie.1080p.WEB.torrent')
+        assert name == 'Some Movie'
+        assert season is None
+        assert is_tv is False
+
+    def test_magnet_extension(self):
+        name, season, is_tv = parse_release_name('Show.S02E05.720p.magnet')
+        assert name == 'Show'
+        assert season == 2
+        assert is_tv is True
+
+    def test_season_at_end(self):
+        """S01 at end of name with no episode number."""
+        name, season, is_tv = parse_release_name('Some.Show.S01.torrent')
+        assert name == 'Some Show'
+        assert season == 1
+        assert is_tv is True
+
+
+class TestCheckLocalLibrary:
+
+    def _make_watcher(self, tmp_dir):
+        tv_dir = os.path.join(tmp_dir, 'tv')
+        movies_dir = os.path.join(tmp_dir, 'movies')
+        os.makedirs(tv_dir)
+        os.makedirs(movies_dir)
+        watcher = BlackholeWatcher(
+            os.path.join(tmp_dir, 'watch'), 'key', 'realdebrid',
+            dedup_enabled=True,
+            local_library_tv=tv_dir,
+            local_library_movies=movies_dir,
+        )
+        return watcher, tv_dir, movies_dir
+
+    def test_skips_existing_tv_season(self, tmp_dir):
+        """Should skip if the show and season exist locally."""
+        watcher, tv_dir, _ = self._make_watcher(tmp_dir)
+        season_dir = os.path.join(tv_dir, 'Fargo (2014)', 'Season 05')
+        os.makedirs(season_dir)
+        with open(os.path.join(season_dir, 'ep01.mkv'), 'w') as f:
+            f.write('data')
+
+        assert watcher._check_local_library('Fargo.S05E01.1080p.WEB.torrent') is True
+
+    def test_allows_missing_season(self, tmp_dir):
+        """Should allow if the show exists but the season doesn't."""
+        watcher, tv_dir, _ = self._make_watcher(tmp_dir)
+        season_dir = os.path.join(tv_dir, 'Fargo (2014)', 'Season 01')
+        os.makedirs(season_dir)
+        with open(os.path.join(season_dir, 'ep01.mkv'), 'w') as f:
+            f.write('data')
+
+        assert watcher._check_local_library('Fargo.S05E01.1080p.WEB.torrent') is False
+
+    def test_skips_existing_movie(self, tmp_dir):
+        """Should skip if the movie exists locally."""
+        watcher, _, movies_dir = self._make_watcher(tmp_dir)
+        movie_dir = os.path.join(movies_dir, 'Gattaca (1997)')
+        os.makedirs(movie_dir)
+        with open(os.path.join(movie_dir, 'Gattaca.mkv'), 'w') as f:
+            f.write('data')
+
+        assert watcher._check_local_library('Gattaca.1997.1080p.BluRay.torrent') is True
+
+    def test_allows_missing_movie(self, tmp_dir):
+        """Should allow if the movie doesn't exist locally."""
+        watcher, _, _ = self._make_watcher(tmp_dir)
+        assert watcher._check_local_library('Gattaca.1997.1080p.BluRay.torrent') is False
+
+    def test_disabled_by_default(self, tmp_dir):
+        """Should always return False when dedup is disabled."""
+        watcher = BlackholeWatcher(os.path.join(tmp_dir, 'watch'), 'key', 'realdebrid')
+        assert watcher._check_local_library('Fargo.S05E01.torrent') is False
+
+    def test_no_false_positive_substring(self, tmp_dir):
+        """Should not match 'Fargo' against 'Wells Fargo Documentary'."""
+        watcher, tv_dir, _ = self._make_watcher(tmp_dir)
+        other_dir = os.path.join(tv_dir, 'Wells Fargo Documentary', 'Season 01')
+        os.makedirs(other_dir)
+        with open(os.path.join(other_dir, 'ep01.mkv'), 'w') as f:
+            f.write('data')
+
+        assert watcher._check_local_library('Fargo.S01E01.torrent') is False
+
+    def test_missing_library_path(self, tmp_dir):
+        """Should not crash when library path doesn't exist."""
+        watcher = BlackholeWatcher(
+            os.path.join(tmp_dir, 'watch'), 'key', 'realdebrid',
+            dedup_enabled=True,
+            local_library_tv='/nonexistent/path',
+            local_library_movies='/nonexistent/path',
+        )
+        assert watcher._check_local_library('Fargo.S01E01.torrent') is False
+
+    def test_empty_season_dir_not_matched(self, tmp_dir):
+        """Should not match a season directory that has no files."""
+        watcher, tv_dir, _ = self._make_watcher(tmp_dir)
+        season_dir = os.path.join(tv_dir, 'Fargo (2014)', 'Season 05')
+        os.makedirs(season_dir)
+        # Empty season dir
+
+        assert watcher._check_local_library('Fargo.S05E01.1080p.WEB.torrent') is False

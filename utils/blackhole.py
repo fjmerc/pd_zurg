@@ -11,6 +11,7 @@ directory for Sonarr/Radarr to import.
 
 import json
 import os
+import re
 import shutil
 import time
 import threading
@@ -40,6 +41,43 @@ MOUNT_CATEGORIES = ['shows', 'movies', 'anime']
 RD_TERMINAL_ERRORS = {'magnet_error', 'error', 'virus', 'dead'}
 AD_TERMINAL_ERRORS = {'Error'}
 TB_TERMINAL_ERRORS = {'error', 'failed'}
+
+
+def parse_release_name(filename):
+    """Extract show/movie name and season from a release filename.
+
+    Returns (name, season_number_or_None, is_tv).
+    """
+    # Remove file extension
+    name = re.sub(r'\.(torrent|magnet)$', '', filename, flags=re.IGNORECASE)
+
+    # Try to find season pattern (S01E01, S01, Season 1)
+    season_match = re.search(
+        r'[.\s]S(\d{1,2})[E.\s]|[.\s]S(\d{1,2})[.\s]|[.\s]S(\d{1,2})$|Season[.\s](\d{1,2})',
+        name, re.IGNORECASE,
+    )
+
+    if season_match:
+        season = int(next(g for g in season_match.groups() if g is not None))
+        # Everything before the season marker is the show name
+        show_name = name[:season_match.start()]
+        show_name = re.sub(r'[.\-_]', ' ', show_name).strip()
+        show_name = re.sub(r'\s*\(?\d{4}\)?\s*$', '', show_name).strip()
+        return show_name, season, True
+
+    # No season pattern — likely a movie
+    year_match = re.search(r'[.\s](\d{4})[.\s]', name)
+    if year_match:
+        movie_name = name[:year_match.start()]
+    else:
+        quality_match = re.search(
+            r'[.\s](1080p|720p|2160p|4K|WEB|BluRay|BDRip|HDTV|REMUX)',
+            name, re.IGNORECASE,
+        )
+        movie_name = name[:quality_match.start()] if quality_match else name
+
+    movie_name = re.sub(r'[.\-_]', ' ', movie_name).strip()
+    return movie_name, None, False
 
 
 class RetryMeta:
@@ -92,12 +130,18 @@ class BlackholeWatcher:
     def __init__(self, watch_dir, debrid_api_key, debrid_service='realdebrid',
                  poll_interval=5, symlink_enabled=False, completed_dir='/completed',
                  rclone_mount='/data', symlink_target_base='', mount_poll_timeout=300,
-                 mount_poll_interval=10, symlink_max_age=72):
+                 mount_poll_interval=10, symlink_max_age=72,
+                 dedup_enabled=False, local_library_tv='', local_library_movies=''):
         self.watch_dir = watch_dir
         self.debrid_api_key = debrid_api_key
         self.debrid_service = debrid_service
         self.poll_interval = poll_interval
         self._stop_event = threading.Event()
+
+        # Local library dedup configuration
+        self.dedup_enabled = dedup_enabled
+        self.local_library_tv = local_library_tv
+        self.local_library_movies = local_library_movies
 
         # Symlink configuration
         self.symlink_enabled = symlink_enabled
@@ -620,12 +664,75 @@ class BlackholeWatcher:
             if torrent_id:
                 self._start_monitor(torrent_id, filename)
 
+    # ── Local library dedup ─────────────────────────────────────────
+
+    @staticmethod
+    def _normalize_name(name):
+        """Normalize a library folder or release name for comparison."""
+        # Strip year in parens e.g. "Fargo (2014)" -> "Fargo"
+        name = re.sub(r'\s*\(\d{4}\)\s*', '', name)
+        return name.lower().strip()
+
+    def _check_local_library(self, filename):
+        """Check if content from this torrent already exists locally.
+
+        Returns True if content exists locally (should skip), False otherwise.
+        """
+        if not self.dedup_enabled:
+            return False
+
+        name, season, is_tv = parse_release_name(filename)
+        if not name:
+            return False
+
+        name_norm = self._normalize_name(name)
+
+        if is_tv and self.local_library_tv and os.path.isdir(self.local_library_tv):
+            for folder in os.listdir(self.local_library_tv):
+                if self._normalize_name(folder) != name_norm:
+                    continue
+                show_path = os.path.join(self.local_library_tv, folder)
+                if season is not None:
+                    season_dir = os.path.join(show_path, f"Season {season:02d}")
+                    if os.path.isdir(season_dir) and os.listdir(season_dir):
+                        logger.info(f"[blackhole] Skipping {filename}: '{folder}' Season {season} exists locally")
+                        return True
+                else:
+                    if os.path.isdir(show_path) and os.listdir(show_path):
+                        logger.info(f"[blackhole] Skipping {filename}: '{folder}' exists locally")
+                        return True
+
+        if not is_tv and self.local_library_movies and os.path.isdir(self.local_library_movies):
+            for folder in os.listdir(self.local_library_movies):
+                if self._normalize_name(folder) != name_norm:
+                    continue
+                movie_path = os.path.join(self.local_library_movies, folder)
+                if os.path.isdir(movie_path) and os.listdir(movie_path):
+                    logger.info(f"[blackhole] Skipping {filename}: '{folder}' exists locally")
+                    return True
+
+        return False
+
     # ── File processing ──────────────────────────────────────────────
 
     def _process_file(self, file_path):
         """Process a single torrent/magnet file."""
         filename = os.path.basename(file_path)
         logger.info(f"[blackhole] Processing: {filename}")
+
+        # Check local library before submitting to debrid
+        if self._check_local_library(filename):
+            try:
+                os.remove(file_path)
+                logger.info(f"[blackhole] Removed {filename} (local duplicate)")
+            except OSError as e:
+                logger.warning(f"[blackhole] Could not remove {filename}: {e}")
+            try:
+                from utils.metrics import metrics
+                metrics.inc('blackhole_processed', {'status': 'skipped_local'})
+            except Exception:
+                pass
+            return
 
         dispatch = {
             'realdebrid': self._add_to_realdebrid,
@@ -880,6 +987,13 @@ def setup():
             return None
         os.makedirs(completed_dir, exist_ok=True)
 
+    # Local library dedup configuration
+    dedup_enabled = os.environ.get('BLACKHOLE_DEDUP_ENABLED', 'false').lower() == 'true'
+    local_library_tv = os.environ.get('BLACKHOLE_LOCAL_LIBRARY_TV', '')
+    local_library_movies = os.environ.get('BLACKHOLE_LOCAL_LIBRARY_MOVIES', '')
+    if dedup_enabled:
+        logger.info(f"[blackhole] Local dedup enabled: tv={local_library_tv}, movies={local_library_movies}")
+
     _watcher = BlackholeWatcher(
         watch_dir, debrid_api_key, debrid_service, poll_interval,
         symlink_enabled=symlink_enabled,
@@ -889,6 +1003,9 @@ def setup():
         mount_poll_timeout=mount_poll_timeout,
         mount_poll_interval=mount_poll_interval,
         symlink_max_age=symlink_max_age,
+        dedup_enabled=dedup_enabled,
+        local_library_tv=local_library_tv,
+        local_library_movies=local_library_movies,
     )
     thread = threading.Thread(target=_watcher.run, daemon=True)
     thread.start()

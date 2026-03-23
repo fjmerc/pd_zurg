@@ -203,6 +203,13 @@ def download(element, stream=True, query='', force=False):
                     if release_hash:
                         _torrent_cache[release_hash] = response.id
                     response = get('https://api.real-debrid.com/rest/1.0/torrents/info/' + torrent_id)
+                if response is None or not hasattr(response, 'status'):
+                    ui_print(f'[realdebrid]: failed to get torrent info for {release.title} (unexpected API response). Looking for another release.')
+                    try:
+                        delete('https://api.real-debrid.com/rest/1.0/torrents/delete/' + torrent_id)
+                    except:
+                        pass
+                    continue
                 if response.status == 'magnet_error':
                     ui_print( f'[realdebrid]: failed to add torrent {release.title}. Looking for another release.')
                     delete('https://api.real-debrid.com/rest/1.0/torrents/delete/' + torrent_id)
@@ -221,8 +228,15 @@ def download(element, stream=True, query='', force=False):
                         ui_print('[realdebrid] selectFiles response ' + repr(response), ui_settings.debug)
 
                     response = get('https://api.real-debrid.com/rest/1.0/torrents/info/' + torrent_id)
+                    if response is None or not hasattr(response, 'status'):
+                        ui_print(f'[realdebrid]: failed to get torrent info after file selection for {release.title} (unexpected API response). Looking for another release.')
+                        try:
+                            delete('https://api.real-debrid.com/rest/1.0/torrents/delete/' + torrent_id)
+                        except:
+                            pass
+                        continue
                     actual_title = ""
-                    if len(response.links) == len(cached_ids) and len(cached_ids) > 0:
+                    if hasattr(response, 'links') and hasattr(response, 'filename') and len(response.links) == len(cached_ids) and len(cached_ids) > 0:
                         actual_title = response.filename
                         release.download = response.links
                     else:

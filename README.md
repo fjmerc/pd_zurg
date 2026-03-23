@@ -108,11 +108,18 @@ services:
       - /pd_zurg/mnt:/data:shared
       ## Blackhole watch folder for .torrent/.magnet files (optional)
       # - /pd_zurg/watch:/watch
+      ## Blackhole completed dir for symlink mode (optional)
+      # - /pd_zurg/completed:/completed
+      ## Local library paths for dedup checking (optional, read-only)
+      # - /path/to/library/tv:/data/media/tv:ro
+      # - /path/to/library/movies:/data/media/movies:ro
     environment:
       - TZ=
       ## Zurg Required Settings
       - ZURG_ENABLED=true
       - RD_API_KEY=
+     # - AD_API_KEY=
+     # - TORBOX_API_KEY=
       ## Zurg Optional Settings
      # - ZURG_LOG_LEVEL=DEBUG
      # - ZURG_VERSION=v0.9.2-hotfix.4
@@ -172,6 +179,18 @@ services:
      # - BLACKHOLE_DIR=/watch
      # - BLACKHOLE_POLL_INTERVAL=5
      # - BLACKHOLE_DEBRID=realdebrid
+      ## Blackhole Symlink Mode
+     # - BLACKHOLE_SYMLINK_ENABLED=true
+     # - BLACKHOLE_COMPLETED_DIR=/completed
+     # - BLACKHOLE_RCLONE_MOUNT=/data
+     # - BLACKHOLE_SYMLINK_TARGET_BASE=/mnt/symlinks
+     # - BLACKHOLE_MOUNT_POLL_TIMEOUT=300
+     # - BLACKHOLE_MOUNT_POLL_INTERVAL=10
+     # - BLACKHOLE_SYMLINK_MAX_AGE=72
+      ## Blackhole Local Library Dedup
+     # - BLACKHOLE_DEDUP_ENABLED=true
+     # - BLACKHOLE_LOCAL_LIBRARY_TV=/mnt/library/tv
+     # - BLACKHOLE_LOCAL_LIBRARY_MOVIES=/mnt/library/movies
       ## Status Web UI
      # - STATUS_UI_ENABLED=true
      # - STATUS_UI_PORT=8080
@@ -263,6 +282,7 @@ of this parameter has the format `<VARIABLE_NAME>=<VALUE>`.
 |`TZ`| [TimeZone](http://en.wikipedia.org/wiki/List_of_tz_database_time_zones) used by the container |  |
 |`RD_API_KEY`| [RealDebrid API key](https://real-debrid.com/apitoken) |  | | :heavy_check_mark:| :heavy_check_mark:|
 |`AD_API_KEY`| [AllDebrid API key](https://alldebrid.com/apikeys/) |  | | :heavy_check_mark:| :heavy_check_mark:|
+|`TORBOX_API_KEY`| [TorBox API key](https://torbox.app/settings) |  | | :heavy_check_mark:| :heavy_check_mark:|
 |`RCLONE_MOUNT_NAME`| A name for the rclone mount |  | :heavy_check_mark:|
 |`RCLONE_LOG_LEVEL`| [Log level](https://rclone.org/docs/#log-level-level) for rclone - To suppress logs set value to OFF | `NOTICE` |
 |`RCLONE_LOG_FILE`| [Log file](https://rclone.org/docs/#log-file-file) for rclone |  |
@@ -291,6 +311,8 @@ of this parameter has the format `<VARIABLE_NAME>=<VALUE>`.
 |`PDZURG_LOG_LEVEL`| The level at which logs should be captured. See the python [Logging Levels](https://docs.python.org/3/library/logging.html#logging-levels) documentation for more details  | `INFO` |
 |`PDZURG_LOG_COUNT`| The number logs to retain. Result will be value + current log  | `2` |
 |`PDZURG_LOG_SIZE`| The size of the log file before it is rotated. Valid options are 'K' (kilobytes), 'M' (megabytes), and 'G' (gigabytes)  | `10M` |
+|`COLOR_LOG_ENABLED`| Set the value "true" to enable colored log output in the container console | `false` |
+|`SKIP_VALIDATION`| Set the value "true" to skip startup configuration validation checks | `false` |
 |`ZURG_ENABLED`| Set the value "true" to enable the Zurg process | `false ` | | | :heavy_check_mark:|
 |`ZURG_VERSION`| The version of Zurg to use. If enabled, the value should contain v0.9.x or v0.9.x-hotfix.x format, or "nightly" if wanting the nightly builds from Zurg private repo (requires GITHUB_TOKEN) | `latest` | | | |
 |`ZURG_UPDATE`| Enable automatic updates of Zurg. Adding this variable will enable automatic updates to the latest version of Zurg locally within the container. | `false` | | | |
@@ -312,9 +334,20 @@ of this parameter has the format `<VARIABLE_NAME>=<VALUE>`.
 |`BLACKHOLE_DIR`| Watch directory path for blackhole files | `/watch` | | | |
 |`BLACKHOLE_POLL_INTERVAL`| Seconds between folder scans | `5` | | | |
 |`BLACKHOLE_DEBRID`| Debrid service to use: `realdebrid`, `alldebrid`, `torbox`. Auto-detected from API keys if not set | auto | | | |
+|`BLACKHOLE_SYMLINK_ENABLED`| Set the value "true" to enable symlink mode for blackhole. Creates symlinks from completed downloads to a target directory instead of copying files. See the [symlink guide](https://github.com/I-am-PUID-0/pd_zurg/wiki/Blackhole-Symlink-Guide) | `false` | | | |
+|`BLACKHOLE_COMPLETED_DIR`| Directory where completed download notifications are written | `/completed` | | | |
+|`BLACKHOLE_RCLONE_MOUNT`| Path to the rclone mount where debrid files appear. Auto-appends `RCLONE_MOUNT_NAME` if set to default | `/data` | | | |
+|`BLACKHOLE_SYMLINK_TARGET_BASE`| Base path for symlink targets. **Required** when `BLACKHOLE_SYMLINK_ENABLED=true` | | | | |
+|`BLACKHOLE_MOUNT_POLL_TIMEOUT`| Maximum seconds to wait for a file to appear on the rclone mount before giving up | `300` | | | |
+|`BLACKHOLE_MOUNT_POLL_INTERVAL`| Seconds between checks when polling for a file on the rclone mount | `10` | | | |
+|`BLACKHOLE_SYMLINK_MAX_AGE`| Hours after which old symlinks in the completed directory are automatically cleaned up | `72` | | | |
+|`BLACKHOLE_DEDUP_ENABLED`| Set the value "true" to enable local library duplicate checking before sending torrents to debrid | `false` | | | |
+|`BLACKHOLE_LOCAL_LIBRARY_TV`| Path to local TV library for dedup checking. Required when `BLACKHOLE_DEDUP_ENABLED=true` | | | | |
+|`BLACKHOLE_LOCAL_LIBRARY_MOVIES`| Path to local movies library for dedup checking. Required when `BLACKHOLE_DEDUP_ENABLED=true` | | | | |
 |`STATUS_UI_ENABLED`| Set the value "true" to enable the status web dashboard | `false` | | | |
 |`STATUS_UI_PORT`| Port for the status web UI | `8080` | | | |
 |`STATUS_UI_AUTH`| Basic auth credentials in `user:password` format. **Required** for the settings editor and restart buttons | none | | | |
+|`FLARESOLVERR_URL`| URL for a [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) instance used to bypass Cloudflare protection on torrent indexers. Example: `http://flaresolverr:8191/v1` | | | | |
 |`FFPROBE_MONITOR_ENABLED`| Set the value "false" to disable the stuck ffprobe process monitor | `true` | | | |
 |`FFPROBE_STUCK_TIMEOUT`| Seconds a ffprobe process must be in uninterruptible sleep before recovery is attempted | `300` | | | |
 |`FFPROBE_POLL_INTERVAL`| Seconds between ffprobe monitor scans | `30` | | | |

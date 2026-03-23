@@ -1168,7 +1168,12 @@ class media:
         self.Releases = []
         if self.type in ["movie", "show"]:
             if not hasattr(self, "title") or self.title == "" or self.title is None:
-                ui_print("error: media item has no title. This unknown movie/show might not be released yet.")
+                eid_info = ""
+                if hasattr(self, "EID") and self.EID:
+                    eid_info = f" (EIDs: {self.EID})"
+                elif hasattr(self, "guid"):
+                    eid_info = f" (guid: {self.guid})"
+                ui_print(f"error: media item has no title{eid_info}. This unknown {self.type} might not be released yet - skipping.")
                 return
             elif not hasattr(self, "year") or self.year == "" or self.year is None:
                 ui_print(f"error: media item {self.title} has no release year. This movie/show might not be released yet.")

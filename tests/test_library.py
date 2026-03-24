@@ -405,6 +405,47 @@ class TestLibraryScannerScanDebrid:
         assert len(result["movies"]) == 1
         assert result["movies"][0]["title"] == "Real Movie"
 
+    def test_scan_discovers_custom_category_names(self, tmp_dir, monkeypatch):
+        # Zurg directory names are user-configurable; scanner must find them
+        anime_dir = os.path.join(tmp_dir, "anime")
+        films_dir = os.path.join(tmp_dir, "films")
+        os.makedirs(os.path.join(anime_dir, "Spirited.Away.2001.1080p"))
+        _make_show(anime_dir, "Naruto", {"Season 1": ["ep1.mkv"]})
+        os.makedirs(os.path.join(films_dir, "Parasite (2019)"))
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        result = scanner.scan()
+
+        movie_titles = {m["title"] for m in result["movies"]}
+        show_titles = {s["title"] for s in result["shows"]}
+        assert "Spirited Away" in movie_titles
+        assert "Parasite" in movie_titles
+        assert "Naruto" in show_titles
+
+    def test_scan_falls_back_to_all_when_no_categories(self, tmp_dir, monkeypatch):
+        # Only __all__ exists — should be scanned as fallback
+        all_dir = os.path.join(tmp_dir, "__all__")
+        os.makedirs(os.path.join(all_dir, "Some Movie (2023)"))
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        result = scanner.scan()
+
+        assert len(result["movies"]) == 1
+        assert result["movies"][0]["title"] == "Some Movie"
+
+    def test_scan_skips_all_when_categories_exist(self, tmp_dir, monkeypatch):
+        # __all__ duplicates content from categories — should be skipped
+        movies_dir = os.path.join(tmp_dir, "movies")
+        all_dir = os.path.join(tmp_dir, "__all__")
+        os.makedirs(os.path.join(movies_dir, "Dune (2021)"))
+        os.makedirs(os.path.join(all_dir, "Dune (2021)"))
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        result = scanner.scan()
+
+        dune_matches = [m for m in result["movies"] if m["title"] == "Dune"]
+        assert len(dune_matches) == 1
+
 
 # ---------------------------------------------------------------------------
 # LibraryScanner.scan() — local paths

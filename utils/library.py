@@ -170,11 +170,7 @@ class LibraryScanner:
         debrid_shows = []
 
         if self._mount_path:
-            debrid_movies = self._scan_mount_movies(self._mount_path, deadline)
-            if time.monotonic() < deadline:
-                debrid_shows = self._scan_mount_shows(self._mount_path, deadline)
-            else:
-                logger.warning("[library] Mount scan timeout reached before shows scan")
+            debrid_movies, debrid_shows = self._scan_mount(self._mount_path, deadline)
 
         local_movies = self._scan_local_movies()
         local_shows = self._scan_local_shows()
@@ -256,60 +252,72 @@ class LibraryScanner:
         t = threading.Thread(target=_run, daemon=True)
         t.start()
 
-    def _scan_mount_movies(self, mount_path, deadline=None):
-        movies_dir = os.path.join(mount_path, 'movies')
-        items = []
-        if not os.path.isdir(movies_dir):
-            return items
-        try:
-            with os.scandir(movies_dir) as it:
-                for entry in it:
-                    if deadline is not None and time.monotonic() > deadline:
-                        logger.warning("[library] Timeout during mount movies scan")
-                        break
-                    if not entry.is_dir(follow_symlinks=False):
-                        continue
-                    title, year = _parse_folder_name(entry.name)
-                    items.append({
-                        'title': title,
-                        'year': year,
-                        'source': 'debrid',
-                        'type': 'movie',
-                        'seasons': 0,
-                        'episodes': 0,
-                        'path': entry.path,
-                    })
-        except (PermissionError, OSError) as e:
-            logger.warning(f"[library] Cannot scan {movies_dir}: {e}")
-        return items
+    def _scan_mount(self, mount_path, deadline=None):
+        """Scan all category directories on the mount.
 
-    def _scan_mount_shows(self, mount_path, deadline=None):
-        shows_dir = os.path.join(mount_path, 'shows')
-        items = []
-        if not os.path.isdir(shows_dir):
-            return items
+        Zurg directory names are user-configurable, so we discover them
+        dynamically instead of hardcoding 'movies'/'shows'. Each item is
+        classified as a show (has Season subdirs) or movie (everything else).
+        Skips __all__ when categorized dirs exist to avoid duplicates.
+        """
+        movies = []
+        shows = []
         try:
-            with os.scandir(shows_dir) as it:
+            categories = []
+            with os.scandir(mount_path) as it:
                 for entry in it:
-                    if deadline is not None and time.monotonic() > deadline:
-                        logger.warning("[library] Timeout during mount shows scan")
-                        break
-                    if not entry.is_dir(follow_symlinks=False):
-                        continue
-                    title, year = _parse_folder_name(entry.name)
-                    seasons, episodes = _count_show_content(entry.path)
-                    items.append({
-                        'title': title,
-                        'year': year,
-                        'source': 'debrid',
-                        'type': 'show',
-                        'seasons': seasons,
-                        'episodes': episodes,
-                        'path': entry.path,
-                    })
+                    if entry.is_dir(follow_symlinks=False):
+                        categories.append(entry.name)
         except (PermissionError, OSError) as e:
-            logger.warning(f"[library] Cannot scan {shows_dir}: {e}")
-        return items
+            logger.warning(f"[library] Cannot list mount {mount_path}: {e}")
+            return movies, shows
+
+        # Use categorized dirs if available; fall back to __all__
+        non_all = [c for c in categories if c != '__all__']
+        scan_dirs = non_all if non_all else [c for c in categories if c == '__all__']
+
+        if not scan_dirs:
+            logger.warning("[library] No directories found on mount")
+            return movies, shows
+
+        logger.debug(f"[library] Scanning mount categories: {scan_dirs}")
+
+        for category in scan_dirs:
+            cat_path = os.path.join(mount_path, category)
+            try:
+                with os.scandir(cat_path) as it:
+                    for entry in it:
+                        if deadline is not None and time.monotonic() > deadline:
+                            logger.warning("[library] Timeout during mount scan")
+                            return movies, shows
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                        title, year = _parse_folder_name(entry.name)
+                        seasons, episodes = _count_show_content(entry.path)
+                        if seasons > 0:
+                            shows.append({
+                                'title': title,
+                                'year': year,
+                                'source': 'debrid',
+                                'type': 'show',
+                                'seasons': seasons,
+                                'episodes': episodes,
+                                'path': entry.path,
+                            })
+                        else:
+                            movies.append({
+                                'title': title,
+                                'year': year,
+                                'source': 'debrid',
+                                'type': 'movie',
+                                'seasons': 0,
+                                'episodes': 0,
+                                'path': entry.path,
+                            })
+            except (PermissionError, OSError) as e:
+                logger.warning(f"[library] Cannot scan {cat_path}: {e}")
+
+        return movies, shows
 
     def _scan_local_movies(self):
         items = []

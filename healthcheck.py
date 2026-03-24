@@ -79,12 +79,12 @@ try:
             if not os.path.ismount(mount_path):
                 error_messages.append(f"Rclone mount {mount_path} is not active.")
 
-    # Status server responsiveness
+    # Status server responsiveness (non-fatal — log warning but don't fail healthcheck)
     try:
         port = int(os.environ.get('STATUS_UI_PORT', '8080'))
         urllib.request.urlopen(f'http://localhost:{port}/', timeout=5)
     except Exception:
-        error_messages.append("Status server is not responding.")
+        print("Warning: Status server is not responding on port " + str(port), file=sys.stderr)
 
     if error_messages:
         error_message_combined = " | ".join(error_messages)

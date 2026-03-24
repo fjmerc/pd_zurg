@@ -443,6 +443,7 @@ _SETTINGS_SETUP_HTML = '''<!DOCTYPE html>
 <title>pd_zurg Settings - Setup</title>
 <style>
 :root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--blue:#58a6ff;--green:#3fb950}
+[data-theme="light"]{--bg:#f6f8fa;--card:#ffffff;--border:#d0d7de;--text:#1f2328;--text2:#656d76;--blue:#0969da;--green:#1a7f37}
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);padding:20px;max-width:700px;margin:40px auto}
 a{color:var(--blue);text-decoration:none}
@@ -455,8 +456,8 @@ h1{color:var(--blue);font-size:1.5em;margin-bottom:8px}
 .step-content{flex:1}
 .step-content p{font-size:.9em;line-height:1.6;color:var(--text2)}
 .step-content p strong{color:var(--text)}
-code{background:#0d1117;border:1px solid var(--border);border-radius:6px;padding:2px 8px;font-size:.85em;color:var(--green);font-family:monospace}
-pre{background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:14px 16px;font-size:.82em;color:var(--green);font-family:monospace;overflow-x:auto;margin:10px 0;line-height:1.6}
+code{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:2px 8px;font-size:.85em;color:var(--green);font-family:monospace}
+pre{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px 16px;font-size:.82em;color:var(--green);font-family:monospace;overflow-x:auto;margin:10px 0;line-height:1.6}
 .note{font-size:.8em;color:var(--text2);margin-top:20px;padding-top:16px;border-top:1px solid var(--border)}
 </style>
 </head>
@@ -494,6 +495,7 @@ pre{background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:
   <br><br>
   <a href="/status">&larr; Back to Dashboard</a>
 </div>
+<script>(function(){var t=localStorage.getItem('pd_zurg_theme');if(t)document.documentElement.setAttribute('data-theme',t);})()</script>
 </body>
 </html>'''
 
@@ -507,9 +509,12 @@ _DASHBOARD_HTML = '''<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <title>pd_zurg Status</title>
 <style>
-:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--border2:#21262d;--text:#c9d1d9;--text2:#8b949e;--text3:#484f58;--blue:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#d29922;--orange:#db6d28}
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--border2:#21262d;--text:#c9d1d9;--text2:#8b949e;--text3:#636e7b;--blue:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#d29922;--orange:#db6d28}
+[data-theme="light"]{--bg:#f6f8fa;--card:#ffffff;--border:#d0d7de;--border2:#d8dee4;--text:#1f2328;--text2:#656d76;--text3:#8b949e;--blue:#0969da;--green:#1a7f37;--red:#cf222e;--yellow:#9a6700;--orange:#bc4c00}
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);padding:20px;max-width:1200px;margin:0 auto}
 a{color:var(--blue);text-decoration:none}
@@ -522,14 +527,15 @@ h1{color:var(--blue);margin-bottom:4px;font-size:1.6em;font-weight:600}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
 .grid.full{grid-template-columns:1fr}
 @media(max-width:768px){.grid{grid-template-columns:1fr}}
-.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;opacity:0;animation:fadeIn .3s ease forwards}
+@keyframes fadeIn{to{opacity:1}}
 .card h2{font-size:.8em;color:var(--text2);margin-bottom:12px;text-transform:uppercase;letter-spacing:.08em;font-weight:600}
 table{width:100%;border-collapse:collapse}
 th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border2);font-size:.85em}
 th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;letter-spacing:.05em}
 #procs td:nth-child(2),#procs td:nth-child(3){text-align:center}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
-.dot.green{background:var(--green)}.dot.red{background:var(--red)}.dot.yellow{background:var(--yellow)}
+.dot.green{background:var(--green)}.dot.red{background:var(--red);border-radius:2px}.dot.yellow{background:transparent;border:2px solid var(--yellow);width:8px;height:8px}
 .svc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
 .svc-item{display:flex;align-items:center;padding:10px 12px;background:var(--bg);border-radius:6px;border:1px solid var(--border2)}
 .svc-item .svc-info{flex:1;margin-left:8px}
@@ -553,7 +559,7 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .log-controls{display:flex;gap:8px;align-items:center;margin-bottom:8px}
 .log-controls select{background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:.8em}
 .log-controls label{font-size:.8em;color:var(--text2)}
-#log-content{max-height:350px;overflow-y:auto;background:var(--bg);border:1px solid var(--border2);border-radius:4px;padding:8px;font-size:.75em;line-height:1.5;white-space:pre-wrap;word-break:break-all}
+#log-content{max-height:350px;overflow-y:auto;background:var(--bg);border:1px solid var(--border2);border-radius:4px;padding:8px;font-size:.75em;line-height:1.5;white-space:pre-wrap;word-break:break-word}
 .log-line.error{color:var(--red)}.log-line.warning{color:var(--yellow)}.log-line.debug{color:var(--text3)}
 details{margin-top:0}
 details summary{cursor:pointer;color:var(--text2);font-size:.8em;padding:4px 0}
@@ -567,11 +573,27 @@ details summary:hover{color:var(--blue)}
 .mt-block{height:16px;min-width:3px;flex:1;border-radius:2px}
 .mt-block.ok{background:var(--green)}.mt-block.down{background:var(--red)}.mt-block.partial{background:var(--yellow)}
 .mt-block:hover{opacity:.8}
-.footer{color:var(--text3);font-size:.7em;text-align:right;margin-top:12px}
+.footer{color:var(--text3);font-size:.78em;text-align:right;margin-top:12px;display:flex;justify-content:flex-end;align-items:center;gap:8px}
+#conn-status{color:var(--red);font-weight:500}
+#log-search:focus{border-color:var(--blue)}
+#log-content.nowrap{white-space:pre;overflow-x:auto;word-break:normal}
+.theme-toggle{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;cursor:pointer;padding:4px 8px;font-size:.85em;line-height:1;transition:border-color .15s,color .15s}
+.theme-toggle:hover{border-color:var(--blue);color:var(--blue)}
+[data-theme="light"] .svc-item{background:var(--card);border-color:var(--border)}
+dialog{background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:24px;max-width:380px;box-shadow:0 8px 32px rgba(0,0,0,.5)}
+dialog::backdrop{background:rgba(0,0,0,.6);backdrop-filter:blur(2px)}
+dialog h3{margin-bottom:12px;font-size:1em;color:var(--text)}
+dialog p{margin-bottom:20px;font-size:.9em;color:var(--text2)}
+dialog .dlg-actions{display:flex;gap:8px;justify-content:flex-end}
+dialog .dlg-btn{padding:8px 18px;border-radius:6px;font-size:.85em;cursor:pointer;border:none;font-weight:500}
+dialog .dlg-cancel{background:var(--border);color:var(--text)}
+dialog .dlg-confirm{background:var(--blue);color:#fff}
+@media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
 </style>
+<script>(function(){try{var t=localStorage.getItem('pd_zurg_theme');if(t){document.documentElement.setAttribute('data-theme',t);document.querySelector('meta[name="color-scheme"]').content=t==='light'?'light':'dark';}}catch(e){}})()</script>
 </head>
 <body>
-<div class="header"><h1>pd_zurg</h1><span class="meta" id="header-meta"></span><a href="/settings" style="font-size:.85em;margin-left:auto;margin-right:12px">Settings</a></div>
+<div class="header"><h1>pd_zurg</h1><span class="meta" id="header-meta"></span><a href="/settings" style="font-size:.85em;margin-left:auto;margin-right:12px">Settings</a><button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme" id="theme-btn">☀️</button></div>
 <div class="meta">Uptime: <span id="uptime"></span></div>
 <div class="meta" id="error-line" style="display:none;color:var(--red)">Errors: <span id="errors">0</span></div>
 <div class="banner" id="banner"></div>
@@ -599,6 +621,7 @@ details summary:hover{color:var(--blue)}
     <h2>System</h2>
     <div class="stats-row">
       <div><div class="stat-value" id="mem-used">-</div><div class="stat-label" id="mem-label">Memory Used</div></div>
+      <div><div class="stat-value" id="cpu-used">-</div><div class="stat-label" id="cpu-label">CPU</div></div>
     </div>
   </div>
   <div class="card">
@@ -617,6 +640,8 @@ details summary:hover{color:var(--blue)}
         <option value="INFO">Info</option>
         <option value="DEBUG">Debug</option>
       </select>
+      <input type="text" id="log-search" placeholder="Search logs..." oninput="filterLogs()" style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:.8em;color:var(--text);outline:none;min-width:100px">
+      <label><input type="checkbox" id="log-wrap" checked onchange="toggleLogWrap()"> Wrap</label>
       <label><input type="checkbox" id="log-autoscroll" checked> Auto-scroll</label>
     </div>
     <div id="log-content"></div>
@@ -742,8 +767,34 @@ details summary:hover{color:var(--blue)}
     </details>
   </div>
 </div>
-<div class="footer">Auto-refreshes every 10s</div>
+<dialog id="confirm-dialog"><h3 id="dlg-title"></h3><p id="dlg-msg"></p><div class="dlg-actions"><button class="dlg-btn dlg-cancel" onclick="document.getElementById('confirm-dialog').close('cancel')">Cancel</button><button class="dlg-btn dlg-confirm" id="dlg-ok">Confirm</button></div></dialog>
+<div class="footer"><span id="conn-status"></span>Refresh: <select id="refresh-interval" onchange="setRefreshInterval(this.value)" style="background:var(--bg);color:var(--text2);border:1px solid var(--border);border-radius:3px;font-size:1em;padding:1px 4px"><option value="5">5s</option><option value="10" selected>10s</option><option value="30">30s</option><option value="0">Paused</option></select></div>
 <script>
+// Theme toggle
+function applyTheme(theme){
+  document.documentElement.setAttribute('data-theme',theme);
+  document.querySelector('meta[name="color-scheme"]').content=theme==='light'?'light':'dark';
+  document.getElementById('theme-btn').textContent=theme==='light'?'\U0001F319':'\u2600\uFE0F';
+}
+function toggleTheme(){
+  const cur=document.documentElement.getAttribute('data-theme')||'dark';
+  const next=cur==='dark'?'light':'dark';
+  applyTheme(next);
+  try{localStorage.setItem('pd_zurg_theme',next);}catch(e){}
+}
+
+// Sync theme button icon on load (head script sets data-theme before body renders)
+(function(){const t=document.documentElement.getAttribute('data-theme');if(t)applyTheme(t);})();
+
+// Log wrap toggle
+function toggleLogWrap(){
+  const el=document.getElementById('log-content');
+  const wrap=document.getElementById('log-wrap').checked;
+  el.classList.toggle('nowrap',!wrap);
+  try{localStorage.setItem('pd_zurg_log_wrap',wrap?'1':'0');}catch(e){}
+}
+(function(){try{const w=localStorage.getItem('pd_zurg_log_wrap');if(w==='0'){document.getElementById('log-wrap').checked=false;document.getElementById('log-content').classList.add('nowrap');}}catch(e){}})();
+
 function fmt(s){
   if(s<60)return s+'s';
   if(s<3600)return Math.floor(s/60)+'m '+s%60+'s';
@@ -756,6 +807,16 @@ function fmtBytes(b){
   if(b>1048576)return(b/1048576).toFixed(0)+'M';
   return(b/1024).toFixed(0)+'K';
 }
+function timeAgo(ts){
+  const sec=Math.floor((Date.now()-new Date(ts).getTime())/1000);
+  if(sec<60)return sec+'s ago';
+  if(sec<3600)return Math.floor(sec/60)+'m ago';
+  if(sec<86400)return Math.floor(sec/3600)+'h ago';
+  return Math.floor(sec/86400)+'d ago';
+}
+let _failCount=0;
+let _statusTimer,_logTimer,_mtTimer;
+let _refreshSec=10;
 function esc(s){const d=document.createElement('div');d.appendChild(document.createTextNode(String(s)));return d.innerHTML;}
 function dot(ok){return '<span class="dot '+(ok?'green':'red')+'"></span>'+(ok?'Running':'Stopped');}
 function mdot(ok,yes,no){return '<span class="dot '+(ok?'green':'red')+'"></span>'+(ok?(yes||'Yes'):(no||'No'));}
@@ -828,7 +889,7 @@ function update(){
     let m='';d.mounts.forEach(x=>{m+='<tr><td>'+esc(x.path)+'</td><td>'+mdot(x.mounted,'Yes','No')+'</td><td>'+mdot(x.accessible,'Yes','No')+'</td></tr>';});
     document.getElementById('mounts').innerHTML=m||'<tr><td colspan="3" style="color:var(--text2)">No mounts</td></tr>';
 
-    // System
+    // System — Memory
     if(d.system.memory_used_bytes!==undefined){
       if(d.system.memory_percent!==undefined&&d.system.memory_limit_bytes!==undefined){
         document.getElementById('mem-used').textContent=fmtBytes(d.system.memory_used_bytes)+' / '+fmtBytes(d.system.memory_limit_bytes);
@@ -838,18 +899,26 @@ function update(){
         document.getElementById('mem-label').textContent='Memory Used (no limit)';
       }
     }
+    // System — CPU
+    if(d.system.cpu_percent!==undefined){
+      document.getElementById('cpu-used').textContent=d.system.cpu_percent.toFixed(1)+'%';
+      document.getElementById('cpu-label').textContent='CPU';
+    }else if(d.system.cpu_usage_usec!==undefined){
+      document.getElementById('cpu-used').textContent=(d.system.cpu_usage_usec/1000000).toFixed(1)+'s';
+      document.getElementById('cpu-label').textContent='CPU Time';
+    }
 
-    // Events
+    // Events (with relative time on hover)
     const validLevels=new Set(['info','warning','error']);
     let e='';d.recent_events.forEach(x=>{
       const lvl=validLevels.has(x.level)?x.level:'info';
       const t=x.timestamp.split('T')[1]||x.timestamp;
-      e+='<div class="event '+lvl+'"><span class="time">'+esc(t)+'</span><span class="comp">'+esc(x.component)+'</span><span class="msg">'+esc(x.message)+'</span></div>';
+      const ago=timeAgo(x.timestamp);
+      e+='<div class="event '+lvl+'"><span class="time" title="'+esc(ago)+'">'+esc(t)+'</span><span class="comp">'+esc(x.component)+'</span><span class="msg">'+esc(x.message)+'</span></div>';
     });
     if(!e){
       e='<div style="color:var(--text2);padding:8px 0">No events yet</div>';
     }else if(d.recent_events.length&&d.recent_events.length<=3){
-      // If only startup events, add a reassuring note
       const newest=d.recent_events[0];
       if(newest){
         try{
@@ -862,15 +931,34 @@ function update(){
       }
     }
     document.getElementById('events').innerHTML=e;
-  }).catch(()=>{});
+    _failCount=0;
+    document.getElementById('conn-status').textContent='';
+  }).catch(()=>{
+    _failCount++;
+    if(_failCount>=3)document.getElementById('conn-status').textContent='Connection lost \u2014 retrying... ';
+  });
 }
 // Detect auth by trying an auth-required endpoint
 window._hasAuth=false;
 fetch('/api/restart/test',{method:'POST'}).then(r=>{window._hasAuth=r.status!==403;}).catch(()=>{});
 
+// Styled confirm dialog
+function showConfirm(title,msg){
+  return new Promise(resolve=>{
+    const dlg=document.getElementById('confirm-dialog');
+    document.getElementById('dlg-title').textContent=title;
+    document.getElementById('dlg-msg').textContent=msg;
+    const okBtn=document.getElementById('dlg-ok');
+    const handler=()=>{dlg.close('ok');};
+    okBtn.onclick=handler;
+    dlg.onclose=()=>{okBtn.onclick=null;resolve(dlg.returnValue==='ok');};
+    dlg.showModal();
+  });
+}
+
 // Restart service
-function restartSvc(btn,name){
-  if(!confirm('Restart '+name+'?'))return;
+async function restartSvc(btn,name){
+  if(!await showConfirm('Restart '+name+'?','This will restart the '+name+' process.'))return;
   btn.disabled=true;btn.textContent='...';
   fetch('/api/restart/'+name,{method:'POST'}).then(r=>r.json()).then(d=>{
     btn.textContent=d.status==='restarting'?'OK':'Err';
@@ -893,8 +981,16 @@ function updateLogs(){
       h+='<div class="log-line '+cls+'">'+esc(l)+'</div>';
     });
     el.innerHTML=h||'<div style="color:var(--text2)">No log entries</div>';
+    filterLogs();
     if(document.getElementById('log-autoscroll').checked)el.scrollTop=el.scrollHeight;
   }).catch(()=>{});
+}
+
+// Log search filter
+function filterLogs(){
+  const q=(document.getElementById('log-search').value||'').toLowerCase();
+  const lines=document.querySelectorAll('#log-content .log-line');
+  lines.forEach(l=>{l.style.display=(!q||l.textContent.toLowerCase().includes(q))?'':'none';});
 }
 
 // Config viewer (load once)
@@ -936,10 +1032,20 @@ function updateMountHistory(){
   }).catch(()=>{});
 }
 
+// Configurable refresh
+function setRefreshInterval(sec){
+  _refreshSec=parseInt(sec)||0;
+  if(_statusTimer)clearInterval(_statusTimer);
+  if(_logTimer)clearInterval(_logTimer);
+  if(_mtTimer)clearInterval(_mtTimer);
+  if(_refreshSec>0){
+    _statusTimer=setInterval(update,_refreshSec*1000);
+    _logTimer=setInterval(updateLogs,_refreshSec*1000);
+    _mtTimer=setInterval(updateMountHistory,Math.max(_refreshSec*3,30)*1000);
+  }
+}
 update();updateLogs();
-setInterval(update,10000);
-setInterval(updateLogs,5000);
-setInterval(updateMountHistory,30000);
+setRefreshInterval(10);
 setTimeout(updateMountHistory,1000);
 </script>
 </body>

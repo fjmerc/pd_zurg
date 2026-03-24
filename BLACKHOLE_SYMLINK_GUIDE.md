@@ -171,8 +171,13 @@ Add these to your `.env` file or set them directly in `docker-compose.yml`:
 | `BLACKHOLE_MOUNT_POLL_TIMEOUT` | No | `300` | Seconds to wait for debrid to process the torrent AND for content to appear on the mount |
 | `BLACKHOLE_MOUNT_POLL_INTERVAL` | No | `10` | Seconds between status/mount checks |
 | `BLACKHOLE_SYMLINK_MAX_AGE` | No | `72` | Hours before completed symlink directories are cleaned up |
+| `BLACKHOLE_DEDUP_ENABLED` | No | `false` | Enable local library duplicate checking before sending torrents to debrid. When enabled, pd_zurg compares incoming torrents against your existing TV and movie libraries to avoid re-downloading content you already have. |
+| `BLACKHOLE_LOCAL_LIBRARY_TV` | Yes* | _(empty)_ | Path to your local TV library inside the container for dedup checking (e.g., `/data/media/tv`). Must be mounted read-only in the pd_zurg container. |
+| `BLACKHOLE_LOCAL_LIBRARY_MOVIES` | Yes* | _(empty)_ | Path to your local movies library inside the container for dedup checking (e.g., `/data/media/movies`). Must be mounted read-only in the pd_zurg container. |
 
 \* Required when symlink mode is enabled.
+
+\* Required when `BLACKHOLE_DEDUP_ENABLED=true`.
 
 #### Understanding BLACKHOLE_SYMLINK_TARGET_BASE
 
@@ -215,6 +220,11 @@ BLACKHOLE_SYMLINK_TARGET_BASE=/mnt/debrid
 BLACKHOLE_MOUNT_POLL_TIMEOUT=300
 BLACKHOLE_MOUNT_POLL_INTERVAL=10
 BLACKHOLE_SYMLINK_MAX_AGE=72
+
+# Blackhole Dedup Settings (optional — checks local library before submitting to debrid)
+BLACKHOLE_DEDUP_ENABLED=true
+BLACKHOLE_LOCAL_LIBRARY_TV=/data/media/tv
+BLACKHOLE_LOCAL_LIBRARY_MOVIES=/data/media/movies
 ```
 
 ### Docker Compose
@@ -234,6 +244,9 @@ services:
       - /mnt/remote/realdebrid:/data:shared      # rclone mount
       - /opt/blackhole:/watch                      # blackhole input (or NFS mount)
       - /opt/completed:/completed                  # symlink output (or NFS mount)
+      # Local library for dedup (read-only)
+      - /mnt/truenas/data/media/tv:/data/media/tv:ro
+      - /mnt/truenas/data/media/movies:/data/media/movies:ro
     environment:
       - BLACKHOLE_ENABLED=true
       - BLACKHOLE_DIR=/watch
@@ -473,3 +486,7 @@ volumes:
   - /opt/blackhole:/watch
   - /opt/completed:/completed
 ```
+
+### What about Bazarr (subtitles)?
+
+Bazarr pulls root folder paths from Sonarr/Radarr. If Sonarr/Radarr have a debrid root folder (e.g., `/mnt/debrid/shows`), Bazarr will show a health warning because it can't access that path. This is cosmetic — Bazarr works normally for content that Sonarr/Radarr have already imported to your local media library (e.g., on TrueNAS or local disk). Subtitles cannot be written directly to the debrid mount since it's read-only.

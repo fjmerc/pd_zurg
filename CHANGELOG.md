@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## Version [2.12.0] - 2026-03-24
+
+### Added
+
+- **Web-based settings editor**: Browser-based configuration for pd_zurg environment variables and plex_debrid settings.json with proper input types, inline validation, and SIGHUP reload (no container restart needed)
+- **Quality profile editor**: JSON editor for plex_debrid quality profiles with first-run setup experience
+- **OAuth device code flows**: Connect Trakt, Debrid Link, Put.io, and Orionoid accounts directly from the settings editor
+- **Settings import/export**: Download or upload .env and settings files for backup and migration
+- **Blackhole symlink mode**: Creates symlinks from completed debrid downloads to a target directory for Sonarr/Radarr import — zero-copy, no local storage used
+- **Local library dedup**: Checks existing TV/movie library before submitting torrents to debrid to avoid duplicate downloads (`BLACKHOLE_DEDUP_ENABLED`)
+- **RD account dedup**: Deduplicates incoming torrents against existing Real-Debrid account torrents before submitting
+- **Workflow diagrams**: Interactive "How it works" diagrams in the status dashboard showing Watchlist and Arr+Blackhole flows with component glossary
+- **Status UI enhancements**: Log viewer with level filtering, process restart buttons, running config viewer, mount event history
+- **Service health checks**: Dashboard shows connectivity status and premium expiry for debrid, Plex, Overseerr, and other integrated services
+- **Config validation**: Startup validation of environment variables with clear error messages
+- **SIGHUP reload**: Reload pd_zurg configuration without restarting the container
+- **.env import button**: Restore configuration from a previously exported .env file via the settings editor
+- **Bidirectional settings sync**: Changes in .env propagate to plex_debrid settings.json and vice versa
+- **DUPLICATE_CLEANUP_KEEP**: New option to control which copy is kept during duplicate cleanup — `local` (default, logs Zurg dupes) or `zurg` (deletes local copy)
+
+### Changed
+
+- `.env` is now the single source of configuration — docker-compose.yml no longer contains inline env vars, making it safe to pull updates without losing settings
+- Duplicate cleanup reworked: skips Zurg copies by default (read-only mount), logs summary at INFO level with per-item detail at DEBUG
+- NFS mode documented as not creating a local mount — cross-machine WebDAV setup recommended instead
+
+### Fixed
+
+- `atomic_write()` crash from invalid kwargs passed to `mkstemp()`
+- Auth lockout: StatusHandler credentials now update on SIGHUP reload
+- Phantom AllDebrid instance created when only Real-Debrid is configured
+- False Plex/Jellyfin conflict error during startup validation
+- Crash when `AUTO_UPDATE_INTERVAL` is set to empty string
+- `SimpleNamespace` missing `.status` attribute crash in RD torrent info handling
+- Environment variables overridden by stale `/config/.env` on container restart
+- Log viewer stuck displaying rotated log file after log rotation
+- Single-file torrent extension mismatch in blackhole symlinks
+- Stale config after SIGHUP reload, missing service triggers, and settings sync gaps
+- JS syntax error in status UI restart button handler
+- Dashboard layout issues: header spacing, column alignment, stat centering
+
+
 ## Version [2.11.0] - 2026-03-21
 
 ### Added

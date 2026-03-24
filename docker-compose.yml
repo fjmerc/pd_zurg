@@ -94,6 +94,8 @@ services:
       - STATUS_UI_ENABLED=${STATUS_UI_ENABLED:-true}
       - STATUS_UI_PORT=${STATUS_UI_PORT:-8080}
       - STATUS_UI_AUTH=${STATUS_UI_AUTH:-}
+      ## Library Metadata
+      - TMDB_API_KEY=${TMDB_API_KEY:-}
       ## Monitoring
       - FFPROBE_MONITOR_ENABLED=${FFPROBE_MONITOR_ENABLED:-}
       - FFPROBE_STUCK_TIMEOUT=${FFPROBE_STUCK_TIMEOUT:-}

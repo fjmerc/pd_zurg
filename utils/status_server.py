@@ -1198,13 +1198,11 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json_response(200, data)
         elif self.path.startswith('/api/library/transfers'):
             from utils.library_prefs import get_transfer_status
-            from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
             tid = qs.get('id', [None])[0]
             result = get_transfer_status(tid)
             self._send_json_response(200, json.dumps(result))
         elif self.path.startswith('/api/library/metadata'):
-            from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
             title = qs.get('title', [''])[0]
             year = qs.get('year', [None])[0]

@@ -64,8 +64,10 @@ a:hover{text-decoration:underline}
 /* Media card */
 .media-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:6px;transition:border-color .15s}
 .media-card:hover{border-color:var(--border2)}
-.media-card.show-card,.media-card.movie-card{cursor:pointer}
+.media-card.show-card,.media-card.movie-card{cursor:pointer;position:relative;padding-right:32px}
 .media-card.show-card:hover,.media-card.movie-card:hover{border-color:var(--blue)}
+.media-card.show-card::after,.media-card.movie-card::after{content:'\203A';position:absolute;right:14px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:1.2em;transition:color .15s,transform .15s}
+.media-card.show-card:hover::after,.media-card.movie-card:hover::after{color:var(--blue);transform:translateY(-50%) translateX(2px)}
 .card-title{font-size:.9em;font-weight:500;color:var(--text);line-height:1.35}
 .card-year{color:var(--text2);font-weight:400}
 .card-meta{font-size:.78em;color:var(--text2)}
@@ -120,7 +122,8 @@ a:hover{text-decoration:underline}
 .pref-select:focus{border-color:var(--input-focus)}
 .btn-action{background:none;border:1px solid var(--border);color:var(--text2);border-radius:4px;padding:2px 8px;font-size:.75em;cursor:pointer;white-space:nowrap;transition:border-color .15s,color .15s}
 .btn-action:hover{border-color:var(--blue);color:var(--blue)}
-.btn-action.danger:hover{border-color:var(--red);color:var(--red)}
+.btn-action.danger{color:var(--red);border-color:#f8514933}
+.btn-action.danger:hover{border-color:var(--red);background:#f851490f}
 .btn-action:disabled{opacity:.5;cursor:not-allowed}
 .season-actions{margin-left:auto;display:flex;gap:4px}
 .transfer-msg{font-size:.78em;color:var(--yellow);margin-top:4px}
@@ -137,7 +140,7 @@ a:hover{text-decoration:underline}
 /* Episode titles and missing */
 .ep-title{color:var(--text2);font-size:.78em;display:block}
 .ep-date{color:var(--text3);font-size:.75em;white-space:nowrap}
-.ep-missing td{opacity:.5}
+.ep-missing td{color:var(--text3)}
 .badge-missing{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#d299220f;color:var(--yellow);border:1px solid #d2992233}
 [data-theme="light"] .badge-missing{background:#9a67001a;border-color:#9a670040}
 
@@ -310,7 +313,7 @@ function buildCard(item, index) {
   var isMovie = item.type === 'movie';
   var isClickable = isShow || isMovie;
   var cardClass = isShow ? ' show-card' : (isMovie ? ' movie-card' : '');
-  var clickAttr = isClickable ? ' onclick="showDetail(' + index + ')"' : '';
+  var clickAttr = isClickable ? ' onclick="showDetail(' + index + ')" tabindex="0" role="button" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();showDetail(' + index + ')}"' : '';
   return '<div class="media-card' + cardClass + '"' + clickAttr + '>'
     + '<div class="card-title">' + esc(item.title) + '</div>'
     + '<div class="card-badges">' + buildBadges(item.source) + '</div>'
@@ -457,6 +460,8 @@ function showDetail(index) {
   document.getElementById('footer').style.display = 'none';
 
   _renderDetail();
+  var backBtn = document.querySelector('.detail-back');
+  if (backBtn) backBtn.focus();
 
   // Fetch TMDB metadata
   var params = 'title=' + encodeURIComponent(item.title) + '&type=' + encodeURIComponent(item.type);
@@ -665,6 +670,7 @@ function hideDetail() {
   document.querySelector('.controls').style.display = '';
   document.getElementById('footer').style.display = '';
   applyFilters();
+  document.getElementById('search-input').focus();
 }
 
 function toggleSeason(headerEl) {

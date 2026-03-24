@@ -1203,6 +1203,28 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             tid = qs.get('id', [None])[0]
             result = get_transfer_status(tid)
             self._send_json_response(200, json.dumps(result))
+        elif self.path.startswith('/api/library/metadata'):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            title = qs.get('title', [''])[0]
+            year = qs.get('year', [None])[0]
+            media_type = qs.get('type', ['show'])[0]
+            if not title:
+                self._send_json_response(400, json.dumps({'error': 'title required'}))
+            else:
+                try:
+                    year_int = int(year) if year else None
+                except (ValueError, TypeError):
+                    year_int = None
+                from utils.tmdb import get_show_info, get_movie_info
+                if media_type == 'movie':
+                    result = get_movie_info(title, year_int)
+                else:
+                    result = get_show_info(title, year_int)
+                if result is None:
+                    self._send_json_response(200, json.dumps(None))
+                else:
+                    self._send_json_response(200, json.dumps(result))
         elif self.path in ('/', '/status'):
             html = _DASHBOARD_HTML.encode()
             self.send_response(200)

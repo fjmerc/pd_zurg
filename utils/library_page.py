@@ -64,8 +64,8 @@ a:hover{text-decoration:underline}
 /* Media card */
 .media-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:6px;transition:border-color .15s}
 .media-card:hover{border-color:var(--border2)}
-.media-card.show-card{cursor:pointer}
-.media-card.show-card:hover{border-color:var(--blue)}
+.media-card.show-card,.media-card.movie-card{cursor:pointer}
+.media-card.show-card:hover,.media-card.movie-card:hover{border-color:var(--blue)}
 .card-title{font-size:.9em;font-weight:500;color:var(--text);line-height:1.35}
 .card-year{color:var(--text2);font-weight:400}
 .card-meta{font-size:.78em;color:var(--text2)}
@@ -125,6 +125,25 @@ a:hover{text-decoration:underline}
 .season-actions{margin-left:auto;display:flex;gap:4px}
 .transfer-msg{font-size:.78em;color:var(--yellow);margin-top:4px}
 
+/* Detail hero with poster */
+.detail-hero{display:flex;gap:16px;margin-bottom:16px}
+.detail-poster{width:150px;min-width:150px;border-radius:8px;overflow:hidden}
+.detail-poster img{width:100%;display:block;border-radius:8px}
+.detail-info{flex:1;min-width:0}
+.detail-overview{font-size:.85em;color:var(--text2);margin-top:8px;line-height:1.5;max-height:6em;overflow:hidden}
+.detail-status{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:var(--border);color:var(--text2);margin-left:6px}
+.detail-runtime{font-size:.82em;color:var(--text2);margin-top:6px}
+
+/* Episode titles and missing */
+.ep-title{color:var(--text2);font-size:.78em;display:block}
+.ep-date{color:var(--text3);font-size:.75em;white-space:nowrap}
+.ep-missing td{opacity:.5}
+.badge-missing{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#d299220f;color:var(--yellow);border:1px solid #d2992233}
+[data-theme="light"] .badge-missing{background:#9a67001a;border-color:#9a670040}
+
+/* Season progress */
+.season-progress{font-size:.78em;color:var(--text3);margin-left:6px}
+
 /* Footer */
 .footer{color:var(--text3);font-size:.78em;text-align:right;margin-top:16px}
 
@@ -135,6 +154,8 @@ a:hover{text-decoration:underline}
   .scan-info{display:none}
   .header{flex-direction:column;align-items:flex-start}
   .episode-table{display:block;overflow-x:auto}
+  .detail-hero{flex-direction:column}
+  .detail-poster{width:120px}
 }
 @media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
 </style>
@@ -284,8 +305,10 @@ function buildCard(item, index) {
     metaLine = '<div class="card-meta">' + parts.join(' &middot; ') + '</div>';
   }
   const isShow = item.type === 'show' && item.season_data && item.season_data.length > 0;
-  const showClass = isShow ? ' show-card' : '';
-  const clickAttr = isShow ? ' onclick="showDetail(' + index + ')"' : '';
+  const isMovie = item.type === 'movie';
+  const isClickable = isShow || isMovie;
+  const showClass = isShow ? ' show-card' : (isMovie ? ' movie-card' : '');
+  const clickAttr = isClickable ? ' onclick="showDetail(' + index + ')"' : '';
   return '<div class="media-card' + showClass + '"' + clickAttr + '>'
     + '<div class="card-title">' + esc(item.title) + yearSpan + '</div>'
     + '<div class="card-badges">' + buildBadges(item.source) + '</div>'
@@ -415,36 +438,146 @@ function normTitle(title) {
   return title.toLowerCase().replace(/\s*\(\d{4}\)\s*$/, '').trim();
 }
 
+var _detailItem = null;
+var _detailMeta = null;
+
 function showDetail(index) {
-  var show = _displayedItems[index];
-  if (!show || !show.season_data) return;
+  var item = _displayedItems[index];
+  if (!item) return;
+  if (item.type === 'show' && (!item.season_data || !item.season_data.length)) return;
   _inDetailView = true;
+  _detailItem = item;
+  _detailMeta = null;
 
   document.querySelector('.tabs').style.display = 'none';
   document.querySelector('.controls').style.display = 'none';
   document.getElementById('footer').style.display = 'none';
 
-  var nk = normTitle(show.title);
-  var curPref = _preferences[nk] || 'none';
+  _renderDetail();
 
+  // Fetch TMDB metadata
+  var params = 'title=' + encodeURIComponent(item.title) + '&type=' + encodeURIComponent(item.type);
+  if (item.year) params += '&year=' + item.year;
+  fetch('/api/library/metadata?' + params)
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(meta) {
+      if (meta && _inDetailView && _detailItem === item) {
+        _detailMeta = meta;
+        _renderDetail();
+      }
+    })
+    .catch(function() {});
+}
+
+function _renderDetail() {
+  var item = _detailItem;
+  var meta = _detailMeta;
+  if (!item) return;
+
+  if (item.type === 'movie') {
+    _renderMovieDetail(item, meta);
+  } else {
+    _renderShowDetail(item, meta);
+  }
+}
+
+function _renderMovieDetail(movie, meta) {
   var area = document.getElementById('content-area');
   var html = '<div class="detail-view">';
   html += '<a class="detail-back" onclick="hideDetail()">&larr; Back to Library</a>';
-  html += '<div class="detail-header">';
+
+  html += '<div class="detail-hero">';
+  if (meta && meta.poster_url) {
+    html += '<div class="detail-poster"><img src="' + esc(meta.poster_url) + '" alt=""></div>';
+  }
+  html += '<div class="detail-info">';
+  html += '<h2>' + esc(movie.title);
+  if (movie.year) html += ' <span class="card-year">(' + esc(String(movie.year)) + ')</span>';
+  html += '</h2>';
+  html += '<div class="card-badges">' + buildBadges(movie.source) + '</div>';
+  if (meta) {
+    if (meta.runtime) html += '<div class="detail-runtime">' + meta.runtime + ' min';
+    if (meta.release_date) html += (meta.runtime ? ' &middot; ' : '<div class="detail-runtime">') + 'Released ' + esc(meta.release_date);
+    if (meta.runtime || meta.release_date) html += '</div>';
+    if (meta.overview) html += '<div class="detail-overview">' + esc(meta.overview) + '</div>';
+  }
+  html += '</div></div>';
+  html += '</div>';
+  area.innerHTML = html;
+}
+
+function _mergeShowMeta(show, meta) {
+  if (!meta || !meta.seasons) return show.season_data || [];
+
+  var fileLookup = {};
+  (show.season_data || []).forEach(function(s) {
+    fileLookup[s.number] = {};
+    s.episodes.forEach(function(ep) { fileLookup[s.number][ep.number] = ep; });
+  });
+
+  var merged = [];
+  meta.seasons.forEach(function(tmdbS) {
+    var fileEps = fileLookup[tmdbS.number] || {};
+    var usedFileSeasons = {};
+    var episodes = [];
+    tmdbS.episodes.forEach(function(te) {
+      var fe = fileEps[te.number];
+      if (fe) {
+        episodes.push({number: te.number, title: te.title, air_date: te.air_date, file: fe.file, source: fe.source});
+        delete fileEps[te.number];
+      } else {
+        episodes.push({number: te.number, title: te.title, air_date: te.air_date, file: null, source: 'missing'});
+      }
+    });
+    // Append file episodes not in TMDB
+    var remaining = Object.keys(fileEps);
+    for (var ri = 0; ri < remaining.length; ri++) {
+      episodes.push(fileEps[remaining[ri]]);
+    }
+    episodes.sort(function(a, b) { return a.number - b.number; });
+    var haveCount = episodes.filter(function(e) { return e.source !== 'missing'; }).length;
+    merged.push({number: tmdbS.number, total_episodes: tmdbS.total_episodes, episode_count: haveCount, episodes: episodes});
+    usedFileSeasons[tmdbS.number] = true;
+  });
+  // Append file seasons not in TMDB
+  (show.season_data || []).forEach(function(s) {
+    if (!meta.seasons.some(function(ms) { return ms.number === s.number; })) {
+      merged.push(s);
+    }
+  });
+  merged.sort(function(a, b) { return a.number - b.number; });
+  return merged;
+}
+
+function _renderShowDetail(show, meta) {
+  var area = document.getElementById('content-area');
+  var nk = normTitle(show.title);
+  var curPref = _preferences[nk] || 'none';
+  var seasons = meta ? _mergeShowMeta(show, meta) : (show.season_data || []);
+
+  var html = '<div class="detail-view">';
+  html += '<a class="detail-back" onclick="hideDetail()">&larr; Back to Library</a>';
+
+  html += '<div class="detail-hero">';
+  if (meta && meta.poster_url) {
+    html += '<div class="detail-poster"><img src="' + esc(meta.poster_url) + '" alt=""></div>';
+  }
+  html += '<div class="detail-info">';
   html += '<h2>' + esc(show.title);
   if (show.year) html += ' <span class="card-year">(' + esc(String(show.year)) + ')</span>';
+  if (meta && meta.status) html += '<span class="detail-status">' + esc(meta.status) + '</span>';
   html += '</h2>';
   html += '<div class="card-badges">' + buildBadges(show.source) + '</div>';
+  if (meta && meta.overview) html += '<div class="detail-overview">' + esc(meta.overview) + '</div>';
   html += '<div class="pref-row"><label style="font-size:.82em;color:var(--text2)">Preference:</label>';
   html += '<select class="pref-select" onchange="setPreference(\'' + esc(nk) + '\',this.value)">';
   html += '<option value="none"' + (curPref === 'none' ? ' selected' : '') + '>No Preference</option>';
   html += '<option value="prefer-local"' + (curPref === 'prefer-local' ? ' selected' : '') + '>Prefer Local</option>';
   html += '<option value="prefer-debrid"' + (curPref === 'prefer-debrid' ? ' selected' : '') + '>Prefer Debrid</option>';
   html += '</select></div>';
-  html += '</div>';
+  html += '</div></div>';
 
   var titleEsc = esc(show.title).replace(/'/g, "\\'");
-  var seasons = show.season_data || [];
   for (var si = 0; si < seasons.length; si++) {
     var season = seasons[si];
     var expanded = si === 0;
@@ -453,10 +586,14 @@ function showDetail(index) {
       if (season.episodes[ci].source === 'debrid') hasDebrid = true;
       if (season.episodes[ci].source === 'local' || season.episodes[ci].source === 'both') hasLocal = true;
     }
+    var progressText = '';
+    if (season.total_episodes) {
+      progressText = '<span class="season-progress">' + season.episode_count + '/' + season.total_episodes + '</span>';
+    }
     html += '<div class="season-section">';
     html += '<div class="season-header' + (expanded ? ' expanded' : '') + '" onclick="toggleSeason(this)">';
     html += '<span class="season-chevron">&#9654;</span>';
-    html += 'Season ' + season.number + ' &mdash; ' + season.episode_count + ' episode' + (season.episode_count !== 1 ? 's' : '');
+    html += 'Season ' + season.number + ' &mdash; ' + season.episode_count + ' episode' + (season.episode_count !== 1 ? 's' : '') + progressText;
     html += '<span class="season-actions">';
     if (hasDebrid) html += '<button class="btn-action" onclick="event.stopPropagation();downloadSeason(\'' + titleEsc + '\',' + season.number + ',' + JSON.stringify(season.episodes).replace(/'/g, "\\'") + ')">Download All</button>';
     if (hasLocal) html += '<button class="btn-action danger" onclick="event.stopPropagation();removeSeason(\'' + titleEsc + '\',' + season.number + ',' + JSON.stringify(season.episodes).replace(/'/g, "\\'") + ')">Remove Local</button>';
@@ -469,16 +606,27 @@ function showDetail(index) {
       var ep = eps[ei];
       var epNum = String(ep.number);
       if (epNum.length < 2) epNum = '0' + epNum;
-      html += '<tr>';
+      var isMissing = ep.source === 'missing';
+      html += '<tr' + (isMissing ? ' class="ep-missing"' : '') + '>';
       html += '<td class="ep-num">E' + esc(epNum) + '</td>';
-      html += '<td class="ep-file">' + esc(ep.file) + '</td>';
-      html += '<td class="ep-source">' + buildBadges(ep.source) + '</td>';
+      html += '<td class="ep-file">';
+      if (ep.title) html += '<span class="ep-title">' + esc(ep.title) + '</span>';
+      if (ep.file) html += esc(ep.file);
+      else if (!ep.title) html += '<span style="color:var(--text3)">—</span>';
+      if (ep.air_date) html += ' <span class="ep-date">' + esc(ep.air_date) + '</span>';
+      html += '</td>';
+      html += '<td class="ep-source">';
+      if (isMissing) html += '<span class="badge-missing">Missing</span>';
+      else html += buildBadges(ep.source);
+      html += '</td>';
       html += '<td class="ep-actions">';
-      if (ep.source === 'debrid') {
-        html += '<button class="btn-action" onclick="downloadEp(\'' + titleEsc + '\',' + season.number + ',' + ep.number + ')">Download</button>';
-      }
-      if (ep.source === 'local' || ep.source === 'both') {
-        html += '<button class="btn-action danger" onclick="removeEp(\'' + titleEsc + '\',' + season.number + ',' + ep.number + ')">Remove</button>';
+      if (!isMissing) {
+        if (ep.source === 'debrid') {
+          html += '<button class="btn-action" onclick="downloadEp(\'' + titleEsc + '\',' + season.number + ',' + ep.number + ')">Download</button>';
+        }
+        if (ep.source === 'local' || ep.source === 'both') {
+          html += '<button class="btn-action danger" onclick="removeEp(\'' + titleEsc + '\',' + season.number + ',' + ep.number + ')">Remove</button>';
+        }
       }
       html += '</td>';
       html += '</tr>';

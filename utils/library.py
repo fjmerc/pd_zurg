@@ -43,8 +43,20 @@ _DOTS_DASHES_PATTERN = re.compile(r'[.\-_]')
 _MULTI_SPACE_PATTERN = re.compile(r'\s{2,}')
 
 
+_SITE_PREFIX_PATTERN = re.compile(
+    r'^(?:www\.[\w-]+\.(?:org|com|net|to|io|me|cc)[\s.\-_]+)',
+    re.IGNORECASE,
+)
+_BRACKET_TAG_PATTERN = re.compile(r'^\[.*?\][\s.\-_]*')
+
+
 def _parse_folder_name(name):
     title = name
+
+    # Strip site/indexer prefixes: "www.UIndex.org.Show.Name" → "Show.Name"
+    title = _SITE_PREFIX_PATTERN.sub('', title)
+    # Strip bracket tags: "[TorrentDay] Show.Name" → "Show.Name"
+    title = _BRACKET_TAG_PATTERN.sub('', title)
 
     # Strip trailing year in parens: "Movie Name (2024)"
     year = None
@@ -83,28 +95,86 @@ def _parse_folder_name(name):
     return title, year
 
 
+_EPISODE_PATTERN = re.compile(r'S\d{1,2}E\d{1,2}', re.IGNORECASE)
+_EPISODE_ID_PATTERN = re.compile(r'S(\d{1,2})E(\d{1,2})', re.IGNORECASE)
+_SEASON_DIR_PATTERN = re.compile(r'^Season\s+(\d+)$', re.IGNORECASE)
+
+
+def _collect_episode_ids(folder_path):
+    """Collect unique (season, episode) tuples from a torrent folder.
+
+    Handles both structured (Season X subdirs) and flat layouts (S01E01.mkv
+    directly in folder). Returns a set of (season_num, episode_num) ints.
+    """
+    ids = set()
+    try:
+        with os.scandir(folder_path) as it:
+            for entry in it:
+                if entry.is_dir(follow_symlinks=False):
+                    season_match = _SEASON_DIR_PATTERN.match(entry.name)
+                    if not season_match:
+                        continue
+                    season_num = int(season_match.group(1))
+                    try:
+                        with os.scandir(entry.path) as season_it:
+                            for f in season_it:
+                                if not f.is_file(follow_symlinks=False):
+                                    continue
+                                ext = os.path.splitext(f.name)[1].lower()
+                                if ext not in MEDIA_EXTENSIONS:
+                                    continue
+                                ep_match = _EPISODE_ID_PATTERN.search(f.name)
+                                if ep_match:
+                                    ids.add((int(ep_match.group(1)), int(ep_match.group(2))))
+                                else:
+                                    # File in Season dir but no S##E## in name — assign sequential
+                                    ids.add((season_num, len(ids) + 1000))
+                    except (PermissionError, OSError):
+                        pass
+                elif entry.is_file(follow_symlinks=False):
+                    ext = os.path.splitext(entry.name)[1].lower()
+                    if ext in MEDIA_EXTENSIONS:
+                        ep_match = _EPISODE_ID_PATTERN.search(entry.name)
+                        if ep_match:
+                            ids.add((int(ep_match.group(1)), int(ep_match.group(2))))
+    except (PermissionError, OSError, FileNotFoundError):
+        pass
+    return ids
+
+
 def _count_show_content(show_path):
     seasons = 0
     episodes = 0
+    flat_episodes = 0
     season_re = re.compile(r'^Season\s+\d+$', re.IGNORECASE)
     try:
         with os.scandir(show_path) as it:
             for entry in it:
-                if not entry.is_dir(follow_symlinks=False):
-                    continue
-                if season_re.match(entry.name):
-                    seasons += 1
-                    try:
-                        with os.scandir(entry.path) as season_it:
-                            for file_entry in season_it:
-                                if file_entry.is_file(follow_symlinks=False):
-                                    ext = os.path.splitext(file_entry.name)[1].lower()
-                                    if ext in MEDIA_EXTENSIONS:
-                                        episodes += 1
-                    except (PermissionError, OSError):
-                        pass
+                if entry.is_dir(follow_symlinks=False):
+                    if season_re.match(entry.name):
+                        seasons += 1
+                        try:
+                            with os.scandir(entry.path) as season_it:
+                                for file_entry in season_it:
+                                    if file_entry.is_file(follow_symlinks=False):
+                                        ext = os.path.splitext(file_entry.name)[1].lower()
+                                        if ext in MEDIA_EXTENSIONS:
+                                            episodes += 1
+                        except (PermissionError, OSError):
+                            pass
+                elif entry.is_file(follow_symlinks=False):
+                    # Count flat episode files (e.g., S03E01.mkv directly in folder)
+                    ext = os.path.splitext(entry.name)[1].lower()
+                    if ext in MEDIA_EXTENSIONS and _EPISODE_PATTERN.search(entry.name):
+                        flat_episodes += 1
     except (PermissionError, OSError, FileNotFoundError):
         pass
+
+    # If no Season subdirs but flat episode files exist, report as 1 season
+    if seasons == 0 and flat_episodes > 0:
+        seasons = 1
+        episodes = flat_episodes
+
     return seasons, episodes
 
 
@@ -165,6 +235,13 @@ class LibraryScanner:
     def scan(self):
         start = time.monotonic()
         deadline = start + 30
+
+        # Deferred mount discovery — status_server.setup() creates the scanner
+        # before Zurg/rclone start, so the mount may not exist yet.
+        if not self._mount_path:
+            self._mount_path = _discover_mount()
+            if self._mount_path:
+                logger.info(f"[library] Mount path discovered (deferred): {self._mount_path}")
 
         debrid_movies = []
         debrid_shows = []
@@ -252,16 +329,20 @@ class LibraryScanner:
         t = threading.Thread(target=_run, daemon=True)
         t.start()
 
-    def _scan_mount(self, mount_path, deadline=None):
-        """Scan all category directories on the mount.
+    # Category names that indicate TV/show content
+    _SHOW_CATEGORIES = {'shows', 'tv', 'anime', 'series', 'television'}
+    # Internal Zurg directories to always skip
+    _SKIP_CATEGORIES = {'__all__', '__unplayable__'}
 
-        Zurg directory names are user-configurable, so we discover them
-        dynamically instead of hardcoding 'movies'/'shows'. Each item is
-        classified as a show (has Season subdirs) or movie (everything else).
-        Skips __all__ when categorized dirs exist to avoid duplicates.
+    def _scan_mount(self, mount_path, deadline=None):
+        """Scan all category directories on the mount and aggregate by title.
+
+        Debrid mounts have one folder per torrent, so the same show appears
+        many times (one per grabbed episode/season pack). This method collects
+        episode IDs from every folder, then groups by normalized title so each
+        show becomes a single entry with correct season/episode counts.
+        Movies are also deduplicated by title.
         """
-        movies = []
-        shows = []
         try:
             categories = []
             with os.scandir(mount_path) as it:
@@ -270,52 +351,98 @@ class LibraryScanner:
                         categories.append(entry.name)
         except (PermissionError, OSError) as e:
             logger.warning(f"[library] Cannot list mount {mount_path}: {e}")
-            return movies, shows
+            return [], []
 
-        # Use categorized dirs if available; fall back to __all__
-        non_all = [c for c in categories if c != '__all__']
-        scan_dirs = non_all if non_all else [c for c in categories if c == '__all__']
+        non_special = [c for c in categories if c not in self._SKIP_CATEGORIES]
+        scan_dirs = non_special if non_special else [c for c in categories if c == '__all__']
 
         if not scan_dirs:
             logger.warning("[library] No directories found on mount")
-            return movies, shows
+            return [], []
 
         logger.debug(f"[library] Scanning mount categories: {scan_dirs}")
 
+        # Collect raw per-folder data
+        show_groups = {}   # normalized_title -> {title, year, episode_ids, path}
+        movie_groups = {}  # normalized_title -> {title, year, path}
+        timed_out = False
+
         for category in scan_dirs:
             cat_path = os.path.join(mount_path, category)
+            category_is_shows = category.lower() in self._SHOW_CATEGORIES
             try:
                 with os.scandir(cat_path) as it:
                     for entry in it:
                         if deadline is not None and time.monotonic() > deadline:
                             logger.warning("[library] Timeout during mount scan")
-                            return movies, shows
+                            timed_out = True
+                            break
                         if not entry.is_dir(follow_symlinks=False):
                             continue
                         title, year = _parse_folder_name(entry.name)
-                        seasons, episodes = _count_show_content(entry.path)
-                        if seasons > 0:
-                            shows.append({
-                                'title': title,
-                                'year': year,
-                                'source': 'debrid',
-                                'type': 'show',
-                                'seasons': seasons,
-                                'episodes': episodes,
-                                'path': entry.path,
-                            })
+                        episode_ids = _collect_episode_ids(entry.path)
+                        is_show = len(episode_ids) > 0 or category_is_shows
+
+                        if is_show:
+                            key = _normalize_title(title)
+                            if key not in show_groups:
+                                show_groups[key] = {
+                                    'title': title,
+                                    'year': year,
+                                    'episode_ids': set(episode_ids),
+                                    'path': entry.path,
+                                }
+                            else:
+                                show_groups[key]['episode_ids'] |= episode_ids
+                                # Prefer title with year or better capitalization
+                                if year and not show_groups[key]['year']:
+                                    show_groups[key]['year'] = year
+                                    show_groups[key]['title'] = title
+                                elif title[0:1].isupper() and not show_groups[key]['title'][0:1].isupper():
+                                    show_groups[key]['title'] = title
                         else:
-                            movies.append({
-                                'title': title,
-                                'year': year,
-                                'source': 'debrid',
-                                'type': 'movie',
-                                'seasons': 0,
-                                'episodes': 0,
-                                'path': entry.path,
-                            })
+                            key = _normalize_title(title)
+                            if key not in movie_groups:
+                                movie_groups[key] = {
+                                    'title': title,
+                                    'year': year,
+                                    'path': entry.path,
+                                }
+                            elif year and not movie_groups[key]['year']:
+                                movie_groups[key]['year'] = year
+                                movie_groups[key]['title'] = title
             except (PermissionError, OSError) as e:
                 logger.warning(f"[library] Cannot scan {cat_path}: {e}")
+            if timed_out:
+                break
+
+        # Convert aggregated groups to item lists
+        movies = []
+        for g in movie_groups.values():
+            movies.append({
+                'title': g['title'],
+                'year': g['year'],
+                'source': 'debrid',
+                'type': 'movie',
+                'seasons': 0,
+                'episodes': 0,
+                'path': g['path'],
+            })
+
+        shows = []
+        for g in show_groups.values():
+            unique_seasons = {s for s, _e in g['episode_ids']} if g['episode_ids'] else set()
+            shows.append({
+                'title': g['title'],
+                'year': g['year'],
+                'source': 'debrid',
+                'type': 'show',
+                'seasons': len(unique_seasons),
+                'episodes': len(g['episode_ids']),
+                'path': g['path'],
+            })
+
+        return movies, shows
 
         return movies, shows
 

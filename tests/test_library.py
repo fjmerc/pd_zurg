@@ -8,6 +8,7 @@ import utils.library as library
 from utils.library import (
     _parse_folder_name,
     _count_show_content,
+    _collect_episode_ids,
     _discover_mount,
     LibraryScanner,
     setup,
@@ -111,6 +112,56 @@ class TestParseFolderName:
         assert title == "Film Name"
         assert year == 2021
 
+    def test_site_prefix_stripped(self):
+        title, year = _parse_folder_name("www.UIndex.org.12.Monkeys.S01E01.1080p.WEB")
+        assert title == "12 Monkeys"
+        assert year is None
+
+    def test_site_prefix_various_tlds(self):
+        title, _ = _parse_folder_name("www.RARBG.com.Movie.Name.2020.1080p")
+        assert title == "Movie Name"
+
+    def test_bracket_tag_stripped(self):
+        title, _ = _parse_folder_name("[TorrentDay] Some.Show.S02E03.720p")
+        assert title == "Some Show"
+
+
+# ---------------------------------------------------------------------------
+# _collect_episode_ids
+# ---------------------------------------------------------------------------
+
+class TestCollectEpisodeIds:
+
+    def test_flat_episode_files(self, tmp_dir):
+        folder = os.path.join(tmp_dir, "show")
+        os.makedirs(folder)
+        open(os.path.join(folder, "Show.S01E01.mkv"), 'w').close()
+        open(os.path.join(folder, "Show.S01E02.mkv"), 'w').close()
+        open(os.path.join(folder, "Show.S02E01.mkv"), 'w').close()
+        ids = _collect_episode_ids(folder)
+        assert ids == {(1, 1), (1, 2), (2, 1)}
+
+    def test_season_dir_with_episode_files(self, tmp_dir):
+        folder = os.path.join(tmp_dir, "show")
+        season = os.path.join(folder, "Season 1")
+        os.makedirs(season)
+        open(os.path.join(season, "Show.S01E01.mkv"), 'w').close()
+        open(os.path.join(season, "Show.S01E02.mkv"), 'w').close()
+        ids = _collect_episode_ids(folder)
+        assert ids == {(1, 1), (1, 2)}
+
+    def test_nonexistent_path(self, tmp_dir):
+        ids = _collect_episode_ids(os.path.join(tmp_dir, "nope"))
+        assert ids == set()
+
+    def test_non_media_files_ignored(self, tmp_dir):
+        folder = os.path.join(tmp_dir, "show")
+        os.makedirs(folder)
+        open(os.path.join(folder, "Show.S01E01.nfo"), 'w').close()
+        open(os.path.join(folder, "Show.S01E01.mkv"), 'w').close()
+        ids = _collect_episode_ids(folder)
+        assert ids == {(1, 1)}
+
 
 # ---------------------------------------------------------------------------
 # _count_show_content
@@ -187,6 +238,36 @@ class TestCountShowContent:
         seasons, episodes = _count_show_content(show_path)
         assert seasons == 1
         assert episodes == 1
+
+    def test_flat_episode_files_detected(self, tmp_dir):
+        show_path = os.path.join(tmp_dir, "Flat Show")
+        os.makedirs(show_path)
+        open(os.path.join(show_path, "Show.Name.S03E01.1080p.mkv"), 'w').close()
+        open(os.path.join(show_path, "Show.Name.S03E02.1080p.mkv"), 'w').close()
+        open(os.path.join(show_path, "Show.Name.S03E03.1080p.mkv"), 'w').close()
+        seasons, episodes = _count_show_content(show_path)
+        assert seasons == 1
+        assert episodes == 3
+
+    def test_flat_non_episode_media_not_counted(self, tmp_dir):
+        show_path = os.path.join(tmp_dir, "Not Episodes")
+        os.makedirs(show_path)
+        # Media file without episode pattern — should not count as episode
+        open(os.path.join(show_path, "movie.mkv"), 'w').close()
+        open(os.path.join(show_path, "bonus.mp4"), 'w').close()
+        seasons, episodes = _count_show_content(show_path)
+        assert seasons == 0
+        assert episodes == 0
+
+    def test_season_dirs_take_priority_over_flat_episodes(self, tmp_dir):
+        show_path = os.path.join(tmp_dir, "Mixed Show")
+        os.makedirs(os.path.join(show_path, "Season 1"))
+        open(os.path.join(show_path, "Season 1", "ep1.mkv"), 'w').close()
+        # Flat episode file alongside Season dir — Season dirs win
+        open(os.path.join(show_path, "S01E01.mkv"), 'w').close()
+        seasons, episodes = _count_show_content(show_path)
+        assert seasons == 1
+        assert episodes == 1  # Only counts from Season dirs
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +473,21 @@ class TestLibraryScannerScanDebrid:
         assert result["movies"] == []
         assert result["shows"] == []
 
+    def test_scan_retries_mount_discovery_when_none(self, tmp_dir, monkeypatch):
+        # Simulates mount appearing after scanner was created (race condition fix)
+        scanner = self._make_scanner(None, monkeypatch)
+        assert scanner._mount_path is None
+
+        # Now create a mount structure and patch _discover_mount to find it
+        movies_dir = os.path.join(tmp_dir, "movies")
+        os.makedirs(os.path.join(movies_dir, "Late Movie (2024)"))
+        monkeypatch.setattr(library, '_discover_mount', lambda: tmp_dir)
+
+        result = scanner.scan()
+        assert scanner._mount_path == tmp_dir
+        assert len(result["movies"]) == 1
+        assert result["movies"][0]["title"] == "Late Movie"
+
     def test_scan_skips_files_in_movies_dir(self, tmp_dir, monkeypatch):
         movies_dir = os.path.join(tmp_dir, "movies")
         os.makedirs(movies_dir)
@@ -409,7 +505,6 @@ class TestLibraryScannerScanDebrid:
         # Zurg directory names are user-configurable; scanner must find them
         anime_dir = os.path.join(tmp_dir, "anime")
         films_dir = os.path.join(tmp_dir, "films")
-        os.makedirs(os.path.join(anime_dir, "Spirited.Away.2001.1080p"))
         _make_show(anime_dir, "Naruto", {"Season 1": ["ep1.mkv"]})
         os.makedirs(os.path.join(films_dir, "Parasite (2019)"))
 
@@ -418,9 +513,49 @@ class TestLibraryScannerScanDebrid:
 
         movie_titles = {m["title"] for m in result["movies"]}
         show_titles = {s["title"] for s in result["shows"]}
-        assert "Spirited Away" in movie_titles
         assert "Parasite" in movie_titles
         assert "Naruto" in show_titles
+
+    def test_category_name_classifies_flat_shows(self, tmp_dir, monkeypatch):
+        # Items under 'shows'/'anime' category should be classified as shows
+        # even without Season subdirs (flat episode files)
+        shows_dir = os.path.join(tmp_dir, "shows")
+        show_folder = os.path.join(shows_dir, "Silo.S02.1080p")
+        os.makedirs(show_folder)
+        open(os.path.join(show_folder, "Silo.S02E01.mkv"), 'w').close()
+        open(os.path.join(show_folder, "Silo.S02E02.mkv"), 'w').close()
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        result = scanner.scan()
+
+        assert len(result["shows"]) == 1
+        assert result["shows"][0]["title"] == "Silo"
+        assert result["shows"][0]["episodes"] == 2
+        assert len(result["movies"]) == 0
+
+    def test_anime_category_classifies_as_show(self, tmp_dir, monkeypatch):
+        anime_dir = os.path.join(tmp_dir, "anime")
+        os.makedirs(os.path.join(anime_dir, "Spirited.Away.2001.1080p"))
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        result = scanner.scan()
+
+        # anime category hint → classified as show even with no episodes
+        assert len(result["shows"]) == 1
+        assert result["shows"][0]["title"] == "Spirited Away"
+
+    def test_scan_skips_unplayable_category(self, tmp_dir, monkeypatch):
+        movies_dir = os.path.join(tmp_dir, "movies")
+        unplayable_dir = os.path.join(tmp_dir, "__unplayable__")
+        os.makedirs(os.path.join(movies_dir, "Good Movie (2023)"))
+        os.makedirs(os.path.join(unplayable_dir, "Bad File"))
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        result = scanner.scan()
+
+        all_titles = {m["title"] for m in result["movies"]} | {s["title"] for s in result["shows"]}
+        assert "Good Movie" in all_titles
+        assert "Bad File" not in all_titles
 
     def test_scan_falls_back_to_all_when_no_categories(self, tmp_dir, monkeypatch):
         # Only __all__ exists — should be scanned as fallback
@@ -445,6 +580,56 @@ class TestLibraryScannerScanDebrid:
 
         dune_matches = [m for m in result["movies"] if m["title"] == "Dune"]
         assert len(dune_matches) == 1
+
+    def test_show_aggregation_merges_duplicate_titles(self, tmp_dir, monkeypatch):
+        shows_dir = os.path.join(tmp_dir, "shows")
+        # Multiple torrent folders for the same show
+        f1 = os.path.join(shows_dir, "Yellowjackets.S01E01.1080p")
+        f2 = os.path.join(shows_dir, "Yellowjackets.S01E02.1080p")
+        f3 = os.path.join(shows_dir, "Yellowjackets.S02E01.1080p")
+        for d in (f1, f2, f3):
+            os.makedirs(d)
+            base = os.path.basename(d)
+            open(os.path.join(d, base + ".mkv"), 'w').close()
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        result = scanner.scan()
+
+        # Should be aggregated into one card
+        yj = [s for s in result["shows"] if "yellowjackets" in s["title"].lower()]
+        assert len(yj) == 1
+        assert yj[0]["seasons"] == 2
+        assert yj[0]["episodes"] == 3
+
+    def test_movie_aggregation_deduplicates(self, tmp_dir, monkeypatch):
+        movies_dir = os.path.join(tmp_dir, "movies")
+        os.makedirs(os.path.join(movies_dir, "Dune.2021.1080p.WEB"))
+        os.makedirs(os.path.join(movies_dir, "Dune.2021.2160p.BluRay"))
+        os.makedirs(os.path.join(movies_dir, "Dune (2021)"))
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        result = scanner.scan()
+
+        dune = [m for m in result["movies"] if "dune" in m["title"].lower()]
+        assert len(dune) == 1
+
+    def test_site_prefix_stripped_in_aggregation(self, tmp_dir, monkeypatch):
+        shows_dir = os.path.join(tmp_dir, "shows")
+        f1 = os.path.join(shows_dir, "www.UIndex.org.The.White.Lotus.S01E01.1080p")
+        f2 = os.path.join(shows_dir, "The.White.Lotus.S01E02.1080p")
+        for d in (f1, f2):
+            os.makedirs(d)
+            base = os.path.basename(d)
+            open(os.path.join(d, base + ".mkv"), 'w').close()
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        result = scanner.scan()
+
+        wl = [s for s in result["shows"] if "white lotus" in s["title"].lower()]
+        assert len(wl) == 1
+        assert wl[0]["episodes"] == 2
+        # Title should not have the www prefix
+        assert not wl[0]["title"].startswith("www")
 
 
 # ---------------------------------------------------------------------------

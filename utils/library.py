@@ -363,7 +363,8 @@ class LibraryScanner:
     def get_data(self):
         with self._lock:
             now = time.monotonic()
-            if self._cache is not None and (now - self._cache_time) < self._ttl:
+            ttl = self._ttl if self._mount_path else 10
+            if self._cache is not None and (now - self._cache_time) < ttl:
                 return self._cache
 
         # Cache expired or empty — scan synchronously so caller always gets data
@@ -384,7 +385,11 @@ class LibraryScanner:
                 data = self.scan()
                 with self._lock:
                     self._cache = data
-                    self._cache_time = time.monotonic()
+                    # If mount not found, expire cache in ~10s so we retry quickly
+                    if not self._mount_path:
+                        self._cache_time = time.monotonic() - self._ttl + 10
+                    else:
+                        self._cache_time = time.monotonic()
                     logger.debug(
                         f"[library] Scan complete: {len(data['movies'])} movies, "
                         f"{len(data['shows'])} shows in {data['scan_duration_ms']}ms"

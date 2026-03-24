@@ -1148,6 +1148,29 @@ class TestLibraryScannerGetData:
         result = scanner.get_data()
         assert result is fresh_payload
 
+    def test_get_data_uses_short_ttl_when_no_mount(self, mocker):
+        scanner = self._bare_scanner()
+        assert scanner._mount_path is None
+        # First call populates cache
+        scanner.get_data()
+        # Rewind cache_time by 11 seconds — short TTL (10s) should expire
+        scanner._cache_time = time.monotonic() - 11
+        fresh = {"movies": ["fresh"], "shows": [], "last_scan": "x", "scan_duration_ms": 0}
+        mocker.patch.object(scanner, "scan", return_value=fresh)
+        result = scanner.get_data()
+        assert result is fresh
+
+    def test_get_data_uses_full_ttl_when_mount_present(self, tmp_dir, mocker):
+        scanner = self._bare_scanner()
+        scanner._mount_path = tmp_dir  # mount exists
+        scanner._cache = {"movies": [], "shows": [], "last_scan": "x", "scan_duration_ms": 0}
+        scanner._cache_time = time.monotonic() - 11  # 11s ago
+        # With mount present, full 600s TTL applies — cache should still be valid
+        mock_scan = mocker.patch.object(scanner, "scan")
+        result = scanner.get_data()
+        mock_scan.assert_not_called()
+        assert result is scanner._cache
+
 
 # ---------------------------------------------------------------------------
 # LibraryScanner.refresh() — background threading
@@ -1213,6 +1236,40 @@ class TestLibraryScannerRefresh:
         time.sleep(0.1)
 
         assert len(scan_calls) == 1
+
+    def test_refresh_sets_short_cache_when_no_mount(self, mocker):
+        scanner = self._bare_scanner()
+        assert scanner._mount_path is None
+        done = threading.Event()
+
+        def _fake_scan():
+            done.set()
+            return {"movies": [], "shows": [], "last_scan": "x", "scan_duration_ms": 0}
+
+        mocker.patch.object(scanner, "scan", side_effect=_fake_scan)
+        scanner.refresh()
+        done.wait(timeout=2)
+        time.sleep(0.05)
+        # Cache time should be set so it expires in ~10s, not 600s
+        elapsed = time.monotonic() - scanner._cache_time
+        assert elapsed > scanner._ttl - 15  # at least 585s "ago"
+
+    def test_refresh_sets_normal_cache_when_mount_present(self, tmp_dir, mocker):
+        scanner = self._bare_scanner()
+        scanner._mount_path = tmp_dir
+        done = threading.Event()
+
+        def _fake_scan():
+            done.set()
+            return {"movies": [], "shows": [], "last_scan": "x", "scan_duration_ms": 0}
+
+        mocker.patch.object(scanner, "scan", side_effect=_fake_scan)
+        scanner.refresh()
+        done.wait(timeout=2)
+        time.sleep(0.05)
+        # Cache time should be recent (within last second)
+        elapsed = time.monotonic() - scanner._cache_time
+        assert elapsed < 2
 
     def test_refresh_clears_scanning_flag_on_error(self, mocker):
         scanner = self._bare_scanner()

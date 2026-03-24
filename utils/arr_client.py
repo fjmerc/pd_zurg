@@ -4,9 +4,12 @@ Delegates media acquisition from the Library "Download" button to the
 user's media management stack.  All HTTP calls use urllib (no new deps).
 
 Service priority:
-  - TV shows:  Overseerr > Sonarr
-  - Movies:    Overseerr > Radarr
-  - Nothing configured: returns None (UI hides buttons)
+  - TV shows:  Sonarr > Overseerr
+  - Movies:    Radarr > Overseerr
+  Sonarr/Radarr are preferred because the Download button targets content
+  already visible in Plex (via debrid).  Overseerr rejects requests for
+  media it considers "available," so it only works as a fallback for
+  content not yet in the library.
 """
 
 import json
@@ -534,18 +537,18 @@ class OverseerrClient(_ArrClientBase):
 def get_download_service(media_type):
     """Return the appropriate client for a media type, or None.
 
-    Priority: Overseerr > Sonarr/Radarr > None
+    Priority: Sonarr/Radarr > Overseerr > None
+
+    Sonarr/Radarr are preferred because the Library Download button
+    targets content already visible in Plex via debrid.  Overseerr
+    rejects requests for media it considers "available" (HTTP 403),
+    so it only serves as a fallback for content not yet in the library.
 
     Args:
         media_type: 'show' or 'movie'
 
     Returns (client_instance, service_name) or (None, None).
     """
-    # Overseerr takes priority for both types
-    client = OverseerrClient()
-    if client.configured:
-        return client, 'overseerr'
-
     if media_type == 'show':
         client = SonarrClient()
         if client.configured:
@@ -554,6 +557,11 @@ def get_download_service(media_type):
         client = RadarrClient()
         if client.configured:
             return client, 'radarr'
+
+    # Fallback to Overseerr (works for content not yet in Plex)
+    client = OverseerrClient()
+    if client.configured:
+        return client, 'overseerr'
 
     return None, None
 

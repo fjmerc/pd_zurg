@@ -84,39 +84,39 @@ class TestServiceRouting:
         assert client is None
         assert name is None
 
-    def test_overseerr_priority_over_sonarr(self, monkeypatch):
+    def test_sonarr_priority_over_overseerr(self, monkeypatch):
         monkeypatch.setenv('SEERR_ADDRESS', 'http://overseerr:5055')
         monkeypatch.setenv('SEERR_API_KEY', 'key')
-        monkeypatch.setenv('SONARR_URL', 'http://sonarr:8989')
-        monkeypatch.setenv('SONARR_API_KEY', 'key')
-        client, name = get_download_service('show')
-        assert name == 'overseerr'
-
-    def test_overseerr_priority_over_radarr(self, monkeypatch):
-        monkeypatch.setenv('SEERR_ADDRESS', 'http://overseerr:5055')
-        monkeypatch.setenv('SEERR_API_KEY', 'key')
-        monkeypatch.setenv('RADARR_URL', 'http://radarr:7878')
-        monkeypatch.setenv('RADARR_API_KEY', 'key')
-        client, name = get_download_service('movie')
-        assert name == 'overseerr'
-
-    def test_sonarr_fallback_when_no_overseerr(self, monkeypatch):
-        monkeypatch.delenv('SEERR_ADDRESS', raising=False)
-        monkeypatch.delenv('SEERR_API_KEY', raising=False)
         monkeypatch.setenv('SONARR_URL', 'http://sonarr:8989')
         monkeypatch.setenv('SONARR_API_KEY', 'key')
         client, name = get_download_service('show')
         assert name == 'sonarr'
 
-    def test_radarr_fallback_when_no_overseerr(self, monkeypatch):
-        monkeypatch.delenv('SEERR_ADDRESS', raising=False)
-        monkeypatch.delenv('SEERR_API_KEY', raising=False)
+    def test_radarr_priority_over_overseerr(self, monkeypatch):
+        monkeypatch.setenv('SEERR_ADDRESS', 'http://overseerr:5055')
+        monkeypatch.setenv('SEERR_API_KEY', 'key')
         monkeypatch.setenv('RADARR_URL', 'http://radarr:7878')
         monkeypatch.setenv('RADARR_API_KEY', 'key')
         client, name = get_download_service('movie')
         assert name == 'radarr'
 
-    def test_get_configured_services(self, monkeypatch):
+    def test_overseerr_fallback_when_no_sonarr(self, monkeypatch):
+        monkeypatch.delenv('SONARR_URL', raising=False)
+        monkeypatch.delenv('SONARR_API_KEY', raising=False)
+        monkeypatch.setenv('SEERR_ADDRESS', 'http://overseerr:5055')
+        monkeypatch.setenv('SEERR_API_KEY', 'key')
+        client, name = get_download_service('show')
+        assert name == 'overseerr'
+
+    def test_overseerr_fallback_when_no_radarr(self, monkeypatch):
+        monkeypatch.delenv('RADARR_URL', raising=False)
+        monkeypatch.delenv('RADARR_API_KEY', raising=False)
+        monkeypatch.setenv('SEERR_ADDRESS', 'http://overseerr:5055')
+        monkeypatch.setenv('SEERR_API_KEY', 'key')
+        client, name = get_download_service('movie')
+        assert name == 'overseerr'
+
+    def test_get_configured_services_overseerr_only(self, monkeypatch):
         monkeypatch.setenv('SEERR_ADDRESS', 'http://overseerr:5055')
         monkeypatch.setenv('SEERR_API_KEY', 'key')
         monkeypatch.delenv('SONARR_URL', raising=False)

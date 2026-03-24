@@ -7,140 +7,140 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
-## Version [2.11.0] - 2026-03-21 🚀
+## Version [2.11.0] - 2026-03-21
 
-### Added ✨
+### Added
 
-- **Process auto-restart**: Crashed processes are automatically detected and restarted with exponential backoff (5s → 300s), sliding window restart counting, and max restart limits 🔄
-- **Zombie reaping**: `SIGCHLD` set to `SIG_IGN` for automatic kernel-level zombie child reaping without conflicting with subprocess management 🧹
-- **Apprise notifications**: Event-driven notifications to 90+ services (Discord, Telegram, Slack, email, etc.) via `NOTIFICATION_URL` environment variable, with event and severity filtering 🔔
-- **Blackhole watch folder**: Arr-stack compatible watch directory for `.torrent` and `.magnet` files with Real-Debrid, AllDebrid, and TorBox support. Failed files quarantined to `failed/` subdirectory 📂
-- **ffprobe stuck-process recovery**: Monitors for ffprobe processes stuck in uninterruptible sleep on debrid mounts, attempts recovery via I/O poke, then kills after max attempts 🔍
-- **Status Web UI**: Lightweight dashboard at `/status` with JSON API at `/api/status`, showing process health, mount status, cgroup-aware system stats, and recent events. Optional basic auth 📊
-- **MDBList content source**: Subscribe to curated MDBList lists (IMDB Top 250, trending, custom) that feed plex_debrid's download pipeline. Configure via plex_debrid settings menu 🎬
-- **Atomic config writes**: Zurg config.yml and rclone.config updates use temp-file-then-rename to prevent corruption on crash 🔒
-- **Wait-for-URL with exponential backoff**: Extracted generic `wait_for_url()` utility from rclone module with 5s → 60s exponential backoff ⏱️
-- **Ordered shutdown**: Per-process shutdown timeouts (plex_debrid: 15s, Zurg/rclone: 10s) with elapsed time logging 🛑
+- **Process auto-restart**: Crashed processes are automatically detected and restarted with exponential backoff (5s → 300s), sliding window restart counting, and max restart limits
+- **Zombie reaping**: `SIGCHLD` set to `SIG_IGN` for automatic kernel-level zombie child reaping without conflicting with subprocess management
+- **Apprise notifications**: Event-driven notifications to 90+ services (Discord, Telegram, Slack, email, etc.) via `NOTIFICATION_URL` environment variable, with event and severity filtering
+- **Blackhole watch folder**: Arr-stack compatible watch directory for `.torrent` and `.magnet` files with Real-Debrid, AllDebrid, and TorBox support. Failed files quarantined to `failed/` subdirectory
+- **ffprobe stuck-process recovery**: Monitors for ffprobe processes stuck in uninterruptible sleep on debrid mounts, attempts recovery via I/O poke, then kills after max attempts
+- **Status Web UI**: Lightweight dashboard at `/status` with JSON API at `/api/status`, showing process health, mount status, cgroup-aware system stats, and recent events. Optional basic auth
+- **MDBList content source**: Subscribe to curated MDBList lists (IMDB Top 250, trending, custom) that feed plex_debrid's download pipeline. Configure via plex_debrid settings menu
+- **Atomic config writes**: Zurg config.yml and rclone.config updates use temp-file-then-rename to prevent corruption on crash
+- **Wait-for-URL with exponential backoff**: Extracted generic `wait_for_url()` utility from rclone module with 5s → 60s exponential backoff
+- **Ordered shutdown**: Per-process shutdown timeouts (plex_debrid: 15s, Zurg/rclone: 10s) with elapsed time logging
 
-### Changed 🔄
+### Changed
 
-- Process registry changed from tuples to dicts for extensibility 📦
-- `stop_process()` now disables auto-restart to prevent spurious restarts during update cycles 🔧
-- Shutdown notification sent after critical cleanup with 5s timeout thread 🧹
+- Process registry changed from tuples to dicts for extensibility
+- `stop_process()` now disables auto-restart to prevent spurious restarts during update cycles
+- Shutdown notification sent after critical cleanup with 5s timeout thread
 
-## Version [2.10.0] - 2026-03-21 🚀
+## Version [2.10.0] - 2026-03-21
 
-### Fixed 🐛
+### Fixed
 
-- Plex API: Migrated all Plex API calls from deprecated `metadata.provider.plex.tv` to `discover.provider.plex.tv` — fixes broken watchlist, metadata, scrobble, and search 🛠️
-- Torrentio: Fixed `qualityfilter` parameter format for current Torrentio API 🛠️
-- Error handling: Replaced bare `except: pass` in main.py that silently swallowed all exceptions including SystemExit and KeyboardInterrupt 🛠️
-- Error handling: Flattened 3-4 levels of nested try/except that re-wrapped exceptions and lost tracebacks 🛠️
-- Healthcheck: Removed redundant in-process healthcheck subprocess loop (Dockerfile HEALTHCHECK already handles this) 🛠️
-- Thread safety: Fixed SubprocessLogger thread join hangs by checking stop_event in read loops and adding join timeouts 🛠️
+- Plex API: Migrated all Plex API calls from deprecated `metadata.provider.plex.tv` to `discover.provider.plex.tv` — fixes broken watchlist, metadata, scrobble, and search
+- Torrentio: Fixed `qualityfilter` parameter format for current Torrentio API
+- Error handling: Replaced bare `except: pass` in main.py that silently swallowed all exceptions including SystemExit and KeyboardInterrupt
+- Error handling: Flattened 3-4 levels of nested try/except that re-wrapped exceptions and lost tracebacks
+- Healthcheck: Removed redundant in-process healthcheck subprocess loop (Dockerfile HEALTHCHECK already handles this)
+- Thread safety: Fixed SubprocessLogger thread join hangs by checking stop_event in read loops and adding join timeouts
 
-### Added ✨
+### Added
 
-- FLARESOLVERR_URL: Optional environment variable to enable FlareSolverr proxy for Torrentio scraping when Cloudflare protection blocks direct requests 🛡️
-- Graceful shutdown: All tracked child processes (Zurg, rclone, plex_debrid) are now terminated on SIGTERM/SIGINT before unmounting filesystems 🛑
-- Port collision detection: Random port assignment for Zurg and rclone NFS now checks availability via socket binding 🔌
-- Rclone config backup: Existing `/config/rclone.config` is backed up to `.bak` before being overwritten on startup 💾
-- Config class: Configuration variables wrapped in a `Config` class with `load()` method for testability and runtime reload ⚙️
-- `__all__` defined in `base/__init__.py` to control wildcard import scope 📦
+- FLARESOLVERR_URL: Optional environment variable to enable FlareSolverr proxy for Torrentio scraping when Cloudflare protection blocks direct requests
+- Graceful shutdown: All tracked child processes (Zurg, rclone, plex_debrid) are now terminated on SIGTERM/SIGINT before unmounting filesystems
+- Port collision detection: Random port assignment for Zurg and rclone NFS now checks availability via socket binding
+- Rclone config backup: Existing `/config/rclone.config` is backed up to `.bak` before being overwritten on startup
+- Config class: Configuration variables wrapped in a `Config` class with `load()` method for testability and runtime reload
+- `__all__` defined in `base/__init__.py` to control wildcard import scope
 
-### Changed 🔄
+### Changed
 
-- Dependency pinning: All packages in requirements.txt pinned to specific versions 📌
-- Dockerfile: Pinned rclone to 1.73.2, Python base to 3.11.12-alpine3.21, zurg-testing files to commit SHA 📌
-- Duplicate cleanup: Merged near-identical `process_tv_shows()` and `process_movies()` into shared function with single PlexServer instance 🔄
-- docker-compose.yml: Removed deprecated `version: "3.8"` key 🧹
-- main.py: Replaced `threading.Event().wait()` with `signal.pause()` for idle loop 🧹
-- Removed duplicate `import zipfile` in `base/__init__.py` 🧹
-- Removed unused `from urllib import response` in `utils/download.py` 🧹
+- Dependency pinning: All packages in requirements.txt pinned to specific versions
+- Dockerfile: Pinned rclone to 1.73.2, Python base to 3.11.12-alpine3.21, zurg-testing files to commit SHA
+- Duplicate cleanup: Merged near-identical `process_tv_shows()` and `process_movies()` into shared function with single PlexServer instance
+- docker-compose.yml: Removed deprecated `version: "3.8"` key
+- main.py: Replaced `threading.Event().wait()` with `signal.pause()` for idle loop
+- Removed duplicate `import zipfile` in `base/__init__.py`
+- Removed unused `from urllib import response` in `utils/download.py`
 
 
-## Version [2.9.2] - 2024-12-12 🚀
+## Version [2.9.2] - 2024-12-12
 
-### Fixed 🐛
+### Fixed
 
 - [Issue #85](https://github.com/I-am-PUID-0/pd_zurg/issues/85) - Updated the default plex_debrid files to the latest changes from the [elfhosted](https://github.com/elfhosted/plex_debrid)
 
 
-## Version [2.9.1] - 2024-09-03 🚀
+## Version [2.9.1] - 2024-09-03
 
-### Fixed 🐛
+### Fixed
 
-- [Issue #68](https://github.com/I-am-PUID-0/pd_zurg/issues/68) Docker Compose fetches incorrect architecture binary on Raspbian arm64 🛠️
-- [Issue #69](https://github.com/I-am-PUID-0/pd_zurg/issues/69) Dockerfile pulling the wrong zurg architecture, when running on aarch64 🛠️
+- [Issue #68](https://github.com/I-am-PUID-0/pd_zurg/issues/68) Docker Compose fetches incorrect architecture binary on Raspbian arm64
+- [Issue #69](https://github.com/I-am-PUID-0/pd_zurg/issues/69) Dockerfile pulling the wrong zurg architecture, when running on aarch64
 
 
-## Version [2.9.0] - 2024-08-09 🚀
+## Version [2.9.0] - 2024-08-09
 
-### Changed 🔄
+### Changed
 
-- plex_debrid: Pulled in [elfhosted](https://github.com/elfhosted/plex_debrid) fork of plex_debrid as the base plex_debrid within the pd_zurg image 🔄
+- plex_debrid: Pulled in [elfhosted](https://github.com/elfhosted/plex_debrid) fork of plex_debrid as the base plex_debrid within the pd_zurg image
 
-### Added ✨
+### Added
 
-- TRAKT_CLIENT_ID: Environment variable to set the trakt client ID for plex_debrid 📊 - when not set, it will use **[itsToggle's](https://github.com/itsToggle)** trakt client ID and secret
-- TRAKT_CLIENT_SECRET: Environment variable to set the trakt client secret for plex_debrid 📊 - when not set, it will use **[itsToggle's](https://github.com/itsToggle)** trakt client ID and secret
+- TRAKT_CLIENT_ID: Environment variable to set the trakt client ID for plex_debrid - when not set, it will use **[itsToggle's](https://github.com/itsToggle)** trakt client ID and secret
+- TRAKT_CLIENT_SECRET: Environment variable to set the trakt client secret for plex_debrid - when not set, it will use **[itsToggle's](https://github.com/itsToggle)** trakt client ID and secret
 
-### Notes 📝
+### Notes
 
 - Per [elfhosted](https://github.com/elfhosted/plex_debrid/tree/main#improvements), below are the improvements made to the plex_debrid fork:
 
-* ✅ Support [ElfHosted internal URLs](https://elfhosted.com/how-to/connect-apps/) for [Plex](https://elfhosted.com/app/plex/), [Jellyfin](https://elfhosted.com/app/jellyfin/), [Overseerr](https://elfhosted.com/app/overseerr/), [Jackett](https://elfhosted.com/app/jackett/), [Prowlarr](https://elfhosted.com/app/prowlarr/) by default.
-* ✅ Trakt OAuth [fixed](https://github.com/elfhosted/plex_debrid/commit/c678fa1e5974a5c666b2fe70d65228c6fdfb4047) (*by passing your own client ID / secret in ENV vars*).
-* ✅ Integrated with [Zilean](https://github.com/iPromKnight/zilean/) for scraping [DebridMediaManager](https://debridmediamanager.com/) (DMM) public hashes, defaults to ElfHosted internal Zilean service.
-* ✅ Parametize watchlist loop interval (*defaults to 30s instead of hard-coded 30 min*)
-* ✅ Single episode downloads [fixed](https://github.com/elfhosted/plex_debrid/pull/1)
+* Support [ElfHosted internal URLs](https://elfhosted.com/how-to/connect-apps/) for [Plex](https://elfhosted.com/app/plex/), [Jellyfin](https://elfhosted.com/app/jellyfin/), [Overseerr](https://elfhosted.com/app/overseerr/), [Jackett](https://elfhosted.com/app/jackett/), [Prowlarr](https://elfhosted.com/app/prowlarr/) by default.
+* Trakt OAuth [fixed](https://github.com/elfhosted/plex_debrid/commit/c678fa1e5974a5c666b2fe70d65228c6fdfb4047) (*by passing your own client ID / secret in ENV vars*).
+* Integrated with [Zilean](https://github.com/iPromKnight/zilean/) for scraping [DebridMediaManager](https://debridmediamanager.com/) (DMM) public hashes, defaults to ElfHosted internal Zilean service.
+* Parametize watchlist loop interval (*defaults to 30s instead of hard-coded 30 min*)
+* Single episode downloads [fixed](https://github.com/elfhosted/plex_debrid/pull/1)
 
 - **Zilean support is not yet implemented in pd_zurg, but will be in a future release**
 
-## Version [2.8.1] - 2024-08-09 🚀
+## Version [2.8.1] - 2024-08-09
 
-## Fixed 🐛
+## Fixed
 
-- healthcheck: Fixed healthcheck for zurg w/ armv7 🛠️
+- healthcheck: Fixed healthcheck for zurg w/ armv7
 
 
-## Version [2.8.0] - 2024-08-09 🚀
+## Version [2.8.0] - 2024-08-09
 
-### Changed 🔄
+### Changed
 
-- plex_debrid: Debug printing for plex_debrid no longer linked to PDZURG_LOG_LEVEL 🐞
-- Downloader: Add linux-arm-7 to get_architecture function 📦
+- plex_debrid: Debug printing for plex_debrid no longer linked to PDZURG_LOG_LEVEL
+- Downloader: Add linux-arm-7 to get_architecture function
 
-### Added ✨
+### Added
 
-- PD_LOG_LEVEL: Environment variable to set the log level for plex_debrid - Only DEBUG and INFO are supported for plex_debrid ; Default is INFO 📊
-- Suppress Logs: If the LOG_LEVEL for a process is set to OFF, then logs will be suppressed for the process 🤫
-- Zurg: Check for arm-7 architecture for compatibility with armv7 devices and set `ln -sf /lib/ld-musl-armhf.so.1 /lib/ld-linux-armhf.so.3` 🛠️
+- PD_LOG_LEVEL: Environment variable to set the log level for plex_debrid - Only DEBUG and INFO are supported for plex_debrid ; Default is INFO
+- Suppress Logs: If the LOG_LEVEL for a process is set to OFF, then logs will be suppressed for the process
+- Zurg: Check for arm-7 architecture for compatibility with armv7 devices and set `ln -sf /lib/ld-musl-armhf.so.1 /lib/ld-linux-armhf.so.3`
 
-### Notes 📝
+### Notes
 
 - Setting RCLONE_LOG_LEVEL to OFF will break rclone - will patch in future release
-- Thank you @barneyphife for the support with the armV7 compatibility 🙏
+- Thank you @barneyphife for the support with the armV7 compatibility
 
 
-## Version [2.7.0] - 2024-07-30 🚀
+## Version [2.7.0] - 2024-07-30
 
-### Changed 🔄
+### Changed
 
-- Refactored to use additional common functions under utils 🛠️
-- Update process: Refactored update process to apply updates to Zurg and plex_debrid before starting the processes 🔄
+- Refactored to use additional common functions under utils
+- Update process: Refactored update process to apply updates to Zurg and plex_debrid before starting the processes
 
-### Added ✨
+### Added
 
-- Ratelimit for GitHub API requests ⏳
-- Retries for GitHub API requests 🔁
-- plex_debrid: Debug printing for plex_debrid linked to PDZURG_LOG_LEVEL 🐞
-- Zurg: Add plex_update.sh from Zurg to working directory for Zurg use 📦
-- Shutdown: Added a shutdown function to gracefully stop the pd_zurg container; e.g., unmount the rclone mounts 🛑
-- ffmpeg: Added ffmpeg to the Dockerfile for Zurg use of ffprobe to extract media information from files, enhancing media metadata accuracy. 🎞️
-- COLOR_LOG_ENABLED: Environment variable to enable color logging; Default is false 🌈
+- Ratelimit for GitHub API requests
+- Retries for GitHub API requests
+- plex_debrid: Debug printing for plex_debrid linked to PDZURG_LOG_LEVEL
+- Zurg: Add plex_update.sh from Zurg to working directory for Zurg use
+- Shutdown: Added a shutdown function to gracefully stop the pd_zurg container; e.g., unmount the rclone mounts
+- ffmpeg: Added ffmpeg to the Dockerfile for Zurg use of ffprobe to extract media information from files, enhancing media metadata accuracy.
+- COLOR_LOG_ENABLED: Environment variable to enable color logging; Default is false
 
-### Fixed 🐛
+### Fixed
 
 [PR #62](https://github.com/I-am-PUID-0/pd_zurg/pull/62) - Allow nightly release custom versions for ZURG_VERSION
 

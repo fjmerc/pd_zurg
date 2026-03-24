@@ -1318,7 +1318,13 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 norm = _normalize_title(title)
                 resolved = []
                 for ep in episodes:
-                    s, e = int(ep.get('season', 0)), int(ep.get('episode', 0))
+                    try:
+                        s, e = int(ep.get('season', 0)), int(ep.get('episode', 0))
+                    except (ValueError, TypeError):
+                        self._send_json_response(400, json.dumps({
+                            'error': 'season and episode must be integers'
+                        }))
+                        return
                     src_path = scanner.get_episode_path(norm, s, e)
                     if src_path and os.path.isfile(src_path):
                         resolved.append({
@@ -1372,7 +1378,13 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 norm = _normalize_title(title)
                 resolved = []
                 for ep in episodes:
-                    s, e = int(ep.get('season', 0)), int(ep.get('episode', 0))
+                    try:
+                        s, e = int(ep.get('season', 0)), int(ep.get('episode', 0))
+                    except (ValueError, TypeError):
+                        self._send_json_response(400, json.dumps({
+                            'error': 'season and episode must be integers'
+                        }))
+                        return
                     local_path = scanner.get_local_episode_path(norm, s, e)
                     if local_path:
                         resolved.append({'path': local_path})

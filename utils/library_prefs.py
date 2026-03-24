@@ -97,6 +97,8 @@ def copy_episodes_to_local(episodes, show_title, local_tv_path):
             'started': time.monotonic(),
         }
 
+    real_root = os.path.realpath(local_tv_path)
+
     def _run():
         completed = 0
         errors = []
@@ -105,6 +107,10 @@ def copy_episodes_to_local(episodes, show_title, local_tv_path):
                 local_tv_path, show_title,
                 f"Season {ep['season']}",
             )
+            real_dir = os.path.realpath(season_dir)
+            if not real_dir.startswith(real_root + os.sep) and real_dir != real_root:
+                errors.append(f"Path outside local library: {season_dir}")
+                continue
             try:
                 os.makedirs(season_dir, exist_ok=True)
                 dest = os.path.join(season_dir, ep['filename'])
@@ -124,7 +130,12 @@ def copy_episodes_to_local(episodes, show_title, local_tv_path):
                 _transfers[tid]['errors'] = errors
 
         with _transfers_lock:
-            _transfers[tid]['status'] = 'failed' if errors and not completed else 'completed'
+            if not completed:
+                _transfers[tid]['status'] = 'failed'
+            elif errors:
+                _transfers[tid]['status'] = 'partial'
+            else:
+                _transfers[tid]['status'] = 'completed'
             _transfers[tid]['finished'] = time.monotonic()
 
         # Trigger library re-scan so UI reflects new files

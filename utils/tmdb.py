@@ -51,10 +51,10 @@ def _api_get(path, params=None):
 
     try:
         with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-            return json.loads(resp.read().decode('utf-8'))
+            return json.loads(resp.read(10 * 1024 * 1024).decode('utf-8'))
     except (urllib.error.URLError, urllib.error.HTTPError,
             json.JSONDecodeError, OSError, ValueError) as e:
-        logger.warning(f"[tmdb] API error for {path}: {e}")
+        logger.warning(f"[tmdb] API error for {path}: {type(e).__name__}")
         return None
 
 

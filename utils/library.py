@@ -343,11 +343,13 @@ class LibraryScanner:
         debrid_movie_keys = {_normalize_title(m['title']): m for m in debrid_movies}
         debrid_show_keys = {_normalize_title(s['title']): s for s in debrid_shows}
 
+        local_movie_keys = {_normalize_title(lm['title']) for lm in local_movies}
+
         movies = []
         # Merge debrid + local movies (title-level, unchanged)
         for item in debrid_movies:
             key = _normalize_title(item['title'])
-            if key in {_normalize_title(lm['title']) for lm in local_movies}:
+            if key in local_movie_keys:
                 item = dict(item)
                 item['source'] = 'both'
             movies.append(item)

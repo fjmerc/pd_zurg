@@ -570,7 +570,8 @@ function _renderShowDetail(show, meta) {
   html += '<div class="card-badges">' + buildBadges(show.source) + '</div>';
   if (meta && meta.overview) html += '<div class="detail-overview">' + esc(meta.overview) + '</div>';
   html += '<div class="pref-row"><label style="font-size:.82em;color:var(--text2)">Preference:</label>';
-  html += '<select class="pref-select" onchange="setPreference(\'' + esc(nk) + '\',this.value)">';
+  var nkEsc = esc(nk).replace(/'/g, "\\'");
+  html += '<select class="pref-select" onchange="setPreference(\'' + nkEsc + '\',this.value)">';
   html += '<option value="none"' + (curPref === 'none' ? ' selected' : '') + '>No Preference</option>';
   html += '<option value="prefer-local"' + (curPref === 'prefer-local' ? ' selected' : '') + '>Prefer Local</option>';
   html += '<option value="prefer-debrid"' + (curPref === 'prefer-debrid' ? ' selected' : '') + '>Prefer Debrid</option>';

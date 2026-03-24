@@ -96,6 +96,11 @@ services:
       - STATUS_UI_AUTH=${STATUS_UI_AUTH:-}
       ## Library Metadata
       - TMDB_API_KEY=${TMDB_API_KEY:-}
+      ## Media Services (Library Download)
+      - SONARR_URL=${SONARR_URL:-}
+      - SONARR_API_KEY=${SONARR_API_KEY:-}
+      - RADARR_URL=${RADARR_URL:-}
+      - RADARR_API_KEY=${RADARR_API_KEY:-}
       ## Monitoring
       - FFPROBE_MONITOR_ENABLED=${FFPROBE_MONITOR_ENABLED:-}
       - FFPROBE_STUCK_TIMEOUT=${FFPROBE_STUCK_TIMEOUT:-}

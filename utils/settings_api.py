@@ -143,6 +143,16 @@ ENV_SCHEMA = [
         ],
     },
     {
+        'name': 'Media Services',
+        'description': 'Sonarr/Radarr/Overseerr integration for the Library Download button',
+        'fields': [
+            ('SONARR_URL', 'Sonarr URL', 'url', False, 'Sonarr base URL (e.g. http://sonarr:8989). Used by Library Download for TV shows'),
+            ('SONARR_API_KEY', 'Sonarr API Key', 'secret', False, 'Sonarr API key (Settings > General in Sonarr)'),
+            ('RADARR_URL', 'Radarr URL', 'url', False, 'Radarr base URL (e.g. http://radarr:7878). Used by Library Download for movies'),
+            ('RADARR_API_KEY', 'Radarr API Key', 'secret', False, 'Radarr API key (Settings > General in Radarr)'),
+        ],
+    },
+    {
         'name': 'Monitoring',
         'description': 'ffprobe monitoring and auto-update',
         'fields': [

@@ -174,7 +174,7 @@ _CONFIG_PREFIXES = (
     'STATUS_UI', 'FFPROBE', 'DUPLICATE', 'NFS',
     'PDZURG', 'AUTO_UPDATE', 'CLEANUP', 'TORBOX',
     'MDBLIST', 'SHOW_MENU', 'GITHUB', 'SKIP_VALIDATION',
-    'TZ',
+    'TZ', 'SONARR_', 'RADARR_', 'TMDB_',
 )
 
 
@@ -1194,14 +1194,11 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     'error': 'Library scanner not initialized'
                 }))
             else:
-                data = json.dumps(scanner.get_data())
+                from utils.arr_client import get_configured_services
+                result = scanner.get_data()
+                result['download_services'] = get_configured_services()
+                data = json.dumps(result)
                 self._send_json_response(200, data)
-        elif self.path.startswith('/api/library/transfers'):
-            from utils.library_prefs import get_transfer_status
-            qs = parse_qs(urlparse(self.path).query)
-            tid = qs.get('id', [None])[0]
-            result = get_transfer_status(tid)
-            self._send_json_response(200, json.dumps(result))
         elif self.path.startswith('/api/library/metadata'):
             qs = parse_qs(urlparse(self.path).query)
             title = qs.get('title', [''])[0]
@@ -1285,7 +1282,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json_response(500, json.dumps({'error': str(e)}))
             return
 
-        if self.path == '/api/library/download-local':
+        if self.path == '/api/library/download':
             try:
                 content_length = int(self.headers.get('Content-Length', 0))
                 if content_length > 100_000:
@@ -1297,52 +1294,83 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
                     return
                 title = values.get('title', '').strip()
-                episodes = values.get('episodes', [])
-                if not title or not episodes:
-                    self._send_json_response(400, json.dumps({'error': 'title and episodes required'}))
+                media_type = values.get('type', 'show').strip()
+                tmdb_id = values.get('tmdb_id')
+                if tmdb_id is not None:
+                    try:
+                        tmdb_id = int(tmdb_id)
+                    except (ValueError, TypeError):
+                        tmdb_id = None
+
+                if not title:
+                    self._send_json_response(400, json.dumps({'error': 'title required'}))
+                    return
+                if media_type not in ('show', 'movie'):
+                    self._send_json_response(400, json.dumps({'error': 'type must be "show" or "movie"'}))
                     return
 
-                from utils.library import get_scanner, _normalize_title
-                scanner = get_scanner()
-                if scanner is None:
-                    self._send_json_response(503, json.dumps({'error': 'Scanner not initialized'}))
-                    return
-                if not scanner._local_tv_path:
+                from utils.arr_client import get_download_service
+                client, service_name = get_download_service(media_type)
+                if client is None:
                     self._send_json_response(400, json.dumps({
-                        'error': 'BLACKHOLE_LOCAL_LIBRARY_TV not configured'
+                        'error': 'No download service configured. Add Sonarr/Radarr or Overseerr in Settings.'
                     }))
                     return
 
-                norm = _normalize_title(title)
-                resolved = []
-                for ep in episodes:
-                    try:
-                        s, e = int(ep.get('season', 0)), int(ep.get('episode', 0))
-                    except (ValueError, TypeError):
+                if service_name == 'sonarr':
+                    season = values.get('season')
+                    episodes = values.get('episodes', [])
+                    if not isinstance(episodes, list):
                         self._send_json_response(400, json.dumps({
-                            'error': 'season and episode must be integers'
+                            'error': 'episodes must be a list'
                         }))
                         return
-                    src_path = scanner.get_episode_path(norm, s, e)
-                    if src_path and os.path.isfile(src_path):
-                        resolved.append({
-                            'season': s, 'episode': e,
-                            'source_path': src_path,
-                            'filename': os.path.basename(src_path),
-                        })
-                if not resolved:
-                    self._send_json_response(404, json.dumps({'error': 'No downloadable episodes found'}))
-                    return
+                    if season is None or not episodes:
+                        self._send_json_response(400, json.dumps({
+                            'error': 'season and episodes required for Sonarr'
+                        }))
+                        return
+                    try:
+                        season = int(season)
+                        episodes = [int(e) for e in episodes]
+                    except (ValueError, TypeError):
+                        self._send_json_response(400, json.dumps({
+                            'error': 'season and episodes must be integers'
+                        }))
+                        return
+                    result = client.ensure_and_search(title, tmdb_id, season, episodes)
 
-                from utils.library_prefs import copy_episodes_to_local
-                tid = copy_episodes_to_local(resolved, title, scanner._local_tv_path)
-                self._send_json_response(200, json.dumps({
-                    'status': 'started', 'transfer_id': tid, 'files': len(resolved)
-                }))
+                elif service_name == 'radarr':
+                    result = client.ensure_and_search(title, tmdb_id)
+
+                elif service_name == 'overseerr':
+                    if media_type == 'show':
+                        season = values.get('season')
+                        if season is None:
+                            self._send_json_response(400, json.dumps({
+                                'error': 'season required for Overseerr TV requests'
+                            }))
+                            return
+                        try:
+                            seasons = [int(season)]
+                        except (ValueError, TypeError):
+                            self._send_json_response(400, json.dumps({
+                                'error': 'season must be an integer'
+                            }))
+                            return
+                        result = client.ensure_and_request_tv(title, tmdb_id, seasons)
+                    else:
+                        result = client.ensure_and_request_movie(title, tmdb_id)
+                else:
+                    result = {'status': 'error', 'message': f'Unknown service: {service_name}'}
+
+                status_code = 200 if result.get('status') != 'error' else 400
+                self._send_json_response(status_code, json.dumps(result))
             except json.JSONDecodeError:
                 self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
-            except Exception as e:
-                self._send_json_response(500, json.dumps({'error': str(e)}))
+            except Exception:
+                logger.exception("[download] Unexpected error")
+                self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
             return
 
         if self.path == '/api/library/remove-local':

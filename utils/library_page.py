@@ -240,8 +240,8 @@ let _tsRefreshTimer = null;
 let _displayedItems = [];
 let _inDetailView = false;
 let _preferences = {};
-let _pollTimers = {};
 let _detailSeasons = [];
+let _downloadServices = {show: null, movie: null};
 let _searchTimer = null;
 
 // ---------------------------------------------------------------------------
@@ -399,6 +399,7 @@ function fetchLibrary() {
       _allMovies      = Array.isArray(data.movies) ? data.movies : [];
       _allShows       = Array.isArray(data.shows)  ? data.shows  : [];
       _preferences    = data.preferences || {};
+      _downloadServices = data.download_services || {show: null, movie: null};
       _lastScan       = data.last_scan || null;
       _scanDurationMs = data.scan_duration_ms || null;
 
@@ -453,7 +454,7 @@ function showDetail(index) {
   _inDetailView = true;
   _detailItem = item;
   _detailMeta = null;
-  document.title = esc(item.title) + ' — pd_zurg Library';
+  document.title = (item.title || '') + ' \u2014 pd_zurg Library';
 
   document.querySelector('.tabs').style.display = 'none';
   document.querySelector('.controls').style.display = 'none';
@@ -510,7 +511,14 @@ function _renderMovieDetail(movie, meta) {
     if (runtimeParts.length) html += '<div class="detail-runtime">' + runtimeParts.join(' &middot; ') + '</div>';
     if (meta.overview) html += '<div class="detail-overview">' + esc(meta.overview) + '</div>';
   }
+  if (movie.source === 'debrid' && _downloadServices.movie) {
+    var movieBtnLabel = _downloadServices.movie === 'overseerr' ? 'Request in Overseerr' : 'Download via Radarr';
+    html += '<div style="margin-top:10px"><button class="btn-action" onclick="downloadMovie()">' + movieBtnLabel + '</button></div>';
+  } else if (movie.source === 'debrid' && !_downloadServices.movie) {
+    html += '<div style="margin-top:10px;font-size:.82em;color:var(--text3)">To download locally, configure <a href="/settings">Radarr or Overseerr</a> in Settings.</div>';
+  }
   html += '</div></div>';
+  html += '<div id="transfer-msg"></div>';
   html += '</div>';
   area.innerHTML = html;
 }
@@ -586,8 +594,11 @@ function _renderShowDetail(show, meta) {
   html += '</h2>';
   html += '<div class="card-badges">' + buildBadges(show.source) + '</div>';
   if (meta && meta.overview) html += '<div class="detail-overview">' + esc(meta.overview) + '</div>';
-  html += '<div class="pref-row"><label style="font-size:.82em;color:var(--text2)">Preference:</label>';
-  html += '<select class="pref-select" onchange="onPrefChange(this.value)">';
+  if ((show.source === 'debrid' || show.source === 'both') && !_downloadServices.show) {
+    html += '<div style="font-size:.82em;color:var(--text3);margin-top:8px">To download episodes locally, configure <a href="/settings">Sonarr or Overseerr</a> in Settings.</div>';
+  }
+  html += '<div class="pref-row"><label style="font-size:.82em;color:var(--text2)" title="When both local and debrid copies exist, which should your media server prefer">Preference:</label>';
+  html += '<select class="pref-select" onchange="onPrefChange(this.value)" title="When both local and debrid copies exist, which should your media server prefer">';
   html += '<option value="none"' + (curPref === 'none' ? ' selected' : '') + '>No Preference</option>';
   html += '<option value="prefer-local"' + (curPref === 'prefer-local' ? ' selected' : '') + '>Prefer Local</option>';
   html += '<option value="prefer-debrid"' + (curPref === 'prefer-debrid' ? ' selected' : '') + '>Prefer Debrid</option>';
@@ -597,9 +608,9 @@ function _renderShowDetail(show, meta) {
   for (var si = 0; si < seasons.length; si++) {
     var season = seasons[si];
     var expanded = hasPrev ? !!expandedNums[String(season.number)] : si === 0;
-    var hasDebrid = false, hasLocal = false;
+    var hasDebrid = false, hasLocal = false, debridCount = 0;
     for (var ci = 0; ci < season.episodes.length; ci++) {
-      if (season.episodes[ci].source === 'debrid') hasDebrid = true;
+      if (season.episodes[ci].source === 'debrid') { hasDebrid = true; debridCount++; }
       if (season.episodes[ci].source === 'local' || season.episodes[ci].source === 'both') hasLocal = true;
     }
     var progressText = '';
@@ -611,7 +622,14 @@ function _renderShowDetail(show, meta) {
     html += '<span class="season-chevron">&#9654;</span>';
     html += 'Season ' + season.number + ' &mdash; ' + season.episode_count + ' episode' + (season.episode_count !== 1 ? 's' : '') + progressText;
     html += '<span class="season-actions">';
-    if (hasDebrid) html += '<button class="btn-action" onclick="event.stopPropagation();dlSeason(' + si + ')">Download All</button>';
+    if (hasDebrid && _downloadServices.show) {
+      if (_downloadServices.show === 'overseerr') {
+        html += '<button class="btn-action" onclick="event.stopPropagation();requestSeason(' + season.number + ')">Request Season</button>';
+      } else {
+        var dlLabel = 'Download ' + debridCount + ' Episode' + (debridCount !== 1 ? 's' : '');
+        html += '<button class="btn-action" onclick="event.stopPropagation();dlSeason(' + si + ')">' + dlLabel + '</button>';
+      }
+    }
     if (hasLocal) html += '<button class="btn-action danger" onclick="event.stopPropagation();rmSeason(' + si + ')">Remove Local</button>';
     html += '</span>';
     html += '</div>';
@@ -638,7 +656,7 @@ function _renderShowDetail(show, meta) {
       html += '</td>';
       html += '<td class="ep-actions">';
       if (!isMissing) {
-        if (ep.source === 'debrid') {
+        if (ep.source === 'debrid' && _downloadServices.show && _downloadServices.show !== 'overseerr') {
           html += '<button class="btn-action" aria-label="Download ' + epLabel + '" onclick="downloadEp(' + season.number + ',' + ep.number + ')">Download</button>';
         }
         if (ep.source === 'local' || ep.source === 'both') {
@@ -660,11 +678,6 @@ function hideDetail() {
   _inDetailView = false;
   _detailItem = null;
   _detailSeasons = [];
-  // Clear any active poll timers
-  for (var tid in _pollTimers) {
-    clearInterval(_pollTimers[tid]);
-  }
-  _pollTimers = {};
   document.title = 'pd_zurg Library';
   document.querySelector('.tabs').style.display = '';
   document.querySelector('.controls').style.display = '';
@@ -698,7 +711,11 @@ function onPrefChange(pref) {
 
 function downloadEp(season, episode) {
   if (!_detailItem) return;
-  _postDownload(_detailItem.title, [{season: season, episode: episode}]);
+  var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
+  _postDownload({
+    title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
+    season: season, episodes: [episode]
+  });
 }
 
 function removeEp(season, episode) {
@@ -713,10 +730,32 @@ function dlSeason(seasonIdx) {
   var eps = [];
   for (var i = 0; i < season.episodes.length; i++) {
     if (season.episodes[i].source === 'debrid') {
-      eps.push({season: season.number, episode: season.episodes[i].number});
+      eps.push(season.episodes[i].number);
     }
   }
-  if (eps.length) _postDownload(_detailItem.title, eps);
+  if (!eps.length) return;
+  var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
+  _postDownload({
+    title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
+    season: season.number, episodes: eps
+  });
+}
+
+function requestSeason(seasonNumber) {
+  if (!_detailItem) return;
+  var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
+  _postDownload({
+    title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
+    season: seasonNumber, episodes: []
+  });
+}
+
+function downloadMovie() {
+  if (!_detailItem) return;
+  var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
+  _postDownload({
+    title: _detailItem.title, type: 'movie', tmdb_id: tmdbId
+  });
 }
 
 function rmSeason(seasonIdx) {
@@ -733,54 +772,38 @@ function rmSeason(seasonIdx) {
   _postRemove(_detailItem.title, eps);
 }
 
-function _postDownload(title, episodes) {
+var _svcNames = {sonarr: 'Sonarr', radarr: 'Radarr', overseerr: 'Overseerr'};
+var _dlInFlight = false;
+
+function _postDownload(payload) {
+  if (_dlInFlight) return;
+  _dlInFlight = true;
+  // Disable all download/request buttons while in flight
+  var btns = document.querySelectorAll('.btn-action:not(.danger)');
+  for (var i = 0; i < btns.length; i++) btns[i].disabled = true;
+
   var msg = document.getElementById('transfer-msg');
-  if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Starting download...';
-  fetch('/api/library/download-local', {
+  var svc = payload.type === 'movie' ? _downloadServices.movie : _downloadServices.show;
+  var svcName = _svcNames[svc] || svc;
+  var actionWord = svc === 'overseerr' ? 'Requesting' : 'Sending to ' + svcName;
+  if (msg) msg.innerHTML = '<span class="scanning-dot"></span>' + esc(actionWord) + '...';
+  fetch('/api/library/download', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({title: title, episodes: episodes})
-  }).then(function(r) { return r.json(); }).then(function(d) {
-    if (d.transfer_id) {
-      if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Downloading ' + d.files + ' file(s)...';
-      _pollTransfer(d.transfer_id);
-    } else if (d.error) {
-      if (msg) msg.textContent = 'Error: ' + d.error;
-    }
+    body: JSON.stringify(payload)
+  }).then(function(r) {
+    return r.json().then(function(d) { return {ok: r.ok, d: d}; });
+  }).then(function(res) {
+    var d = res.d;
+    var errMsg = (!res.ok || d.status === 'error') ? (d.error || d.message || 'Unknown error') : null;
+    if (msg) msg.textContent = errMsg ? 'Error: ' + errMsg : (d.message || 'Sent.');
   }).catch(function(e) {
-    if (msg) msg.textContent = 'Download failed: ' + e;
+    if (msg) msg.textContent = 'Request failed: ' + e;
+  }).finally(function() {
+    _dlInFlight = false;
+    var btns = document.querySelectorAll('.btn-action:not(.danger)');
+    for (var i = 0; i < btns.length; i++) btns[i].disabled = false;
   });
-}
-
-function _pollTransfer(tid) {
-  if (_pollTimers[tid]) return;
-  _pollTimers[tid] = setInterval(function() {
-    fetch('/api/library/transfers?id=' + tid)
-      .then(function(r) { return r.json(); })
-      .then(function(d) {
-        var msg = document.getElementById('transfer-msg');
-        if (d.status === 'running') {
-          if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Downloading ' + d.completed + '/' + d.total + ' files...';
-        } else {
-          clearInterval(_pollTimers[tid]);
-          delete _pollTimers[tid];
-          if (d.status === 'completed') {
-            if (msg) msg.textContent = 'Download complete.';
-          } else if (d.status === 'partial') {
-            if (msg) msg.textContent = 'Download partial: some files failed.';
-          } else {
-            if (msg) msg.textContent = 'Download failed.';
-          }
-          setTimeout(_refreshDetailData, 1000);
-        }
-      })
-      .catch(function() {
-        clearInterval(_pollTimers[tid]);
-        delete _pollTimers[tid];
-        var msg = document.getElementById('transfer-msg');
-        if (msg) msg.textContent = 'Lost connection to server.';
-      });
-  }, 2000);
 }
 
 function _postRemove(title, episodes) {
@@ -810,6 +833,7 @@ function _refreshDetailData() {
       _allMovies = Array.isArray(data.movies) ? data.movies : [];
       _allShows  = Array.isArray(data.shows)  ? data.shows  : [];
       _preferences = data.preferences || {};
+      _downloadServices = data.download_services || {show: null, movie: null};
       _lastScan = data.last_scan || null;
       if (_inDetailView && _detailItem) {
         // Find updated show/movie by title

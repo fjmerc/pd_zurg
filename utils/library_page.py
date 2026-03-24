@@ -112,6 +112,18 @@ a:hover{text-decoration:underline}
 .ep-num{font-weight:600;color:var(--text2);white-space:nowrap;width:50px}
 .ep-file{color:var(--text);word-break:break-all}
 .ep-source{white-space:nowrap;text-align:right}
+.ep-actions{white-space:nowrap;text-align:right;width:80px}
+
+/* Preference & action controls */
+.pref-row{display:flex;align-items:center;gap:8px;margin-top:8px}
+.pref-select{background:var(--input-bg);border:1px solid var(--input-border);border-radius:6px;padding:4px 8px;color:var(--text);font-size:.82em;outline:none;cursor:pointer}
+.pref-select:focus{border-color:var(--input-focus)}
+.btn-action{background:none;border:1px solid var(--border);color:var(--text2);border-radius:4px;padding:2px 8px;font-size:.75em;cursor:pointer;white-space:nowrap;transition:border-color .15s,color .15s}
+.btn-action:hover{border-color:var(--blue);color:var(--blue)}
+.btn-action.danger:hover{border-color:var(--red);color:var(--red)}
+.btn-action:disabled{opacity:.5;cursor:not-allowed}
+.season-actions{margin-left:auto;display:flex;gap:4px}
+.transfer-msg{font-size:.78em;color:var(--yellow);margin-top:4px}
 
 /* Footer */
 .footer{color:var(--text3);font-size:.78em;text-align:right;margin-top:16px}
@@ -202,6 +214,8 @@ let _scanning  = false;
 let _tsRefreshTimer = null;
 let _displayedItems = [];
 let _inDetailView = false;
+let _preferences = {};
+let _pollTimers = {};
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -356,6 +370,7 @@ function fetchLibrary() {
     .then(function(data) {
       _allMovies      = Array.isArray(data.movies) ? data.movies : [];
       _allShows       = Array.isArray(data.shows)  ? data.shows  : [];
+      _preferences    = data.preferences || {};
       _lastScan       = data.last_scan || null;
       _scanDurationMs = data.scan_duration_ms || null;
 
@@ -396,6 +411,10 @@ function triggerRefresh() {
 // ---------------------------------------------------------------------------
 // Show detail view
 // ---------------------------------------------------------------------------
+function normTitle(title) {
+  return title.toLowerCase().replace(/\s*\(\d{4}\)\s*$/, '').trim();
+}
+
 function showDetail(index) {
   var show = _displayedItems[index];
   if (!show || !show.season_data) return;
@@ -405,6 +424,9 @@ function showDetail(index) {
   document.querySelector('.controls').style.display = 'none';
   document.getElementById('footer').style.display = 'none';
 
+  var nk = normTitle(show.title);
+  var curPref = _preferences[nk] || 'none';
+
   var area = document.getElementById('content-area');
   var html = '<div class="detail-view">';
   html += '<a class="detail-back" onclick="hideDetail()">&larr; Back to Library</a>';
@@ -413,16 +435,32 @@ function showDetail(index) {
   if (show.year) html += ' <span class="card-year">(' + esc(String(show.year)) + ')</span>';
   html += '</h2>';
   html += '<div class="card-badges">' + buildBadges(show.source) + '</div>';
+  html += '<div class="pref-row"><label style="font-size:.82em;color:var(--text2)">Preference:</label>';
+  html += '<select class="pref-select" onchange="setPreference(\'' + esc(nk) + '\',this.value)">';
+  html += '<option value="none"' + (curPref === 'none' ? ' selected' : '') + '>No Preference</option>';
+  html += '<option value="prefer-local"' + (curPref === 'prefer-local' ? ' selected' : '') + '>Prefer Local</option>';
+  html += '<option value="prefer-debrid"' + (curPref === 'prefer-debrid' ? ' selected' : '') + '>Prefer Debrid</option>';
+  html += '</select></div>';
   html += '</div>';
 
+  var titleEsc = esc(show.title).replace(/'/g, "\\'");
   var seasons = show.season_data || [];
   for (var si = 0; si < seasons.length; si++) {
     var season = seasons[si];
     var expanded = si === 0;
+    var hasDebrid = false, hasLocal = false;
+    for (var ci = 0; ci < season.episodes.length; ci++) {
+      if (season.episodes[ci].source === 'debrid') hasDebrid = true;
+      if (season.episodes[ci].source === 'local' || season.episodes[ci].source === 'both') hasLocal = true;
+    }
     html += '<div class="season-section">';
     html += '<div class="season-header' + (expanded ? ' expanded' : '') + '" onclick="toggleSeason(this)">';
     html += '<span class="season-chevron">&#9654;</span>';
     html += 'Season ' + season.number + ' &mdash; ' + season.episode_count + ' episode' + (season.episode_count !== 1 ? 's' : '');
+    html += '<span class="season-actions">';
+    if (hasDebrid) html += '<button class="btn-action" onclick="event.stopPropagation();downloadSeason(\'' + titleEsc + '\',' + season.number + ',' + JSON.stringify(season.episodes).replace(/'/g, "\\'") + ')">Download All</button>';
+    if (hasLocal) html += '<button class="btn-action danger" onclick="event.stopPropagation();removeSeason(\'' + titleEsc + '\',' + season.number + ',' + JSON.stringify(season.episodes).replace(/'/g, "\\'") + ')">Remove Local</button>';
+    html += '</span>';
     html += '</div>';
     html += '<div class="season-episodes"' + (expanded ? '' : ' style="display:none"') + '>';
     html += '<table class="episode-table"><tbody>';
@@ -435,11 +473,20 @@ function showDetail(index) {
       html += '<td class="ep-num">E' + esc(epNum) + '</td>';
       html += '<td class="ep-file">' + esc(ep.file) + '</td>';
       html += '<td class="ep-source">' + buildBadges(ep.source) + '</td>';
+      html += '<td class="ep-actions">';
+      if (ep.source === 'debrid') {
+        html += '<button class="btn-action" onclick="downloadEp(\'' + titleEsc + '\',' + season.number + ',' + ep.number + ')">Download</button>';
+      }
+      if (ep.source === 'local' || ep.source === 'both') {
+        html += '<button class="btn-action danger" onclick="removeEp(\'' + titleEsc + '\',' + season.number + ',' + ep.number + ')">Remove</button>';
+      }
+      html += '</td>';
       html += '</tr>';
     }
     html += '</tbody></table></div></div>';
   }
 
+  html += '<div id="transfer-msg"></div>';
   html += '</div>';
   area.innerHTML = html;
 }
@@ -456,6 +503,111 @@ function toggleSeason(headerEl) {
   var episodes = headerEl.nextElementSibling;
   var isExpanded = headerEl.classList.toggle('expanded');
   episodes.style.display = isExpanded ? '' : 'none';
+}
+
+// ---------------------------------------------------------------------------
+// Preference & action API calls
+// ---------------------------------------------------------------------------
+function setPreference(normKey, pref) {
+  fetch('/api/library/preference', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({title: normKey, preference: pref})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (pref === 'none') { delete _preferences[normKey]; }
+    else { _preferences[normKey] = pref; }
+  }).catch(function(e) { alert('Failed to save preference: ' + e); });
+}
+
+function downloadEp(title, season, episode) {
+  _postDownload(title, [{season: season, episode: episode}]);
+}
+
+function downloadSeason(title, seasonNum, episodes) {
+  var eps = [];
+  for (var i = 0; i < episodes.length; i++) {
+    if (episodes[i].source === 'debrid') {
+      eps.push({season: seasonNum, episode: episodes[i].number});
+    }
+  }
+  if (eps.length) _postDownload(title, eps);
+}
+
+function _postDownload(title, episodes) {
+  var msg = document.getElementById('transfer-msg');
+  if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Starting download...';
+  fetch('/api/library/download-local', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({title: title, episodes: episodes})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.transfer_id) {
+      if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Downloading ' + d.files + ' file(s)...';
+      _pollTransfer(d.transfer_id);
+    } else if (d.error) {
+      if (msg) msg.textContent = 'Error: ' + d.error;
+    }
+  }).catch(function(e) {
+    if (msg) msg.textContent = 'Download failed: ' + e;
+  });
+}
+
+function _pollTransfer(tid) {
+  if (_pollTimers[tid]) return;
+  _pollTimers[tid] = setInterval(function() {
+    fetch('/api/library/transfers?id=' + tid)
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        var msg = document.getElementById('transfer-msg');
+        if (d.status === 'running') {
+          if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Downloading ' + d.completed + '/' + d.total + ' files...';
+        } else {
+          clearInterval(_pollTimers[tid]);
+          delete _pollTimers[tid];
+          if (d.status === 'completed') {
+            if (msg) msg.textContent = 'Download complete.';
+            setTimeout(function() { fetchLibrary(); }, 1000);
+          } else {
+            if (msg) msg.textContent = 'Download finished with errors.';
+          }
+        }
+      });
+  }, 2000);
+}
+
+function removeEp(title, season, episode) {
+  if (!confirm('Remove local copy of S' + (season < 10 ? '0' : '') + season + 'E' + (episode < 10 ? '0' : '') + episode + '?')) return;
+  _postRemove(title, [{season: season, episode: episode}]);
+}
+
+function removeSeason(title, seasonNum, episodes) {
+  var eps = [];
+  for (var i = 0; i < episodes.length; i++) {
+    if (episodes[i].source === 'local' || episodes[i].source === 'both') {
+      eps.push({season: seasonNum, episode: episodes[i].number});
+    }
+  }
+  if (!eps.length) return;
+  if (!confirm('Remove ' + eps.length + ' local episode(s) from Season ' + seasonNum + '?')) return;
+  _postRemove(title, eps);
+}
+
+function _postRemove(title, episodes) {
+  var msg = document.getElementById('transfer-msg');
+  fetch('/api/library/remove-local', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({title: title, episodes: episodes})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.status === 'removed') {
+      if (msg) msg.textContent = 'Removed ' + d.removed + ' file(s).';
+      setTimeout(function() { fetchLibrary(); }, 1000);
+    } else if (d.error) {
+      if (msg) msg.textContent = 'Error: ' + d.error;
+    }
+  }).catch(function(e) {
+    if (msg) msg.textContent = 'Remove failed: ' + e;
+  });
 }
 
 // ---------------------------------------------------------------------------

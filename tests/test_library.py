@@ -520,6 +520,9 @@ class TestLibraryScannerScanDebrid:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
         return scanner
 
     def test_scan_debrid_movies_returns_correct_items(self, tmp_dir, monkeypatch):
@@ -586,6 +589,9 @@ class TestLibraryScannerScanDebrid:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
 
         result = scanner.scan()
         assert result["movies"] == []
@@ -767,6 +773,9 @@ class TestLibraryScannerScanLocal:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
         return scanner
 
     def test_scan_local_movies_source_is_local(self, tmp_dir):
@@ -828,6 +837,9 @@ class TestLibraryScannerScanCrossRef:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
 
         result = scanner.scan()
 
@@ -853,6 +865,9 @@ class TestLibraryScannerScanCrossRef:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
 
         result = scanner.scan()
         local_only = next(m for m in result["movies"] if m["title"] == "Local Only")
@@ -874,6 +889,9 @@ class TestLibraryScannerScanCrossRef:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
 
         result = scanner.scan()
         show = next(s for s in result["shows"] if s["title"] == "Succession")
@@ -898,6 +916,9 @@ class TestLibraryScannerScanCrossRef:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
 
         result = scanner.scan()
         arrival = next(m for m in result["movies"] if m["title"] == "Arrival")
@@ -969,6 +990,9 @@ class TestSeasonDataInScanResults:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
         return scanner
 
     def test_shows_have_season_data(self, tmp_dir, monkeypatch):
@@ -1065,6 +1089,9 @@ class TestEpisodeLevelCrossRef:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
         return scanner
 
     def test_same_episode_both_sources_gets_both(self, tmp_dir):
@@ -1186,6 +1213,75 @@ class TestEpisodeLevelCrossRef:
         matching = [s for s in result["shows"] if "Shared" in s["title"]]
         assert len(matching) == 1
 
+    def test_path_index_populated_for_debrid(self, tmp_dir):
+        def debrid(shows_dir):
+            f = os.path.join(shows_dir, "Indexed.S01E01.1080p")
+            os.makedirs(f)
+            open(os.path.join(f, "Indexed.S01E01.mkv"), 'w').close()
+
+        def local(local_tv):
+            pass
+
+        scanner = self._make_cross_ref_scanner(tmp_dir, debrid, local)
+        scanner.scan()
+
+        path = scanner.get_episode_path("indexed", 1, 1)
+        assert path is not None
+        assert path.endswith("Indexed.S01E01.mkv")
+
+    def test_local_path_index_populated(self, tmp_dir):
+        def debrid(shows_dir):
+            pass
+
+        def local(local_tv):
+            show = os.path.join(local_tv, "LocalShow (2020)")
+            s1 = os.path.join(show, "Season 1")
+            os.makedirs(s1)
+            open(os.path.join(s1, "LocalShow.S01E01.mkv"), 'w').close()
+
+        scanner = self._make_cross_ref_scanner(tmp_dir, debrid, local)
+        scanner.scan()
+
+        path = scanner.get_local_episode_path("localshow", 1, 1)
+        assert path is not None
+        assert path.endswith("LocalShow.S01E01.mkv")
+
+    def test_both_source_preserves_local_path(self, tmp_dir):
+        def debrid(shows_dir):
+            f = os.path.join(shows_dir, "Both.S01E01.1080p")
+            os.makedirs(f)
+            open(os.path.join(f, "Both.S01E01.mkv"), 'w').close()
+
+        def local(local_tv):
+            show = os.path.join(local_tv, "Both (2020)")
+            s1 = os.path.join(show, "Season 1")
+            os.makedirs(s1)
+            open(os.path.join(s1, "Both.S01E01.mkv"), 'w').close()
+
+        scanner = self._make_cross_ref_scanner(tmp_dir, debrid, local)
+        scanner.scan()
+
+        debrid_path = scanner.get_episode_path("both", 1, 1)
+        local_path = scanner.get_local_episode_path("both", 1, 1)
+        assert debrid_path is not None
+        assert local_path is not None
+        assert debrid_path != local_path
+
+    def test_scan_result_includes_preferences(self, tmp_dir, monkeypatch):
+        def debrid(shows_dir):
+            pass
+
+        def local(local_tv):
+            pass
+
+        scanner = self._make_cross_ref_scanner(tmp_dir, debrid, local)
+        # Mock preferences to avoid needing /config
+        monkeypatch.setattr('utils.library_prefs.load_preferences', lambda: {'test': 'prefer-local'})
+        result = scanner.scan()
+
+        assert 'preferences' in result
+        assert result['preferences'] == {'test': 'prefer-local'}
+
 
 # ---------------------------------------------------------------------------
 # LibraryScanner.get_data() — caching and TTL
@@ -1204,6 +1300,9 @@ class TestLibraryScannerGetData:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
         return scanner
 
     def test_get_data_returns_scan_result(self):
@@ -1278,6 +1377,9 @@ class TestLibraryScannerRefresh:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
         return scanner
 
     def test_refresh_triggers_background_scan(self, mocker):

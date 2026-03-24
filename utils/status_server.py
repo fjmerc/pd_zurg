@@ -1196,6 +1196,13 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             else:
                 data = json.dumps(scanner.get_data())
                 self._send_json_response(200, data)
+        elif self.path.startswith('/api/library/transfers'):
+            from utils.library_prefs import get_transfer_status
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            tid = qs.get('id', [None])[0]
+            result = get_transfer_status(tid)
+            self._send_json_response(200, json.dumps(result))
         elif self.path in ('/', '/status'):
             html = _DASHBOARD_HTML.encode()
             self.send_response(200)
@@ -1229,6 +1236,137 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             return
 
         if not self._check_auth():
+            return
+
+        if self.path == '/api/library/preference':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 100_000:
+                    self._send_json_response(400, json.dumps({'error': 'Request body too large'}))
+                    return
+                body = self.rfile.read(content_length)
+                values = json.loads(body.decode('utf-8'))
+                if not isinstance(values, dict):
+                    self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
+                    return
+                title = values.get('title', '').strip()
+                preference = values.get('preference', '').strip()
+                if not title or not preference:
+                    self._send_json_response(400, json.dumps({'error': 'title and preference required'}))
+                    return
+                from utils.library_prefs import set_preference
+                result = set_preference(title, preference)
+                self._send_json_response(200, json.dumps(result))
+            except ValueError as e:
+                self._send_json_response(400, json.dumps({'error': str(e)}))
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception as e:
+                self._send_json_response(500, json.dumps({'error': str(e)}))
+            return
+
+        if self.path == '/api/library/download-local':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 100_000:
+                    self._send_json_response(400, json.dumps({'error': 'Request body too large'}))
+                    return
+                body = self.rfile.read(content_length)
+                values = json.loads(body.decode('utf-8'))
+                if not isinstance(values, dict):
+                    self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
+                    return
+                title = values.get('title', '').strip()
+                episodes = values.get('episodes', [])
+                if not title or not episodes:
+                    self._send_json_response(400, json.dumps({'error': 'title and episodes required'}))
+                    return
+
+                from utils.library import get_scanner, _normalize_title
+                scanner = get_scanner()
+                if scanner is None:
+                    self._send_json_response(503, json.dumps({'error': 'Scanner not initialized'}))
+                    return
+                if not scanner._local_tv_path:
+                    self._send_json_response(400, json.dumps({
+                        'error': 'BLACKHOLE_LOCAL_LIBRARY_TV not configured'
+                    }))
+                    return
+
+                norm = _normalize_title(title)
+                resolved = []
+                for ep in episodes:
+                    s, e = int(ep.get('season', 0)), int(ep.get('episode', 0))
+                    src_path = scanner.get_episode_path(norm, s, e)
+                    if src_path and os.path.isfile(src_path):
+                        resolved.append({
+                            'season': s, 'episode': e,
+                            'source_path': src_path,
+                            'filename': os.path.basename(src_path),
+                        })
+                if not resolved:
+                    self._send_json_response(404, json.dumps({'error': 'No downloadable episodes found'}))
+                    return
+
+                from utils.library_prefs import copy_episodes_to_local
+                tid = copy_episodes_to_local(resolved, title, scanner._local_tv_path)
+                self._send_json_response(200, json.dumps({
+                    'status': 'started', 'transfer_id': tid, 'files': len(resolved)
+                }))
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception as e:
+                self._send_json_response(500, json.dumps({'error': str(e)}))
+            return
+
+        if self.path == '/api/library/remove-local':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 100_000:
+                    self._send_json_response(400, json.dumps({'error': 'Request body too large'}))
+                    return
+                body = self.rfile.read(content_length)
+                values = json.loads(body.decode('utf-8'))
+                if not isinstance(values, dict):
+                    self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
+                    return
+                title = values.get('title', '').strip()
+                episodes = values.get('episodes', [])
+                if not title or not episodes:
+                    self._send_json_response(400, json.dumps({'error': 'title and episodes required'}))
+                    return
+
+                from utils.library import get_scanner, _normalize_title
+                scanner = get_scanner()
+                if scanner is None:
+                    self._send_json_response(503, json.dumps({'error': 'Scanner not initialized'}))
+                    return
+                if not scanner._local_tv_path:
+                    self._send_json_response(400, json.dumps({
+                        'error': 'BLACKHOLE_LOCAL_LIBRARY_TV not configured'
+                    }))
+                    return
+
+                norm = _normalize_title(title)
+                resolved = []
+                for ep in episodes:
+                    s, e = int(ep.get('season', 0)), int(ep.get('episode', 0))
+                    local_path = scanner.get_local_episode_path(norm, s, e)
+                    if local_path:
+                        resolved.append({'path': local_path})
+                if not resolved:
+                    self._send_json_response(404, json.dumps({'error': 'No local episodes found'}))
+                    return
+
+                from utils.library_prefs import remove_local_episodes
+                result = remove_local_episodes(resolved, scanner._local_tv_path)
+                # Trigger re-scan to reflect changes
+                scanner.refresh()
+                self._send_json_response(200, json.dumps(result))
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception as e:
+                self._send_json_response(500, json.dumps({'error': str(e)}))
             return
 
         if self.path == '/api/settings/env':

@@ -305,6 +305,9 @@ class LibraryScanner:
         self._ttl = 600
         self._lock = threading.Lock()
         self._scanning = False
+        self._path_index = {}
+        self._local_path_index = {}
+        self._path_lock = threading.Lock()
 
         if self._mount_path:
             logger.info(f"[library] Mount path: {self._mount_path}")
@@ -370,7 +373,8 @@ class LibraryScanner:
                 merged = {}
                 for ek, info in debrid_eps.items():
                     if ek in local_eps:
-                        merged[ek] = dict(info, source='both')
+                        merged[ek] = dict(info, source='both',
+                                          local_path=local_eps[ek].get('path', ''))
                     else:
                         merged[ek] = dict(info, source='debrid')
                 for ek, info in local_eps.items():
@@ -398,15 +402,39 @@ class LibraryScanner:
             if key not in debrid_show_keys:
                 shows.append(ls)
 
-        # Build season_data for all shows and strip internal _episodes
+        # Build path indexes and season_data, then strip internal _episodes
+        path_index = {}
+        local_path_index = {}
+        for show in shows:
+            eps = show.get('_episodes', {})
+            norm = _normalize_title(show['title'])
+            show_source = show.get('source', 'debrid')
+            for (sn, en), info in eps.items():
+                src = info.get('source', show_source)
+                p = info.get('path', '')
+                lp = info.get('local_path', '')
+                if src in ('debrid', 'both') and p:
+                    path_index[(norm, sn, en)] = p
+                if src == 'local' and p:
+                    local_path_index[(norm, sn, en)] = p
+                if lp:
+                    local_path_index[(norm, sn, en)] = lp
+
+        with self._path_lock:
+            self._path_index = path_index
+            self._local_path_index = local_path_index
+
         for show in shows:
             eps = show.pop('_episodes', {})
             show['season_data'] = _build_season_data(eps, show.get('source', 'debrid'))
+
+        from utils.library_prefs import get_all_preferences
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         return {
             'movies': movies,
             'shows': shows,
+            'preferences': get_all_preferences(),
             'last_scan': datetime.now(timezone.utc).isoformat(timespec='seconds'),
             'scan_duration_ms': elapsed_ms,
         }
@@ -453,6 +481,16 @@ class LibraryScanner:
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
+
+    def get_episode_path(self, normalized_title, season, episode):
+        """Get debrid mount path for an episode."""
+        with self._path_lock:
+            return self._path_index.get((normalized_title, season, episode))
+
+    def get_local_episode_path(self, normalized_title, season, episode):
+        """Get local library path for an episode."""
+        with self._path_lock:
+            return self._local_path_index.get((normalized_title, season, episode))
 
     # Category names that indicate TV/show content
     _SHOW_CATEGORIES = {'shows', 'tv', 'anime', 'series', 'television'}

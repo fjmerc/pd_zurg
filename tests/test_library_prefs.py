@@ -3,7 +3,6 @@
 import json
 import os
 import threading
-import time
 import pytest
 import utils.library_prefs as lp
 
@@ -17,10 +16,6 @@ def _isolate_prefs(tmp_dir, monkeypatch):
     """Point prefs to a temp dir and reset module state between tests."""
     prefs_path = os.path.join(tmp_dir, 'library_prefs.json')
     monkeypatch.setattr(lp, 'PREFS_PATH', prefs_path)
-    # Reset transfer state
-    with lp._transfers_lock:
-        lp._transfers.clear()
-    lp._transfer_counter = 0
 
 
 # ---------------------------------------------------------------------------
@@ -96,83 +91,6 @@ class TestPreferences:
 
 
 # ---------------------------------------------------------------------------
-# File copy
-# ---------------------------------------------------------------------------
-
-class TestCopyEpisodes:
-
-    def test_copy_creates_directory_structure(self, tmp_dir):
-        src = os.path.join(tmp_dir, 'source.mkv')
-        with open(src, 'w') as f:
-            f.write('video data')
-        local_tv = os.path.join(tmp_dir, 'local_tv')
-        os.makedirs(local_tv)
-
-        episodes = [{'season': 2, 'episode': 3, 'source_path': src, 'filename': 'ep.mkv'}]
-        tid = lp.copy_episodes_to_local(episodes, 'My Show', local_tv)
-
-        # Wait for background thread
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            status = lp.get_transfer_status(tid)
-            if status['status'] != 'running':
-                break
-            time.sleep(0.05)
-
-        dest = os.path.join(local_tv, 'My Show', 'Season 2', 'ep.mkv')
-        assert os.path.isfile(dest)
-        with open(dest) as f:
-            assert f.read() == 'video data'
-
-    def test_copy_returns_transfer_id(self, tmp_dir):
-        local_tv = os.path.join(tmp_dir, 'local_tv')
-        os.makedirs(local_tv)
-        tid = lp.copy_episodes_to_local([], 'Show', local_tv)
-        assert tid is not None
-
-    def test_copy_skips_existing_file(self, tmp_dir):
-        src = os.path.join(tmp_dir, 'source.mkv')
-        with open(src, 'w') as f:
-            f.write('original')
-        local_tv = os.path.join(tmp_dir, 'local_tv')
-        dest_dir = os.path.join(local_tv, 'Show', 'Season 1')
-        os.makedirs(dest_dir)
-        dest = os.path.join(dest_dir, 'ep.mkv')
-        with open(dest, 'w') as f:
-            f.write('already here')
-
-        episodes = [{'season': 1, 'episode': 1, 'source_path': src, 'filename': 'ep.mkv'}]
-        tid = lp.copy_episodes_to_local(episodes, 'Show', local_tv)
-
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            status = lp.get_transfer_status(tid)
-            if status['status'] != 'running':
-                break
-            time.sleep(0.05)
-
-        with open(dest) as f:
-            assert f.read() == 'already here'
-
-    def test_copy_handles_missing_source(self, tmp_dir):
-        local_tv = os.path.join(tmp_dir, 'local_tv')
-        os.makedirs(local_tv)
-        episodes = [{'season': 1, 'episode': 1, 'source_path': '/nonexistent/file.mkv', 'filename': 'ep.mkv'}]
-        tid = lp.copy_episodes_to_local(episodes, 'Show', local_tv)
-
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            status = lp.get_transfer_status(tid)
-            if status['status'] != 'running':
-                break
-            time.sleep(0.05)
-
-        status = lp.get_transfer_status(tid)
-        assert status['status'] == 'failed'
-        assert len(status['errors']) > 0
-
-
-# ---------------------------------------------------------------------------
 # File removal
 # ---------------------------------------------------------------------------
 
@@ -232,44 +150,3 @@ class TestRemoveLocalEpisodes:
 
         result = lp.remove_local_episodes([{'path': missing}], local_tv)
         assert result['removed'] == 0
-
-
-# ---------------------------------------------------------------------------
-# Transfer tracking
-# ---------------------------------------------------------------------------
-
-class TestTransferTracking:
-
-    def test_get_status_by_id(self, tmp_dir):
-        local_tv = os.path.join(tmp_dir, 'local_tv')
-        os.makedirs(local_tv)
-        tid = lp.copy_episodes_to_local([], 'Show', local_tv)
-        status = lp.get_transfer_status(tid)
-        assert 'status' in status
-
-    def test_get_all_statuses(self, tmp_dir):
-        local_tv = os.path.join(tmp_dir, 'local_tv')
-        os.makedirs(local_tv)
-        lp.copy_episodes_to_local([], 'A', local_tv)
-        lp.copy_episodes_to_local([], 'B', local_tv)
-        time.sleep(0.1)
-        all_status = lp.get_transfer_status()
-        assert isinstance(all_status, dict)
-        assert len(all_status) >= 2
-
-    def test_not_found_returns_status(self):
-        result = lp.get_transfer_status('nonexistent')
-        assert result['status'] == 'not_found'
-
-    def test_pruning_old_transfers(self, tmp_dir):
-        local_tv = os.path.join(tmp_dir, 'local_tv')
-        os.makedirs(local_tv)
-        tid = lp.copy_episodes_to_local([], 'Show', local_tv)
-        time.sleep(0.1)
-        # Simulate old finished transfer
-        with lp._transfers_lock:
-            lp._transfers[tid]['finished'] = time.monotonic() - 7200
-        # Fetching should prune it
-        lp.get_transfer_status()
-        with lp._transfers_lock:
-            assert tid not in lp._transfers

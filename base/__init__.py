@@ -58,6 +58,7 @@ __all__ = [
     'BLACKHOLE_SYMLINK_TARGET_BASE', 'BLACKHOLE_MOUNT_POLL_TIMEOUT',
     'BLACKHOLE_MOUNT_POLL_INTERVAL', 'BLACKHOLE_SYMLINK_MAX_AGE',
     'STATUS_UI_ENABLED', 'STATUS_UI_PORT', 'STATUS_UI_AUTH',
+    'SONARR_URL', 'SONARR_API_KEY', 'RADARR_URL', 'RADARR_API_KEY',
 ]
 
 load_dotenv(find_dotenv('./config/.env'))
@@ -170,6 +171,10 @@ class Config:
         self.STATUS_UI_ENABLED = os.getenv('STATUS_UI_ENABLED')
         self.STATUS_UI_PORT = os.getenv('STATUS_UI_PORT')
         self.STATUS_UI_AUTH = os.getenv('STATUS_UI_AUTH')
+        self.SONARR_URL = os.getenv('SONARR_URL')
+        self.SONARR_API_KEY = load_secret_or_env('sonarr_api_key')
+        self.RADARR_URL = os.getenv('RADARR_URL')
+        self.RADARR_API_KEY = load_secret_or_env('radarr_api_key')
 
 
 # Default singleton instance — used by existing code via module-level globals
@@ -227,3 +232,7 @@ BLACKHOLE_SYMLINK_MAX_AGE = config.BLACKHOLE_SYMLINK_MAX_AGE
 STATUS_UI_ENABLED = config.STATUS_UI_ENABLED
 STATUS_UI_PORT = config.STATUS_UI_PORT
 STATUS_UI_AUTH = config.STATUS_UI_AUTH
+SONARR_URL = config.SONARR_URL
+SONARR_API_KEY = config.SONARR_API_KEY
+RADARR_URL = config.RADARR_URL
+RADARR_API_KEY = config.RADARR_API_KEY

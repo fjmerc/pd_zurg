@@ -1,208 +1,199 @@
-﻿<div align="center" style="max-width: 100%; height: auto;">
-  <a href="https://github.com/fjmerc/pd_zurg">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://github.com/I-am-PUID-0/pd_zurg/assets/36779668/da811d50-18bf-4498-b508-2b1a6ed848bc">
-      <img alt="pd_zurg" src="https://github.com/I-am-PUID-0/pd_zurg/assets/36779668/da811d50-18bf-4498-b508-2b1a6ed848bc" style="max-width: 100%; height: auto;">
-    </picture>
-  </a>
-</div>
+# pd_zurg
 
-## 📜 Description
-A combined docker image for the unified deployment of **[itsToggle's](https://github.com/itsToggle)**, **[yowmamasita's](https://github.com/yowmamasita)**, and **[ncw's](https://github.com/ncw)** projects -- **[plex_debrid](https://github.com/itsToggle/plex_debrid)**, **[zurg](https://github.com/debridmediamanager/zurg-testing)**, and **[rclone](https://github.com/rclone/rclone)**
+Stream your Real-Debrid library through Plex or Jellyfin — one container, zero local storage.
+
+![Build Status](https://img.shields.io/github/actions/workflow/status/fjmerc/pd_zurg/docker-image.yml)
+
+## What is pd_zurg?
+
+pd_zurg packages three tools into a single Docker container: **[Zurg](https://github.com/debridmediamanager/zurg-testing)** (connects to your debrid account and serves files via WebDAV), **[rclone](https://github.com/rclone/rclone)** (mounts those files as a local directory), and optionally **[plex_debrid](https://github.com/itsToggle/plex_debrid)** (automates content discovery from your watchlists). Your media server sees the debrid library as local files and streams them on demand — no downloading, no local storage needed.
+
+~150MB Alpine image. 3 services. That's it.
+
+## Why This Fork?
 
 > [!NOTE]
-> ## 🔀 Fork Status: Actively Maintained
-> This is an **actively maintained fork** of the original pd_zurg by [I-am-PUID-0](https://github.com/I-am-PUID-0).
->
-> The upstream project has been deprecated in favor of [DUMB](https://github.com/I-am-PUID-0/DUMB) (Debrid Unlimited Media Bridge), a ground-up rewrite supporting 30+ services. If you need a full-featured media orchestration platform, DUMB is the recommended path.
->
-> **This fork** keeps pd_zurg's simplicity advantage (~150MB Alpine image, 3 services) while backporting key reliability and usability features from DUMB:
-> - Process auto-restart with exponential backoff
-> - Event notifications via 90+ services (Discord, Telegram, etc.)
-> - Blackhole watch folder for Sonarr/Radarr integration
-> - Stuck ffprobe recovery for debrid mounts
-> - Lightweight status dashboard with web-based settings editor
-> - MDBList content discovery
-> - Atomic config writes, ordered shutdown, and more
+> The original pd_zurg by [I-am-PUID-0](https://github.com/I-am-PUID-0) has been deprecated in favor of [DUMB](https://github.com/I-am-PUID-0/DUMB). This fork keeps pd_zurg alive with a focus on simplicity and reliability.
 
->[!CAUTION]
-> Docker Desktop **CANNOT** be used to run pd_zurg. 
->
-> Docker Desktop does not support the [mount propagation](https://docs.docker.com/storage/bind-mounts/#configure-bind-propagation) required for rclone mounts. 
->
-> ![image](https://github.com/I-am-PUID-0/pd_zurg/assets/36779668/08887298-6a9c-4980-98bb-f119f8632a99)
->
-> See the wiki for [alternative solutions](https://github.com/I-am-PUID-0/pd_zurg/wiki/Setup-Guides) to run pd_zurg on Windows through WSL2.
+**What this fork adds:**
 
+- **Process auto-restart** — crashed services restart with exponential backoff (5s → 300s), resets after 1 hour of stability
+- **Blackhole watch folder** — Sonarr/Radarr drop `.torrent`/`.magnet` files, pd_zurg sends them to debrid and creates symlinks when ready. See the [Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md)
+- **Local library dedup** — checks your existing library before submitting to debrid to avoid duplicates
+- **Notifications** — 90+ services via [Apprise](https://github.com/caronc/apprise) (Discord, Telegram, Slack, email, etc.)
+- **Status dashboard** — process health, mount status, system resources, and a browser-based settings editor
+- **ffprobe recovery** — detects and kills stuck ffprobe processes on debrid mounts
+- **MDBList integration** — subscribe to curated lists that auto-feed plex_debrid
+- **Atomic config writes** and **ordered shutdown** for reliability
 
-## 🌟 Features
+## How It Works
 
-See the pd_zurg [Wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki) for a full list of original features and settings.
+pd_zurg supports two workflows. You can use either or both.
 
-### New in This Fork
+**Watchlist Flow** — plex_debrid monitors your watchlists automatically:
 
-#### 🔄 Process Auto-Restart with Health Checks
-Crashed processes (Zurg, rclone, plex_debrid) are automatically detected and restarted with exponential backoff (5s, 15s, 45s, 120s, 300s). A sliding window resets the restart counter after 1 hour of stability. Maximum 5 restarts before giving up. No configuration needed — enabled by default.
+```
+Watchlist (Plex / Trakt / Overseerr)
+  → plex_debrid (search & match)
+    → Real-Debrid (cloud cache)
+      → Zurg (WebDAV) → rclone (/data mount)
+        → Plex / Jellyfin (stream)
+```
 
-#### 🔔 Apprise Notifications
-Send event notifications to 90+ services (Discord, Telegram, Slack, email, Pushover, etc.) via a single `NOTIFICATION_URL` environment variable. Events include startup, shutdown, mount success/failure, and duplicate cleanup completion. Supports event filtering and severity levels.
+**Arr + Blackhole Flow** — Sonarr/Radarr with tag-based routing:
 
-#### 📂 Blackhole Watch Folder
-Drop `.torrent` or `.magnet` files into a watch directory and they're automatically submitted to your debrid service. Compatible with Sonarr/Radarr's blackhole download client. Supports Real-Debrid, AllDebrid, and TorBox. Failed files are quarantined to a `failed/` subdirectory.
+```
+Overseerr (requests) → Sonarr / Radarr (tag-based routing)
+  │
+  ├─ Local path (no debrid tag):
+  │    VPN → qBittorrent / Usenet → Local Disk → Plex
+  │
+  └─ Debrid path (tag: debrid — no VPN needed):
+       Blackhole (/watch)
+         → pd_zurg (submit to Real-Debrid)
+           → Zurg / rclone (mount)
+             → Symlinks (/completed)
+               → Sonarr / Radarr (import) → Plex (stream)
+```
 
-#### 🌐 Cross-Machine Setup
-If pd_zurg and Sonarr/Radarr run on different machines, expose Zurg's WebDAV port (`ZURG_PORT`) and mount it on the arr machine using rclone. This is simpler and more reliable than NFS re-export. Pin `ZURG_PORT` to a fixed value and expose it in docker-compose, then mount via `rclone mount :webdav:` on the remote machine with `--umask 000 --allow-other`.
+## Quick Start
 
-#### 🔍 ffprobe Stuck-Process Recovery
-Detects ffprobe processes stuck in uninterruptible sleep on debrid mounts (a common issue when Plex/Jellyfin scans expired links). Attempts recovery by "poking" the stuck I/O, then kills the process after 3 failed attempts. Enabled by default with a 5-minute threshold.
+### Prerequisites
 
-#### 📊 Status Web UI & Settings Editor
-Lightweight dashboard at `/status` showing process health, mount status, system resources (cgroup-aware for containers), and recent events. Auto-refreshes every 10 seconds. JSON API at `/api/status` for monitoring integration.
+- A **Linux Docker host** (not Docker Desktop — it lacks [mount propagation](https://docs.docker.com/storage/bind-mounts/#configure-bind-propagation) support. See the [wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki/Setup-Guides) for WSL2 alternatives on Windows)
+- A [Real-Debrid](https://real-debrid.com/apitoken), [AllDebrid](https://alldebrid.com/apikeys/), or [TorBox](https://torbox.app/settings) account with an API key
+- FUSE support on the host (`/dev/fuse`)
 
-The built-in **settings editor** at `/settings` lets you configure everything through the browser — no SSH or file editing required:
-- **pd_zurg tab**: Edit all environment variables with proper input types (toggles, dropdowns, password fields), inline validation, and SIGHUP reload (no container restart needed)
-- **plex_debrid tab**: Edit settings.json with multi-select service pickers, list editors, and quality profile JSON editor — saves and restarts plex_debrid automatically
-- **OAuth**: Connect Trakt, Debrid Link, Put.io, and Orionoid accounts via device code flow directly from the browser
-- **Import/Export**: Download or upload settings files for backup and migration
+### 1. Build the image
 
-Requires `STATUS_UI_AUTH` to be set (e.g., `admin:changeme`) — the settings editor is not accessible without authentication.
+```bash
+docker build -t pd_zurg https://github.com/fjmerc/pd_zurg.git
+```
 
-#### 🎬 MDBList Content Source
-Subscribe to curated MDBList lists (IMDB Top 250, trending, genre lists, custom lists) that automatically feed plex_debrid's download pipeline. Configure via plex_debrid's settings menu with your MDBList API key and list IDs.
+### 2. Configure
 
-#### 🔒 Atomic Config Writes
-Config file updates (Zurg config.yml, rclone.config) use write-to-temp-then-rename to prevent corruption if the container is killed mid-write.
+```bash
+# Download the example config and compose file
+wget https://raw.githubusercontent.com/fjmerc/pd_zurg/master/.env.example -O .env
+wget https://raw.githubusercontent.com/fjmerc/pd_zurg/master/docker-compose.yml
 
-#### ⏱️ Ordered Shutdown
-Per-process shutdown timeouts (plex_debrid: 15s, Zurg/rclone: 10s) with elapsed time logging to identify slow-to-stop processes.
+# Edit — at minimum set these:
+#   RD_API_KEY        (your debrid API key)
+#   STATUS_UI_AUTH    (e.g., admin:yourpassword)
+nano .env
+```
 
-## 🐳 Docker Image
-Build the image locally (see [Docker Build](#-docker-build) below) or use the upstream image from [Docker Hub](https://hub.docker.com/r/iampuid0/pd_zurg) if you don't need this fork's features.
+The [`.env.example`](.env.example) is fully commented — every setting is documented inline.
 
+### 3. Create directories
 
-## 🛠️ Docker-compose
+```bash
+mkdir -p config log cache mnt RD
+```
 
-> [!NOTE] 
-> The below examples are not exhaustive and are intended to provide a starting point for deployment.
-> Additionally, the host directories used in the examples are based on [Define the directory structure](https://github.com/I-am-PUID-0/pd_zurg/wiki/Setup-Guides#define-the-directory-structure) and provided for illustrative purposes and can be changed to suit your needs.
+### 4. Start
 
-```YAML
+```bash
+docker compose up -d
+```
+
+### 5. Verify
+
+- Open the status dashboard at `http://your-host:8080/status`
+- Check that Zurg and rclone show as **Running**
+- Verify the mount: `ls mnt/pd_zurg/` should show your debrid library categories
+
+## Choose Your Workflow
+
+### Option A: Watchlist Mode (plex_debrid)
+
+Best if you want fully automated content from Plex watchlists, Trakt lists, or Overseerr requests — no Sonarr/Radarr needed.
+
+**Enable in `.env`:**
+
+```bash
+PD_ENABLED=true
+PLEX_USER=your_plex_username
+PLEX_TOKEN=your_plex_token
+PLEX_ADDRESS=http://192.168.1.100:32400
+
+# Optional: auto-refresh Plex library when new content appears
+PLEX_REFRESH=true
+PLEX_MOUNT_DIR=/pd_zurg
+
+# Optional: Overseerr integration
+SEERR_API_KEY=your_key
+SEERR_ADDRESS=http://overseerr:5055
+```
+
+For **Jellyfin/Emby**, use `JF_ADDRESS` and `JF_API_KEY` instead of the Plex variables. Note: Jellyfin requires [additional plex_debrid setup](https://github.com/itsToggle/plex_debrid#open_file_folder-library-collection-service) for Trakt Collections.
+
+### Option B: Arr + Blackhole Mode (Sonarr/Radarr)
+
+Best if you already use Sonarr/Radarr and want debrid as a download client alongside (or instead of) qBittorrent/Usenet.
+
+**Enable in `.env`:**
+
+```bash
+PD_ENABLED=false                # Not needed — Sonarr/Radarr handle discovery
+BLACKHOLE_ENABLED=true
+BLACKHOLE_SYMLINK_ENABLED=true
+BLACKHOLE_RCLONE_MOUNT=/data/pd_zurg
+BLACKHOLE_SYMLINK_TARGET_BASE=/mnt/debrid   # Path as seen by Sonarr/Radarr
+
+# Optional: skip content you already have
+BLACKHOLE_DEDUP_ENABLED=true
+BLACKHOLE_LOCAL_LIBRARY_TV=/data/media/tv
+BLACKHOLE_LOCAL_LIBRARY_MOVIES=/data/media/movies
+```
+
+**Add volumes** in `docker-compose.yml`:
+
+```yaml
+volumes:
+  - /opt/blackhole:/watch            # Sonarr/Radarr drop .torrent files here
+  - /opt/completed:/completed        # pd_zurg creates symlinks here
+  # For dedup (optional, read-only):
+  - /path/to/library/tv:/data/media/tv:ro
+  - /path/to/library/movies:/data/media/movies:ro
+```
+
+See the **[Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md)** for complete setup including Sonarr/Radarr download client configuration, multi-host NFS, verification steps, and troubleshooting.
+
+### Option C: Both
+
+You can run plex_debrid and blackhole simultaneously. Set `PD_ENABLED=true` and `BLACKHOLE_ENABLED=true`. Use tags in Sonarr/Radarr to route specific content through the blackhole while plex_debrid handles watchlist items.
+
+## Docker Compose
+
+> [!NOTE]
+> These examples are starting points. Adjust paths to match your environment.
+
+### Base Setup
+
+```yaml
 services:
   pd_zurg:
     container_name: pd_zurg
-    image: pd_zurg:latest  # Build locally: docker build -t pd_zurg https://github.com/fjmerc/pd_zurg.git
-    stdin_open: true # docker run -i
-    tty: true        # docker run -t
+    image: pd_zurg:latest
+    stdin_open: true
+    tty: true
+    env_file: .env
     volumes:
-      ## Location of configuration files. If a Zurg config.yml and/or Zurg app is placed here, it will be used to override the default configuration and/or app used at startup.
-      - /pd_zurg/config:/config
-      ## Location for logs
-      - /pd_zurg/log:/log
-      ## Location for rclone cache if enabled
-      - /pd_zurg/cache:/cache
-      ## Location for Zurg RealDebrid active configuration
-      - /pd_zurg/RD:/zurg/RD
-      ## Location for Zurg AllDebrid active configuration -- when supported by Zurg
-      - /pd_zurg/AD:/zurg/AD
-      ## Location for rclone mount to host
-      - /pd_zurg/mnt:/data:shared
-      ## Blackhole watch folder for .torrent/.magnet files (optional)
-      # - /pd_zurg/watch:/watch
-      ## Blackhole completed dir for symlink mode (optional)
-      # - /pd_zurg/completed:/completed
-      ## Local library paths for dedup checking (optional, read-only)
+      - ./config:/config
+      - ./log:/log
+      - ./cache:/cache
+      - ./RD:/zurg/RD
+      # - ./AD:/zurg/AD             # Uncomment for AllDebrid
+      - ./mnt:/data:shared
+      ## Uncomment for blackhole mode:
+      # - /opt/blackhole:/watch
+      # - /opt/completed:/completed
+      ## Uncomment for dedup (read-only):
       # - /path/to/library/tv:/data/media/tv:ro
       # - /path/to/library/movies:/data/media/movies:ro
-    environment:
-      - TZ=
-      ## Zurg Required Settings
-      - ZURG_ENABLED=true
-      - RD_API_KEY=
-     # - AD_API_KEY=
-     # - TORBOX_API_KEY=
-      ## Zurg Optional Settings
-     # - ZURG_LOG_LEVEL=DEBUG
-     # - ZURG_VERSION=v0.9.2-hotfix.4
-     # - ZURG_UPDATE=true
-     # - PLEX_REFRESH=true
-     # - PLEX_MOUNT_DIR=/pd_zurg
-     # - ZURG_USER=
-     # - ZURG_PASS=
-     # - ZURG_PORT=8800
-      ## Rclone Required Settings
-      - RCLONE_MOUNT_NAME=pd_zurg
-      ## Rclone Optional Settings - See rclone docs for full list
-     # - NFS_ENABLED=true
-     # - NFS_PORT=8000
-     # - RCLONE_LOG_LEVEL=DEBUG
-     # - RCLONE_CACHE_DIR=/cache
-     # - RCLONE_DIR_CACHE_TIME=10s
-     # - RCLONE_VFS_CACHE_MODE=full
-     # - RCLONE_VFS_CACHE_MAX_SIZE=100G
-     # - RCLONE_ATTR_TIMEOUT=8700h
-     # - RCLONE_BUFFER_SIZE=32M
-     # - RCLONE_VFS_CACHE_MAX_AGE=4h
-     # - RCLONE_VFS_READ_CHUNK_SIZE=32M
-     # - RCLONE_VFS_READ_CHUNK_SIZE_LIMIT=1G
-     # - RCLONE_TRANSFERS=8
-      ## Plex Debrid Required Settings
-      - PD_ENABLED=true
-      ## To utilize plex_debrid with Plex, the following environment variables are required
-      - PLEX_USER=
-      - PLEX_TOKEN=
-      - PLEX_ADDRESS=
-      ## To utilize plex_debrid with Jellyfin, the following environment variables are required - Note that plex_debrid will require addtional setup before use with Jellyfin
-     # - JF_ADDRESS=
-     # - JF_API_KEY=
-      ## Plex Debrid Optional Settings
-     # - PD_UPDATE=true
-     # - PD_REPO=itsToggle,plex_debrid,main
-     # - SHOW_MENU=false
-     # - SEERR_API_KEY=
-     # - SEERR_ADDRESS=
-      ## Scraper Optional Settings
-     # - FLARESOLVERR_URL=http://flaresolverr:8191/v1
-      ## Special Features
-     # - AUTO_UPDATE_INTERVAL=12
-     # - DUPLICATE_CLEANUP=true
-     # - CLEANUP_INTERVAL=1
-     # - DUPLICATE_CLEANUP_KEEP=local
-     # - PDZURG_LOG_LEVEL=DEBUG
-     # - PDZURG_LOG_COUNT=2
-     # - PDZURG_LOG_SIZE=10M
-      ## Notification Settings (supports 90+ services via Apprise)
-     # - NOTIFICATION_URL=discord://webhook_id/webhook_token
-     # - NOTIFICATION_EVENTS=startup,shutdown,mount_success,health_error
-     # - NOTIFICATION_LEVEL=info
-      ## Blackhole Watch Folder (Sonarr/Radarr integration)
-     # - BLACKHOLE_ENABLED=true
-     # - BLACKHOLE_DIR=/watch
-     # - BLACKHOLE_POLL_INTERVAL=5
-     # - BLACKHOLE_DEBRID=realdebrid
-      ## Blackhole Symlink Mode
-     # - BLACKHOLE_SYMLINK_ENABLED=true
-     # - BLACKHOLE_COMPLETED_DIR=/completed
-     # - BLACKHOLE_RCLONE_MOUNT=/data
-     # - BLACKHOLE_SYMLINK_TARGET_BASE=/mnt/symlinks
-     # - BLACKHOLE_MOUNT_POLL_TIMEOUT=300
-     # - BLACKHOLE_MOUNT_POLL_INTERVAL=10
-     # - BLACKHOLE_SYMLINK_MAX_AGE=72
-      ## Blackhole Local Library Dedup
-     # - BLACKHOLE_DEDUP_ENABLED=true
-     # - BLACKHOLE_LOCAL_LIBRARY_TV=/mnt/library/tv
-     # - BLACKHOLE_LOCAL_LIBRARY_MOVIES=/mnt/library/movies
-      ## Status Web UI
-     # - STATUS_UI_ENABLED=true
-     # - STATUS_UI_PORT=8080
-     # - STATUS_UI_AUTH=admin:changeme
-      ## ffprobe Monitor (enabled by default)
-     # - FFPROBE_MONITOR_ENABLED=true
-     # - FFPROBE_STUCK_TIMEOUT=300
-    ## Status Web UI port (optional)
-    # ports:
-    #   - "8080:8080"
-    # Example to attach to gluetun vpn container if realdebrid blocks IP address
-    # network_mode: container:gluetun
+    ports:
+      - "8080:8080"                  # Status UI
     devices:
       - /dev/fuse:/dev/fuse:rwm
     cap_add:
@@ -211,256 +202,278 @@ services:
       - apparmor:unconfined
       - no-new-privileges
 ```
-## 🎥 Example Plex Docker-compose
 
-> [!NOTE] 
-> The Plex server must be started after the rclone mount is available.  The below example uses the ```depends_on``` parameter to delay the start of the Plex server until the rclone mount is available.  The rclone mount must be shared to the Plex container.  The rclone mount location should be added to the Plex library.  
+### Plex Companion
 
-```YAML
-services:
+The Plex container should wait for pd_zurg's mount to be ready:
+
+```yaml
   plex:
     image: plexinc/pms-docker:latest
     container_name: plex
     devices:
-      - /dev/dri:/dev/dri    
+      - /dev/dri:/dev/dri
     volumes:
-      - /home/username/docker/plex/library:/config
-      - /home/username/docker/plex/transcode:/transcode
-      - /home/username/pd_zurg/mnt:/rclone # rclone mount location from pd_zurg must be shared to Plex container. Add to plex library  
+      - /path/to/plex/config:/config
+      - /path/to/plex/transcode:/transcode
+      - ./mnt:/rclone               # rclone mount from pd_zurg — add to Plex library
     environment:
-      - TZ=
+      - TZ=America/New_York
     ports:
       - "32400:32400"
-    depends_on:  # Used to delay the startup of plex to ensure the rclone mount is available.
-      pd_zurg: # set to the name of the container running rclone
-        condition: service_healthy 
+    depends_on:
+      pd_zurg:
+        condition: service_healthy
 ```
 
-## 🔨 Docker Build
+## Features
 
-### Docker CLI
+| Feature | Description |
+|---------|-------------|
+| **Process auto-restart** | Crashed processes restart with exponential backoff (5s → 300s). Resets after 1 hour of stability. Max 5 retries. |
+| **Blackhole + symlinks** | Sonarr/Radarr integration via watch folder. Creates symlinks to debrid content — zero-copy, no local storage. [Guide](BLACKHOLE_SYMLINK_GUIDE.md) |
+| **Local library dedup** | Checks your existing TV/movie library before sending torrents to debrid. Avoids duplicate downloads. |
+| **Notifications** | 90+ services via [Apprise](https://github.com/caronc/apprise). Events: startup, shutdown, mount, cleanup, errors. |
+| **Status dashboard** | Process health, mount status, system resources at `/status`. Auto-refreshes. JSON API at `/api/status`. |
+| **Settings editor** | Browser-based config at `/settings`. Edit env vars, plex_debrid settings, run OAuth flows — no SSH needed. |
+| **MDBList** | Subscribe to curated lists (IMDB Top 250, trending, genre lists) that auto-feed plex_debrid. |
+| **ffprobe recovery** | Detects stuck ffprobe processes on debrid mounts. Recovers or kills after 3 failed attempts. |
+| **Cross-machine setup** | Expose Zurg's WebDAV port and mount from any machine via rclone. Simpler than NFS. |
+| **Atomic config writes** | Write-to-temp-then-rename prevents corruption on mid-write container kills. |
+| **Ordered shutdown** | Per-process timeouts with elapsed time logging. |
+| **Duplicate cleanup** | Automated Plex duplicate detection with configurable keep policy (local vs Zurg copy). |
 
-```
-docker build -t pd_zurg https://github.com/fjmerc/pd_zurg.git
-```
+## Web UI & Settings Editor
 
-## 🎥 Plex or Jellyfin/Emby deployment
+The **status dashboard** at `/status` shows:
+- Process health (Zurg, rclone, plex_debrid) with uptime
+- Mount status and disk usage
+- System resources (cgroup-aware for containers)
+- Recent events and filtered log viewer
 
-To use plex_debrid with Plex, the following environment variables are required: PD_ENABLED, PLEX_USER, PLEX_TOKEN, PLEX_ADDRESS
+The **settings editor** at `/settings` provides:
+- **pd_zurg tab** — edit all environment variables with toggles, dropdowns, password fields, inline validation, and SIGHUP reload (no restart needed)
+- **plex_debrid tab** — edit settings.json with multi-select pickers, list editors, and quality profile JSON editor
+- **OAuth tab** — connect Trakt, Debrid Link, Put.io, and Orionoid via device code flow
+- **Import/Export** — download or upload settings for backup and migration
 
-To use plex_debrid with Jellyfin/Emby, the following environment variables are required: PD_ENABLED, JF_ADDRESS, JF_API_KEY
+Requires `STATUS_UI_AUTH` (e.g., `admin:changeme`). The settings editor is not accessible without authentication.
 
-> ⚠️ Note: Addtional setup required for Jellyfin
->
-> plex_debrid requires the Library collection service to be set for Trakt Collection: see the plex_debrid [Trakt Collections](https://github.com/itsToggle/plex_debrid#open_file_folder-library-collection-service) for more details
+## Configuration Reference
 
-## 🔄 Plex Refresh
+All settings are documented in [`.env.example`](.env.example) with inline comments. The grouped tables below provide additional context.
 
-To enable Plex library refresh with Zurg, the following environment variables are required: PLEX_REFRESH, PLEX_MOUNT_DIR, PLEX_ADDRESS, PLEX_TOKEN, ZURG_ENABLED, RD_API_KEY, RCLONE_MOUNT_NAME
+<details>
+<summary><strong>Core — Zurg & rclone (always required)</strong></summary>
 
-## 🔗 SEERR Integration
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TZ` | [Timezone](http://en.wikipedia.org/wiki/List_of_tz_database_time_zones) | |
+| `ZURG_ENABLED` | Enable Zurg | `false` |
+| `RD_API_KEY` | [Real-Debrid API key](https://real-debrid.com/apitoken) | |
+| `AD_API_KEY` | [AllDebrid API key](https://alldebrid.com/apikeys/) (alternative to RD) | |
+| `TORBOX_API_KEY` | [TorBox API key](https://torbox.app/settings) (alternative to RD) | |
+| `RCLONE_MOUNT_NAME` | Name for the rclone mount | |
+| `RCLONE_LOG_LEVEL` | [Log level](https://rclone.org/docs/#log-level-level) for rclone. Set to `OFF` to suppress | `NOTICE` |
+| `RCLONE_DIR_CACHE_TIME` | [Directory cache duration](https://rclone.org/commands/rclone_mount/#vfs-directory-cache). Recommended: `10s` | `5m` |
+| `RCLONE_CACHE_DIR` | [Cache directory](https://rclone.org/docs/#cache-dir-dir) | |
+| `RCLONE_VFS_CACHE_MODE` | [VFS cache mode](https://rclone.org/commands/rclone_mount/#vfs-file-caching) | |
+| `RCLONE_VFS_CACHE_MAX_SIZE` | Max VFS cache size | |
+| `RCLONE_VFS_CACHE_MAX_AGE` | Max VFS cache age | |
+| `RCLONE_VFS_READ_CHUNK_SIZE` | Initial read chunk size | |
+| `RCLONE_VFS_READ_CHUNK_SIZE_LIMIT` | Max read chunk size | |
+| `RCLONE_BUFFER_SIZE` | Buffer size for transfers | |
+| `RCLONE_TRANSFERS` | Number of parallel transfers | |
+| `ZURG_VERSION` | Pin Zurg version (e.g., `v0.9.2-hotfix.4`) or `nightly` (requires `GITHUB_TOKEN`) | `latest` |
+| `ZURG_UPDATE` | Auto-update Zurg on startup | `false` |
+| `ZURG_LOG_LEVEL` | Zurg log level. Set to `OFF` to suppress | `INFO` |
+| `ZURG_USER` | WebDAV basic auth username | |
+| `ZURG_PASS` | WebDAV basic auth password | |
+| `ZURG_PORT` | WebDAV port. **Set a fixed port** if exposing to other machines | random |
+| `NFS_ENABLED` | Enable rclone NFS server. **Warning:** does NOT create a local mount — use FUSE mode if Plex is on the same machine | `false` |
+| `NFS_PORT` | NFS server port | random |
 
-To enable either Overseerr or Jellyseerr integration with plex_debrid, the following environment variables are required: SEERR_API_KEY, SEERR_ADDRESS
+</details>
 
+<details>
+<summary><strong>plex_debrid — Watchlist automation</strong></summary>
 
-## 🔄 Automatic Updates
-If you would like to enable automatic updates for plex_debrid, utilize the ```PD_UPDATE``` environment variable. Only works when PD_REPO is set.
-Additional details can be found in the [pd_zurg Wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki#automatic-update-of-plex_debrid-to-the-latest-version) 
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PD_ENABLED` | Enable plex_debrid | `false` |
+| `PLEX_USER` | [Plex username](https://app.plex.tv/desktop/#!/settings/account) | |
+| `PLEX_TOKEN` | [Plex token](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/) | |
+| `PLEX_ADDRESS` | Plex server URL (e.g., `http://192.168.1.100:32400`). Must include `http://` or `https://`, no trailing `/` | |
+| `JF_ADDRESS` | Jellyfin/Emby URL (alternative to Plex) | |
+| `JF_API_KEY` | Jellyfin/Emby API key | |
+| `SEERR_API_KEY` | Overseerr/Jellyseerr API key | |
+| `SEERR_ADDRESS` | Overseerr/Jellyseerr URL | |
+| `SHOW_MENU` | Show plex_debrid interactive menu on startup | `true` |
+| `PD_UPDATE` | Auto-update plex_debrid. Requires `PD_REPO` | `false` |
+| `PD_REPO` | Update repository: `user,repo,branch` (e.g., `itsToggle,plex_debrid,main`) | |
+| `PD_LOG_LEVEL` | Log level (`DEBUG`, `INFO`, or `OFF`) | `INFO` |
+| `TRAKT_CLIENT_ID` | Trakt API client ID (uses itsToggle's default if unset) | |
+| `TRAKT_CLIENT_SECRET` | Trakt API client secret | |
+| `FLARESOLVERR_URL` | [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) URL for Cloudflare-protected indexers | |
 
+</details>
 
-If you would like to enable automatic updates for Zurg, utilize the ```ZURG_UPDATE``` environment variable. 
-Additional details can be found in the [pd_zurg Wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki#automatic-update-of-zurg-to-the-latest-version)
+<details>
+<summary><strong>Plex Library Management</strong></summary>
 
-## 🌐 Environment Variables
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PLEX_REFRESH` | Auto-refresh Plex libraries after mount changes | `false` |
+| `PLEX_MOUNT_DIR` | Mount path as Plex sees it (for library refresh) | |
+| `DUPLICATE_CLEANUP` | Automated Plex duplicate detection and cleanup | `false` |
+| `CLEANUP_INTERVAL` | Hours between duplicate cleanup runs | `24` |
+| `DUPLICATE_CLEANUP_KEEP` | Which copy to keep: `local` (logs Zurg dupes) or `zurg` (deletes local copy) | `local` |
+| `AUTO_UPDATE_INTERVAL` | Hours between auto-update checks | `24` |
 
-To customize some properties of the container, the following environment
-variables can be passed via the `-e` parameter (one for each variable), or via the docker-compose file within the ```environment:``` section, or with a .env file saved to the config directory -- See the wiki for more info on using the [.env](https://github.com/I-am-PUID-0/pd_zurg/wiki/Settings#use-of-env-file-for-setting-environment-variables).  Value
-of this parameter has the format `<VARIABLE_NAME>=<VALUE>`.
+</details>
 
-| Variable       | Description                                  | Default | Required for rclone| Required for plex_debrid| Required for zurg|
-|----------------|----------------------------------------------|---------|:-:|:-:|:-:|
-|`TZ`| [TimeZone](http://en.wikipedia.org/wiki/List_of_tz_database_time_zones) used by the container |  |
-|`RD_API_KEY`| [RealDebrid API key](https://real-debrid.com/apitoken) |  | | :heavy_check_mark:| :heavy_check_mark:|
-|`AD_API_KEY`| [AllDebrid API key](https://alldebrid.com/apikeys/) |  | | :heavy_check_mark:| :heavy_check_mark:|
-|`TORBOX_API_KEY`| [TorBox API key](https://torbox.app/settings) |  | | :heavy_check_mark:| :heavy_check_mark:|
-|`RCLONE_MOUNT_NAME`| A name for the rclone mount |  | :heavy_check_mark:|
-|`RCLONE_LOG_LEVEL`| [Log level](https://rclone.org/docs/#log-level-level) for rclone - To suppress logs set value to OFF | `NOTICE` |
-|`RCLONE_LOG_FILE`| [Log file](https://rclone.org/docs/#log-file-file) for rclone |  |
-|`RCLONE_DIR_CACHE_TIME`| [How long a directory should be considered up to date and not refreshed from the backend](https://rclone.org/commands/rclone_mount/#vfs-directory-cache) #optional, but recommended is 10s. | `5m` |
-|`RCLONE_CACHE_DIR`| [Directory used for caching](https://rclone.org/docs/#cache-dir-dir). |  |
-|`RCLONE_VFS_CACHE_MODE`| [Cache mode for VFS](https://rclone.org/commands/rclone_mount/#vfs-file-caching) |  |
-|`RCLONE_VFS_CACHE_MAX_SIZE`| [Max size of the VFS cache](https://rclone.org/commands/rclone_mount/#vfs-file-caching) | |
-|`RCLONE_VFS_CACHE_MAX_AGE`| [Max age of the VFS cache](https://rclone.org/commands/rclone_mount/#vfs-file-caching) |  |
-|`PLEX_USER`| The [Plex Username](https://app.plex.tv/desktop/#!/settings/account) for your account | || :heavy_check_mark:|
-|`PLEX_TOKEN`| The [Plex Token](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/) associated with PLEX_USER |  || :heavy_check_mark:|
-|`PLEX_ADDRESS`| The URL of your Plex server. Example: http://192.168.0.100:32400 or http://plex:32400 - format must include ```http://``` or ```https://``` and have no trailing characters after the port number (32400). E.g., ```/``` ||| :heavy_check_mark:|
-|`PLEX_REFRESH`| Set the value "true" to enable Plex library refresh called by the Zurg process  | `false ` | | | |
-|`PLEX_MOUNT_DIR`| Set the value to the mount location used within Plex to enable Plex library refresh called by the Zurg process  |  | | | |
-|`SHOW_MENU`| Enable the plex_debrid menu to show upon startup, requiring user interaction before the program runs. Conversely, if the plex_debrid menu is disabled, the program will automatically run upon successful startup. If used, the value must be ```true``` or ```false``` | `true` |
-|`PD_ENABLED`| Set the value "true" to enable the plex_debrid process | `false ` | | :heavy_check_mark: | |
-|`PD_LOG_LEVEL`| The level at which logs should be captured. Only DEBUG and INFO are supported for plex_debrid  - To suppress logs set value to OFF   | `INFO` |
-|`PD_LOGFILE`| Log file for plex_debrid. The log file will appear in the ```/config``` as ```plex_debrid.log```. If used, the value must be ```true``` or ```false``` | `false` |
-|`PD_UPDATE`| Enable automatic updates of plex_debrid. Adding this variable will enable automatic updates to the latest version of plex_debrid locally within the container. Only enabled if PD_REPO is set| `false` |
-|`PD_REPO`| The repository to use for plex_debrid. If used, the value must be a comma seperated list for the GitHub username,repository name, and optionally the branch; e.g., "itsToggle,plex_debrid,main" | `None` |
-|`TRAKT_CLIENT_ID`| The Trakt Client ID for plex_debrid - when not set, it will use **[itsToggle's](https://github.com/itsToggle)** trakt client ID | ` ` | |  | |
-|`TRAKT_CLIENT_SECRET`| The Trakt Client Secret for plex_debrid - when not set, it will use **[itsToggle's](https://github.com/itsToggle)** trakt secret| ` ` | | | |
-|`AUTO_UPDATE_INTERVAL`| Interval between automatic update checks in hours. Vaules can be any positive [whole](https://www.oxfordlearnersdictionaries.com/us/definition/english/whole-number) or [decimal](https://www.oxfordreference.com/display/10.1093/oi/authority.20110803095705740;jsessionid=3FDC96CC0D79CCE69702661D025B9E9B#:~:text=The%20separator%20used%20between%20the,number%20expressed%20in%20decimal%20representation.) point based number. Ex. a value of .5 would yield thirty minutes, and 1.5 would yield one and a half hours | `24` |
-|`DUPLICATE_CLEANUP`| Automated cleanup of duplicate content in Plex.  | `false` |
-|`CLEANUP_INTERVAL`| Interval between duplicate cleanup in hours. Values can be any positive [whole](https://www.oxfordlearnersdictionaries.com/us/definition/english/whole-number) or [decimal](https://www.oxfordreference.com/display/10.1093/oi/authority.20110803095705740;jsessionid=3FDC96CC0D79CCE69702661D025B9E9B#:~:text=The%20separator%20used%20between%20the,number%20expressed%20in%20decimal%20representation.) point based number. Ex. a value of .5 would yield thirty minutes and 1.5 would yield one and a half hours | `24` |
-|`DUPLICATE_CLEANUP_KEEP`| Which copy to keep when duplicates are found: `local` (default) logs Zurg duplicates but skips deletion since Zurg's mount is read-only; `zurg` deletes the local copy instead, permanently resolving the duplicate. | `local` |
-|`PDZURG_LOG_LEVEL`| The level at which logs should be captured. See the python [Logging Levels](https://docs.python.org/3/library/logging.html#logging-levels) documentation for more details  | `INFO` |
-|`PDZURG_LOG_COUNT`| The number logs to retain. Result will be value + current log  | `2` |
-|`PDZURG_LOG_SIZE`| The size of the log file before it is rotated. Valid options are 'K' (kilobytes), 'M' (megabytes), and 'G' (gigabytes)  | `10M` |
-|`COLOR_LOG_ENABLED`| Set the value "true" to enable colored log output in the container console | `false` |
-|`SKIP_VALIDATION`| Set the value "true" to skip startup configuration validation checks | `false` |
-|`ZURG_ENABLED`| Set the value "true" to enable the Zurg process | `false ` | | | :heavy_check_mark:|
-|`ZURG_VERSION`| The version of Zurg to use. If enabled, the value should contain v0.9.x or v0.9.x-hotfix.x format, or "nightly" if wanting the nightly builds from Zurg private repo (requires GITHUB_TOKEN) | `latest` | | | |
-|`ZURG_UPDATE`| Enable automatic updates of Zurg. Adding this variable will enable automatic updates to the latest version of Zurg locally within the container. | `false` | | | |
-|`ZURG_LOG_LEVEL`| Set the log level for Zurg - To suppress logs set value to OFF | `INFO` | | | |
-|`GITHUB_TOKEN`| GitHub Personal Token for use with Zurg private repo. Requires Zurg [sponsorship](https://github.com/sponsors/debridmediamanager) | `false ` | | | |
-|`JF_API_KEY`| The Jellyfin/Emby API Key ||| ||
-|`JF_ADDRESS`| The URL of your Jellyfin/Emby server. Example: http://192.168.0.101:8096 or http://jellyfin:8096 - format must include ```http://``` or ```https://``` and have no trailing characters after the port number (8096). E.g., ```/``` ||| |
-|`SEERR_API_KEY`| The Jellyseerr or Overseerr API Key ||| ||
-|`SEERR_ADDRESS`| The URL of your Jellyseerr or Overseerr server. Example: http://192.168.0.102:5055 or http://Overseerr:5055 - format must include ```http://``` or ```https://``` and have no trailing characters after the port number (8096). E.g., ```/``` ||| |
-|`ZURG_USER`| The username to be used for protecting the Zurg endpoints.  | `none `| | | |
-|`ZURG_PASS`| The password to be used for protecting the Zurg endpoints.  | `none `  | | | |
-|`ZURG_PORT`| The port to be used for the Zurg server. **Recommended:** set a fixed port if exposing WebDAV to other machines | `random ` | | | |
-|`NFS_ENABLED`| Set the value "true" to enable the NFS server for rclone. **Warning:** this uses `rclone serve nfs` which does NOT create a local mount — if Plex is on the same machine, it will lose access to files. For cross-machine setups, use FUSE mode (default) and expose `ZURG_PORT` instead | `false ` | | | |
-|`NFS_PORT`| The port to be used for the rclone NFS server | `random ` | | | |
-|`NOTIFICATION_URL`| [Apprise](https://github.com/caronc/apprise) notification URL(s), comma-separated. Example: `discord://webhook_id/webhook_token` | | | | |
-|`NOTIFICATION_EVENTS`| Comma-separated list of events to notify on: `startup`, `shutdown`, `mount_success`, `health_error`, `download_complete`, `library_refresh` | all | | | |
-|`NOTIFICATION_LEVEL`| Minimum notification severity: `info`, `warning`, `error` | `info` | | | |
-|`BLACKHOLE_ENABLED`| Set the value "true" to enable the blackhole watch folder for .torrent/.magnet files | `false` | | | |
-|`BLACKHOLE_DIR`| Watch directory path for blackhole files | `/watch` | | | |
-|`BLACKHOLE_POLL_INTERVAL`| Seconds between folder scans | `5` | | | |
-|`BLACKHOLE_DEBRID`| Debrid service to use: `realdebrid`, `alldebrid`, `torbox`. Auto-detected from API keys if not set | auto | | | |
-|`BLACKHOLE_SYMLINK_ENABLED`| Set the value "true" to enable symlink mode for blackhole. Creates symlinks from completed downloads to a target directory instead of copying files. See the [symlink guide](https://github.com/I-am-PUID-0/pd_zurg/wiki/Blackhole-Symlink-Guide) | `false` | | | |
-|`BLACKHOLE_COMPLETED_DIR`| Directory where completed download notifications are written | `/completed` | | | |
-|`BLACKHOLE_RCLONE_MOUNT`| Path to the rclone mount where debrid files appear. Auto-appends `RCLONE_MOUNT_NAME` if set to default | `/data` | | | |
-|`BLACKHOLE_SYMLINK_TARGET_BASE`| Base path for symlink targets. **Required** when `BLACKHOLE_SYMLINK_ENABLED=true` | | | | |
-|`BLACKHOLE_MOUNT_POLL_TIMEOUT`| Maximum seconds to wait for a file to appear on the rclone mount before giving up | `300` | | | |
-|`BLACKHOLE_MOUNT_POLL_INTERVAL`| Seconds between checks when polling for a file on the rclone mount | `10` | | | |
-|`BLACKHOLE_SYMLINK_MAX_AGE`| Hours after which old symlinks in the completed directory are automatically cleaned up | `72` | | | |
-|`BLACKHOLE_DEDUP_ENABLED`| Set the value "true" to enable local library duplicate checking before sending torrents to debrid | `false` | | | |
-|`BLACKHOLE_LOCAL_LIBRARY_TV`| Path to local TV library for dedup checking. Required when `BLACKHOLE_DEDUP_ENABLED=true` | | | | |
-|`BLACKHOLE_LOCAL_LIBRARY_MOVIES`| Path to local movies library for dedup checking. Required when `BLACKHOLE_DEDUP_ENABLED=true` | | | | |
-|`STATUS_UI_ENABLED`| Set the value "true" to enable the status web dashboard | `false` | | | |
-|`STATUS_UI_PORT`| Port for the status web UI | `8080` | | | |
-|`STATUS_UI_AUTH`| Basic auth credentials in `user:password` format. **Required** for the settings editor and restart buttons | none | | | |
-|`FLARESOLVERR_URL`| URL for a [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) instance used to bypass Cloudflare protection on torrent indexers. Example: `http://flaresolverr:8191/v1` | | | | |
-|`FFPROBE_MONITOR_ENABLED`| Set the value "false" to disable the stuck ffprobe process monitor | `true` | | | |
-|`FFPROBE_STUCK_TIMEOUT`| Seconds a ffprobe process must be in uninterruptible sleep before recovery is attempted | `300` | | | |
-|`FFPROBE_POLL_INTERVAL`| Seconds between ffprobe monitor scans | `30` | | | |
+<details>
+<summary><strong>Blackhole — Sonarr/Radarr integration</strong></summary>
 
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `BLACKHOLE_ENABLED` | Enable blackhole watch folder | `false` |
+| `BLACKHOLE_DIR` | Watch directory for `.torrent`/`.magnet` files | `/watch` |
+| `BLACKHOLE_POLL_INTERVAL` | Seconds between folder scans | `5` |
+| `BLACKHOLE_DEBRID` | Debrid service: `realdebrid`, `alldebrid`, `torbox`. Auto-detected if not set | auto |
+| `BLACKHOLE_SYMLINK_ENABLED` | Enable symlink creation after download. See [Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md) | `false` |
+| `BLACKHOLE_COMPLETED_DIR` | Directory for completed symlinks | `/completed` |
+| `BLACKHOLE_RCLONE_MOUNT` | rclone mount path inside container. Append mount name if set (e.g., `/data/pd_zurg`) | `/data` |
+| `BLACKHOLE_SYMLINK_TARGET_BASE` | Mount path as seen by Sonarr/Radarr host. **Required** for symlink mode | |
+| `BLACKHOLE_MOUNT_POLL_TIMEOUT` | Max seconds to wait for content on mount | `300` |
+| `BLACKHOLE_MOUNT_POLL_INTERVAL` | Seconds between mount checks | `10` |
+| `BLACKHOLE_SYMLINK_MAX_AGE` | Hours before old symlinks are cleaned up | `72` |
+| `BLACKHOLE_DEDUP_ENABLED` | Check local library before submitting to debrid | `false` |
+| `BLACKHOLE_LOCAL_LIBRARY_TV` | Container path to TV library for dedup. Required when dedup enabled | |
+| `BLACKHOLE_LOCAL_LIBRARY_MOVIES` | Container path to movie library for dedup. Required when dedup enabled | |
 
-## 📂 Data Volumes
+</details>
 
-The following table describes the data volumes used by the container.  The mappings
-are set via the `-v` parameter or via the docker-compose file within the ```volumes:``` section.  Each mapping is specified with the following
-format: `<HOST_DIR>:<CONTAINER_DIR>[:PERMISSIONS]`.
+<details>
+<summary><strong>Status UI & Monitoring</strong></summary>
 
-| Container path  | Permissions | Description |
-|-----------------|-------------|-------------|
-|`/config`| rw | This is where the application stores the rclone.conf, plex_debrid settings.json, and any files needing persistence. CAUTION: rclone.conf is overwritten upon start/restart of the container. Do NOT use an existing rclone.conf file if you have other rclone services |
-|`/log`| rw | This is where the application stores its log files |
-|`/data`| rshared  | This is where rclone will be mounted. Not required when only utilizing plex_debrid   |
-|`/zurg/RD`| rw| This is where Zurg will store the active configuration and data for RealDebrid. Not required when only utilizing plex_debrid   |
-|`/zurg/AD`| rw | This is where Zurg will store the active configuration and data for AllDebrid. Not required when only utilizing plex_debrid   |
-|`/watch`| rw | Blackhole watch folder for .torrent/.magnet files. Only required when `BLACKHOLE_ENABLED=true`   |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `STATUS_UI_ENABLED` | Enable the status web dashboard | `false` |
+| `STATUS_UI_PORT` | Dashboard port | `8080` |
+| `STATUS_UI_AUTH` | Basic auth in `user:password` format. **Required** for settings editor | |
+| `FFPROBE_MONITOR_ENABLED` | Enable stuck ffprobe detection | `true` |
+| `FFPROBE_STUCK_TIMEOUT` | Seconds before a stuck ffprobe triggers recovery | `300` |
+| `FFPROBE_POLL_INTERVAL` | Seconds between ffprobe monitor scans | `30` |
 
-## 🗝️ Docker Secrets
+</details>
 
-pd_zurg supports the use of docker secrets for the following environment variables:
+<details>
+<summary><strong>Notifications</strong></summary>
 
-| Variable       | Description                                  | Default | Required for rclone| Required for plex_debrid| Required for zurg|
-|----------------|----------------------------------------------|---------|:-:|:-:|:-:|
-|`GITHUB_TOKEN`| [GitHub Personal Token](https://github.com/settings/tokens) | ` ` | | | :heavy_check_mark:|
-|`RD_API_KEY`| [RealDebrid API key](https://real-debrid.com/apitoken) | ` ` | | :heavy_check_mark:| :heavy_check_mark:|
-|`AD_API_KEY`| [AllDebrid API key](https://alldebrid.com/apikeys/) | ` ` | | :heavy_check_mark:| :heavy_check_mark:|
-|`PLEX_USER`| The [Plex USERNAME](https://app.plex.tv/desktop/#!/settings/account) for your account | ` ` || :heavy_check_mark:|
-|`PLEX_TOKEN`| The [Plex Token](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/) associated with PLEX_USER | ` ` || :heavy_check_mark:|
-|`PLEX_ADDRESS`| The URL of your Plex server. Example: http://192.168.0.100:32400 or http://plex:32400 - format must include ```http://``` or ```https://``` and have no trailing characters after the port number (32400). E.g., ```/``` | ` ` || :heavy_check_mark:|
-|`JF_API_KEY`| The Jellyfin API Key | ` ` || :heavy_check_mark:||
-|`JF_ADDRESS`| The URL of your Jellyfin server. Example: http://192.168.0.101:8096 or http://jellyfin:8096 - format must include ```http://``` or ```https://``` and have no trailing characters after the port number (8096). E.g., ```/``` | ` ` || :heavy_check_mark:|
-|`SEERR_API_KEY`| The Jellyseerr or Overseerr API Key | ` ` || :heavy_check_mark:||
-|`SEERR_ADDRESS`| The URL of your Jellyseerr or Overseerr server. Example: http://192.168.0.102:5055 or http://Overseerr:5055 - format must include ```http://``` or ```https://``` and have no trailing characters after the port number (8096). E.g., ```/``` | ` ` || :heavy_check_mark:|
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `NOTIFICATION_URL` | [Apprise](https://github.com/caronc/apprise) URL(s), comma-separated (e.g., `discord://webhook_id/webhook_token`) | |
+| `NOTIFICATION_EVENTS` | Events: `startup`, `shutdown`, `mount_success`, `health_error`, `download_complete`, `library_refresh` | all |
+| `NOTIFICATION_LEVEL` | Minimum severity: `info`, `warning`, `error` | `info` |
 
-To utilize docker secrets, remove the associated environment variables from the docker-compose, create a file with the case-sensitive naming convention identified and secret value, then reference the file in the docker-compose file as shown below:
-```YAML
+</details>
+
+<details>
+<summary><strong>Logging & Advanced</strong></summary>
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PDZURG_LOG_LEVEL` | pd_zurg [log level](https://docs.python.org/3/library/logging.html#logging-levels) | `INFO` |
+| `PDZURG_LOG_COUNT` | Number of rotated log files to retain | `2` |
+| `PDZURG_LOG_SIZE` | Max log file size before rotation (`K`/`M`/`G`) | `10M` |
+| `COLOR_LOG_ENABLED` | Enable colored console output | `false` |
+| `GITHUB_TOKEN` | [GitHub token](https://github.com/settings/tokens) for Zurg private repo / nightly builds | |
+| `SKIP_VALIDATION` | Skip startup config validation | `false` |
+
+</details>
+
+## Data Volumes
+
+| Container path | Permissions | Description |
+|----------------|:-----------:|-------------|
+| `/config` | rw | rclone.conf, plex_debrid settings.json, persistent state. **Note:** rclone.conf is overwritten on start — don't share with other rclone instances |
+| `/log` | rw | Log files |
+| `/cache` | rw | rclone VFS cache (when `RCLONE_VFS_CACHE_MODE` is set) |
+| `/data` | rshared | rclone mount point. Not needed if only using plex_debrid |
+| `/zurg/RD` | rw | Zurg Real-Debrid state |
+| `/zurg/AD` | rw | Zurg AllDebrid state |
+| `/watch` | rw | Blackhole watch folder (only when `BLACKHOLE_ENABLED=true`) |
+| `/completed` | rw | Completed symlinks (only when `BLACKHOLE_SYMLINK_ENABLED=true`) |
+
+<details>
+<summary><strong>Docker Secrets</strong></summary>
+
+pd_zurg supports Docker secrets for sensitive values. Create files containing each secret and reference them in your compose:
+
+**Supported:** `github_token`, `rd_api_key`, `ad_api_key`, `torbox_api_key`, `plex_user`, `plex_token`, `plex_address`, `jf_api_key`, `jf_address`, `seerr_api_key`, `seerr_address`
+
+```yaml
 services:
   pd_zurg:
     image: pd_zurg:latest
     secrets:
-      - github_token
       - rd_api_key
-      - ad_api_key
-      - plex_user
       - plex_token
-      - plex_address
-      - jf_api_key
-      - jf_address
-      - seerr_api_key
-      - seerr_address
 
 secrets:
-  github_token:
-    file: ./path/to/github_token.txt
   rd_api_key:
-    file: ./path/to/rd_api_key.txt
-  ad_api_key:
-    file: ./path/to/ad_api_key.txt
-  plex_user:
-    file: ./path/to/plex_user.txt
+    file: ./secrets/rd_api_key.txt
   plex_token:
-    file: ./path/to/plex_token.txt
-  plex_address:
-    file: ./path/to/plex_address.txt
-  jf_api_key:
-    file: ./path/to/jf_api_key.txt
-  jf_address:
-    file: ./path/to/jf_address.txt
-  seerr_api_key:
-    file: ./path/to/seerr_api_key.txt
-  seerr_address:
-    file: ./path/to/seerr_address.txt
+    file: ./secrets/plex_token.txt
 ```
 
+Remove the corresponding environment variables when using secrets.
 
-## 📝 TODO
+</details>
 
-See the [issues](https://github.com/fjmerc/pd_zurg/issues) for planned features and bug reports.
+## Guides
 
+- **[Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md)** — complete Sonarr/Radarr setup including symlink mode, multi-host NFS, dedup, and troubleshooting
+- **[Changelog](CHANGELOG.md)** — version history and release notes
 
-## 🚀 Deployment
+## Troubleshooting
 
-pd_zurg allows for the simultaneous or individual deployment of plex_debrid and/or Zurg w/ rclone
+**Mount not available / empty `/data` directory**
+- Ensure `/dev/fuse` is mapped and `SYS_ADMIN` capability is set in your compose file
+- Check rclone logs: `docker logs pd_zurg 2>&1 | grep rclone`
+- Verify your debrid API key is valid and the account is active
 
-For additional details on deployment, see the upstream [pd_zurg Wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki/Setup-Guides#deployment-options) (setup guides still apply to this fork)
+**Docker Desktop: mount propagation error**
+- Docker Desktop does not support `rshared` mount propagation required by rclone
+- Use a Linux VM, WSL2, or bare-metal Docker instead
+- See the [wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki/Setup-Guides) for WSL2 setup instructions
 
+**Plex not seeing debrid content**
+- The Plex library must point to the rclone mount shared from pd_zurg
+- If using `depends_on: service_healthy`, ensure pd_zurg's healthcheck passes first
+- Try `PLEX_REFRESH=true` with `PLEX_MOUNT_DIR` set to the mount path as Plex sees it
 
-## 🌍 Community
+**Blackhole: symlinks created but broken**
+- `BLACKHOLE_SYMLINK_TARGET_BASE` must match the mount path on the Sonarr/Radarr host, not inside the pd_zurg container
+- Verify the rclone/WebDAV mount is accessible from where Sonarr/Radarr run
+- See the [Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md#troubleshooting) for detailed diagnostics
 
-### pd_zurg (this fork)
-- Create a new [issue](https://github.com/fjmerc/pd_zurg/issues) if you find a bug or have an idea for an improvement
-- For upstream pd_zurg questions, see the original [discussions](https://github.com/I-am-PUID-0/pd_zurg/discussions) or [discord](https://discord.gg/EPSWqmeeXM)
+**Stuck ffprobe processes**
+- Normal when Plex scans expired debrid links — the monitor handles it automatically
+- Increase `FFPROBE_STUCK_TIMEOUT` if you see false positives during large library scans
 
-### plex_debrid
-- For questions related to plex_debrid, see the GitHub [discussions](https://github.com/itsToggle/plex_debrid/discussions) 
-- or create a new [issue](https://github.com/itsToggle/plex_debrid/issues) if you find a bug or have an idea for an improvement.
-- or join the plex_debrid [discord server](https://discord.gg/u3vTDGjeKE) 
+## Community
 
+- **Bug reports & feature requests:** [GitHub Issues](https://github.com/fjmerc/pd_zurg/issues)
+- **Upstream pd_zurg:** [Discussions](https://github.com/I-am-PUID-0/pd_zurg/discussions) | [Discord](https://discord.gg/EPSWqmeeXM)
+- **plex_debrid:** [Discussions](https://github.com/itsToggle/plex_debrid/discussions) | [Discord](https://discord.gg/u3vTDGjeKE)
 
-## 🍻 Buy **[itsToggle](https://github.com/itsToggle)** a beer/coffee? :)
+## Credits
 
-If you enjoy the underlying projects and want to buy itsToggle a beer/coffee, feel free to use the real-debrid [affiliate link](http://real-debrid.com/?id=5708990) or send a virtual beverage via [PayPal](https://www.paypal.com/paypalme/oidulibbe) :)
+pd_zurg builds on the work of:
 
-## 🍻 Buy **[yowmamasita](https://github.com/yowmamasita)** a beer/coffee? :)
-
-If you enjoy the underlying projects and want to buy yowmamasita a beer/coffee, feel free to use the [GitHub sponsor link](https://github.com/sponsors/debridmediamanager)
-
-## 🍻 Buy **[ncw](https://github.com/ncw)** a beer/coffee? :) 
-
-If you enjoy the underlying projects and want to buy Nick Craig-Wood a beer/coffee, feel free to use the website's [sponsor links](https://rclone.org/sponsor/)
-
-## ✅ GitHub Workflow Status
-![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/fjmerc/pd_zurg/docker-image.yml)
+- **[itsToggle](https://github.com/itsToggle)** — plex_debrid ([affiliate](http://real-debrid.com/?id=5708990) | [PayPal](https://www.paypal.com/paypalme/oidulibbe))
+- **[yowmamasita](https://github.com/yowmamasita)** — Zurg ([sponsor](https://github.com/sponsors/debridmediamanager))
+- **[ncw](https://github.com/ncw)** — rclone ([sponsor](https://rclone.org/sponsor/))
+- **[I-am-PUID-0](https://github.com/I-am-PUID-0)** — original pd_zurg

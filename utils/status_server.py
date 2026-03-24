@@ -704,8 +704,11 @@ details summary:hover{color:var(--blue)}
               <div class="wf-arrow">&rarr;</div>
               <div class="wf-node blue">Zurg / rclone<small>Mount</small></div>
               <div class="wf-arrow">&rarr;</div>
+              <div class="wf-node orange">Symlinks<small>/completed</small></div>
+              <div class="wf-arrow">&rarr;</div>
+              <div class="wf-node muted">Sonarr / Radarr<small>Import</small></div>
+              <div class="wf-arrow">&rarr;</div>
               <div class="wf-node green">Plex<small>Stream</small></div>
-            </div>
           </div>
         </div>
       </div>
@@ -729,7 +732,7 @@ details summary:hover{color:var(--blue)}
           <dt style="color:var(--blue)">rclone</dt>
           <dd>Mounts the Zurg WebDAV server as a local directory at <code style="color:var(--green);font-size:.95em">/data/pd_zurg</code> so your media server can access the files.</dd>
           <dt style="color:var(--orange)">Blackhole</dt>
-          <dd>Watches a folder for .torrent/.magnet files dropped by Sonarr/Radarr. Sends them to Real-Debrid automatically. Sonarr continues monitoring for new episodes.</dd>
+          <dd>Watches a folder for .torrent/.magnet files dropped by Sonarr/Radarr. Sends them to Real-Debrid, waits for content on the mount, then creates symlinks in a completed directory for Sonarr/Radarr to import. Optional dedup checks your local library first.</dd>
           <dt>qBittorrent / Usenet</dt>
           <dd>Traditional download clients for the local path. qBittorrent handles torrents, SABnzbd/NZBGet handle Usenet NZBs. Both store files to local disk.</dd>
           <dt style="color:#bc8cff">VPN</dt>

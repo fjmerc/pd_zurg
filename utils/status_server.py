@@ -1624,7 +1624,7 @@ def setup():
     except Exception as e:
         logger.error(f"Failed to initialize library scanner: {e}")
 
-    server = http.server.HTTPServer(('0.0.0.0', port), StatusHandler)
+    server = http.server.ThreadingHTTPServer(('0.0.0.0', port), StatusHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     logger.info(f"Status UI started on port {port}")

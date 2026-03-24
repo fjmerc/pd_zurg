@@ -23,6 +23,6 @@ RUN \
   pip3 install -r /plex_debrid/requirements.txt && \
   pip3 install -r /requirements.txt
 
-HEALTHCHECK --interval=60s --timeout=10s \
+HEALTHCHECK --interval=60s --timeout=10s --start-period=120s \
   CMD ["/bin/sh", "-c", "source /venv/bin/activate && python /healthcheck.py"]
 ENTRYPOINT ["/bin/sh", "-c", "source /venv/bin/activate && python /main.py"]

@@ -136,6 +136,13 @@ ENV_SCHEMA = [
         ],
     },
     {
+        'name': 'Library Metadata',
+        'description': 'TMDB integration for episode titles, posters, and missing episode detection',
+        'fields': [
+            ('TMDB_API_KEY', 'TMDB API Key', 'secret', False, 'API key from themoviedb.org (free, enables metadata in Library page)'),
+        ],
+    },
+    {
         'name': 'Monitoring',
         'description': 'ffprobe monitoring and auto-update',
         'fields': [

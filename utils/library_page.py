@@ -261,7 +261,7 @@ function buildBadges(source) {
 }
 
 function buildCard(item, index) {
-  const yearSpan = item.year ? ' <span class="card-year">(' + esc(String(item.year)) + ')</span>' : '';
+  const yearSpan = '';
   let metaLine = '';
   if (item.type === 'show' && (item.seasons || item.episodes)) {
     const parts = [];

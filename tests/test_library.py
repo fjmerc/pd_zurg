@@ -7,6 +7,7 @@ import pytest
 import utils.library as library
 from utils.library import (
     _parse_folder_name,
+    _clean_title,
     _count_show_content,
     _collect_episodes,
     _build_season_data,
@@ -125,6 +126,94 @@ class TestParseFolderName:
     def test_bracket_tag_stripped(self):
         title, _ = _parse_folder_name("[TorrentDay] Some.Show.S02E03.720p")
         assert title == "Some Show"
+
+    # Season text stripping
+    def test_season_text_stripped_dotted(self):
+        title, year = _parse_folder_name("Arrested.Development.(2003).Season.1.1080p")
+        assert title == "Arrested Development"
+        assert year == 2003
+
+    def test_season_text_stripped_spaced(self):
+        title, year = _parse_folder_name("Arrested Development (2003) Season 1")
+        assert title == "Arrested Development"
+        assert year == 2003
+
+    def test_season_range_stripped(self):
+        title, year = _parse_folder_name("12.Monkeys.Season.1.to.4.Mp4")
+        assert title == "12 Monkeys"
+
+    def test_season_dash_range_stripped(self):
+        title, _ = _parse_folder_name("Vice.Principals.Season.1-2.1080p")
+        assert title == "Vice Principals"
+
+    def test_seasons_plural_stripped(self):
+        title, _ = _parse_folder_name("Show.Name.Seasons.1.and.2.WEB")
+        assert title == "Show Name"
+
+    def test_s01_s02_range_stripped(self):
+        title, _ = _parse_folder_name("Show.Name.S01-S03.COMPLETE")
+        assert title == "Show Name"
+
+    def test_container_suffix_stripped(self):
+        title, _ = _parse_folder_name("Some.Show.Season.1.Mp4")
+        assert title == "Some Show"
+
+    def test_complete_suffix_stripped(self):
+        title, _ = _parse_folder_name("Show.Name.S01.Complete")
+        assert title == "Show Name"
+
+    def test_mid_year_extracted(self):
+        title, year = _parse_folder_name("iCarly (2021) Season 2")
+        assert title == "iCarly"
+        assert year == 2021
+
+    def test_trailing_bare_year_extracted(self):
+        title, year = _parse_folder_name("iCarly 2020")
+        assert title == "iCarly"
+        assert year == 2020
+
+    def test_trailing_year_preserves_numeric_title(self):
+        # "1883" is all digits — trailing year should not eat the entire title
+        title, year = _parse_folder_name("1883")
+        assert title == "1883"
+
+    def test_extras_suffix_stripped(self):
+        title, _ = _parse_folder_name("Show.Name.S01.1080p + Extras")
+        assert title == "Show Name"
+
+
+# ---------------------------------------------------------------------------
+# _clean_title
+# ---------------------------------------------------------------------------
+
+class TestCleanTitle:
+
+    def test_passthrough_simple(self):
+        assert _clean_title("Movie Name", 2020) == ("Movie Name", 2020)
+
+    def test_strips_season_text(self):
+        title, year = _clean_title("Show.Season.3", None)
+        assert title == "Show"
+
+    def test_strips_season_range_to(self):
+        title, _ = _clean_title("Show.Season.1.to.4", None)
+        assert title == "Show"
+
+    def test_extracts_mid_year(self):
+        title, year = _clean_title("Show (2003) leftover", None)
+        assert title == "Show leftover"
+        assert year == 2003
+
+    def test_does_not_overwrite_existing_year(self):
+        title, year = _clean_title("Show (2003)", 2005)
+        # Existing year takes priority
+        assert year == 2005
+
+    def test_trailing_year_needs_nonempty_remainder(self):
+        title, year = _clean_title("1999", None)
+        # "1999" alone — stripping it would leave empty title
+        assert title == "1999"
+        assert year is None
 
 
 # ---------------------------------------------------------------------------

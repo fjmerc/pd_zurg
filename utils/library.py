@@ -49,6 +49,64 @@ _SITE_PREFIX_PATTERN = re.compile(
 )
 _BRACKET_TAG_PATTERN = re.compile(r'^\[.*?\][\s.\-_]*')
 
+# Patterns for _clean_title
+_SEASON_TEXT_PATTERN = re.compile(
+    r'[\s.\-_]+Seasons?[\s.\-_]+\d+(?:[\s.\-_]*[-\u2013][\s.\-_]*\d+|[\s.\-_]+(?:to|and|&)[\s.\-_]+\d+)?'
+    r'|[\s.\-_]+S\d{1,2}[\s.\-_]*[-\u2013][\s.\-_]*S\d{1,2}',
+    re.IGNORECASE,
+)
+_MID_YEAR_PATTERN = re.compile(r'\s*\((\d{4})\)')
+_CONTAINER_SUFFIX_PATTERN = re.compile(r'\s+(?:Mp4|MKV|AVI)\s*$', re.IGNORECASE)
+_EXTRAS_PATTERN = re.compile(r'\s*\+\s*\w+.*$')
+_TRAILING_YEAR_PATTERN = re.compile(r'\s+(\d{4})\s*$')
+_COMPLETE_SUFFIX_PATTERN = re.compile(r'\s+Complete\s*$', re.IGNORECASE)
+
+
+def _clean_title(title, year):
+    """Normalize a partially-parsed title by stripping season text, container
+    suffixes, and extracting mid-string years.  Runs BEFORE dots-to-spaces for
+    season patterns, then after for the rest.
+    """
+    # Strip "+ Extras" suffixes (before dots-to-spaces)
+    title = _EXTRAS_PATTERN.sub('', title)
+
+    # Strip "Season X" / "Seasons X-Y" / "S01-S02" text and everything after
+    season_match = _SEASON_TEXT_PATTERN.search(title)
+    if season_match:
+        title = title[:season_match.start()]
+
+    # Convert dots/dashes/underscores to spaces
+    title = _DOTS_DASHES_PATTERN.sub(' ', title)
+    title = _MULTI_SPACE_PATTERN.sub(' ', title).strip()
+
+    # Strip container suffixes: "Mp4", "MKV", "AVI"
+    title = _CONTAINER_SUFFIX_PATTERN.sub('', title).strip()
+
+    # Strip "Complete" suffix
+    title = _COMPLETE_SUFFIX_PATTERN.sub('', title).strip()
+
+    # Extract mid-string year in parens: "(2003)" → year field
+    if year is None:
+        mid_match = _MID_YEAR_PATTERN.search(title)
+        if mid_match:
+            candidate = int(mid_match.group(1))
+            if 1900 <= candidate <= 2100:
+                year = candidate
+                title = title[:mid_match.start()] + title[mid_match.end():]
+                title = _MULTI_SPACE_PATTERN.sub(' ', title).strip()
+
+    # Extract trailing bare year: "Show Name 2023" → year field
+    if year is None:
+        trail_match = _TRAILING_YEAR_PATTERN.search(title)
+        if trail_match:
+            candidate = int(trail_match.group(1))
+            remaining = title[:trail_match.start()].strip()
+            if 1900 <= candidate <= 2100 and remaining:
+                year = candidate
+                title = remaining
+
+    return title, year
+
 
 def _parse_folder_name(name):
     title = name
@@ -64,18 +122,13 @@ def _parse_folder_name(name):
     if year_match:
         year = int(year_match.group(1))
         title = title[:year_match.start()].strip()
-        # Replace dots/dashes/underscores with spaces
-        title = _DOTS_DASHES_PATTERN.sub(' ', title)
-        title = _MULTI_SPACE_PATTERN.sub(' ', title).strip()
-        return title, year
+        return _clean_title(title, year)
 
     # Strip S01E01-style markers (TV episodes/seasons)
     season_match = _SEASON_EPISODE_PATTERN.search(title)
     if season_match:
         title = title[:season_match.start()]
-        title = _DOTS_DASHES_PATTERN.sub(' ', title)
-        title = _MULTI_SPACE_PATTERN.sub(' ', title).strip()
-        return title, None
+        return _clean_title(title, None)
 
     # Strip quality markers
     quality_match = _QUALITY_PATTERN.search(title)
@@ -90,9 +143,7 @@ def _parse_folder_name(name):
             year = candidate
             title = title[:inline_match.start()]
 
-    title = _DOTS_DASHES_PATTERN.sub(' ', title)
-    title = _MULTI_SPACE_PATTERN.sub(' ', title).strip()
-    return title, year
+    return _clean_title(title, year)
 
 
 _EPISODE_PATTERN = re.compile(r'S\d{1,2}E\d{1,2}', re.IGNORECASE)

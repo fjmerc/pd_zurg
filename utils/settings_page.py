@@ -215,7 +215,7 @@ textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;l
 <body>
 <div class="header">
   <h1>pd_zurg Settings</h1>
-  <div class="nav"><a href="/status">Dashboard</a> <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme" id="theme-btn">&#x2600;&#xFE0F;</button></div>
+  <div class="nav"><a href="/status">Dashboard</a> <a href="/library">Library</a> <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme" id="theme-btn">&#x2600;&#xFE0F;</button></div>
 </div>
 
 <div class="tabs" role="tablist">

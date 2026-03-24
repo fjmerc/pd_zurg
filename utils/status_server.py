@@ -593,7 +593,7 @@ dialog .dlg-confirm{background:var(--blue);color:#fff}
 <script>(function(){try{var t=localStorage.getItem('pd_zurg_theme');if(t){document.documentElement.setAttribute('data-theme',t);document.querySelector('meta[name="color-scheme"]').content=t==='light'?'light':'dark';}}catch(e){}})()</script>
 </head>
 <body>
-<div class="header"><h1>pd_zurg</h1><span class="meta" id="header-meta"></span><a href="/settings" style="font-size:.85em;margin-left:auto;margin-right:12px">Settings</a><button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme" id="theme-btn">☀️</button></div>
+<div class="header"><h1>pd_zurg</h1><span class="meta" id="header-meta"></span><div style="margin-left:auto;display:flex;gap:12px;align-items:center;font-size:.85em"><a href="/library">Library</a><a href="/settings">Settings</a><button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme" id="theme-btn">☀️</button></div></div>
 <div class="meta">Uptime: <span id="uptime"></span></div>
 <div class="meta" id="error-line" style="display:none;color:var(--red)">Errors: <span id="errors">0</span></div>
 <div class="banner" id="banner"></div>
@@ -1178,6 +1178,24 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(content)))
             self.end_headers()
             self.wfile.write(content)
+        elif self.path == '/library':
+            from utils.library_page import get_library_html
+            html = get_library_html().encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(html)))
+            self.end_headers()
+            self.wfile.write(html)
+        elif self.path == '/api/library':
+            from utils.library import get_scanner
+            scanner = get_scanner()
+            if scanner is None:
+                self._send_json_response(503, json.dumps({
+                    'error': 'Library scanner not initialized'
+                }))
+            else:
+                data = json.dumps(scanner.get_data())
+                self._send_json_response(200, data)
         elif self.path in ('/', '/status'):
             html = _DASHBOARD_HTML.encode()
             self.send_response(200)
@@ -1190,6 +1208,19 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
+        # Library refresh — no auth required (read-only trigger)
+        if self.path == '/api/library/refresh':
+            from utils.library import get_scanner
+            scanner = get_scanner()
+            if scanner is None:
+                self._send_json_response(503, json.dumps({
+                    'error': 'Library scanner not initialized'
+                }))
+            else:
+                scanner.refresh()
+                self._send_json_response(200, json.dumps({'status': 'scanning'}))
+            return
+
         # POST endpoints always require auth
         if not self.auth_credentials:
             self._send_json_response(403, json.dumps({
@@ -1413,6 +1444,13 @@ def setup():
 
     StatusHandler.status_data_ref = status_data
     StatusHandler.auth_credentials = auth if auth and ':' in auth else None
+
+    # Initialize library scanner
+    try:
+        from utils import library as library_mod
+        library_mod.setup()
+    except Exception as e:
+        logger.error(f"Failed to initialize library scanner: {e}")
 
     server = http.server.HTTPServer(('0.0.0.0', port), StatusHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

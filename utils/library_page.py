@@ -92,7 +92,7 @@ a:hover{text-decoration:underline}
 
 /* Detail view */
 .detail-view{max-width:900px}
-.detail-back{display:inline-block;color:var(--blue);cursor:pointer;font-size:.85em;margin-bottom:12px;user-select:none}
+.detail-back{display:inline-block;background:none;border:none;color:var(--blue);cursor:pointer;font-size:.85em;margin-bottom:12px;user-select:none;padding:0;font-family:inherit}
 .detail-back:hover{text-decoration:underline}
 .detail-header{margin-bottom:16px}
 .detail-header h2{font-size:1.3em;font-weight:600;margin-bottom:6px}
@@ -130,7 +130,7 @@ a:hover{text-decoration:underline}
 .detail-poster{width:150px;min-width:150px;border-radius:8px;overflow:hidden}
 .detail-poster img{width:100%;display:block;border-radius:8px}
 .detail-info{flex:1;min-width:0}
-.detail-overview{font-size:.85em;color:var(--text2);margin-top:8px;line-height:1.5;max-height:6em;overflow:hidden}
+.detail-overview{font-size:.85em;color:var(--text2);margin-top:8px;line-height:1.5;max-height:6em;overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,black 60%,transparent);mask-image:linear-gradient(to bottom,black 60%,transparent)}
 .detail-status{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:var(--border);color:var(--text2);margin-left:6px}
 .detail-runtime{font-size:.82em;color:var(--text2);margin-top:6px}
 
@@ -157,6 +157,7 @@ a:hover{text-decoration:underline}
   .detail-hero{flex-direction:column}
   .detail-poster{width:120px}
 }
+:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 @media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
 </style>
 <script>(function(){try{var t=localStorage.getItem('pd_zurg_theme');if(t){document.documentElement.setAttribute('data-theme',t);document.querySelector('meta[name="color-scheme"]').content=t==='light'?'light':'dark';}}catch(e){}})()</script>
@@ -186,7 +187,7 @@ a:hover{text-decoration:underline}
 <div class="controls">
   <div class="search-wrap">
     <input type="search" id="search-input" placeholder="Search titles..." autocomplete="off"
-           oninput="applyFilters()" aria-label="Search titles">
+           oninput="clearTimeout(_searchTimer);_searchTimer=setTimeout(applyFilters,150)" aria-label="Search titles">
   </div>
   <select class="filter-select" id="source-filter" onchange="applyFilters()" aria-label="Filter by source">
     <option value="">All Sources</option>
@@ -237,6 +238,8 @@ let _displayedItems = [];
 let _inDetailView = false;
 let _preferences = {};
 let _pollTimers = {};
+let _detailSeasons = [];
+let _searchTimer = null;
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -296,21 +299,20 @@ function buildBadges(source) {
 }
 
 function buildCard(item, index) {
-  const yearSpan = '';
-  let metaLine = '';
+  var metaLine = '';
   if (item.type === 'show' && (item.seasons || item.episodes)) {
-    const parts = [];
+    var parts = [];
     if (item.seasons) parts.push(item.seasons + ' Season' + (item.seasons !== 1 ? 's' : ''));
     if (item.episodes) parts.push(item.episodes + ' Episode' + (item.episodes !== 1 ? 's' : ''));
     metaLine = '<div class="card-meta">' + parts.join(' &middot; ') + '</div>';
   }
-  const isShow = item.type === 'show' && item.season_data && item.season_data.length > 0;
-  const isMovie = item.type === 'movie';
-  const isClickable = isShow || isMovie;
-  const showClass = isShow ? ' show-card' : (isMovie ? ' movie-card' : '');
-  const clickAttr = isClickable ? ' onclick="showDetail(' + index + ')"' : '';
-  return '<div class="media-card' + showClass + '"' + clickAttr + '>'
-    + '<div class="card-title">' + esc(item.title) + yearSpan + '</div>'
+  var isShow = item.type === 'show' && item.season_data && item.season_data.length > 0;
+  var isMovie = item.type === 'movie';
+  var isClickable = isShow || isMovie;
+  var cardClass = isShow ? ' show-card' : (isMovie ? ' movie-card' : '');
+  var clickAttr = isClickable ? ' onclick="showDetail(' + index + ')"' : '';
+  return '<div class="media-card' + cardClass + '"' + clickAttr + '>'
+    + '<div class="card-title">' + esc(item.title) + '</div>'
     + '<div class="card-badges">' + buildBadges(item.source) + '</div>'
     + metaLine
     + '</div>';
@@ -448,6 +450,7 @@ function showDetail(index) {
   _inDetailView = true;
   _detailItem = item;
   _detailMeta = null;
+  document.title = esc(item.title) + ' — pd_zurg Library';
 
   document.querySelector('.tabs').style.display = 'none';
   document.querySelector('.controls').style.display = 'none';
@@ -484,11 +487,11 @@ function _renderDetail() {
 function _renderMovieDetail(movie, meta) {
   var area = document.getElementById('content-area');
   var html = '<div class="detail-view">';
-  html += '<a class="detail-back" onclick="hideDetail()">&larr; Back to Library</a>';
+  html += '<button class="detail-back" onclick="hideDetail()" tabindex="0">&larr; Back to Library</button>';
 
   html += '<div class="detail-hero">';
   if (meta && meta.poster_url) {
-    html += '<div class="detail-poster"><img src="' + esc(meta.poster_url) + '" alt=""></div>';
+    html += '<div class="detail-poster"><img src="' + esc(meta.poster_url) + '" alt="Poster for ' + esc(movie.title) + '"></div>';
   }
   html += '<div class="detail-info">';
   html += '<h2>' + esc(movie.title);
@@ -496,9 +499,10 @@ function _renderMovieDetail(movie, meta) {
   html += '</h2>';
   html += '<div class="card-badges">' + buildBadges(movie.source) + '</div>';
   if (meta) {
-    if (meta.runtime) html += '<div class="detail-runtime">' + meta.runtime + ' min';
-    if (meta.release_date) html += (meta.runtime ? ' &middot; ' : '<div class="detail-runtime">') + 'Released ' + esc(meta.release_date);
-    if (meta.runtime || meta.release_date) html += '</div>';
+    var runtimeParts = [];
+    if (meta.runtime) runtimeParts.push(esc(String(meta.runtime)) + ' min');
+    if (meta.release_date) runtimeParts.push('Released ' + esc(meta.release_date));
+    if (runtimeParts.length) html += '<div class="detail-runtime">' + runtimeParts.join(' &middot; ') + '</div>';
     if (meta.overview) html += '<div class="detail-overview">' + esc(meta.overview) + '</div>';
   }
   html += '</div></div>';
@@ -518,7 +522,6 @@ function _mergeShowMeta(show, meta) {
   var merged = [];
   meta.seasons.forEach(function(tmdbS) {
     var fileEps = fileLookup[tmdbS.number] || {};
-    var usedFileSeasons = {};
     var episodes = [];
     tmdbS.episodes.forEach(function(te) {
       var fe = fileEps[te.number];
@@ -537,7 +540,6 @@ function _mergeShowMeta(show, meta) {
     episodes.sort(function(a, b) { return a.number - b.number; });
     var haveCount = episodes.filter(function(e) { return e.source !== 'missing'; }).length;
     merged.push({number: tmdbS.number, total_episodes: tmdbS.total_episodes, episode_count: haveCount, episodes: episodes});
-    usedFileSeasons[tmdbS.number] = true;
   });
   // Append file seasons not in TMDB
   (show.season_data || []).forEach(function(s) {
@@ -554,13 +556,23 @@ function _renderShowDetail(show, meta) {
   var nk = normTitle(show.title);
   var curPref = _preferences[nk] || 'none';
   var seasons = meta ? _mergeShowMeta(show, meta) : (show.season_data || []);
+  _detailSeasons = seasons;
+
+  // Save expanded state from previous render
+  var expandedNums = {};
+  var prevHeaders = document.querySelectorAll('.season-header.expanded');
+  for (var pi = 0; pi < prevHeaders.length; pi++) {
+    var ds = prevHeaders[pi].getAttribute('data-season');
+    if (ds) expandedNums[ds] = true;
+  }
+  var hasPrev = Object.keys(expandedNums).length > 0;
 
   var html = '<div class="detail-view">';
-  html += '<a class="detail-back" onclick="hideDetail()">&larr; Back to Library</a>';
+  html += '<button class="detail-back" onclick="hideDetail()" tabindex="0">&larr; Back to Library</button>';
 
   html += '<div class="detail-hero">';
   if (meta && meta.poster_url) {
-    html += '<div class="detail-poster"><img src="' + esc(meta.poster_url) + '" alt=""></div>';
+    html += '<div class="detail-poster"><img src="' + esc(meta.poster_url) + '" alt="Poster for ' + esc(show.title) + '"></div>';
   }
   html += '<div class="detail-info">';
   html += '<h2>' + esc(show.title);
@@ -570,18 +582,16 @@ function _renderShowDetail(show, meta) {
   html += '<div class="card-badges">' + buildBadges(show.source) + '</div>';
   if (meta && meta.overview) html += '<div class="detail-overview">' + esc(meta.overview) + '</div>';
   html += '<div class="pref-row"><label style="font-size:.82em;color:var(--text2)">Preference:</label>';
-  var nkEsc = esc(nk).replace(/'/g, "\\'");
-  html += '<select class="pref-select" onchange="setPreference(\'' + nkEsc + '\',this.value)">';
+  html += '<select class="pref-select" onchange="onPrefChange(this.value)">';
   html += '<option value="none"' + (curPref === 'none' ? ' selected' : '') + '>No Preference</option>';
   html += '<option value="prefer-local"' + (curPref === 'prefer-local' ? ' selected' : '') + '>Prefer Local</option>';
   html += '<option value="prefer-debrid"' + (curPref === 'prefer-debrid' ? ' selected' : '') + '>Prefer Debrid</option>';
   html += '</select></div>';
   html += '</div></div>';
 
-  var titleEsc = esc(show.title).replace(/'/g, "\\'");
   for (var si = 0; si < seasons.length; si++) {
     var season = seasons[si];
-    var expanded = si === 0;
+    var expanded = hasPrev ? !!expandedNums[String(season.number)] : si === 0;
     var hasDebrid = false, hasLocal = false;
     for (var ci = 0; ci < season.episodes.length; ci++) {
       if (season.episodes[ci].source === 'debrid') hasDebrid = true;
@@ -592,12 +602,12 @@ function _renderShowDetail(show, meta) {
       progressText = '<span class="season-progress">' + season.episode_count + '/' + season.total_episodes + '</span>';
     }
     html += '<div class="season-section">';
-    html += '<div class="season-header' + (expanded ? ' expanded' : '') + '" onclick="toggleSeason(this)">';
+    html += '<div class="season-header' + (expanded ? ' expanded' : '') + '" data-season="' + season.number + '" tabindex="0" role="button" aria-expanded="' + expanded + '" onclick="toggleSeason(this)" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();toggleSeason(this)}">';
     html += '<span class="season-chevron">&#9654;</span>';
     html += 'Season ' + season.number + ' &mdash; ' + season.episode_count + ' episode' + (season.episode_count !== 1 ? 's' : '') + progressText;
     html += '<span class="season-actions">';
-    if (hasDebrid) html += '<button class="btn-action" onclick="event.stopPropagation();downloadSeason(\'' + titleEsc + '\',' + season.number + ',' + JSON.stringify(season.episodes).replace(/'/g, "\\'") + ')">Download All</button>';
-    if (hasLocal) html += '<button class="btn-action danger" onclick="event.stopPropagation();removeSeason(\'' + titleEsc + '\',' + season.number + ',' + JSON.stringify(season.episodes).replace(/'/g, "\\'") + ')">Remove Local</button>';
+    if (hasDebrid) html += '<button class="btn-action" onclick="event.stopPropagation();dlSeason(' + si + ')">Download All</button>';
+    if (hasLocal) html += '<button class="btn-action danger" onclick="event.stopPropagation();rmSeason(' + si + ')">Remove Local</button>';
     html += '</span>';
     html += '</div>';
     html += '<div class="season-episodes"' + (expanded ? '' : ' style="display:none"') + '>';
@@ -608,12 +618,13 @@ function _renderShowDetail(show, meta) {
       var epNum = String(ep.number);
       if (epNum.length < 2) epNum = '0' + epNum;
       var isMissing = ep.source === 'missing';
+      var epLabel = 'S' + (season.number < 10 ? '0' : '') + season.number + 'E' + epNum;
       html += '<tr' + (isMissing ? ' class="ep-missing"' : '') + '>';
       html += '<td class="ep-num">E' + esc(epNum) + '</td>';
       html += '<td class="ep-file">';
       if (ep.title) html += '<span class="ep-title">' + esc(ep.title) + '</span>';
       if (ep.file) html += esc(ep.file);
-      else if (!ep.title) html += '<span style="color:var(--text3)">—</span>';
+      else if (!ep.title) html += '<span style="color:var(--text3)">&mdash;</span>';
       if (ep.air_date) html += ' <span class="ep-date">' + esc(ep.air_date) + '</span>';
       html += '</td>';
       html += '<td class="ep-source">';
@@ -623,10 +634,10 @@ function _renderShowDetail(show, meta) {
       html += '<td class="ep-actions">';
       if (!isMissing) {
         if (ep.source === 'debrid') {
-          html += '<button class="btn-action" onclick="downloadEp(\'' + titleEsc + '\',' + season.number + ',' + ep.number + ')">Download</button>';
+          html += '<button class="btn-action" aria-label="Download ' + epLabel + '" onclick="downloadEp(' + season.number + ',' + ep.number + ')">Download</button>';
         }
         if (ep.source === 'local' || ep.source === 'both') {
-          html += '<button class="btn-action danger" onclick="removeEp(\'' + titleEsc + '\',' + season.number + ',' + ep.number + ')">Remove</button>';
+          html += '<button class="btn-action danger" aria-label="Remove ' + epLabel + '" onclick="removeEp(' + season.number + ',' + ep.number + ')">Remove</button>';
         }
       }
       html += '</td>';
@@ -642,6 +653,14 @@ function _renderShowDetail(show, meta) {
 
 function hideDetail() {
   _inDetailView = false;
+  _detailItem = null;
+  _detailSeasons = [];
+  // Clear any active poll timers
+  for (var tid in _pollTimers) {
+    clearInterval(_pollTimers[tid]);
+  }
+  _pollTimers = {};
+  document.title = 'pd_zurg Library';
   document.querySelector('.tabs').style.display = '';
   document.querySelector('.controls').style.display = '';
   document.getElementById('footer').style.display = '';
@@ -651,35 +670,61 @@ function hideDetail() {
 function toggleSeason(headerEl) {
   var episodes = headerEl.nextElementSibling;
   var isExpanded = headerEl.classList.toggle('expanded');
+  headerEl.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
   episodes.style.display = isExpanded ? '' : 'none';
 }
 
 // ---------------------------------------------------------------------------
 // Preference & action API calls
 // ---------------------------------------------------------------------------
-function setPreference(normKey, pref) {
+function onPrefChange(pref) {
+  if (!_detailItem) return;
+  var nk = normTitle(_detailItem.title);
   fetch('/api/library/preference', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({title: normKey, preference: pref})
+    body: JSON.stringify({title: nk, preference: pref})
   }).then(function(r) { return r.json(); }).then(function(d) {
-    if (pref === 'none') { delete _preferences[normKey]; }
-    else { _preferences[normKey] = pref; }
+    if (pref === 'none') { delete _preferences[nk]; }
+    else { _preferences[nk] = pref; }
   }).catch(function(e) { alert('Failed to save preference: ' + e); });
 }
 
-function downloadEp(title, season, episode) {
-  _postDownload(title, [{season: season, episode: episode}]);
+function downloadEp(season, episode) {
+  if (!_detailItem) return;
+  _postDownload(_detailItem.title, [{season: season, episode: episode}]);
 }
 
-function downloadSeason(title, seasonNum, episodes) {
+function removeEp(season, episode) {
+  if (!_detailItem) return;
+  if (!confirm('Remove local copy of S' + (season < 10 ? '0' : '') + season + 'E' + (episode < 10 ? '0' : '') + episode + '?')) return;
+  _postRemove(_detailItem.title, [{season: season, episode: episode}]);
+}
+
+function dlSeason(seasonIdx) {
+  if (!_detailItem || !_detailSeasons[seasonIdx]) return;
+  var season = _detailSeasons[seasonIdx];
   var eps = [];
-  for (var i = 0; i < episodes.length; i++) {
-    if (episodes[i].source === 'debrid') {
-      eps.push({season: seasonNum, episode: episodes[i].number});
+  for (var i = 0; i < season.episodes.length; i++) {
+    if (season.episodes[i].source === 'debrid') {
+      eps.push({season: season.number, episode: season.episodes[i].number});
     }
   }
-  if (eps.length) _postDownload(title, eps);
+  if (eps.length) _postDownload(_detailItem.title, eps);
+}
+
+function rmSeason(seasonIdx) {
+  if (!_detailItem || !_detailSeasons[seasonIdx]) return;
+  var season = _detailSeasons[seasonIdx];
+  var eps = [];
+  for (var i = 0; i < season.episodes.length; i++) {
+    if (season.episodes[i].source === 'local' || season.episodes[i].source === 'both') {
+      eps.push({season: season.number, episode: season.episodes[i].number});
+    }
+  }
+  if (!eps.length) return;
+  if (!confirm('Remove ' + eps.length + ' local episode(s) from Season ' + season.number + '?')) return;
+  _postRemove(_detailItem.title, eps);
 }
 
 function _postDownload(title, episodes) {
@@ -715,30 +760,21 @@ function _pollTransfer(tid) {
           delete _pollTimers[tid];
           if (d.status === 'completed') {
             if (msg) msg.textContent = 'Download complete.';
-            setTimeout(function() { fetchLibrary(); }, 1000);
+          } else if (d.status === 'partial') {
+            if (msg) msg.textContent = 'Download partial: some files failed.';
           } else {
-            if (msg) msg.textContent = 'Download finished with errors.';
+            if (msg) msg.textContent = 'Download failed.';
           }
+          setTimeout(_refreshDetailData, 1000);
         }
+      })
+      .catch(function() {
+        clearInterval(_pollTimers[tid]);
+        delete _pollTimers[tid];
+        var msg = document.getElementById('transfer-msg');
+        if (msg) msg.textContent = 'Lost connection to server.';
       });
   }, 2000);
-}
-
-function removeEp(title, season, episode) {
-  if (!confirm('Remove local copy of S' + (season < 10 ? '0' : '') + season + 'E' + (episode < 10 ? '0' : '') + episode + '?')) return;
-  _postRemove(title, [{season: season, episode: episode}]);
-}
-
-function removeSeason(title, seasonNum, episodes) {
-  var eps = [];
-  for (var i = 0; i < episodes.length; i++) {
-    if (episodes[i].source === 'local' || episodes[i].source === 'both') {
-      eps.push({season: seasonNum, episode: episodes[i].number});
-    }
-  }
-  if (!eps.length) return;
-  if (!confirm('Remove ' + eps.length + ' local episode(s) from Season ' + seasonNum + '?')) return;
-  _postRemove(title, eps);
 }
 
 function _postRemove(title, episodes) {
@@ -750,13 +786,40 @@ function _postRemove(title, episodes) {
   }).then(function(r) { return r.json(); }).then(function(d) {
     if (d.status === 'removed') {
       if (msg) msg.textContent = 'Removed ' + d.removed + ' file(s).';
-      setTimeout(function() { fetchLibrary(); }, 1000);
+      setTimeout(_refreshDetailData, 1000);
     } else if (d.error) {
       if (msg) msg.textContent = 'Error: ' + d.error;
     }
   }).catch(function(e) {
     if (msg) msg.textContent = 'Remove failed: ' + e;
   });
+}
+
+function _refreshDetailData() {
+  // Refresh library data and stay in detail view if still open
+  fetch('/api/library')
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(data) {
+      if (!data) return;
+      _allMovies = Array.isArray(data.movies) ? data.movies : [];
+      _allShows  = Array.isArray(data.shows)  ? data.shows  : [];
+      _preferences = data.preferences || {};
+      _lastScan = data.last_scan || null;
+      if (_inDetailView && _detailItem) {
+        // Find updated show/movie by title
+        var items = _detailItem.type === 'movie' ? _allMovies : _allShows;
+        var nk = normTitle(_detailItem.title);
+        for (var i = 0; i < items.length; i++) {
+          if (normTitle(items[i].title) === nk) {
+            _detailItem = items[i];
+            _renderDetail();
+            return;
+          }
+        }
+      }
+      applyFilters();
+    })
+    .catch(function() {});
 }
 
 // ---------------------------------------------------------------------------

@@ -27,9 +27,12 @@ _SETTINGS_HTML = r'''<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <title>pd_zurg Settings</title>
 <style>
-:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--border2:#21262d;--text:#c9d1d9;--text2:#8b949e;--text3:#484f58;--blue:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#d29922;--orange:#db6d28;--input-bg:#0d1117;--input-border:#30363d;--input-focus:#58a6ff}
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--border2:#21262d;--text:#c9d1d9;--text2:#8b949e;--text3:#636e7b;--blue:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#d29922;--orange:#db6d28;--input-bg:#0d1117;--input-border:#30363d;--input-focus:#58a6ff}
+[data-theme="light"]{--bg:#f6f8fa;--card:#ffffff;--border:#d0d7de;--border2:#d8dee4;--text:#1f2328;--text2:#656d76;--text3:#8b949e;--blue:#0969da;--green:#1a7f37;--red:#cf222e;--yellow:#9a6700;--orange:#bc4c00;--input-bg:#ffffff;--input-border:#d0d7de;--input-focus:#0969da}
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);padding:20px;max-width:900px;margin:0 auto}
 a{color:var(--blue);text-decoration:none}
@@ -45,8 +48,15 @@ a:hover{text-decoration:underline}
 .tab{padding:10px 20px;cursor:pointer;color:var(--text2);font-size:.9em;font-weight:500;border-bottom:2px solid transparent;margin-bottom:-2px;transition:color .15s,border-color .15s;user-select:none}
 .tab:hover{color:var(--text)}
 .tab.active{color:var(--blue);border-bottom-color:var(--blue)}
+.tab.dirty::after{content:' *';color:var(--yellow);font-weight:700}
 .tab-content{display:none}
 .tab-content.active{display:block}
+
+/* Search filter */
+.search-bar{margin-bottom:14px}
+.search-bar input{width:100%;background:var(--input-bg);border:1px solid var(--input-border);border-radius:6px;padding:9px 12px 9px 34px;color:var(--text);font-size:.85em;outline:none;transition:border-color .15s;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='%23636e7b' viewBox='0 0 16 16'%3E%3Cpath d='M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85zm-5.242.156a5 5 0 1 1 0-10 5 5 0 0 1 0 10z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:10px center}
+.search-bar input:focus{border-color:var(--input-focus)}
+.search-bar .search-count{font-size:.75em;color:var(--text2);margin-top:4px}
 
 /* Status banner */
 .banner{padding:12px 16px;border-radius:8px;margin-bottom:16px;font-size:.9em;font-weight:500;display:none;line-height:1.5}
@@ -133,6 +143,8 @@ textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;l
 .btn:disabled{opacity:.5;cursor:not-allowed}
 .btn-primary{background:var(--green);color:#fff}
 .btn-primary:hover:not(:disabled){opacity:.85}
+.btn-primary.dirty{box-shadow:0 0 0 2px var(--yellow);animation:pulse-save 2s ease-in-out infinite}
+@keyframes pulse-save{0%,100%{box-shadow:0 0 0 2px var(--yellow)}50%{box-shadow:0 0 8px 2px var(--yellow)}}
 .btn-secondary{background:transparent;border:1px solid var(--border);color:var(--text)}
 .btn-secondary:hover:not(:disabled){border-color:var(--blue);color:var(--blue)}
 
@@ -189,29 +201,38 @@ textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;l
 .btn-sm{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:.78em}
 .btn-sm:hover{border-color:var(--blue);color:var(--blue)}
 
-.footer{color:var(--text3);font-size:.7em;text-align:right;margin-top:16px}
+.footer{color:var(--text3);font-size:.78em;text-align:right;margin-top:16px}
+.theme-toggle{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;cursor:pointer;padding:4px 8px;font-size:.85em;line-height:1;transition:border-color .15s,color .15s}
+.theme-toggle:hover{border-color:var(--blue);color:var(--blue)}
+[data-theme="light"] .cat-header:hover{background:#f0f3f6}
+[data-theme="light"] .toggle .slider{background:var(--border)}
+[data-theme="light"] .toggle .slider:before{background:#fff}
+[data-theme="light"] .preset-card:hover{background:#0969da08}
+@media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
 </style>
+<script>(function(){try{var t=localStorage.getItem('pd_zurg_theme');if(t){document.documentElement.setAttribute('data-theme',t);document.querySelector('meta[name="color-scheme"]').content=t==='light'?'light':'dark';}}catch(e){}})()</script>
 </head>
 <body>
 <div class="header">
   <h1>pd_zurg Settings</h1>
-  <div class="nav"><a href="/status">Dashboard</a></div>
+  <div class="nav"><a href="/status">Dashboard</a> <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme" id="theme-btn">&#x2600;&#xFE0F;</button></div>
 </div>
 
-<div class="tabs">
-  <div class="tab active" onclick="switchTab('env')">pd_zurg</div>
-  <div class="tab" onclick="switchTab('pd')">plex_debrid</div>
+<div class="tabs" role="tablist">
+  <div class="tab active" role="tab" tabindex="0" aria-selected="true" aria-controls="tab-env" onclick="switchTab('env')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('env')}">pd_zurg</div>
+  <div class="tab" role="tab" tabindex="0" aria-selected="false" aria-controls="tab-pd" onclick="switchTab('pd')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('pd')}">plex_debrid</div>
 </div>
 
 <div class="banner" id="banner"></div>
 
 <!-- pd_zurg env vars tab -->
-<div class="tab-content active" id="tab-env">
+<div class="tab-content active" id="tab-env" role="tabpanel">
   <div class="tab-toolbar">
     <a class="btn-sm" href="/api/settings/export/env" download=".env">Export .env</a>
     <label class="btn-sm" style="cursor:pointer">Import .env<input type="file" accept=".env,text/plain" style="display:none" onchange="envImport(this)"></label>
     <button type="button" class="btn-sm" onclick="envResetDefaults()">Reset All to Defaults</button>
   </div>
+  <div class="search-bar"><input type="text" id="search-env" placeholder="Filter settings..." oninput="filterSettings('env',this.value)"><div class="search-count" id="search-env-count"></div></div>
   <div id="env-categories"></div>
   <div class="actions">
     <button type="button" class="btn btn-primary" id="btn-env-save" onclick="envSave()">Save &amp; Apply</button>
@@ -221,12 +242,13 @@ textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;l
 </div>
 
 <!-- plex_debrid settings tab -->
-<div class="tab-content" id="tab-pd">
+<div class="tab-content" id="tab-pd" role="tabpanel">
   <div class="tab-toolbar">
     <a class="btn-sm" href="/api/settings/export/plex-debrid" download="settings.json">Export settings.json</a>
     <label class="btn-sm" style="cursor:pointer">Import settings.json<input type="file" accept=".json,application/json" style="display:none" onchange="pdImport(this)"></label>
     <button type="button" class="btn-sm" onclick="pdResetDefaults()">Reset to Defaults</button>
   </div>
+  <div class="search-bar"><input type="text" id="search-pd" placeholder="Filter settings..." oninput="filterSettings('pd',this.value)"><div class="search-count" id="search-pd-count"></div></div>
   <div id="pd-categories"></div>
   <div class="actions">
     <button type="button" class="btn btn-primary" id="btn-pd-save" onclick="pdSave()">Save &amp; Restart plex_debrid</button>
@@ -238,11 +260,28 @@ textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;l
 <div class="footer">pd_zurg changes apply via SIGHUP reload. plex_debrid changes trigger a service restart.</div>
 
 <script>
+// Theme toggle
+function applyTheme(theme){
+  document.documentElement.setAttribute('data-theme',theme);
+  document.querySelector('meta[name="color-scheme"]').content=theme==='light'?'light':'dark';
+  document.getElementById('theme-btn').innerHTML=theme==='light'?'\u{1F319}':'\u{2600}\u{FE0F}';
+}
+function toggleTheme(){
+  const cur=document.documentElement.getAttribute('data-theme')||'dark';
+  const next=cur==='dark'?'light':'dark';
+  applyTheme(next);
+  try{localStorage.setItem('pd_zurg_theme',next);}catch(e){}
+}
+// Sync theme button icon on load (head script already set data-theme)
+(function(){const t=document.documentElement.getAttribute('data-theme');if(t)applyTheme(t);})();
+
 const ENV_SCHEMA = __ENV_SCHEMA_JSON__;
 const PD_SCHEMA = __PD_SCHEMA_JSON__;
 let envValues = {};
 let pdValues = {};
-let isDirty = false;
+let isDirty = false;  // combined flag for beforeunload
+let envDirty = false;
+let pdDirty = false;
 
 // -----------------------------------------------------------------------
 // Shared helpers
@@ -268,13 +307,17 @@ function hideBanner() {
 }
 
 function switchTab(name) {
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  const curDirty = activeTabName() === 'env' ? envDirty : pdDirty;
+  if (curDirty && !confirm('You have unsaved changes. Switch tabs anyway?')) return;
+  document.querySelectorAll('.tab').forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
+  document.querySelectorAll('.tab-content').forEach(t => { t.classList.remove('active'); });
   if (name === 'env') {
-    document.querySelector('.tab:nth-child(1)').classList.add('active');
+    const tab = document.querySelector('.tab:nth-child(1)');
+    tab.classList.add('active'); tab.setAttribute('aria-selected', 'true');
     document.getElementById('tab-env').classList.add('active');
   } else {
-    document.querySelector('.tab:nth-child(2)').classList.add('active');
+    const tab = document.querySelector('.tab:nth-child(2)');
+    tab.classList.add('active'); tab.setAttribute('aria-selected', 'true');
     document.getElementById('tab-pd').classList.add('active');
   }
   hideBanner();
@@ -283,6 +326,7 @@ function switchTab(name) {
 function toggleCategory(header) {
   header.classList.toggle('open');
   header.nextElementSibling.classList.toggle('open');
+  header.setAttribute('aria-expanded', header.classList.contains('open'));
 }
 
 function toggleSecret(btn) {
@@ -314,7 +358,7 @@ function renderEnvField(field, value) {
   if (field.type === 'boolean') {
     const isTrue = String(value).toLowerCase() === 'true';
     const checked = isTrue ? ' checked' : '';
-    inputHtml = `<div class="toggle-wrap"><label class="toggle"><input type="checkbox" id="${id}" data-key="${esc(field.key)}" data-type="boolean"${checked}><span class="slider"></span></label></div>`;
+    inputHtml = `<div class="toggle-wrap"><label class="toggle"><input type="checkbox" id="${id}" data-key="${esc(field.key)}" data-type="boolean"${checked} aria-label="${esc(field.label)}"><span class="slider"></span></label></div>`;
   } else if (field.type === 'secret') {
     inputHtml = `<div class="secret-wrap"><input type="password" id="${id}" data-key="${esc(field.key)}" data-type="secret" value="${esc(value || '')}"><button type="button" class="btn-show" onclick="toggleSecret(this)">Show</button></div>`;
   } else if (field.type.startsWith('select:')) {
@@ -347,7 +391,8 @@ function renderEnvCategories(values) {
     const openClass = i === 0 ? ' open' : '';
     let fieldsHtml = '';
     cat.fields.forEach(f => { fieldsHtml += renderEnvField(f, values[f.key] || ''); });
-    html += `<div class="category"><div class="cat-header${openClass}" onclick="toggleCategory(this)"><h2>${esc(cat.name)} <span class="desc">\u2014 ${esc(cat.description)}</span></h2><span class="arrow">&#9660;</span></div><div class="cat-body${openClass}">${fieldsHtml}</div></div>`;
+    const expanded = i === 0 ? 'true' : 'false';
+    html += `<div class="category"><div class="cat-header${openClass}" role="button" tabindex="0" aria-expanded="${expanded}" onclick="toggleCategory(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleCategory(this)}"><h2>${esc(cat.name)} <span class="desc">\u2014 ${esc(cat.description)}</span></h2><span class="arrow" aria-hidden="true">&#9660;</span></div><div class="cat-body${openClass}">${fieldsHtml}</div></div>`;
   });
   container.innerHTML = html;
 }
@@ -414,7 +459,8 @@ async function envSave() {
       if (result.warnings && result.warnings.length) html += '<br><br><strong>Warnings:</strong><br>' + result.warnings.map(w => '&bull; ' + esc(w)).join('<br>');
       showBanner('success', html);
       envValues = collectEnvData();
-      isDirty = false;
+      envDirty = false;
+      updateDirtyUI();
     } else {
       showBanner('warning', '<strong>Saved</strong> (reload failed \u2014 restart container to apply)');
     }
@@ -460,7 +506,7 @@ function renderPdField(field, value) {
     case 'boolean_str': {
       const isTrue = String(value).toLowerCase() === 'true';
       const checked = isTrue ? ' checked' : '';
-      inputHtml = `<div class="toggle-wrap"><label class="toggle"><input type="checkbox" id="${id}" data-pdkey="${esc(field.key)}" data-pdtype="boolean_str"${checked}><span class="slider"></span></label></div>`;
+      inputHtml = `<div class="toggle-wrap"><label class="toggle"><input type="checkbox" id="${id}" data-pdkey="${esc(field.key)}" data-pdtype="boolean_str"${checked} aria-label="${esc(field.label)}"><span class="slider"></span></label></div>`;
       break;
     }
     case 'secret': {
@@ -550,7 +596,8 @@ function renderPdCategories(values) {
       advHtml = `<div class="advanced-toggle" onclick="toggleAdvanced(this)">Show advanced settings</div><div class="advanced-fields">${advFields}</div>`;
     }
 
-    html += `<div class="category"><div class="cat-header${openClass}" onclick="toggleCategory(this)"><h2>${esc(cat.name)} <span class="desc">\u2014 ${esc(cat.description)}</span></h2><span class="arrow">&#9660;</span></div><div class="cat-body${openClass}">${mainFields}${advHtml}</div></div>`;
+    const expanded = i === 0 ? 'true' : 'false';
+    html += `<div class="category"><div class="cat-header${openClass}" role="button" tabindex="0" aria-expanded="${expanded}" onclick="toggleCategory(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleCategory(this)}"><h2>${esc(cat.name)} <span class="desc">\u2014 ${esc(cat.description)}</span></h2><span class="arrow" aria-hidden="true">&#9660;</span></div><div class="cat-body${openClass}">${mainFields}${advHtml}</div></div>`;
   });
   container.innerHTML = html;
 
@@ -780,7 +827,7 @@ function refreshVersionsUI() {
   // Update JSON textarea if visible
   const ta = document.getElementById('versions-json-textarea');
   if (ta) ta.value = JSON.stringify(_versionsData, null, 2);
-  isDirty = true;
+  pdDirty = true; isDirty = true; updateDirtyUI();
 }
 
 function addPreset(key) {
@@ -840,7 +887,7 @@ function updateRule(profileIdx, ruleIdx, row) {
   const op = selects[2]?.value || '';
   const val = input?.value || '';
   _versionsData[profileIdx][3][ruleIdx] = [field, weight, op, val];
-  isDirty = true;
+  pdDirty = true; isDirty = true; updateDirtyUI();
 }
 
 function ruleFieldChanged(profileIdx, ruleIdx, select) {
@@ -872,7 +919,7 @@ function updateCondition(profileIdx, condIdx, row) {
     selects[1]?.value || '',
     input?.value || ''
   ];
-  isDirty = true;
+  pdDirty = true; isDirty = true; updateDirtyUI();
 }
 
 function condFieldChanged(profileIdx, condIdx, select) {
@@ -1022,7 +1069,8 @@ async function pdSave() {
       if (result.warnings && result.warnings.length) html += '<br><br><strong>Warnings:</strong><br>' + result.warnings.map(w => '&bull; ' + esc(w)).join('<br>');
       showBanner('success', html);
       pdValues = data;
-      isDirty = false;
+      pdDirty = false;
+      updateDirtyUI();
     } else {
       showBanner('warning', '<strong>Saved</strong> (restart failed \u2014 restart container manually)');
     }
@@ -1272,6 +1320,73 @@ function pdImport(input) {
 }
 
 // -----------------------------------------------------------------------
+// Settings search/filter
+// -----------------------------------------------------------------------
+function filterSettings(tab, query) {
+  const container = document.getElementById(tab === 'env' ? 'env-categories' : 'pd-categories');
+  const q = query.toLowerCase().trim();
+  const countEl = document.getElementById('search-' + tab + '-count');
+  let total = 0, shown = 0;
+
+  container.querySelectorAll('.category').forEach(cat => {
+    const body = cat.querySelector('.cat-body');
+    const header = cat.querySelector('.cat-header');
+    let catVisible = 0;
+
+    // Check both regular and advanced fields
+    cat.querySelectorAll('.field').forEach(field => {
+      total++;
+      const label = (field.querySelector('.field-label') || {}).textContent || '';
+      if (!q || label.toLowerCase().includes(q)) {
+        field.style.display = '';
+        shown++;
+        catVisible++;
+      } else {
+        field.style.display = 'none';
+      }
+    });
+
+    if (q && catVisible > 0) {
+      // Auto-expand categories with matches
+      header.classList.add('open');
+      body.classList.add('open');
+      // Also expand advanced section if it has matches
+      const adv = body.querySelector('.advanced-fields');
+      if (adv) {
+        const advVisible = adv.querySelectorAll('.field:not([style*="display: none"])').length;
+        if (advVisible > 0) { adv.classList.add('open'); }
+      }
+    }
+
+    cat.style.display = (q && catVisible === 0) ? 'none' : '';
+  });
+
+  countEl.textContent = q ? (shown + ' of ' + total + ' settings') : '';
+}
+
+// -----------------------------------------------------------------------
+// Dirty state UI
+// -----------------------------------------------------------------------
+function activeTabName() {
+  return document.getElementById('tab-env').classList.contains('active') ? 'env' : 'pd';
+}
+function markDirty() {
+  const tab = activeTabName();
+  if (tab === 'env') envDirty = true; else pdDirty = true;
+  isDirty = envDirty || pdDirty;
+  updateDirtyUI();
+}
+function updateDirtyUI() {
+  isDirty = envDirty || pdDirty;
+  const envTab = document.querySelector('.tab:nth-child(1)');
+  const pdTab = document.querySelector('.tab:nth-child(2)');
+  envTab.classList.toggle('dirty', envDirty);
+  pdTab.classList.toggle('dirty', pdDirty);
+  document.getElementById('btn-env-save').classList.toggle('dirty', envDirty);
+  document.getElementById('btn-pd-save').classList.toggle('dirty', pdDirty);
+}
+
+// -----------------------------------------------------------------------
 // Init
 // -----------------------------------------------------------------------
 async function init() {
@@ -1279,24 +1394,36 @@ async function init() {
   try {
     const resp = await fetch('/api/settings/env');
     if (resp.ok) { envValues = await resp.json(); }
-  } catch (e) {}
+    else { showBanner('error', 'Failed to load pd_zurg settings (HTTP ' + resp.status + '). Check authentication.'); }
+  } catch (e) { showBanner('error', 'Failed to load pd_zurg settings: ' + esc(e.message)); }
   renderEnvCategories(envValues);
 
   // Load plex_debrid values
   try {
     const resp = await fetch('/api/settings/plex-debrid');
     if (resp.ok) { pdValues = await resp.json(); }
-  } catch (e) {}
+    else if (resp.status !== 404) { showBanner('error', 'Failed to load plex_debrid settings (HTTP ' + resp.status + ')'); }
+  } catch (e) { showBanner('error', 'Failed to load plex_debrid settings: ' + esc(e.message)); }
   renderPdCategories(pdValues);
 }
 
 init();
 
-// Track dirty state
-document.addEventListener('input', () => { isDirty = true; });
-document.addEventListener('change', () => { isDirty = true; });
+// Track dirty state per tab
+document.addEventListener('input', markDirty);
+document.addEventListener('change', markDirty);
 window.addEventListener('beforeunload', (e) => {
   if (isDirty) { e.preventDefault(); e.returnValue = ''; }
+});
+
+// Keyboard shortcut: Ctrl+S / Cmd+S to save active tab
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+    e.preventDefault();
+    const envActive = document.getElementById('tab-env').classList.contains('active');
+    if (envActive) envSave();
+    else pdSave();
+  }
 });
 </script>
 </body>

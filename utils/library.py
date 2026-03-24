@@ -100,13 +100,14 @@ _EPISODE_ID_PATTERN = re.compile(r'S(\d{1,2})E(\d{1,2})', re.IGNORECASE)
 _SEASON_DIR_PATTERN = re.compile(r'^Season\s+(\d+)$', re.IGNORECASE)
 
 
-def _collect_episode_ids(folder_path):
-    """Collect unique (season, episode) tuples from a torrent folder.
+def _collect_episodes(folder_path):
+    """Collect episode details from a torrent folder.
 
+    Returns dict: {(season_num, ep_num): {'file': str, 'path': str}}
     Handles both structured (Season X subdirs) and flat layouts (S01E01.mkv
-    directly in folder). Returns a set of (season_num, episode_num) ints.
+    directly in folder).
     """
-    ids = set()
+    episodes = {}
     try:
         with os.scandir(folder_path) as it:
             for entry in it:
@@ -125,10 +126,11 @@ def _collect_episode_ids(folder_path):
                                     continue
                                 ep_match = _EPISODE_ID_PATTERN.search(f.name)
                                 if ep_match:
-                                    ids.add((int(ep_match.group(1)), int(ep_match.group(2))))
+                                    key = (int(ep_match.group(1)), int(ep_match.group(2)))
                                 else:
                                     # File in Season dir but no S##E## in name — assign sequential
-                                    ids.add((season_num, len(ids) + 1000))
+                                    key = (season_num, len(episodes) + 1000)
+                                episodes[key] = {'file': f.name, 'path': f.path}
                     except (PermissionError, OSError):
                         pass
                 elif entry.is_file(follow_symlinks=False):
@@ -136,10 +138,41 @@ def _collect_episode_ids(folder_path):
                     if ext in MEDIA_EXTENSIONS:
                         ep_match = _EPISODE_ID_PATTERN.search(entry.name)
                         if ep_match:
-                            ids.add((int(ep_match.group(1)), int(ep_match.group(2))))
+                            key = (int(ep_match.group(1)), int(ep_match.group(2)))
+                            episodes[key] = {'file': entry.name, 'path': entry.path}
     except (PermissionError, OSError, FileNotFoundError):
         pass
-    return ids
+    return episodes
+
+
+def _build_season_data(episodes_dict, default_source='debrid'):
+    """Build sorted season_data list from an episodes dict.
+
+    Args:
+        episodes_dict: {(season_num, ep_num): {'file': str, ...}}
+        default_source: source label for episodes without explicit 'source' key
+
+    Returns: list of season dicts sorted by season number, episodes sorted within.
+    """
+    by_season = {}
+    for (season_num, ep_num), info in episodes_dict.items():
+        if season_num not in by_season:
+            by_season[season_num] = []
+        by_season[season_num].append({
+            'number': ep_num,
+            'file': info['file'],
+            'source': info.get('source', default_source),
+        })
+
+    result = []
+    for snum in sorted(by_season.keys()):
+        eps = sorted(by_season[snum], key=lambda e: e['number'])
+        result.append({
+            'number': snum,
+            'episode_count': len(eps),
+            'episodes': eps,
+        })
+    return result
 
 
 def _count_show_content(show_path):
@@ -257,7 +290,7 @@ class LibraryScanner:
         debrid_show_keys = {_normalize_title(s['title']): s for s in debrid_shows}
 
         movies = []
-        # Merge debrid + local movies
+        # Merge debrid + local movies (title-level, unchanged)
         for item in debrid_movies:
             key = _normalize_title(item['title'])
             if key in {_normalize_title(lm['title']) for lm in local_movies}:
@@ -270,18 +303,54 @@ class LibraryScanner:
             if key not in debrid_movie_keys:
                 movies.append(lm)
 
+        # Merge debrid + local shows with episode-level cross-referencing
+        local_show_map = {_normalize_title(ls['title']): ls for ls in local_shows}
+
         shows = []
         for item in debrid_shows:
             key = _normalize_title(item['title'])
-            if key in {_normalize_title(ls['title']) for ls in local_shows}:
+            if key in local_show_map:
                 item = dict(item)
-                item['source'] = 'both'
+                local_item = local_show_map[key]
+                debrid_eps = item.get('_episodes', {})
+                local_eps = local_item.get('_episodes', {})
+
+                # Merge at episode level
+                merged = {}
+                for ek, info in debrid_eps.items():
+                    if ek in local_eps:
+                        merged[ek] = dict(info, source='both')
+                    else:
+                        merged[ek] = dict(info, source='debrid')
+                for ek, info in local_eps.items():
+                    if ek not in debrid_eps:
+                        merged[ek] = dict(info, source='local')
+
+                item['_episodes'] = merged
+
+                # Roll up show-level source from episode sources
+                sources = {ep.get('source') for ep in merged.values()}
+                if len(sources) > 1 or 'both' in sources:
+                    item['source'] = 'both'
+                elif 'local' in sources:
+                    item['source'] = 'local'
+                else:
+                    item['source'] = 'debrid'
+
+                # Update counts from merged episodes
+                item['seasons'] = len({s for s, _ in merged})
+                item['episodes'] = len(merged)
             shows.append(item)
 
         for ls in local_shows:
             key = _normalize_title(ls['title'])
             if key not in debrid_show_keys:
                 shows.append(ls)
+
+        # Build season_data for all shows and strip internal _episodes
+        for show in shows:
+            eps = show.pop('_episodes', {})
+            show['season_data'] = _build_season_data(eps, show.get('source', 'debrid'))
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         return {
@@ -363,7 +432,7 @@ class LibraryScanner:
         logger.debug(f"[library] Scanning mount categories: {scan_dirs}")
 
         # Collect raw per-folder data
-        show_groups = {}   # normalized_title -> {title, year, episode_ids, path}
+        show_groups = {}   # normalized_title -> {title, year, episodes, path}
         movie_groups = {}  # normalized_title -> {title, year, path}
         timed_out = False
 
@@ -380,8 +449,8 @@ class LibraryScanner:
                         if not entry.is_dir(follow_symlinks=False):
                             continue
                         title, year = _parse_folder_name(entry.name)
-                        episode_ids = _collect_episode_ids(entry.path)
-                        is_show = len(episode_ids) > 0 or category_is_shows
+                        episodes = _collect_episodes(entry.path)
+                        is_show = len(episodes) > 0 or category_is_shows
 
                         if is_show:
                             key = _normalize_title(title)
@@ -389,11 +458,11 @@ class LibraryScanner:
                                 show_groups[key] = {
                                     'title': title,
                                     'year': year,
-                                    'episode_ids': set(episode_ids),
+                                    'episodes': dict(episodes),
                                     'path': entry.path,
                                 }
                             else:
-                                show_groups[key]['episode_ids'] |= episode_ids
+                                show_groups[key]['episodes'].update(episodes)
                                 # Prefer title with year or better capitalization
                                 if year and not show_groups[key]['year']:
                                     show_groups[key]['year'] = year
@@ -431,18 +500,18 @@ class LibraryScanner:
 
         shows = []
         for g in show_groups.values():
-            unique_seasons = {s for s, _e in g['episode_ids']} if g['episode_ids'] else set()
+            eps = g['episodes']
+            unique_seasons = {s for s, _e in eps} if eps else set()
             shows.append({
                 'title': g['title'],
                 'year': g['year'],
                 'source': 'debrid',
                 'type': 'show',
                 'seasons': len(unique_seasons),
-                'episodes': len(g['episode_ids']),
+                'episodes': len(eps),
+                '_episodes': eps,
                 'path': g['path'],
             })
-
-        return movies, shows
 
         return movies, shows
 
@@ -485,16 +554,32 @@ class LibraryScanner:
                     if not entry.is_dir(follow_symlinks=False):
                         continue
                     title, year = _parse_folder_name(entry.name)
-                    seasons, episodes = _count_show_content(entry.path)
-                    items.append({
-                        'title': title,
-                        'year': year,
-                        'source': 'local',
-                        'type': 'show',
-                        'seasons': seasons,
-                        'episodes': episodes,
-                        'path': entry.path,
-                    })
+                    eps = _collect_episodes(entry.path)
+                    if eps:
+                        unique_seasons = {s for s, _e in eps}
+                        items.append({
+                            'title': title,
+                            'year': year,
+                            'source': 'local',
+                            'type': 'show',
+                            'seasons': len(unique_seasons),
+                            'episodes': len(eps),
+                            '_episodes': eps,
+                            'path': entry.path,
+                        })
+                    else:
+                        # Fallback for shows without parseable episode patterns
+                        seasons, ep_count = _count_show_content(entry.path)
+                        items.append({
+                            'title': title,
+                            'year': year,
+                            'source': 'local',
+                            'type': 'show',
+                            'seasons': seasons,
+                            'episodes': ep_count,
+                            '_episodes': {},
+                            'path': entry.path,
+                        })
         except (PermissionError, OSError) as e:
             logger.warning(f"[library] Cannot scan local TV: {e}")
         return items

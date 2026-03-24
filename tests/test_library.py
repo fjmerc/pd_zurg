@@ -8,7 +8,8 @@ import utils.library as library
 from utils.library import (
     _parse_folder_name,
     _count_show_content,
-    _collect_episode_ids,
+    _collect_episodes,
+    _build_season_data,
     _discover_mount,
     LibraryScanner,
     setup,
@@ -127,10 +128,10 @@ class TestParseFolderName:
 
 
 # ---------------------------------------------------------------------------
-# _collect_episode_ids
+# _collect_episodes
 # ---------------------------------------------------------------------------
 
-class TestCollectEpisodeIds:
+class TestCollectEpisodes:
 
     def test_flat_episode_files(self, tmp_dir):
         folder = os.path.join(tmp_dir, "show")
@@ -138,8 +139,10 @@ class TestCollectEpisodeIds:
         open(os.path.join(folder, "Show.S01E01.mkv"), 'w').close()
         open(os.path.join(folder, "Show.S01E02.mkv"), 'w').close()
         open(os.path.join(folder, "Show.S02E01.mkv"), 'w').close()
-        ids = _collect_episode_ids(folder)
-        assert ids == {(1, 1), (1, 2), (2, 1)}
+        eps = _collect_episodes(folder)
+        assert set(eps.keys()) == {(1, 1), (1, 2), (2, 1)}
+        assert eps[(1, 1)]['file'] == "Show.S01E01.mkv"
+        assert 'path' in eps[(1, 1)]
 
     def test_season_dir_with_episode_files(self, tmp_dir):
         folder = os.path.join(tmp_dir, "show")
@@ -147,20 +150,46 @@ class TestCollectEpisodeIds:
         os.makedirs(season)
         open(os.path.join(season, "Show.S01E01.mkv"), 'w').close()
         open(os.path.join(season, "Show.S01E02.mkv"), 'w').close()
-        ids = _collect_episode_ids(folder)
-        assert ids == {(1, 1), (1, 2)}
+        eps = _collect_episodes(folder)
+        assert set(eps.keys()) == {(1, 1), (1, 2)}
+        assert eps[(1, 1)]['file'] == "Show.S01E01.mkv"
+        assert eps[(1, 2)]['file'] == "Show.S01E02.mkv"
 
     def test_nonexistent_path(self, tmp_dir):
-        ids = _collect_episode_ids(os.path.join(tmp_dir, "nope"))
-        assert ids == set()
+        eps = _collect_episodes(os.path.join(tmp_dir, "nope"))
+        assert eps == {}
 
     def test_non_media_files_ignored(self, tmp_dir):
         folder = os.path.join(tmp_dir, "show")
         os.makedirs(folder)
         open(os.path.join(folder, "Show.S01E01.nfo"), 'w').close()
         open(os.path.join(folder, "Show.S01E01.mkv"), 'w').close()
-        ids = _collect_episode_ids(folder)
-        assert ids == {(1, 1)}
+        eps = _collect_episodes(folder)
+        assert set(eps.keys()) == {(1, 1)}
+
+    def test_mixed_season_dirs_and_flat_files(self, tmp_dir):
+        folder = os.path.join(tmp_dir, "show")
+        season = os.path.join(folder, "Season 1")
+        os.makedirs(season)
+        open(os.path.join(season, "Show.S01E01.mkv"), 'w').close()
+        open(os.path.join(folder, "Show.S02E01.mkv"), 'w').close()
+        eps = _collect_episodes(folder)
+        assert (1, 1) in eps
+        assert (2, 1) in eps
+        assert len(eps) == 2
+
+    def test_season_dir_files_without_episode_pattern(self, tmp_dir):
+        """Files in Season dirs without S##E## get sequential IDs."""
+        folder = os.path.join(tmp_dir, "show")
+        season = os.path.join(folder, "Season 3")
+        os.makedirs(season)
+        open(os.path.join(season, "episode1.mkv"), 'w').close()
+        eps = _collect_episodes(folder)
+        assert len(eps) == 1
+        # Should be assigned to season 3 with a high sequential number
+        key = list(eps.keys())[0]
+        assert key[0] == 3
+        assert key[1] >= 1000
 
 
 # ---------------------------------------------------------------------------
@@ -784,6 +813,289 @@ class TestLibraryScannerScanCrossRef:
         result = scanner.scan()
         arrival = next(m for m in result["movies"] if m["title"] == "Arrival")
         assert arrival["source"] == "both"
+
+
+# ---------------------------------------------------------------------------
+# _build_season_data
+# ---------------------------------------------------------------------------
+
+class TestBuildSeasonData:
+
+    def test_empty_episodes(self):
+        assert _build_season_data({}) == []
+
+    def test_single_season(self):
+        eps = {
+            (1, 2): {'file': 'S01E02.mkv'},
+            (1, 1): {'file': 'S01E01.mkv'},
+        }
+        result = _build_season_data(eps, 'debrid')
+        assert len(result) == 1
+        assert result[0]['number'] == 1
+        assert result[0]['episode_count'] == 2
+        # Episodes sorted by number
+        assert result[0]['episodes'][0]['number'] == 1
+        assert result[0]['episodes'][1]['number'] == 2
+        assert result[0]['episodes'][0]['source'] == 'debrid'
+
+    def test_multiple_seasons_sorted(self):
+        eps = {
+            (2, 1): {'file': 'S02E01.mkv'},
+            (1, 1): {'file': 'S01E01.mkv'},
+            (1, 2): {'file': 'S01E02.mkv'},
+        }
+        result = _build_season_data(eps, 'local')
+        assert len(result) == 2
+        assert result[0]['number'] == 1
+        assert result[1]['number'] == 2
+        assert result[0]['episode_count'] == 2
+        assert result[1]['episode_count'] == 1
+
+    def test_explicit_source_overrides_default(self):
+        eps = {
+            (1, 1): {'file': 'S01E01.mkv', 'source': 'both'},
+            (1, 2): {'file': 'S01E02.mkv'},
+        }
+        result = _build_season_data(eps, 'debrid')
+        assert result[0]['episodes'][0]['source'] == 'both'
+        assert result[0]['episodes'][1]['source'] == 'debrid'
+
+
+# ---------------------------------------------------------------------------
+# season_data in scan results
+# ---------------------------------------------------------------------------
+
+class TestSeasonDataInScanResults:
+
+    def _make_scanner(self, mount_path, monkeypatch):
+        monkeypatch.delenv("BLACKHOLE_LOCAL_LIBRARY_MOVIES", raising=False)
+        monkeypatch.delenv("BLACKHOLE_LOCAL_LIBRARY_TV", raising=False)
+        library._scanner = None
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._mount_path = mount_path
+        scanner._local_movies_path = None
+        scanner._local_tv_path = None
+        scanner._cache = None
+        scanner._cache_time = 0
+        scanner._ttl = 600
+        scanner._lock = threading.Lock()
+        scanner._scanning = False
+        return scanner
+
+    def test_shows_have_season_data(self, tmp_dir, monkeypatch):
+        shows_dir = os.path.join(tmp_dir, "shows")
+        f1 = os.path.join(shows_dir, "TestShow.S01E01.1080p")
+        os.makedirs(f1)
+        open(os.path.join(f1, "TestShow.S01E01.mkv"), 'w').close()
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        result = scanner.scan()
+
+        show = result["shows"][0]
+        assert "season_data" in show
+        assert len(show["season_data"]) == 1
+        assert show["season_data"][0]["number"] == 1
+        assert show["season_data"][0]["episode_count"] == 1
+        assert show["season_data"][0]["episodes"][0]["number"] == 1
+        assert show["season_data"][0]["episodes"][0]["source"] == "debrid"
+
+    def test_movies_have_no_season_data(self, tmp_dir, monkeypatch):
+        movies_dir = os.path.join(tmp_dir, "movies")
+        os.makedirs(os.path.join(movies_dir, "Movie (2023)"))
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        result = scanner.scan()
+
+        movie = result["movies"][0]
+        assert "season_data" not in movie
+
+    def test_aggregated_show_season_data_correct(self, tmp_dir, monkeypatch):
+        shows_dir = os.path.join(tmp_dir, "shows")
+        f1 = os.path.join(shows_dir, "Show.S01E01.1080p")
+        f2 = os.path.join(shows_dir, "Show.S01E02.1080p")
+        f3 = os.path.join(shows_dir, "Show.S02E01.1080p")
+        for d in (f1, f2, f3):
+            os.makedirs(d)
+            base = os.path.basename(d)
+            open(os.path.join(d, base + ".mkv"), 'w').close()
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        result = scanner.scan()
+
+        show = result["shows"][0]
+        assert show["seasons"] == 2
+        assert show["episodes"] == 3
+        sd = show["season_data"]
+        assert len(sd) == 2
+        assert sd[0]["number"] == 1
+        assert sd[0]["episode_count"] == 2
+        assert sd[1]["number"] == 2
+        assert sd[1]["episode_count"] == 1
+
+    def test_no_internal_episodes_key_in_result(self, tmp_dir, monkeypatch):
+        shows_dir = os.path.join(tmp_dir, "shows")
+        f1 = os.path.join(shows_dir, "Show.S01E01.1080p")
+        os.makedirs(f1)
+        open(os.path.join(f1, "Show.S01E01.mkv"), 'w').close()
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        result = scanner.scan()
+
+        show = result["shows"][0]
+        assert "_episodes" not in show
+
+
+# ---------------------------------------------------------------------------
+# Episode-level cross-referencing
+# ---------------------------------------------------------------------------
+
+class TestEpisodeLevelCrossRef:
+
+    def _make_cross_ref_scanner(self, tmp_dir, mount_shows_setup, local_tv_setup):
+        """Create a scanner with debrid mount and local TV paths.
+
+        mount_shows_setup: callable(shows_dir) that creates debrid show folders
+        local_tv_setup: callable(local_tv) that creates local show folders
+        """
+        mount_dir = os.path.join(tmp_dir, "mount")
+        shows_dir = os.path.join(mount_dir, "shows")
+        os.makedirs(shows_dir, exist_ok=True)
+        mount_shows_setup(shows_dir)
+
+        local_tv = os.path.join(tmp_dir, "local_tv")
+        os.makedirs(local_tv, exist_ok=True)
+        local_tv_setup(local_tv)
+
+        library._scanner = None
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._mount_path = mount_dir
+        scanner._local_movies_path = None
+        scanner._local_tv_path = local_tv
+        scanner._cache = None
+        scanner._cache_time = 0
+        scanner._ttl = 600
+        scanner._lock = threading.Lock()
+        scanner._scanning = False
+        return scanner
+
+    def test_same_episode_both_sources_gets_both(self, tmp_dir):
+        def debrid(shows_dir):
+            f = os.path.join(shows_dir, "Show.S01E01.1080p")
+            os.makedirs(f)
+            open(os.path.join(f, "Show.S01E01.mkv"), 'w').close()
+
+        def local(local_tv):
+            show = os.path.join(local_tv, "Show (2020)")
+            s1 = os.path.join(show, "Season 1")
+            os.makedirs(s1)
+            open(os.path.join(s1, "Show.S01E01.mkv"), 'w').close()
+
+        scanner = self._make_cross_ref_scanner(tmp_dir, debrid, local)
+        result = scanner.scan()
+
+        show = next(s for s in result["shows"] if s["title"] == "Show")
+        assert show["source"] == "both"
+        ep = show["season_data"][0]["episodes"][0]
+        assert ep["number"] == 1
+        assert ep["source"] == "both"
+
+    def test_different_episodes_get_respective_sources(self, tmp_dir):
+        def debrid(shows_dir):
+            f = os.path.join(shows_dir, "Show.S01E01.1080p")
+            os.makedirs(f)
+            open(os.path.join(f, "Show.S01E01.mkv"), 'w').close()
+
+        def local(local_tv):
+            show = os.path.join(local_tv, "Show (2020)")
+            s1 = os.path.join(show, "Season 1")
+            os.makedirs(s1)
+            open(os.path.join(s1, "Show.S01E02.mkv"), 'w').close()
+
+        scanner = self._make_cross_ref_scanner(tmp_dir, debrid, local)
+        result = scanner.scan()
+
+        show = next(s for s in result["shows"] if s["title"] == "Show")
+        assert show["source"] == "both"  # has both debrid and local episodes
+        sd = show["season_data"]
+        assert len(sd) == 1
+        eps = {e["number"]: e["source"] for e in sd[0]["episodes"]}
+        assert eps[1] == "debrid"
+        assert eps[2] == "local"
+
+    def test_source_rollup_all_debrid(self, tmp_dir):
+        def debrid(shows_dir):
+            f = os.path.join(shows_dir, "OnlyDebrid.S01E01.1080p")
+            os.makedirs(f)
+            open(os.path.join(f, "OnlyDebrid.S01E01.mkv"), 'w').close()
+
+        def local(local_tv):
+            pass  # no local shows
+
+        scanner = self._make_cross_ref_scanner(tmp_dir, debrid, local)
+        result = scanner.scan()
+
+        show = next(s for s in result["shows"] if "OnlyDebrid" in s["title"])
+        assert show["source"] == "debrid"
+        assert show["season_data"][0]["episodes"][0]["source"] == "debrid"
+
+    def test_source_rollup_all_local(self, tmp_dir):
+        def debrid(shows_dir):
+            pass  # no debrid shows
+
+        def local(local_tv):
+            show = os.path.join(local_tv, "OnlyLocal (2020)")
+            s1 = os.path.join(show, "Season 1")
+            os.makedirs(s1)
+            open(os.path.join(s1, "OnlyLocal.S01E01.mkv"), 'w').close()
+
+        scanner = self._make_cross_ref_scanner(tmp_dir, debrid, local)
+        result = scanner.scan()
+
+        show = next(s for s in result["shows"] if "OnlyLocal" in s["title"])
+        assert show["source"] == "local"
+        assert show["season_data"][0]["episodes"][0]["source"] == "local"
+
+    def test_cross_ref_updates_counts(self, tmp_dir):
+        def debrid(shows_dir):
+            f = os.path.join(shows_dir, "Merged.S01E01.1080p")
+            os.makedirs(f)
+            open(os.path.join(f, "Merged.S01E01.mkv"), 'w').close()
+
+        def local(local_tv):
+            show = os.path.join(local_tv, "Merged (2020)")
+            s1 = os.path.join(show, "Season 1")
+            s2 = os.path.join(show, "Season 2")
+            os.makedirs(s1)
+            os.makedirs(s2)
+            open(os.path.join(s1, "Merged.S01E02.mkv"), 'w').close()
+            open(os.path.join(s2, "Merged.S02E01.mkv"), 'w').close()
+
+        scanner = self._make_cross_ref_scanner(tmp_dir, debrid, local)
+        result = scanner.scan()
+
+        show = next(s for s in result["shows"] if "Merged" in s["title"])
+        # Debrid has S01E01, local has S01E02 + S02E01 = 3 episodes, 2 seasons
+        assert show["episodes"] == 3
+        assert show["seasons"] == 2
+        assert show["source"] == "both"
+
+    def test_cross_ref_no_duplicate_shows(self, tmp_dir):
+        def debrid(shows_dir):
+            f = os.path.join(shows_dir, "Shared.S01E01.1080p")
+            os.makedirs(f)
+            open(os.path.join(f, "Shared.S01E01.mkv"), 'w').close()
+
+        def local(local_tv):
+            show = os.path.join(local_tv, "Shared (2020)")
+            s1 = os.path.join(show, "Season 1")
+            os.makedirs(s1)
+            open(os.path.join(s1, "Shared.S01E01.mkv"), 'w').close()
+
+        scanner = self._make_cross_ref_scanner(tmp_dir, debrid, local)
+        result = scanner.scan()
+
+        matching = [s for s in result["shows"] if "Shared" in s["title"]]
+        assert len(matching) == 1
 
 
 # ---------------------------------------------------------------------------

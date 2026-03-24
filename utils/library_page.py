@@ -64,6 +64,8 @@ a:hover{text-decoration:underline}
 /* Media card */
 .media-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:6px;transition:border-color .15s}
 .media-card:hover{border-color:var(--border2)}
+.media-card.show-card{cursor:pointer}
+.media-card.show-card:hover{border-color:var(--blue)}
 .card-title{font-size:.9em;font-weight:500;color:var(--text);line-height:1.35}
 .card-year{color:var(--text2);font-weight:400}
 .card-meta{font-size:.78em;color:var(--text2)}
@@ -88,6 +90,29 @@ a:hover{text-decoration:underline}
 .theme-toggle{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;cursor:pointer;padding:4px 8px;font-size:.85em;line-height:1;transition:border-color .15s,color .15s}
 .theme-toggle:hover{border-color:var(--blue);color:var(--blue)}
 
+/* Detail view */
+.detail-view{max-width:900px}
+.detail-back{display:inline-block;color:var(--blue);cursor:pointer;font-size:.85em;margin-bottom:12px;user-select:none}
+.detail-back:hover{text-decoration:underline}
+.detail-header{margin-bottom:16px}
+.detail-header h2{font-size:1.3em;font-weight:600;margin-bottom:6px}
+.detail-header .card-badges{margin-top:4px}
+
+/* Season accordion */
+.season-section{border:1px solid var(--border);border-radius:8px;margin-bottom:8px;overflow:hidden}
+.season-header{padding:10px 14px;cursor:pointer;font-size:.9em;font-weight:500;color:var(--text);background:var(--card);display:flex;align-items:center;gap:8px;user-select:none;transition:background-color .15s}
+.season-header:hover{background:var(--border2)}
+.season-chevron{font-size:.7em;color:var(--text2);width:14px;text-align:center;transition:transform .15s}
+.season-header.expanded .season-chevron{transform:rotate(90deg)}
+
+/* Episode table */
+.episode-table{width:100%;border-collapse:collapse}
+.episode-table tr{border-top:1px solid var(--border)}
+.episode-table td{padding:7px 14px;font-size:.82em;color:var(--text)}
+.ep-num{font-weight:600;color:var(--text2);white-space:nowrap;width:50px}
+.ep-file{color:var(--text);word-break:break-all}
+.ep-source{white-space:nowrap;text-align:right}
+
 /* Footer */
 .footer{color:var(--text3);font-size:.78em;text-align:right;margin-top:16px}
 
@@ -97,6 +122,7 @@ a:hover{text-decoration:underline}
   .search-wrap{min-width:120px}
   .scan-info{display:none}
   .header{flex-direction:column;align-items:flex-start}
+  .episode-table{display:block;overflow-x:auto}
 }
 @media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
 </style>
@@ -174,6 +200,8 @@ let _lastScan  = null;
 let _scanDurationMs = null;
 let _scanning  = false;
 let _tsRefreshTimer = null;
+let _displayedItems = [];
+let _inDetailView = false;
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -232,7 +260,7 @@ function buildBadges(source) {
   return '<span class="badge-debrid">' + esc(source) + '</span>';
 }
 
-function buildCard(item) {
+function buildCard(item, index) {
   const yearSpan = item.year ? ' <span class="card-year">(' + esc(String(item.year)) + ')</span>' : '';
   let metaLine = '';
   if (item.type === 'show' && (item.seasons || item.episodes)) {
@@ -241,7 +269,10 @@ function buildCard(item) {
     if (item.episodes) parts.push(item.episodes + ' Episode' + (item.episodes !== 1 ? 's' : ''));
     metaLine = '<div class="card-meta">' + parts.join(' &middot; ') + '</div>';
   }
-  return '<div class="media-card">'
+  const isShow = item.type === 'show' && item.season_data && item.season_data.length > 0;
+  const showClass = isShow ? ' show-card' : '';
+  const clickAttr = isShow ? ' onclick="showDetail(' + index + ')"' : '';
+  return '<div class="media-card' + showClass + '"' + clickAttr + '>'
     + '<div class="card-title">' + esc(item.title) + yearSpan + '</div>'
     + '<div class="card-badges">' + buildBadges(item.source) + '</div>'
     + metaLine
@@ -280,6 +311,7 @@ function applyFilters() {
 
 function renderGrid(items) {
   const area = document.getElementById('content-area');
+  _displayedItems = items;
   if (!items.length) {
     const isFiltered = document.getElementById('search-input').value.trim()
       || document.getElementById('source-filter').value;
@@ -293,7 +325,7 @@ function renderGrid(items) {
     }
     return;
   }
-  area.innerHTML = '<div class="grid">' + items.map(buildCard).join('') + '</div>';
+  area.innerHTML = '<div class="grid">' + items.map(function(item, i) { return buildCard(item, i); }).join('') + '</div>';
 }
 
 function updateBadges(filteredCount) {
@@ -359,6 +391,71 @@ function triggerRefresh() {
         updateScanInfo();
       }, 3000);
     });
+}
+
+// ---------------------------------------------------------------------------
+// Show detail view
+// ---------------------------------------------------------------------------
+function showDetail(index) {
+  var show = _displayedItems[index];
+  if (!show || !show.season_data) return;
+  _inDetailView = true;
+
+  document.querySelector('.tabs').style.display = 'none';
+  document.querySelector('.controls').style.display = 'none';
+  document.getElementById('footer').style.display = 'none';
+
+  var area = document.getElementById('content-area');
+  var html = '<div class="detail-view">';
+  html += '<a class="detail-back" onclick="hideDetail()">&larr; Back to Library</a>';
+  html += '<div class="detail-header">';
+  html += '<h2>' + esc(show.title);
+  if (show.year) html += ' <span class="card-year">(' + esc(String(show.year)) + ')</span>';
+  html += '</h2>';
+  html += '<div class="card-badges">' + buildBadges(show.source) + '</div>';
+  html += '</div>';
+
+  var seasons = show.season_data || [];
+  for (var si = 0; si < seasons.length; si++) {
+    var season = seasons[si];
+    var expanded = si === 0;
+    html += '<div class="season-section">';
+    html += '<div class="season-header' + (expanded ? ' expanded' : '') + '" onclick="toggleSeason(this)">';
+    html += '<span class="season-chevron">&#9654;</span>';
+    html += 'Season ' + season.number + ' &mdash; ' + season.episode_count + ' episode' + (season.episode_count !== 1 ? 's' : '');
+    html += '</div>';
+    html += '<div class="season-episodes"' + (expanded ? '' : ' style="display:none"') + '>';
+    html += '<table class="episode-table"><tbody>';
+    var eps = season.episodes || [];
+    for (var ei = 0; ei < eps.length; ei++) {
+      var ep = eps[ei];
+      var epNum = String(ep.number);
+      if (epNum.length < 2) epNum = '0' + epNum;
+      html += '<tr>';
+      html += '<td class="ep-num">E' + esc(epNum) + '</td>';
+      html += '<td class="ep-file">' + esc(ep.file) + '</td>';
+      html += '<td class="ep-source">' + buildBadges(ep.source) + '</td>';
+      html += '</tr>';
+    }
+    html += '</tbody></table></div></div>';
+  }
+
+  html += '</div>';
+  area.innerHTML = html;
+}
+
+function hideDetail() {
+  _inDetailView = false;
+  document.querySelector('.tabs').style.display = '';
+  document.querySelector('.controls').style.display = '';
+  document.getElementById('footer').style.display = '';
+  applyFilters();
+}
+
+function toggleSeason(headerEl) {
+  var episodes = headerEl.nextElementSibling;
+  var isExpanded = headerEl.classList.toggle('expanded');
+  episodes.style.display = isExpanded ? '' : 'none';
 }
 
 // ---------------------------------------------------------------------------

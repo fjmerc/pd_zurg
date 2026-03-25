@@ -1278,8 +1278,9 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json_response(400, json.dumps({'error': str(e)}))
             except json.JSONDecodeError:
                 self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
-            except Exception as e:
-                self._send_json_response(500, json.dumps({'error': str(e)}))
+            except Exception:
+                logger.exception("[preference] Unexpected error")
+                self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
             return
 
         if self.path == '/api/library/download':
@@ -1385,11 +1386,74 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
                     return
                 title = values.get('title', '').strip()
+                media_type = values.get('type', 'show').strip()
+                tmdb_id = values.get('tmdb_id')
+                if tmdb_id is not None:
+                    try:
+                        tmdb_id = int(tmdb_id)
+                    except (ValueError, TypeError):
+                        tmdb_id = None
                 episodes = values.get('episodes', [])
-                if not title or not episodes:
-                    self._send_json_response(400, json.dumps({'error': 'title and episodes required'}))
+                if not title:
+                    self._send_json_response(400, json.dumps({'error': 'title required'}))
                     return
 
+                # Try Sonarr/Radarr first (preferred — updates their database)
+                from utils.arr_client import get_download_service, SonarrClient, RadarrClient
+                client, service_name = get_download_service(media_type)
+
+                if service_name == 'sonarr' and episodes:
+                    season = values.get('season')
+                    if season is None:
+                        self._send_json_response(400, json.dumps({
+                            'error': 'season is required for Sonarr episode removal'
+                        }))
+                        return
+                    try:
+                        season = int(season)
+                        ep_nums = [int(e) for e in episodes] if isinstance(episodes, list) else []
+                    except (ValueError, TypeError):
+                        self._send_json_response(400, json.dumps({
+                            'error': 'season and episodes must be integers'
+                        }))
+                        return
+                    if not ep_nums:
+                        self._send_json_response(400, json.dumps({
+                            'error': 'episodes list is empty'
+                        }))
+                        return
+                    result = client.remove_episodes(title, tmdb_id, season, ep_nums)
+                    if result.get('status') != 'error':
+                        from utils.library import get_scanner
+                        scanner = get_scanner()
+                        if scanner:
+                            scanner.refresh()
+                    status_code = 200 if result.get('status') != 'error' else 400
+                    self._send_json_response(status_code, json.dumps(result))
+                    return
+
+                if service_name == 'radarr' and media_type == 'movie':
+                    result = client.remove_movie(title, tmdb_id)
+                    if result.get('status') != 'error':
+                        from utils.library import get_scanner
+                        scanner = get_scanner()
+                        if scanner:
+                            scanner.refresh()
+                    status_code = 200 if result.get('status') != 'error' else 400
+                    self._send_json_response(status_code, json.dumps(result))
+                    return
+
+                # Movie removal requires Radarr — no fallback
+                if media_type == 'movie':
+                    self._send_json_response(400, json.dumps({
+                        'error': 'Movie removal requires Radarr. Configure Radarr in Settings.'
+                    }))
+                    return
+
+                # Fallback: direct file deletion for TV (requires writable mount)
+                if not episodes:
+                    self._send_json_response(400, json.dumps({'error': 'episodes required'}))
+                    return
                 from utils.library import get_scanner, _normalize_title
                 scanner = get_scanner()
                 if scanner is None:
@@ -1397,7 +1461,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     return
                 if not scanner._local_tv_path:
                     self._send_json_response(400, json.dumps({
-                        'error': 'BLACKHOLE_LOCAL_LIBRARY_TV not configured'
+                        'error': 'No writable local library and no Sonarr/Radarr configured'
                     }))
                     return
 
@@ -1420,13 +1484,13 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
 
                 from utils.library_prefs import remove_local_episodes
                 result = remove_local_episodes(resolved, scanner._local_tv_path)
-                # Trigger re-scan to reflect changes
                 scanner.refresh()
                 self._send_json_response(200, json.dumps(result))
             except json.JSONDecodeError:
                 self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
-            except Exception as e:
-                self._send_json_response(500, json.dumps({'error': str(e)}))
+            except Exception:
+                logger.exception("[remove] Unexpected error")
+                self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
             return
 
         if self.path == '/api/settings/env':

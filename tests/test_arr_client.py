@@ -233,6 +233,43 @@ class TestSonarrClient:
         client = SonarrClient('', '')
         assert client.lookup_series(title='Test') is None
 
+    @patch('urllib.request.urlopen')
+    def test_remove_episodes(self, mock_urlopen, sonarr):
+        # get_all_series, get_episodes, delete file1, delete file2
+        responses = [
+            _mock_urlopen([{'id': 5, 'title': 'My Show', 'tmdbId': 123}]),
+            _mock_urlopen([
+                {'id': 100, 'seasonNumber': 1, 'episodeNumber': 1, 'hasFile': True, 'episodeFileId': 50},
+                {'id': 101, 'seasonNumber': 1, 'episodeNumber': 2, 'hasFile': True, 'episodeFileId': 51},
+                {'id': 102, 'seasonNumber': 1, 'episodeNumber': 3, 'hasFile': False, 'episodeFileId': 0},
+            ]),
+            _mock_urlopen({}),  # delete file 50
+            _mock_urlopen({}),  # delete file 51
+        ]
+        mock_urlopen.side_effect = responses
+        result = sonarr.remove_episodes('My Show', 123, 1, [1, 2, 3])
+        assert result['status'] == 'removed'
+        assert result['removed'] == 2
+
+    @patch('urllib.request.urlopen')
+    def test_remove_episodes_not_found(self, mock_urlopen, sonarr):
+        mock_urlopen.return_value = _mock_urlopen([])
+        result = sonarr.remove_episodes('Missing', None, 1, [1])
+        assert result['status'] == 'error'
+
+    @patch('urllib.request.urlopen')
+    def test_remove_episodes_no_files(self, mock_urlopen, sonarr):
+        responses = [
+            _mock_urlopen([{'id': 5, 'title': 'My Show', 'tmdbId': 123}]),
+            _mock_urlopen([
+                {'id': 100, 'seasonNumber': 1, 'episodeNumber': 1, 'hasFile': False, 'episodeFileId': 0},
+            ]),
+        ]
+        mock_urlopen.side_effect = responses
+        result = sonarr.remove_episodes('My Show', 123, 1, [1])
+        assert result['status'] == 'error'
+        assert 'No files' in result['message']
+
 
 # ---------------------------------------------------------------------------
 # Radarr client
@@ -295,6 +332,45 @@ class TestRadarrClient:
         mock_urlopen.side_effect = responses
         result = radarr.ensure_and_search('Missing', None)
         assert result['status'] == 'error'
+
+    @patch('urllib.request.urlopen')
+    def test_remove_movie(self, mock_urlopen, radarr):
+        responses = [
+            _mock_urlopen([{
+                'id': 1, 'title': 'Inception', 'tmdbId': 27205,
+                'hasFile': True, 'movieFile': {'id': 99},
+            }]),
+            _mock_urlopen({}),  # delete file
+        ]
+        mock_urlopen.side_effect = responses
+        result = radarr.remove_movie('Inception', 27205)
+        assert result['status'] == 'removed'
+        assert result['removed'] == 1
+
+    @patch('urllib.request.urlopen')
+    def test_remove_movie_no_file(self, mock_urlopen, radarr):
+        mock_urlopen.return_value = _mock_urlopen([{
+            'id': 1, 'title': 'Inception', 'tmdbId': 27205, 'hasFile': False,
+        }])
+        result = radarr.remove_movie('Inception', 27205)
+        assert result['status'] == 'error'
+        assert 'no file' in result['message']
+
+    @patch('urllib.request.urlopen')
+    def test_remove_movie_not_found(self, mock_urlopen, radarr):
+        mock_urlopen.return_value = _mock_urlopen([])
+        result = radarr.remove_movie('Missing', None)
+        assert result['status'] == 'error'
+
+    @patch('urllib.request.urlopen')
+    def test_remove_movie_null_movie_file(self, mock_urlopen, radarr):
+        mock_urlopen.return_value = _mock_urlopen([{
+            'id': 1, 'title': 'Inception', 'tmdbId': 27205,
+            'hasFile': True, 'movieFile': None,
+        }])
+        result = radarr.remove_movie('Inception', 27205)
+        assert result['status'] == 'error'
+        assert 'file ID' in result['message']
 
 
 # ---------------------------------------------------------------------------

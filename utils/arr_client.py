@@ -94,6 +94,9 @@ class _ArrClientBase:
     def _post(self, path, body=None):
         return self._request('POST', path, body=body)
 
+    def _delete(self, path, params=None):
+        return self._request('DELETE', path, params=params)
+
 
 # ---------------------------------------------------------------------------
 # Sonarr
@@ -264,6 +267,55 @@ class SonarrClient(_ArrClientBase):
             'command_id': cmd.get('id'),
         }
 
+    def delete_episode_file(self, file_id):
+        """Delete an episode file by its Sonarr file ID."""
+        return self._delete(f'/api/v3/episodefile/{file_id}')
+
+    def remove_episodes(self, title, tmdb_id, season_number, episode_numbers):
+        """High-level: remove episode files via Sonarr.
+
+        Finds the series, identifies episode files for the requested
+        season/episodes, and deletes them through Sonarr's API.
+        """
+        series = self.find_series_in_library(tmdb_id=tmdb_id, title=title)
+        if not series:
+            return {'status': 'error', 'message': f'Series not found in Sonarr: {title}'}
+
+        series_id = series.get('id')
+        if series_id is None:
+            return {'status': 'error', 'message': 'Sonarr returned series without ID'}
+
+        episodes = self.get_episodes(series_id)
+        file_ids = set()
+        for ep in episodes:
+            if (ep.get('seasonNumber') == season_number
+                    and ep.get('episodeNumber') in episode_numbers
+                    and ep.get('hasFile')
+                    and ep.get('episodeFileId')):
+                file_ids.add(ep['episodeFileId'])
+
+        if not file_ids:
+            return {
+                'status': 'error',
+                'message': f'No files found in Sonarr for {title} S{season_number:02d}',
+            }
+
+        deleted = 0
+        for fid in file_ids:
+            result = self.delete_episode_file(fid)
+            if result is not None:
+                deleted += 1
+
+        if deleted == 0:
+            return {'status': 'error', 'message': 'Failed to remove files via Sonarr'}
+
+        return {
+            'status': 'removed',
+            'service': 'sonarr',
+            'message': f'Removed {deleted} episode(s) via Sonarr',
+            'removed': deleted,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Radarr
@@ -412,6 +464,35 @@ class RadarrClient(_ArrClientBase):
             'status': 'sent',
             'service': 'radarr',
             'message': f'Added {title} to Radarr — searching now',
+        }
+
+    def delete_movie_file(self, file_id):
+        """Delete a movie file by its Radarr file ID."""
+        return self._delete(f'/api/v3/moviefile/{file_id}')
+
+    def remove_movie(self, title, tmdb_id):
+        """High-level: remove a movie file via Radarr."""
+        movie = self.find_movie_in_library(tmdb_id=tmdb_id, title=title)
+        if not movie:
+            return {'status': 'error', 'message': f'Movie not found in Radarr: {title}'}
+
+        if not movie.get('hasFile'):
+            return {'status': 'error', 'message': f'{title} has no file in Radarr'}
+
+        movie_file = movie.get('movieFile') or {}
+        movie_file_id = movie_file.get('id')
+        if movie_file_id is None:
+            return {'status': 'error', 'message': 'Radarr movie missing file ID'}
+
+        result = self.delete_movie_file(movie_file_id)
+        if result is None:
+            return {'status': 'error', 'message': 'Failed to remove movie file via Radarr'}
+
+        return {
+            'status': 'removed',
+            'service': 'radarr',
+            'message': f'Removed {title} via Radarr',
+            'removed': 1,
         }
 
 

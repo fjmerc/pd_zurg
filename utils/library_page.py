@@ -125,6 +125,11 @@ a:hover{text-decoration:underline}
 .btn-action.danger{color:var(--red);border-color:#f8514933}
 .btn-action.danger:hover{border-color:var(--red);background:#f851490f}
 .btn-action:disabled{opacity:.5;cursor:not-allowed}
+.btn-apply{background:var(--blue);color:#fff;border:none;border-radius:6px;padding:6px 16px;font-size:.82em;font-weight:600;cursor:pointer;transition:background .15s,opacity .15s;min-height:32px}
+.btn-apply:hover{background:#4c9aff}
+.btn-apply:disabled{opacity:.5;cursor:not-allowed}
+[data-theme="light"] .btn-apply{background:var(--blue);color:#fff}
+[data-theme="light"] .btn-apply:hover{background:#0860ca}
 .season-actions{margin-left:auto;display:flex;gap:4px}
 .transfer-msg{font-size:.78em;color:var(--yellow);margin-top:4px}
 
@@ -511,10 +516,32 @@ function _renderMovieDetail(movie, meta) {
     if (runtimeParts.length) html += '<div class="detail-runtime">' + runtimeParts.join(' &middot; ') + '</div>';
     if (meta.overview) html += '<div class="detail-overview">' + esc(meta.overview) + '</div>';
   }
-  if (movie.source === 'debrid' && _downloadServices.movie) {
-    var movieBtnLabel = _downloadServices.movie === 'overseerr' ? 'Request in Overseerr' : 'Download via Radarr';
-    html += '<div style="margin-top:10px"><button class="btn-action" onclick="downloadMovie()">' + movieBtnLabel + '</button></div>';
-  } else if (movie.source === 'debrid' && !_downloadServices.movie) {
+  // Movie preference dropdown + action buttons
+  var movieNk = normTitle(movie.title);
+  var moviePref = _preferences[movieNk] || 'none';
+  if (_downloadServices.movie) {
+    _savedPref = moviePref;
+    html += '<div class="pref-row"><label for="movie-pref-select" style="font-size:.82em;color:var(--text2)">Source preference:</label>';
+    html += '<select class="pref-select" id="movie-pref-select" onchange="onPrefSelectChange(this.value)">';
+    html += '<option value="none"' + (moviePref === 'none' ? ' selected' : '') + '>No Preference</option>';
+    html += '<option value="prefer-local"' + (moviePref === 'prefer-local' ? ' selected' : '') + '>Prefer Local</option>';
+    if (_downloadServices.movie === 'radarr') {
+      html += '<option value="prefer-debrid"' + (moviePref === 'prefer-debrid' ? ' selected' : '') + '>Prefer Debrid</option>';
+    }
+    html += '</select>';
+    html += '<button class="btn-apply" id="movie-pref-apply-btn" style="display:none" onclick="applyMoviePreference()">Apply</button>';
+    html += '</div>';
+    html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px">Prefer Local downloads the movie. Prefer Debrid removes the local copy and streams from debrid.</div>';
+    html += '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">';
+    if (movie.source === 'debrid') {
+      var movieDlLabel = _downloadServices.movie === 'overseerr' ? 'Request in Overseerr' : 'Switch to Local';
+      html += '<button class="btn-action" onclick="downloadMovie()">' + movieDlLabel + '</button>';
+    }
+    if ((movie.source === 'local' || movie.source === 'both') && _downloadServices.movie === 'radarr') {
+      html += '<button class="btn-action danger" onclick="removeMovie()">Switch to Debrid</button>';
+    }
+    html += '</div>';
+  } else if (movie.source === 'debrid') {
     html += '<div style="margin-top:10px;font-size:.82em;color:var(--text3)">To download locally, configure <a href="/settings">Radarr or Overseerr</a> in Settings.</div>';
   }
   html += '</div></div>';
@@ -568,6 +595,7 @@ function _renderShowDetail(show, meta) {
   var area = document.getElementById('content-area');
   var nk = normTitle(show.title);
   var curPref = _preferences[nk] || 'none';
+  _savedPref = curPref;
   var seasons = meta ? _mergeShowMeta(show, meta) : (show.season_data || []);
   _detailSeasons = seasons;
 
@@ -597,12 +625,15 @@ function _renderShowDetail(show, meta) {
   if ((show.source === 'debrid' || show.source === 'both') && !_downloadServices.show) {
     html += '<div style="font-size:.82em;color:var(--text3);margin-top:8px">To download episodes locally, configure <a href="/settings">Sonarr or Overseerr</a> in Settings.</div>';
   }
-  html += '<div class="pref-row"><label style="font-size:.82em;color:var(--text2)" title="When both local and debrid copies exist, which should your media server prefer">Preference:</label>';
-  html += '<select class="pref-select" onchange="onPrefChange(this.value)" title="When both local and debrid copies exist, which should your media server prefer">';
+  html += '<div class="pref-row"><label for="show-pref-select" style="font-size:.82em;color:var(--text2)">Source preference:</label>';
+  html += '<select class="pref-select" id="show-pref-select" onchange="onPrefSelectChange(this.value)">';
   html += '<option value="none"' + (curPref === 'none' ? ' selected' : '') + '>No Preference</option>';
   html += '<option value="prefer-local"' + (curPref === 'prefer-local' ? ' selected' : '') + '>Prefer Local</option>';
   html += '<option value="prefer-debrid"' + (curPref === 'prefer-debrid' ? ' selected' : '') + '>Prefer Debrid</option>';
-  html += '</select></div>';
+  html += '</select>';
+  html += '<button class="btn-apply" id="show-pref-apply-btn" style="display:none" onclick="applyPreference()">Apply</button>';
+  html += '</div>';
+  html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px">Prefer Local downloads debrid-only episodes. Prefer Debrid removes local copies and streams from debrid.</div>';
   html += '</div></div>';
 
   for (var si = 0; si < seasons.length; si++) {
@@ -630,7 +661,14 @@ function _renderShowDetail(show, meta) {
         html += '<button class="btn-action" onclick="event.stopPropagation();dlSeason(' + si + ')">' + dlLabel + '</button>';
       }
     }
-    if (hasLocal) html += '<button class="btn-action danger" onclick="event.stopPropagation();rmSeason(' + si + ')">Remove Local</button>';
+    if (hasLocal && _downloadServices.show && _downloadServices.show !== 'overseerr') {
+      var localCount = 0;
+      for (var lci = 0; lci < season.episodes.length; lci++) {
+        if (season.episodes[lci].source === 'local' || season.episodes[lci].source === 'both') localCount++;
+      }
+      var rmLabel = 'Switch ' + localCount + ' to Debrid';
+      html += '<button class="btn-action danger" onclick="event.stopPropagation();rmSeason(' + si + ')">' + rmLabel + '</button>';
+    }
     html += '</span>';
     html += '</div>';
     html += '<div class="season-episodes"' + (expanded ? '' : ' style="display:none"') + '>';
@@ -659,8 +697,8 @@ function _renderShowDetail(show, meta) {
         if (ep.source === 'debrid' && _downloadServices.show && _downloadServices.show !== 'overseerr') {
           html += '<button class="btn-action" aria-label="Download ' + epLabel + '" onclick="downloadEp(' + season.number + ',' + ep.number + ')">Download</button>';
         }
-        if (ep.source === 'local' || ep.source === 'both') {
-          html += '<button class="btn-action danger" aria-label="Remove ' + epLabel + '" onclick="removeEp(' + season.number + ',' + ep.number + ')">Remove</button>';
+        if ((ep.source === 'local' || ep.source === 'both') && _downloadServices.show && _downloadServices.show !== 'overseerr') {
+          html += '<button class="btn-action danger" aria-label="Switch ' + epLabel + ' to Debrid" onclick="removeEp(' + season.number + ',' + ep.number + ')">Switch to Debrid</button>';
         }
       }
       html += '</td>';
@@ -696,9 +734,98 @@ function toggleSeason(headerEl) {
 // ---------------------------------------------------------------------------
 // Preference & action API calls
 // ---------------------------------------------------------------------------
-function onPrefChange(pref) {
-  if (!_detailItem) return;
+var _savedPref = 'none';  // tracks saved pref to detect changes
+
+function _getPrefElements() {
+  // Show and movie detail views use distinct IDs; only one is rendered at a time
+  var sel = document.getElementById('show-pref-select') || document.getElementById('movie-pref-select');
+  var btn = document.getElementById('show-pref-apply-btn') || document.getElementById('movie-pref-apply-btn');
+  return {sel: sel, btn: btn};
+}
+
+function onPrefSelectChange(pref) {
+  var els = _getPrefElements();
+  if (els.btn) els.btn.style.display = (pref !== _savedPref) ? '' : 'none';
+}
+
+function applyPreference() {
+  if (!_detailItem || _actionInFlight) return;
+  var sel = _getPrefElements().sel;
+  if (!sel) return;
+  var pref = sel.value;
   var nk = normTitle(_detailItem.title);
+  var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
+  var seasons = _detailSeasons || [];
+  var showSvc = _downloadServices.show;
+  // Overseerr cannot remove files — only Sonarr/Radarr can
+  var canRemove = showSvc && showSvc !== 'overseerr';
+
+  if (pref === 'prefer-local' && showSvc) {
+    // Collect debrid-only episodes across seasons
+    var dlTasks = [];
+    var totalEps = 0;
+    var isOverseerr = showSvc === 'overseerr';
+    for (var si = 0; si < seasons.length; si++) {
+      var eps = [];
+      for (var ei = 0; ei < seasons[si].episodes.length; ei++) {
+        if (seasons[si].episodes[ei].source === 'debrid') { eps.push(seasons[si].episodes[ei].number); totalEps++; }
+      }
+      if (eps.length) {
+        (function(sNum, epList) {
+          dlTasks.push(function() {
+            // Overseerr works at season level; Sonarr can do per-episode
+            var payload = {title: _detailItem.title, type: 'show', tmdb_id: tmdbId, season: sNum};
+            payload.episodes = isOverseerr ? [] : epList;
+            return _postDownload(payload);
+          });
+        })(seasons[si].number, eps);
+      }
+    }
+    if (totalEps === 0) {
+      _savePref(nk, pref);
+      var msg = document.getElementById('transfer-msg');
+      if (msg) msg.textContent = 'All episodes already local. Preference saved.';
+      return;
+    }
+    var svcLabel = _svcNames[showSvc] || showSvc;
+    if (!confirm(isOverseerr
+      ? 'Request ' + dlTasks.length + ' season(s) in Overseerr?'
+      : 'Download ' + totalEps + ' episode(s) locally via ' + svcLabel + '?')) return;
+    _runSequential(dlTasks).then(function(ok) { if (ok) _savePref(nk, pref); });
+
+  } else if (pref === 'prefer-debrid' && canRemove) {
+    // Collect all local episodes across seasons
+    var rmTasks = [];
+    var totalLocal = 0;
+    for (var si2 = 0; si2 < seasons.length; si2++) {
+      var rmEps = [];
+      for (var ei2 = 0; ei2 < seasons[si2].episodes.length; ei2++) {
+        var src = seasons[si2].episodes[ei2].source;
+        if (src === 'local' || src === 'both') { rmEps.push(seasons[si2].episodes[ei2].number); totalLocal++; }
+      }
+      if (rmEps.length) {
+        (function(sNum, epList) {
+          rmTasks.push(function() {
+            return _postRemove({
+              title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
+              season: sNum, episodes: epList
+            });
+          });
+        })(seasons[si2].number, rmEps);
+      }
+    }
+    if (totalLocal === 0) { _savePref(nk, pref); return; }
+    if (!confirm('Switch ' + totalLocal + ' episode(s) to debrid streaming?\n\nLocal copies will be removed via Sonarr.')) return;
+    _runSequential(rmTasks).then(function(ok) { if (ok) _savePref(nk, pref); });
+
+  } else {
+    _savePref(nk, pref);
+    var msg = document.getElementById('transfer-msg');
+    if (msg) msg.textContent = 'Preference saved.';
+  }
+}
+
+function _savePref(nk, pref) {
   fetch('/api/library/preference', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -706,6 +833,9 @@ function onPrefChange(pref) {
   }).then(function(r) { return r.json(); }).then(function(d) {
     if (pref === 'none') { delete _preferences[nk]; }
     else { _preferences[nk] = pref; }
+    _savedPref = pref;
+    var btn = _getPrefElements().btn;
+    if (btn) btn.style.display = 'none';
   }).catch(function(e) { alert('Failed to save preference: ' + e); });
 }
 
@@ -720,8 +850,12 @@ function downloadEp(season, episode) {
 
 function removeEp(season, episode) {
   if (!_detailItem) return;
-  if (!confirm('Remove local copy of S' + (season < 10 ? '0' : '') + season + 'E' + (episode < 10 ? '0' : '') + episode + '?')) return;
-  _postRemove(_detailItem.title, [{season: season, episode: episode}]);
+  if (!confirm('Switch S' + (season < 10 ? '0' : '') + season + 'E' + (episode < 10 ? '0' : '') + episode + ' to debrid streaming?\n\nThe local copy will be removed.')) return;
+  var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
+  _postRemove({
+    title: _detailItem.title, type: _detailItem.type, tmdb_id: tmdbId,
+    season: season, episodes: [episode]
+  });
 }
 
 function dlSeason(seasonIdx) {
@@ -734,6 +868,9 @@ function dlSeason(seasonIdx) {
     }
   }
   if (!eps.length) return;
+  var svc = _downloadServices.show;
+  var svcName = _svcNames[svc] || svc;
+  if (!confirm('Download ' + eps.length + ' episode(s) from Season ' + season.number + ' via ' + svcName + '?')) return;
   var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
   _postDownload({
     title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
@@ -743,6 +880,7 @@ function dlSeason(seasonIdx) {
 
 function requestSeason(seasonNumber) {
   if (!_detailItem) return;
+  if (!confirm('Request Season ' + seasonNumber + ' in Overseerr?')) return;
   var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
   _postDownload({
     title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
@@ -758,36 +896,82 @@ function downloadMovie() {
   });
 }
 
+function removeMovie() {
+  if (!_detailItem) return;
+  if (!confirm('Switch ' + _detailItem.title + ' to debrid streaming?\n\nThe local copy will be removed via Radarr.')) return;
+  var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
+  _postRemove({
+    title: _detailItem.title, type: 'movie', tmdb_id: tmdbId,
+    episodes: []
+  });
+}
+
+function applyMoviePreference() {
+  if (!_detailItem || _actionInFlight) return;
+  var sel = _getPrefElements().sel;
+  if (!sel) return;
+  var pref = sel.value;
+  var nk = normTitle(_detailItem.title);
+  var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
+  var movieSvc = _downloadServices.movie;
+
+  if (pref === 'prefer-local' && movieSvc && _detailItem.source === 'debrid') {
+    var svcLabel = _svcNames[movieSvc] || movieSvc;
+    if (!confirm('Download ' + _detailItem.title + ' locally via ' + svcLabel + '?')) return;
+    _postDownload({
+      title: _detailItem.title, type: 'movie', tmdb_id: tmdbId
+    }).then(function(ok) { if (ok) _savePref(nk, pref); });
+
+  } else if (pref === 'prefer-debrid' && movieSvc === 'radarr' && (_detailItem.source === 'local' || _detailItem.source === 'both')) {
+    if (!confirm('Switch ' + _detailItem.title + ' to debrid streaming?\n\nThe local copy will be removed via Radarr.')) return;
+    _postRemove({
+      title: _detailItem.title, type: 'movie', tmdb_id: tmdbId,
+      episodes: []
+    }).then(function(ok) { if (ok) _savePref(nk, pref); });
+
+  } else {
+    _savePref(nk, pref);
+    var msg = document.getElementById('transfer-msg');
+    if (msg) msg.textContent = 'Preference saved.';
+  }
+}
+
 function rmSeason(seasonIdx) {
   if (!_detailItem || !_detailSeasons[seasonIdx]) return;
   var season = _detailSeasons[seasonIdx];
-  var eps = [];
+  var epNums = [];
   for (var i = 0; i < season.episodes.length; i++) {
     if (season.episodes[i].source === 'local' || season.episodes[i].source === 'both') {
-      eps.push({season: season.number, episode: season.episodes[i].number});
+      epNums.push(season.episodes[i].number);
     }
   }
-  if (!eps.length) return;
-  if (!confirm('Remove ' + eps.length + ' local episode(s) from Season ' + season.number + '?')) return;
-  _postRemove(_detailItem.title, eps);
+  if (!epNums.length) return;
+  if (!confirm('Switch ' + epNums.length + ' episode(s) from Season ' + season.number + ' to debrid streaming?\n\nLocal copies will be removed.')) return;
+  var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
+  _postRemove({
+    title: _detailItem.title, type: _detailItem.type, tmdb_id: tmdbId,
+    season: season.number, episodes: epNums
+  });
 }
 
 var _svcNames = {sonarr: 'Sonarr', radarr: 'Radarr', overseerr: 'Overseerr'};
-var _dlInFlight = false;
+var _actionInFlight = false;
+
+function _setActionsDisabled(disabled) {
+  var btns = document.querySelectorAll('.btn-action, .btn-apply');
+  for (var i = 0; i < btns.length; i++) btns[i].disabled = disabled;
+}
 
 function _postDownload(payload) {
-  if (_dlInFlight) return;
-  _dlInFlight = true;
-  // Disable all download/request buttons while in flight
-  var btns = document.querySelectorAll('.btn-action:not(.danger)');
-  for (var i = 0; i < btns.length; i++) btns[i].disabled = true;
-
+  if (_actionInFlight) return Promise.resolve(false);
+  _actionInFlight = true;
+  _setActionsDisabled(true);
   var msg = document.getElementById('transfer-msg');
   var svc = payload.type === 'movie' ? _downloadServices.movie : _downloadServices.show;
   var svcName = _svcNames[svc] || svc;
   var actionWord = svc === 'overseerr' ? 'Requesting' : 'Sending to ' + svcName;
   if (msg) msg.innerHTML = '<span class="scanning-dot"></span>' + esc(actionWord) + '...';
-  fetch('/api/library/download', {
+  return fetch('/api/library/download', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(payload)
@@ -797,31 +981,57 @@ function _postDownload(payload) {
     var d = res.d;
     var errMsg = (!res.ok || d.status === 'error') ? (d.error || d.message || 'Unknown error') : null;
     if (msg) msg.textContent = errMsg ? 'Error: ' + errMsg : (d.message || 'Sent.');
+    return !errMsg;  // true on success, false on error
   }).catch(function(e) {
     if (msg) msg.textContent = 'Request failed: ' + e;
+    return false;
   }).finally(function() {
-    _dlInFlight = false;
-    var btns = document.querySelectorAll('.btn-action:not(.danger)');
-    for (var i = 0; i < btns.length; i++) btns[i].disabled = false;
+    _actionInFlight = false;
+    _setActionsDisabled(false);
   });
 }
 
-function _postRemove(title, episodes) {
+function _postRemove(payload) {
+  if (_actionInFlight) return Promise.resolve(false);
+  _actionInFlight = true;
+  _setActionsDisabled(true);
   var msg = document.getElementById('transfer-msg');
-  fetch('/api/library/remove-local', {
+  if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Removing...';
+  return fetch('/api/library/remove-local', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({title: title, episodes: episodes})
-  }).then(function(r) { return r.json(); }).then(function(d) {
-    if (d.status === 'removed') {
-      if (msg) msg.textContent = 'Removed ' + d.removed + ' file(s).';
+    body: JSON.stringify(payload)
+  }).then(function(r) {
+    return r.json().then(function(d) { return {ok: r.ok, d: d}; });
+  }).then(function(res) {
+    var d = res.d;
+    if (!res.ok || (d.status !== 'removed')) {
+      var errMsg = d.error || d.message || 'Unknown error';
+      if (msg) msg.textContent = 'Error: ' + errMsg;
+      return false;
+    } else {
+      if (msg) msg.textContent = d.message || ('Removed ' + (d.removed || 0) + ' file(s).');
       setTimeout(_refreshDetailData, 1000);
-    } else if (d.error) {
-      if (msg) msg.textContent = 'Error: ' + d.error;
+      return true;
     }
   }).catch(function(e) {
     if (msg) msg.textContent = 'Remove failed: ' + e;
+    return false;
+  }).finally(function() {
+    _actionInFlight = false;
+    _setActionsDisabled(false);
   });
+}
+
+// Serialize an array of functions that each return a Promise<boolean>.
+// Returns true if at least one task succeeded.
+function _runSequential(tasks) {
+  var anySuccess = false;
+  return tasks.reduce(function(chain, task) {
+    return chain.then(function() {
+      return task().then(function(ok) { if (ok) anySuccess = true; });
+    });
+  }, Promise.resolve()).then(function() { return anySuccess; });
 }
 
 function _refreshDetailData() {

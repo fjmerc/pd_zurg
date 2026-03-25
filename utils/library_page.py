@@ -794,14 +794,16 @@ function applyPreference() {
     _runSequential(dlTasks).then(function(ok) { if (ok) _savePref(nk, pref); });
 
   } else if (pref === 'prefer-debrid' && canRemove) {
-    // Collect all local episodes across seasons
+    // Only remove episodes that already have a debrid copy (source === 'both')
     var rmTasks = [];
-    var totalLocal = 0;
+    var totalBoth = 0;
+    var totalLocalOnly = 0;
     for (var si2 = 0; si2 < seasons.length; si2++) {
       var rmEps = [];
       for (var ei2 = 0; ei2 < seasons[si2].episodes.length; ei2++) {
         var src = seasons[si2].episodes[ei2].source;
-        if (src === 'local' || src === 'both') { rmEps.push(seasons[si2].episodes[ei2].number); totalLocal++; }
+        if (src === 'both') { rmEps.push(seasons[si2].episodes[ei2].number); totalBoth++; }
+        else if (src === 'local') { totalLocalOnly++; }
       }
       if (rmEps.length) {
         (function(sNum, epList) {
@@ -814,9 +816,28 @@ function applyPreference() {
         })(seasons[si2].number, rmEps);
       }
     }
-    if (totalLocal === 0) { _savePref(nk, pref); return; }
-    if (!confirm('Switch ' + totalLocal + ' episode(s) to debrid streaming?\n\nLocal copies will be removed via Sonarr.')) return;
-    _runSequential(rmTasks).then(function(ok) { if (ok) _savePref(nk, pref); });
+    if (totalBoth === 0 && totalLocalOnly === 0) { _savePref(nk, pref); return; }
+    if (totalBoth === 0) {
+      // All episodes are local-only — save pref but keep files safe
+      var localCount = totalLocalOnly;
+      _savePref(nk, pref).then(function(saved) {
+        var msg = document.getElementById('transfer-msg');
+        if (msg) msg.textContent = saved
+          ? 'Preference saved. ' + localCount + ' local episode(s) kept until debrid copies are available.'
+          : 'Failed to save preference.';
+      });
+      return;
+    }
+    var confirmMsg = 'Remove local copies of ' + totalBoth + ' episode(s) that already have debrid copies?';
+    if (totalLocalOnly > 0) confirmMsg += '\n\n' + totalLocalOnly + ' local-only episode(s) will be kept until debrid copies are available.';
+    if (!confirm(confirmMsg)) return;
+    var oldPref = _savedPref;
+    _savePref(nk, pref).then(function(saved) {
+      if (!saved) return;
+      _runSequential(rmTasks).then(function(ok) {
+        if (!ok) _savePref(nk, oldPref);
+      });
+    });
 
   } else {
     _savePref(nk, pref);
@@ -826,7 +847,7 @@ function applyPreference() {
 }
 
 function _savePref(nk, pref) {
-  fetch('/api/library/preference', {
+  return fetch('/api/library/preference', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({title: nk, preference: pref})
@@ -836,7 +857,8 @@ function _savePref(nk, pref) {
     _savedPref = pref;
     var btn = _getPrefElements().btn;
     if (btn) btn.style.display = 'none';
-  }).catch(function(e) { alert('Failed to save preference: ' + e); });
+    return true;
+  }).catch(function(e) { alert('Failed to save preference: ' + e); return false; });
 }
 
 function downloadEp(season, episode) {
@@ -923,11 +945,28 @@ function applyMoviePreference() {
     }).then(function(ok) { if (ok) _savePref(nk, pref); });
 
   } else if (pref === 'prefer-debrid' && movieSvc === 'radarr' && (_detailItem.source === 'local' || _detailItem.source === 'both')) {
-    if (!confirm('Switch ' + _detailItem.title + ' to debrid streaming?\n\nThe local copy will be removed via Radarr.')) return;
-    _postRemove({
-      title: _detailItem.title, type: 'movie', tmdb_id: tmdbId,
-      episodes: []
-    }).then(function(ok) { if (ok) _savePref(nk, pref); });
+    if (_detailItem.source === 'both') {
+      // Debrid already has it — safe to remove local copy
+      if (!confirm('Remove local copy of ' + _detailItem.title + '?\n\nDebrid copy is already available.')) return;
+      var oldPref = _savedPref;
+      _savePref(nk, pref).then(function(saved) {
+        if (!saved) return;
+        _postRemove({
+          title: _detailItem.title, type: 'movie', tmdb_id: tmdbId,
+          episodes: []
+        }).then(function(ok) {
+          if (!ok) _savePref(nk, oldPref);
+        });
+      });
+    } else {
+      // Local only — debrid does not have this yet; keep local copy safe
+      _savePref(nk, pref).then(function(saved) {
+        var msg = document.getElementById('transfer-msg');
+        if (msg) msg.textContent = saved
+          ? 'Preference saved. Local copy kept until a debrid copy is available.'
+          : 'Failed to save preference.';
+      });
+    }
 
   } else {
     _savePref(nk, pref);

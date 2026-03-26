@@ -1011,10 +1011,14 @@ class LibraryScanner:
         if not os.path.isdir(self._local_movies_path):
             logger.warning(f"[library] Local movies path not found: {self._local_movies_path}")
             return items
+        symlink_base = os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', '').strip()
         try:
             with os.scandir(self._local_movies_path) as it:
                 for entry in it:
                     if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    # Skip folders that only contain debrid symlinks
+                    if symlink_base and self._is_debrid_symlink_dir(entry.path, symlink_base):
                         continue
                     title, year = _parse_folder_name(entry.name)
                     items.append({
@@ -1030,6 +1034,60 @@ class LibraryScanner:
             logger.warning(f"[library] Cannot scan local movies: {e}")
         return items
 
+    @staticmethod
+    def _is_debrid_symlink_dir(path, symlink_base):
+        """Check if a directory contains only symlinks pointing to the debrid mount."""
+        try:
+            for f in os.scandir(path):
+                if f.is_symlink():
+                    target = os.readlink(f.path)
+                    if not target.startswith(symlink_base + os.sep):
+                        return False  # symlink to non-debrid location
+                elif f.is_file(follow_symlinks=False):
+                    return False  # real file = genuine local content
+            return True  # all entries are debrid symlinks (or dir is empty)
+        except OSError:
+            return False
+
+    @staticmethod
+    def _is_debrid_symlink_only(path, symlink_base):
+        """Check if a show directory tree contains only debrid symlinks (no real files).
+
+        Walks into Season subdirectories to check episode files.
+        """
+        prefix = symlink_base + os.sep
+        has_any_media = False
+        try:
+            for entry in os.scandir(path):
+                if entry.is_dir(follow_symlinks=False):
+                    # Check inside Season dirs
+                    try:
+                        for f in os.scandir(entry.path):
+                            ext = os.path.splitext(f.name)[1].lower()
+                            if ext not in MEDIA_EXTENSIONS:
+                                continue
+                            has_any_media = True
+                            if f.is_symlink():
+                                if not os.readlink(f.path).startswith(prefix):
+                                    return False
+                            elif f.is_file(follow_symlinks=False):
+                                return False  # real file
+                    except OSError:
+                        pass
+                elif entry.is_symlink():
+                    ext = os.path.splitext(entry.name)[1].lower()
+                    if ext in MEDIA_EXTENSIONS:
+                        has_any_media = True
+                        if not os.readlink(entry.path).startswith(prefix):
+                            return False
+                elif entry.is_file(follow_symlinks=False):
+                    ext = os.path.splitext(entry.name)[1].lower()
+                    if ext in MEDIA_EXTENSIONS:
+                        return False  # real file
+        except OSError:
+            return False
+        return has_any_media  # only True if we found media and all were debrid symlinks
+
     def _scan_local_shows(self):
         items = []
         if not self._local_tv_path:
@@ -1037,10 +1095,14 @@ class LibraryScanner:
         if not os.path.isdir(self._local_tv_path):
             logger.warning(f"[library] Local TV path not found: {self._local_tv_path}")
             return items
+        symlink_base = os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', '').strip()
         try:
             with os.scandir(self._local_tv_path) as it:
                 for entry in it:
                     if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    # Skip show folders that are entirely debrid symlinks
+                    if symlink_base and self._is_debrid_symlink_only(entry.path, symlink_base):
                         continue
                     title, year = _parse_folder_name(entry.name)
                     eps = _collect_episodes(entry.path)

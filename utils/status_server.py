@@ -1528,6 +1528,105 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
             return
 
+        if self.path == '/api/library/switch-to-debrid':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 100_000:
+                    self._send_json_response(400, json.dumps({'error': 'Request body too large'}))
+                    return
+                body = self.rfile.read(content_length)
+                values = json.loads(body.decode('utf-8'))
+                if not isinstance(values, dict):
+                    self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
+                    return
+                title = values.get('title', '').strip()
+                if not title:
+                    self._send_json_response(400, json.dumps({'error': 'title required'}))
+                    return
+
+                from utils.library import get_scanner, normalize_title
+                import os as _os
+                scanner = get_scanner()
+                if scanner is None:
+                    self._send_json_response(503, json.dumps({'error': 'Scanner not initialized'}))
+                    return
+
+                rclone_mount = _os.environ.get('BLACKHOLE_RCLONE_MOUNT', '').strip()
+                symlink_base = _os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', '').strip()
+                local_tv = scanner._local_tv_path
+
+                if not rclone_mount or not symlink_base:
+                    self._send_json_response(400, json.dumps({
+                        'error': 'BLACKHOLE_RCLONE_MOUNT and BLACKHOLE_SYMLINK_TARGET_BASE must be configured'
+                    }))
+                    return
+                if not local_tv:
+                    self._send_json_response(400, json.dumps({
+                        'error': 'No local TV library configured (BLACKHOLE_LOCAL_LIBRARY_TV)'
+                    }))
+                    return
+
+                norm = normalize_title(title)
+                season_eps = values.get('episodes', [])
+
+                # Build the list of episodes to switch
+                to_switch = []
+                not_on_debrid = 0
+                with scanner._path_lock:
+                    for ep in season_eps:
+                        try:
+                            s = int(ep.get('season', 0))
+                            e = int(ep.get('episode', 0))
+                        except (ValueError, TypeError):
+                            continue
+                        local_p = scanner._local_path_index.get((norm, s, e))
+                        debrid_p = scanner._path_index.get((norm, s, e))
+                        if local_p and debrid_p:
+                            to_switch.append({
+                                'local_path': local_p,
+                                'debrid_path': debrid_p,
+                                'season': s,
+                                'episode': e,
+                            })
+                        elif local_p and not debrid_p:
+                            not_on_debrid += 1
+
+                if not to_switch and not_on_debrid == 0:
+                    self._send_json_response(400, json.dumps({
+                        'error': f'No matching episodes found for {title}'
+                    }))
+                    return
+
+                if not to_switch and not_on_debrid > 0:
+                    self._send_json_response(200, json.dumps({
+                        'status': 'none_available',
+                        'message': f'{not_on_debrid} episode(s) have no debrid copy available',
+                        'switched': 0,
+                        'not_on_debrid': not_on_debrid,
+                    }))
+                    return
+
+                from utils.library_prefs import replace_local_with_symlinks
+                result = replace_local_with_symlinks(to_switch, local_tv, rclone_mount, symlink_base)
+                if not_on_debrid > 0:
+                    result['not_on_debrid'] = not_on_debrid
+                    result['message'] = (
+                        f"Switched {result['switched']} episode(s) to debrid. "
+                        f"{not_on_debrid} episode(s) kept local (no debrid copy)."
+                    )
+                else:
+                    result['message'] = f"Switched {result['switched']} episode(s) to debrid."
+
+                scanner.refresh()
+                status_code = 200 if result.get('switched', 0) > 0 else 400
+                self._send_json_response(status_code, json.dumps(result))
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception:
+                logger.exception("[switch-to-debrid] Unexpected error")
+                self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
+            return
+
         if self.path == '/api/library/remove-debrid':
             try:
                 content_length = int(self.headers.get('Content-Length', 0))

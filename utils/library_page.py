@@ -840,132 +840,61 @@ function applyPreference() {
       if (ok) _savePref(nk, pref);
     });
 
-  } else if (pref === 'prefer-debrid' && canRemove) {
-    // Collect episodes by source:
-    // - source=both → remove local copies (debrid already available)
-    // - source=local → remove local first so Sonarr marks them missing, then search for debrid
-    var rmBothTasks = [];
-    var rmLocalTasks = [];
-    var dlTasks2 = [];
-    var pendingEps = [];
-    var totalBoth = 0;
+  } else if (pref === 'prefer-debrid') {
+    // Switch local episodes to debrid by replacing local files with symlinks
+    // to the debrid mount. No Sonarr search needed — content must already
+    // exist on the mount (source=both).
+    var switchEps = [];
+    var totalSwitchable = 0;
     var totalLocalOnly = 0;
-    var svcLabel3 = _svcNames[showSvc] || showSvc;
     for (var si2 = 0; si2 < seasons.length; si2++) {
-      var rmBothEps = [];
-      var rmLocalEps = [];
       for (var ei2 = 0; ei2 < seasons[si2].episodes.length; ei2++) {
         var src = seasons[si2].episodes[ei2].source;
-        if (src === 'both') { rmBothEps.push(seasons[si2].episodes[ei2].number); totalBoth++; }
-        else if (src === 'local') { rmLocalEps.push(seasons[si2].episodes[ei2].number); totalLocalOnly++; }
-      }
-      if (rmBothEps.length) {
-        (function(sNum, epList) {
-          rmBothTasks.push(function() {
-            return _postRemove({
-              title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
-              season: sNum, episodes: epList
-            });
-          });
-        })(seasons[si2].number, rmBothEps);
-      }
-      if (rmLocalEps.length) {
-        (function(sNum, epList) {
-          rmLocalTasks.push(function() {
-            return _postRemove({
-              title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
-              season: sNum, episodes: epList
-            });
-          });
-          dlTasks2.push(function() {
-            return _postDownload({
-              title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
-              season: sNum, episodes: epList
-            });
-          });
-          for (var pe = 0; pe < epList.length; pe++) {
-            pendingEps.push({season: sNum, episode: epList[pe]});
-          }
-        })(seasons[si2].number, rmLocalEps);
-      }
-    }
-    if (totalBoth === 0 && totalLocalOnly === 0) { _savePref(nk, pref); return; }
-
-    // Case 1: only local-only episodes — remove local, then search for debrid replacements
-    if (totalBoth === 0 && totalLocalOnly > 0) {
-      if (!confirm('Switch ' + totalLocalOnly + ' episode(s) to debrid via ' + svcLabel3 + '?'
-        + '\n\nLocal copies will be removed and Sonarr will search for debrid replacements.'
-        + '\nEpisodes may be temporarily unavailable until debrid copies are found.')) return;
-      var oldPref = _savedPref;
-      _savePref(nk, pref).then(function(saved) {
-        if (!saved) return;
-        var msg = document.getElementById('transfer-msg');
-        if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Step 1/2: Removing local copies...';
-        _runSequential(rmLocalTasks).then(function(rmOk) {
-          if (!rmOk) {
-            if (msg) msg.textContent = 'Failed to remove local copies. Preference rolled back.';
-            _savePref(nk, oldPref);
-            return;
-          }
-          _setPending(_detailItem.title, pendingEps, 'to-debrid');
-          if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Step 2/2: Sending search to ' + esc(svcLabel3) + '...';
-          _runSequential(dlTasks2).then(function(dlOk) {
-            if (msg) msg.textContent = dlOk
-              ? 'Done. ' + totalLocalOnly + ' local file(s) removed. ' + svcLabel3 + ' is searching for debrid replacements.'
-              : 'Local copies removed but search failed. Retry search manually in ' + svcLabel3 + '.';
-            setTimeout(_refreshDetailData, 2000);
-          });
-        });
-      });
-      return;
-    }
-
-    // Case 2: only both-source episodes — remove local copies (debrid already available)
-    if (totalBoth > 0 && totalLocalOnly === 0) {
-      if (!confirm('Remove local copies of ' + totalBoth + ' episode(s) that already have debrid copies?')) return;
-      var oldPref2 = _savedPref;
-      _savePref(nk, pref).then(function(saved) {
-        if (!saved) return;
-        _runSequential(rmBothTasks).then(function(ok) {
-          if (!ok) _savePref(nk, oldPref2);
-        });
-      });
-      return;
-    }
-
-    // Case 3: mixed — remove local for all, then search for debrid replacements for local-only
-    if (!confirm('Switch to debrid for ' + (totalBoth + totalLocalOnly) + ' episode(s) via ' + svcLabel3 + '?'
-      + '\n\n' + totalBoth + ' episode(s) already have debrid copies — local files will be removed.'
-      + '\n' + totalLocalOnly + ' episode(s) need debrid copies — local files will be removed and Sonarr will search.'
-      + '\nSome episodes may be temporarily unavailable.')) return;
-    var oldPref3 = _savedPref;
-    _savePref(nk, pref).then(function(saved) {
-      if (!saved) return;
-      var msg = document.getElementById('transfer-msg');
-      if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Step 1/3: Removing ' + totalBoth + ' local file(s) with debrid copies...';
-      var allRmTasks = rmBothTasks.concat(rmLocalTasks);
-      _runSequential(rmBothTasks).then(function(rmBothOk) {
-        if (!rmBothOk) {
-          if (msg) msg.textContent = 'Failed to remove local copies. Preference rolled back.';
-          _savePref(nk, oldPref3);
-          return;
+        if (src === 'both') {
+          switchEps.push({season: seasons[si2].number, episode: seasons[si2].episodes[ei2].number});
+          totalSwitchable++;
+        } else if (src === 'local') {
+          totalLocalOnly++;
         }
-        if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Step 2/3: Removing ' + totalLocalOnly + ' local-only file(s)...';
-        _runSequential(rmLocalTasks).then(function(rmLocalOk) {
-          if (!rmLocalOk) {
-            if (msg) msg.textContent = totalBoth + ' file(s) removed. Failed to remove local-only files.';
-            return;
-          }
-          _setPending(_detailItem.title, pendingEps, 'to-debrid');
-          if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Step 3/3: Sending search to ' + esc(svcLabel3) + '...';
-          _runSequential(dlTasks2).then(function(dlOk) {
-            if (msg) msg.textContent = dlOk
-              ? 'Done. ' + (totalBoth + totalLocalOnly) + ' local file(s) removed. ' + svcLabel3 + ' is searching for ' + totalLocalOnly + ' debrid replacement(s).'
-              : (totalBoth + totalLocalOnly) + ' local file(s) removed. Search failed — retry manually in ' + svcLabel3 + '.';
-            setTimeout(_refreshDetailData, 2000);
-          });
-        });
+      }
+    }
+    if (totalSwitchable === 0 && totalLocalOnly === 0) { _savePref(nk, pref); return; }
+    if (totalSwitchable === 0) {
+      _savePref(nk, pref).then(function(saved) {
+        var msg = document.getElementById('transfer-msg');
+        if (msg) msg.textContent = saved
+          ? 'Preference saved. ' + totalLocalOnly + ' episode(s) have no debrid copy — local files kept.'
+          : 'Failed to save preference.';
       });
+      return;
+    }
+    var confirmMsg2 = 'Switch ' + totalSwitchable + ' episode(s) to debrid streaming?'
+      + '\n\nLocal files will be replaced with symlinks to the debrid mount.';
+    if (totalLocalOnly > 0) confirmMsg2 += '\n\n' + totalLocalOnly + ' episode(s) have no debrid copy and will stay local.';
+    if (!confirm(confirmMsg2)) return;
+    _actionInFlight = true;
+    _setActionsDisabled(true);
+    var msg = document.getElementById('transfer-msg');
+    if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Switching to debrid...';
+    fetch('/api/library/switch-to-debrid', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({title: _detailItem.title, episodes: switchEps})
+    }).then(function(r) {
+      return r.json().then(function(d) { return {ok: r.ok, d: d}; });
+    }).then(function(res) {
+      if (res.ok && res.d.switched > 0) {
+        _savePref(nk, pref);
+        if (msg) msg.textContent = res.d.message || ('Switched ' + res.d.switched + ' episode(s) to debrid.');
+        setTimeout(_refreshDetailData, 1000);
+      } else {
+        if (msg) msg.textContent = 'Error: ' + (res.d.error || res.d.message || 'Switch failed');
+      }
+    }).catch(function(e) {
+      if (msg) msg.textContent = 'Switch failed: ' + e;
+    }).finally(function() {
+      _actionInFlight = false;
+      _setActionsDisabled(false);
     });
 
   } else {
@@ -1079,49 +1008,37 @@ function applyMoviePreference() {
       if (ok) _savePref(nk, pref);
     });
 
-  } else if (pref === 'prefer-debrid' && movieSvc === 'radarr' && (_detailItem.source === 'local' || _detailItem.source === 'both')) {
-    if (_detailItem.source === 'both') {
-      // Debrid already has it — safe to remove local copy
-      if (!confirm('Remove local copy of ' + _detailItem.title + '?\n\nDebrid copy is already available.')) return;
-      var oldPref = _savedPref;
+  } else if (pref === 'prefer-debrid' && (_detailItem.source === 'local' || _detailItem.source === 'both')) {
+    if (_detailItem.source === 'local') {
+      // No debrid copy — just save preference
       _savePref(nk, pref).then(function(saved) {
-        if (!saved) return;
+        var msg = document.getElementById('transfer-msg');
+        if (msg) msg.textContent = saved
+          ? 'Preference saved. No debrid copy available — local file kept.'
+          : 'Failed to save preference.';
+      });
+    } else {
+      // source=both — replace local file with symlink to debrid mount
+      if (!confirm('Switch ' + _detailItem.title + ' to debrid streaming?'
+        + '\n\nLocal file will be replaced with a symlink to the debrid mount.')) return;
+      _actionInFlight = true;
+      _setActionsDisabled(true);
+      var msg = document.getElementById('transfer-msg');
+      if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Switching to debrid...';
+      // Movies don't have season/episode structure in the scanner — use a general approach
+      _savePref(nk, pref).then(function(saved) {
+        if (!saved) { _actionInFlight = false; _setActionsDisabled(false); return; }
+        var oldPref = _savedPref;
         _postRemove({
           title: _detailItem.title, type: 'movie', tmdb_id: tmdbId,
           episodes: []
         }).then(function(ok) {
-          if (!ok) _savePref(nk, oldPref);
-        });
-      });
-    } else {
-      // Local only — remove local first so Radarr marks it missing, then search for debrid
-      var svcLabel2 = _svcNames[movieSvc] || movieSvc;
-      if (!confirm('Switch ' + _detailItem.title + ' to debrid via ' + svcLabel2 + '?'
-        + '\n\nLocal copy will be removed and Radarr will search for a debrid replacement.'
-        + '\nThe movie may be temporarily unavailable.')) return;
-      var oldPref3 = _savedPref;
-      _savePref(nk, pref).then(function(saved) {
-        if (!saved) return;
-        var msg = document.getElementById('transfer-msg');
-        if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Step 1/2: Removing local copy...';
-        _postRemove({
-          title: _detailItem.title, type: 'movie', tmdb_id: tmdbId,
-          episodes: []
-        }).then(function(rmOk) {
-          if (!rmOk) {
-            if (msg) msg.textContent = 'Failed to remove local copy. Preference rolled back.';
-            _savePref(nk, oldPref3);
-            return;
-          }
-          if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Step 2/2: Sending search to ' + esc(svcLabel2) + '...';
-          _postDownload({
-            title: _detailItem.title, type: 'movie', tmdb_id: tmdbId
-          }).then(function(dlOk) {
-            if (msg) msg.textContent = dlOk
-              ? 'Done. Local copy removed. ' + svcLabel2 + ' is searching for debrid replacement.'
-              : 'Local copy removed but search failed. Retry search manually in ' + svcLabel2 + '.';
-            setTimeout(_refreshDetailData, 2000);
-          });
+          if (!ok) { _savePref(nk, oldPref); }
+          else if (msg) { msg.textContent = 'Local copy removed. Debrid copy is now the active source.'; }
+          setTimeout(_refreshDetailData, 1000);
+        }).finally(function() {
+          _actionInFlight = false;
+          _setActionsDisabled(false);
         });
       });
     }

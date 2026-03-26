@@ -6,6 +6,7 @@ This guide explains how to use pd_zurg's blackhole feature with symlink mode to 
 
 - [Overview](#overview)
 - [How It Works](#how-it-works)
+- [Auto-Symlinks for Debrid-Only Content](#auto-symlinks-for-debrid-only-content)
 - [Prerequisites](#prerequisites)
 - [Architecture](#architecture)
   - [Single-Host Setup](#single-host-setup)
@@ -445,6 +446,49 @@ Make sure:
 - The NFS client host IP is in the export list
 - NFS is running: `sudo systemctl status nfs-server`
 - After changing exports: `sudo exportfs -ra`
+
+## Auto-Symlinks for Debrid-Only Content
+
+In addition to the blackhole pipeline (where Sonarr/Radarr submit torrents), pd_zurg can automatically create symlinks for content that was added to debrid through other means — direct uploads, other tools, or shared debrid accounts.
+
+### How it works
+
+When `BLACKHOLE_SYMLINK_ENABLED=true` and local library paths are configured (`BLACKHOLE_LOCAL_LIBRARY_TV` / `BLACKHOLE_LOCAL_LIBRARY_MOVIES`), the library scanner runs after each scan and:
+
+1. Identifies shows/movies that exist on the debrid mount but have no local presence (source = debrid only)
+2. Creates organized symlink structures in the local library:
+   - **TV**: `{local_tv}/Show Name (Year)/Season XX/filename.mkv` → debrid mount
+   - **Movies**: `{local_movies}/Movie Name (Year)/filename.mkv` → debrid mount
+3. Uses Sonarr/Radarr's canonical folder names when the show/movie is already tracked by the arr
+4. Triggers a Sonarr `RescanSeries` / Radarr `RescanMovie` command so the arr picks up the new files
+
+### Requirements
+
+All of these must be set:
+
+| Variable | Purpose | Example |
+|----------|---------|---------|
+| `BLACKHOLE_SYMLINK_ENABLED` | Enable symlink features | `true` |
+| `BLACKHOLE_RCLONE_MOUNT` | rclone mount path inside pd_zurg container | `/data/pd_zurg` |
+| `BLACKHOLE_SYMLINK_TARGET_BASE` | Same mount as seen by Sonarr/Radarr | `/mnt/debrid` |
+| `BLACKHOLE_LOCAL_LIBRARY_TV` | Local TV library (must be **read-write**) | `/data/media/tv` |
+| `BLACKHOLE_LOCAL_LIBRARY_MOVIES` | Local movie library (must be **read-write**) | `/data/media/movies` |
+
+For the Sonarr/Radarr rescan trigger, also configure `SONARR_URL`/`SONARR_API_KEY` and/or `RADARR_URL`/`RADARR_API_KEY`.
+
+### Important: read-write mounts
+
+The local library paths **must be mounted read-write** in the pd_zurg container. If they are read-only (`:ro`), symlink creation will fail with `Read-only file system` errors. In your pd_zurg `docker-compose.yml`:
+
+```yaml
+volumes:
+  - /path/to/tv:/data/media/tv        # NO :ro — must be writable
+  - /path/to/movies:/data/media/movies # NO :ro — must be writable
+```
+
+### What about shows/movies not in Sonarr/Radarr?
+
+Content that isn't tracked by Sonarr/Radarr will still get symlinks created (using the parsed torrent title). These will appear as "unmapped folders" in the arr's Library Import section, where you can review and import them.
 
 ## FAQ
 

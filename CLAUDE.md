@@ -58,6 +58,10 @@ Tests use three shared fixtures from `tests/conftest.py`: `tmp_dir` (temp direct
 
 **Key utilities (in `utils/`):**
 - `blackhole.py` (largest module) — Watches `/watch` folder, submits to debrid API, polls status, creates symlinks in `/completed` when content appears on rclone mount. Includes release name parsing and local library dedup.
+- `library.py` — Library scanner: walks debrid mount + local library, cross-references by title, builds season/episode data. Auto-creates symlinks for debrid-only content and triggers Sonarr/Radarr rescans. Clears resolved pending state.
+- `library_page.py` — HTML/JS template for the library browser UI. Sonarr-inspired episode list with season progress pills, expand/collapse, and formatted air dates.
+- `library_prefs.py` — Source preferences (prefer-local/prefer-debrid), pending transition tracking, and symlink replacement (local file → debrid symlink).
+- `arr_client.py` — Sonarr and Radarr API clients (urllib-based). Series/movie lookup, episode search, download triggers, rescan commands. Uses `SONARR_URL`/`RADARR_URL` + API keys.
 - `status_server.py` + `settings_api.py` + `settings_page.py` — Built-in HTTP dashboard (no framework) with process health, mount status, system metrics, and a browser-based settings editor with OAuth flows
 - `config_validator.py` — Startup validation of API keys, URLs, feature conflicts
 - `config_reload.py` — SIGHUP live reload handler

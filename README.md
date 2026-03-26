@@ -22,6 +22,8 @@ pd_zurg packages three tools into a single Docker container: **[Zurg](https://gi
 - **Local library dedup** — checks your existing library before submitting to debrid to avoid duplicates
 - **Notifications** — 90+ services via [Apprise](https://github.com/caronc/apprise) (Discord, Telegram, Slack, email, etc.)
 - **Status dashboard** — process health, mount status, system resources, and a browser-based settings editor
+- **Library browser** — browse your combined debrid + local library with TMDB metadata, source preference management, and episode-level download/switch controls
+- **Auto debrid symlinks** — automatically creates organized symlinks in your local library for debrid-only content so Sonarr/Radarr can discover it, with automatic rescan triggers
 - **ffprobe recovery** — detects and kills stuck ffprobe processes on debrid mounts
 - **MDBList integration** — subscribe to curated lists that auto-feed plex_debrid
 - **Atomic config writes** and **ordered shutdown** for reliability
@@ -153,9 +155,9 @@ BLACKHOLE_LOCAL_LIBRARY_MOVIES=/data/media/movies
 volumes:
   - /opt/blackhole:/watch            # Sonarr/Radarr drop .torrent files here
   - /opt/completed:/completed        # pd_zurg creates symlinks here
-  # For dedup (optional, read-only):
-  - /path/to/library/tv:/data/media/tv:ro
-  - /path/to/library/movies:/data/media/movies:ro
+  # Local library (read-write — needed for auto debrid symlinks):
+  - /path/to/library/tv:/data/media/tv
+  - /path/to/library/movies:/data/media/movies
 ```
 
 See the **[Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md)** for complete setup including Sonarr/Radarr download client configuration, multi-host NFS, verification steps, and troubleshooting.
@@ -189,9 +191,9 @@ services:
       ## Uncomment for blackhole mode:
       # - /opt/blackhole:/watch
       # - /opt/completed:/completed
-      ## Uncomment for dedup (read-only):
-      # - /path/to/library/tv:/data/media/tv:ro
-      # - /path/to/library/movies:/data/media/movies:ro
+      ## Uncomment for local library (read-write for auto debrid symlinks):
+      # - /path/to/library/tv:/data/media/tv
+      # - /path/to/library/movies:/data/media/movies
     ports:
       - "8080:8080"                  # Status UI
     devices:

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## Version [2.13.0] - 2026-03-26
+
+### Added
+
+- **Auto-create debrid symlinks**: When `BLACKHOLE_SYMLINK_ENABLED=true` and local library paths are configured, the library scanner automatically creates organized symlinks in the local TV/movie library for debrid-only content. Sonarr/Radarr can then discover content that only exists on the debrid mount without manual import. Symlinks use canonical arr folder names when available.
+- **Sonarr/Radarr rescan triggers**: After creating debrid symlinks, automatically triggers disk rescans in Sonarr (RescanSeries) and Radarr (RescanMovie) so they pick up new files without manual intervention.
+- **Sonarr-inspired episode list UX**: Seasons sorted newest-first, color-coded progress pills (green=complete, yellow=partial, gray=empty), Expand All / Collapse All button, collapse footer on long seasons, formatted air dates (e.g., "Mar 15, 2025").
+- **Pending state auto-cleanup**: Every library scan checks pending "Switching to debrid/local" entries against actual episode sources and clears resolved ones, even for manual changes outside the app.
+
+### Fixed
+
+- **Stale pending badges**: "Switching to debrid" badges persisted forever because switch-to-debrid and remove-local endpoints never cleared pending state. Now cleared immediately after successful operations.
+- **applyMoviePreference prefer-debrid path**: Missing `_actionInFlight` guard and error recovery caused buttons to get permanently disabled after network failures.
+- **Keydown listener leak**: Debrid removal confirmation dialog leaked keyboard event listeners when the DOM was destroyed by navigation or re-render.
+- **Log file selection**: `read_log_lines` picked log files by mtime (unreliable for same-second writes), now uses lexicographic sort on date-stamped filenames.
+- **Thread safety**: `get_all_pending()` now acquires `_pending_lock` for consistent reads.
+- **Direction validation**: `set_pending()` rejects invalid direction values to prevent permanently stale entries.
+- **XSS hardening**: Season numbers escaped in data attributes, log messages use `%r` formatting.
+
 ## Version [2.12.0] - 2026-03-24
 
 ### Added

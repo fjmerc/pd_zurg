@@ -675,6 +675,19 @@ function _mergeShowMeta(show, meta) {
   return merged;
 }
 
+var _shortMonths = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+function _formatDate(dateStr) {
+  if (!dateStr) return '';
+  var parts = dateStr.split('-');
+  if (parts.length !== 3) return dateStr;
+  var m = parseInt(parts[1],10);
+  var d = parseInt(parts[2],10);
+  var y = parseInt(parts[0],10);
+  if (isNaN(m) || isNaN(d) || isNaN(y)) return dateStr;
+  return _shortMonths[m - 1] + ' ' + d + ', ' + y;
+}
+
 function _relativeDate(dateStr) {
   if (!dateStr) return '';
   var parts = dateStr.split('-');
@@ -849,7 +862,7 @@ function _renderShowDetail(show, meta) {
       if (ep.title) html += '<span class="ep-title">' + esc(ep.title) + '</span>';
       if (ep.file) html += esc(ep.file);
       else if (!ep.title) html += '<span style="color:var(--text3)">&mdash;</span>';
-      if (ep.air_date) html += ' <span class="ep-date" title="' + esc(ep.air_date) + '">' + esc(_relativeDate(ep.air_date)) + '</span>';
+      if (ep.air_date) html += ' <span class="ep-date" title="' + esc(_relativeDate(ep.air_date)) + '">' + esc(_formatDate(ep.air_date)) + '</span>';
       html += '</td>';
       html += '<td class="ep-source">';
       var isPending = false;

@@ -205,6 +205,13 @@ class SonarrClient(_ArrClientBase):
             'episodeIds': episode_ids,
         })
 
+    def rescan_series(self, series_id):
+        """Trigger a disk rescan for a series so Sonarr picks up new files."""
+        return self._post('/api/v3/command', {
+            'name': 'RescanSeries',
+            'seriesId': series_id,
+        })
+
     def ensure_and_search(self, title, tmdb_id, season_number, episode_numbers):
         """High-level: ensure series exists in Sonarr, then search for episodes.
 
@@ -411,6 +418,13 @@ class RadarrClient(_ArrClientBase):
         return self._post('/api/v3/command', {
             'name': 'MoviesSearch',
             'movieIds': [movie_id],
+        })
+
+    def rescan_movie(self, movie_id):
+        """Trigger a disk rescan for a movie so Radarr picks up new files."""
+        return self._post('/api/v3/command', {
+            'name': 'RescanMovie',
+            'movieId': movie_id,
         })
 
     def ensure_and_search(self, title, tmdb_id):

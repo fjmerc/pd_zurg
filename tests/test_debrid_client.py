@@ -386,6 +386,12 @@ class TestTorBox:
         """IDs with dots are rejected by _SAFE_ID validation."""
         assert tb.delete_torrent('456.0') is False
 
+    def test_delete_failure_response(self, tb):
+        """Non-success response returns False without leaking response body."""
+        with patch('utils.debrid_client.requests.post') as mock_post:
+            mock_post.return_value = _mock_response({'success': False, 'detail': 'not found'})
+            assert tb.delete_torrent('456') is False
+
     def test_delete_invalid_id(self, tb):
         assert tb.delete_torrent('../../bad') is False
 

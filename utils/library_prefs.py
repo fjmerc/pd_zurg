@@ -211,24 +211,31 @@ def replace_local_with_symlinks(episodes, local_tv_path, rclone_mount, symlink_t
             continue
 
         # Translate debrid path from pd_zurg namespace to Sonarr namespace
-        if not debrid_path.startswith(rclone_mount):
-            errors.append(f"Debrid path not under rclone mount: {debrid_path}")
+        real_debrid = os.path.realpath(debrid_path)
+        real_mount = os.path.realpath(rclone_mount)
+        if not real_debrid.startswith(real_mount + os.sep) and real_debrid != real_mount:
+            errors.append(f"Debrid path outside rclone mount: {debrid_path}")
             continue
-        symlink_target = symlink_target_base + debrid_path[len(rclone_mount):]
+        symlink_target = symlink_target_base + real_debrid[len(real_mount):]
 
         try:
             if not os.path.isfile(real_local):
                 errors.append(f"Local file not found: {local_path}")
                 continue
 
-            # Delete local file
-            os.remove(real_local)
-            logger.info(f"[library_prefs] Removed local: {real_local}")
-
-            # Create symlink at the same path pointing to debrid mount
-            os.symlink(symlink_target, real_local)
-            logger.info(f"[library_prefs] Symlinked: {real_local} -> {symlink_target}")
-            switched += 1
+            # Atomic swap: rename to backup, create symlink, remove backup on success
+            backup_path = real_local + '.pd_zurg_backup'
+            os.rename(real_local, backup_path)
+            try:
+                os.symlink(symlink_target, real_local)
+                os.remove(backup_path)
+                logger.info(f"[library_prefs] Switched to symlink: {real_local} -> {symlink_target}")
+                switched += 1
+            except OSError as sym_err:
+                # Symlink failed — restore the original file
+                os.rename(backup_path, real_local)
+                logger.error(f"[library_prefs] Symlink failed, restored original: {local_path}: {sym_err}")
+                errors.append(f"Symlink failed (restored): {sym_err}")
 
         except OSError as e:
             logger.error(f"[library_prefs] Symlink switch failed: {local_path}: {e}")

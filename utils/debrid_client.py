@@ -208,7 +208,7 @@ class AllDebridClient(DebridClientBase):
             if data.get('status') == 'success':
                 logger.info(f"[debrid] AD deleted magnet: {torrent_id}")
                 return True
-            logger.error(f"[debrid] AD delete failed for {torrent_id}: {data}")
+            logger.error(f"[debrid] AD delete failed for {torrent_id}: status={data.get('status')}")
             return False
         except (requests.RequestException, ValueError) as e:
             logger.error(f"[debrid] AD delete failed for {torrent_id}: {self._sanitize_error(e)}")
@@ -257,14 +257,15 @@ class TorBoxClient(DebridClientBase):
             resp = requests.post(
                 f'{self._BASE}/torrents/controltorrent',
                 headers=self._headers(),
-                json={'torrent_id': int(float(torrent_id)), 'operation': 'Delete'},
+                json={'torrent_id': int(torrent_id), 'operation': 'Delete'},
                 timeout=_TIMEOUT,
             )
+            resp.raise_for_status()
             data = resp.json()
             if data.get('success'):
                 logger.info(f"[debrid] TB deleted torrent: {torrent_id}")
                 return True
-            logger.error(f"[debrid] TB delete failed for {torrent_id}: {data}")
+            logger.error(f"[debrid] TB delete failed for {torrent_id}: success={data.get('success')}")
             return False
         except (requests.RequestException, ValueError) as e:
             logger.error(f"[debrid] TB delete failed for {torrent_id}: {self._sanitize_error(e)}")

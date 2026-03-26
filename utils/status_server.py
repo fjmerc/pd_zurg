@@ -1234,7 +1234,17 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        # Library refresh — no auth required (read-only trigger)
+        # POST endpoints always require auth
+        if not self.auth_credentials:
+            self._send_json_response(403, json.dumps({
+                'error': 'This endpoint requires STATUS_UI_AUTH to be configured'
+            }))
+            return
+
+        if not self._check_auth():
+            return
+
+        # Library refresh — now requires auth since scan triggers preference enforcement
         if self.path == '/api/library/refresh':
             from utils.library import get_scanner
             scanner = get_scanner()
@@ -1245,16 +1255,6 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             else:
                 scanner.refresh()
                 self._send_json_response(200, json.dumps({'status': 'scanning'}))
-            return
-
-        # POST endpoints always require auth
-        if not self.auth_credentials:
-            self._send_json_response(403, json.dumps({
-                'error': 'This endpoint requires STATUS_UI_AUTH to be configured'
-            }))
-            return
-
-        if not self._check_auth():
             return
 
         if self.path == '/api/library/preference':
@@ -1489,7 +1489,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 if not episodes:
                     self._send_json_response(400, json.dumps({'error': 'episodes required'}))
                     return
-                from utils.library import get_scanner, _normalize_title
+                from utils.library import get_scanner, normalize_title as _normalize_title
                 scanner = get_scanner()
                 if scanner is None:
                     self._send_json_response(503, json.dumps({'error': 'Scanner not initialized'}))
@@ -1545,14 +1545,13 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     return
 
                 from utils.library import get_scanner, normalize_title
-                import os as _os
                 scanner = get_scanner()
                 if scanner is None:
                     self._send_json_response(503, json.dumps({'error': 'Scanner not initialized'}))
                     return
 
-                rclone_mount = _os.environ.get('BLACKHOLE_RCLONE_MOUNT', '').strip()
-                symlink_base = _os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', '').strip()
+                rclone_mount = os.environ.get('BLACKHOLE_RCLONE_MOUNT', '').strip()
+                symlink_base = os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', '').strip()
                 local_tv = scanner._local_tv_path
 
                 if not rclone_mount or not symlink_base:

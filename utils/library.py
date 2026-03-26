@@ -513,7 +513,7 @@ class LibraryScanner:
 
         Only runs if LIBRARY_PREFERENCE_AUTO_ENFORCE is true (default).
         """
-        auto_enforce = os.environ.get('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'true').lower() == 'true'
+        auto_enforce = os.environ.get('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'false').lower() == 'true'
         if not auto_enforce:
             return
 
@@ -524,6 +524,9 @@ class LibraryScanner:
             return
 
         from utils.library_prefs import replace_local_with_symlinks, clear_pending
+
+        # Track titles processed this scan to avoid redundant operations
+        enforced_this_scan = set()
 
         # Enforce prefer-debrid: replace local files with symlinks for source=both episodes
         if rclone_mount and symlink_base and self._local_tv_path:
@@ -558,8 +561,14 @@ class LibraryScanner:
                             f"[library] Auto-enforced prefer-debrid for {show['title']}: "
                             f"switched {result['switched']} episode(s) to symlinks"
                         )
-                        cleared = [{'season': e['season'], 'episode': e['episode']} for e in to_switch]
-                        clear_pending(norm, cleared)
+                        # Only clear pending for episodes that were actually switched
+                        # (those whose local_path is now a symlink)
+                        cleared = [
+                            {'season': e['season'], 'episode': e['episode']}
+                            for e in to_switch if os.path.islink(e['local_path'])
+                        ]
+                        if cleared:
+                            clear_pending(norm, cleared)
                         try:
                             from utils.notifications import notify
                             notify('library_refresh',
@@ -568,26 +577,41 @@ class LibraryScanner:
                         except Exception:
                             pass
 
-        # Enforce prefer-local: delete debrid torrents for source=both episodes
-        # This is DESTRUCTIVE (permanent RD deletion) — only if auto-enforce is on
+        # Enforce prefer-local: delete debrid torrents ONLY when ALL debrid
+        # episodes have local copies (source=both for every debrid episode).
+        # This prevents deleting seasons/episodes that have no local backup.
+        prefer_local_safe = {}
         for show in shows:
             norm = _normalize_title(show['title'])
-            pref = preferences.get(norm)
-            if pref != 'prefer-local':
+            if preferences.get(norm) != 'prefer-local':
                 continue
-
-            both_eps = []
+            has_debrid_only = False
+            has_both = False
             for sd in show.get('season_data', []):
                 for ep in sd.get('episodes', []):
-                    if ep.get('source') == 'both':
-                        both_eps.append((sd['number'], ep['number']))
+                    src = ep.get('source')
+                    if src == 'debrid':
+                        has_debrid_only = True
+                    elif src == 'both':
+                        has_both = True
+            # Only safe to delete if there are both-source eps AND no debrid-only eps
+            if has_both and not has_debrid_only:
+                prefer_local_safe[norm] = show
 
-            if both_eps:
-                try:
-                    from utils.debrid_client import get_debrid_client
-                    client, svc = get_debrid_client()
-                    if client:
-                        year = show.get('year')
+        for movie in movies:
+            norm = _normalize_title(movie['title'])
+            if preferences.get(norm) == 'prefer-local' and movie.get('source') == 'both':
+                prefer_local_safe[norm] = movie
+
+        if prefer_local_safe:
+            try:
+                from utils.debrid_client import get_debrid_client
+                client, svc = get_debrid_client()
+                if client:
+                    for norm, item in prefer_local_safe.items():
+                        if norm in enforced_this_scan:
+                            continue
+                        year = item.get('year')
                         matches = client.find_torrents_by_title(norm, target_year=year)
                         if matches:
                             deleted = 0
@@ -596,19 +620,20 @@ class LibraryScanner:
                                     deleted += 1
                             if deleted:
                                 logger.info(
-                                    f"[library] Auto-enforced prefer-local for {show['title']}: "
+                                    f"[library] Auto-enforced prefer-local for {item['title']}: "
                                     f"deleted {deleted} debrid torrent(s)"
                                 )
                                 clear_pending(norm)
+                                enforced_this_scan.add(norm)
                                 try:
                                     from utils.notifications import notify
                                     notify('library_refresh',
-                                           f"Source switch: {show['title']}",
+                                           f"Source switch: {item['title']}",
                                            f"Removed {deleted} debrid torrent(s) — now playing from local storage")
                                 except Exception:
                                     pass
-                except Exception as e:
-                    logger.error(f"[library] Auto-enforce prefer-local failed for {show['title']}: {e}")
+            except Exception as e:
+                logger.error(f"[library] Auto-enforce prefer-local failed: {e}")
 
     # Category names that indicate TV/show content
     _SHOW_CATEGORIES = {'shows', 'tv', 'anime', 'series', 'television'}

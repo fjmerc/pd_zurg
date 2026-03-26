@@ -150,7 +150,7 @@ class TestReplaceLocalWithSymlinks:
         )
 
         assert result['switched'] == 0
-        assert any('not under rclone mount' in e for e in result['errors'])
+        assert any('outside rclone mount' in e for e in result['errors'])
         # Local file should still be a real file
         assert os.path.isfile(local_path)
         assert not os.path.islink(local_path)

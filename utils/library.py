@@ -707,6 +707,32 @@ class LibraryScanner:
         symlinked_shows = set()   # titles that got new symlinks
         symlinked_movies = set()  # titles that got new symlinks
 
+        # Fetch arr libraries for canonical folder names and rescan IDs
+        sonarr_map = {}  # lowercase title -> {'folder': str, 'id': int, 'client': obj}
+        radarr_map = {}  # lowercase title -> {'folder': str, 'id': int, 'client': obj}
+        try:
+            from utils.arr_client import get_download_service
+            client, svc = get_download_service('show')
+            if client and svc == 'sonarr':
+                for s in (client.get_all_series() or []):
+                    p = s.get('path', '')
+                    sonarr_map[s.get('title', '').lower()] = {
+                        'folder': os.path.basename(p) if p else '',
+                        'id': s.get('id'),
+                        'client': client,
+                    }
+            client, svc = get_download_service('movie')
+            if client and svc == 'radarr':
+                for m in (client.get_all_movies() or []):
+                    p = m.get('path', '')
+                    radarr_map[m.get('title', '').lower()] = {
+                        'folder': os.path.basename(p) if p else '',
+                        'id': m.get('id'),
+                        'client': client,
+                    }
+        except Exception as e:
+            logger.debug(f"[library] Could not fetch arr libraries for folder naming: {e}")
+
         # --- Movies ---
         if self._local_movies_path:
             real_movies_root = os.path.realpath(self._local_movies_path)
@@ -719,7 +745,11 @@ class LibraryScanner:
 
                 title = movie['title']
                 year = movie.get('year')
-                movie_dir = f"{title} ({year})" if year else title
+                arr_info = radarr_map.get(title.lower())
+                if arr_info and arr_info['folder']:
+                    movie_dir = arr_info['folder']
+                else:
+                    movie_dir = f"{title} ({year})" if year else title
 
                 # Find the largest media file in the torrent folder
                 media_file = None
@@ -785,7 +815,11 @@ class LibraryScanner:
             norm = _normalize_title(show['title'])
             title = show['title']
             year = show.get('year')
-            show_dir = f"{title} ({year})" if year else title
+            arr_info = sonarr_map.get(title.lower())
+            if arr_info and arr_info['folder']:
+                show_dir = arr_info['folder']
+            else:
+                show_dir = f"{title} ({year})" if year else title
 
             for sd in show.get('season_data', []):
                 snum = sd['number']
@@ -835,51 +869,23 @@ class LibraryScanner:
 
         if created:
             logger.info(f"[library] Created {created} debrid symlink(s) in local library")
-            self._trigger_arr_rescan(symlinked_shows, symlinked_movies)
-
-    def _trigger_arr_rescan(self, show_titles, movie_titles):
-        """Trigger Sonarr/Radarr disk rescans for newly symlinked content.
-
-        Looks up each title in the arr library and triggers a rescan command
-        so the arr picks up the new symlinks without manual intervention.
-        Failures are logged but never block the scan.
-        """
-        try:
-            from utils.arr_client import get_download_service
-        except ImportError:
-            return
-
-        if show_titles:
-            try:
-                client, svc = get_download_service('show')
-                if client and svc == 'sonarr':
-                    all_series = client.get_all_series() or []
-                    title_map = {}
-                    for s in all_series:
-                        title_map[s.get('title', '').lower()] = s.get('id')
-                    for title in show_titles:
-                        sid = title_map.get(title.lower())
-                        if sid:
-                            client.rescan_series(sid)
-                            logger.debug(f"[library] Triggered Sonarr rescan for {title}")
-            except Exception as e:
-                logger.debug(f"[library] Sonarr rescan failed: {e}")
-
-        if movie_titles:
-            try:
-                client, svc = get_download_service('movie')
-                if client and svc == 'radarr':
-                    all_movies = client.get_all_movies() or []
-                    title_map = {}
-                    for m in all_movies:
-                        title_map[m.get('title', '').lower()] = m.get('id')
-                    for title in movie_titles:
-                        mid = title_map.get(title.lower())
-                        if mid:
-                            client.rescan_movie(mid)
-                            logger.debug(f"[library] Triggered Radarr rescan for {title}")
-            except Exception as e:
-                logger.debug(f"[library] Radarr rescan failed: {e}")
+            # Trigger arr rescans using already-fetched library data
+            for title in symlinked_shows:
+                info = sonarr_map.get(title.lower())
+                if info and info.get('id') and info.get('client'):
+                    try:
+                        info['client'].rescan_series(info['id'])
+                        logger.debug(f"[library] Triggered Sonarr rescan for {title}")
+                    except Exception as e:
+                        logger.debug(f"[library] Sonarr rescan failed for {title}: {e}")
+            for title in symlinked_movies:
+                info = radarr_map.get(title.lower())
+                if info and info.get('id') and info.get('client'):
+                    try:
+                        info['client'].rescan_movie(info['id'])
+                        logger.debug(f"[library] Triggered Radarr rescan for {title}")
+                    except Exception as e:
+                        logger.debug(f"[library] Radarr rescan failed for {title}: {e}")
 
     # Category names that indicate TV/show content
     _SHOW_CATEGORIES = {'shows', 'tv', 'anime', 'series', 'television'}

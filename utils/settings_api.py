@@ -122,6 +122,9 @@ ENV_SCHEMA = [
             ('BLACKHOLE_MOUNT_POLL_TIMEOUT', 'Mount Poll Timeout (seconds)', 'number:30-3600', False, 'Max time to wait for content on mount (default: 300)'),
             ('BLACKHOLE_MOUNT_POLL_INTERVAL', 'Mount Poll Interval (seconds)', 'number:5-120', False, 'How often to check for content on mount (default: 10)'),
             ('BLACKHOLE_SYMLINK_MAX_AGE', 'Symlink Max Age (hours)', 'number:0-720', False, 'Remove symlink dirs older than this (0=disabled, default: 72)'),
+            ('BLACKHOLE_DEDUP_ENABLED', 'Enable Local Library Dedup', 'boolean', False, 'Skip torrents that match content already in your local library'),
+            ('BLACKHOLE_LOCAL_LIBRARY_TV', 'Local TV Library Path', 'string', False, 'Path to local TV library (for dedup and auto debrid symlinks)'),
+            ('BLACKHOLE_LOCAL_LIBRARY_MOVIES', 'Local Movie Library Path', 'string', False, 'Path to local movie library (for dedup and auto debrid symlinks)'),
         ],
     },
     {
@@ -144,12 +147,13 @@ ENV_SCHEMA = [
     },
     {
         'name': 'Media Services',
-        'description': 'Sonarr/Radarr/Overseerr integration for the Library Download button',
+        'description': 'Sonarr/Radarr/Overseerr integration for downloads, rescans, and library symlinks',
         'fields': [
-            ('SONARR_URL', 'Sonarr URL', 'url', False, 'Sonarr base URL (e.g. http://sonarr:8989). Used by Library Download for TV shows'),
+            ('SONARR_URL', 'Sonarr URL', 'url', False, 'Sonarr base URL (e.g. http://sonarr:8989). Used for downloads, rescans, and folder naming'),
             ('SONARR_API_KEY', 'Sonarr API Key', 'secret', False, 'Sonarr API key (Settings > General in Sonarr)'),
-            ('RADARR_URL', 'Radarr URL', 'url', False, 'Radarr base URL (e.g. http://radarr:7878). Used by Library Download for movies'),
+            ('RADARR_URL', 'Radarr URL', 'url', False, 'Radarr base URL (e.g. http://radarr:7878). Used for downloads, rescans, and folder naming'),
             ('RADARR_API_KEY', 'Radarr API Key', 'secret', False, 'Radarr API key (Settings > General in Radarr)'),
+            ('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'Auto-Enforce Preferences', 'boolean', False, 'Automatically switch sources when content arrives matching a stored preference'),
         ],
     },
     {

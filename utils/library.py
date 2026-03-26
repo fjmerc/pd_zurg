@@ -295,6 +295,11 @@ def _normalize_title(title):
     return t
 
 
+# Public aliases for cross-module reuse (e.g., debrid_client title matching)
+parse_folder_name = _parse_folder_name
+normalize_title = _normalize_title
+
+
 class LibraryScanner:
     def __init__(self):
         self._mount_path = _discover_mount()

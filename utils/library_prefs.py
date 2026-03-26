@@ -179,6 +179,64 @@ def remove_local_episodes(episodes, local_tv_path):
     return {'status': 'removed', 'removed': removed, 'errors': errors}
 
 
+def replace_local_with_symlinks(episodes, local_tv_path, rclone_mount, symlink_target_base):
+    """Replace local episode files with symlinks to the debrid mount.
+
+    For each episode, deletes the local file and creates a symlink at the
+    same path pointing to the debrid mount file (translated to the Sonarr
+    namespace via symlink_target_base).
+
+    Args:
+        episodes: list of dicts with 'local_path' and 'debrid_path' keys
+        local_tv_path: root local TV path — local paths must be under this
+        rclone_mount: mount path inside pd_zurg (e.g., /data/pd_zurg)
+        symlink_target_base: mount path from Sonarr's perspective (e.g., /mnt/debrid)
+
+    Returns dict with status, count switched, and any errors.
+    """
+    real_root = os.path.realpath(local_tv_path)
+    switched = 0
+    errors = []
+
+    for ep in episodes:
+        local_path = ep.get('local_path', '')
+        debrid_path = ep.get('debrid_path', '')
+        if not local_path or not debrid_path:
+            continue
+
+        # Validate local path is under the local library root
+        real_local = os.path.realpath(local_path)
+        if not real_local.startswith(real_root + os.sep) and real_local != real_root:
+            errors.append(f"Path outside local library: {local_path}")
+            continue
+
+        # Translate debrid path from pd_zurg namespace to Sonarr namespace
+        if not debrid_path.startswith(rclone_mount):
+            errors.append(f"Debrid path not under rclone mount: {debrid_path}")
+            continue
+        symlink_target = symlink_target_base + debrid_path[len(rclone_mount):]
+
+        try:
+            if not os.path.isfile(real_local):
+                errors.append(f"Local file not found: {local_path}")
+                continue
+
+            # Delete local file
+            os.remove(real_local)
+            logger.info(f"[library_prefs] Removed local: {real_local}")
+
+            # Create symlink at the same path pointing to debrid mount
+            os.symlink(symlink_target, real_local)
+            logger.info(f"[library_prefs] Symlinked: {real_local} -> {symlink_target}")
+            switched += 1
+
+        except OSError as e:
+            logger.error(f"[library_prefs] Symlink switch failed: {local_path}: {e}")
+            errors.append(str(e))
+
+    return {'status': 'switched' if switched > 0 else 'error', 'switched': switched, 'errors': errors}
+
+
 def _cleanup_empty_dirs(deleted_file_path, stop_at):
     """Remove empty parent directories up to stop_at after file deletion."""
     parent = os.path.dirname(deleted_file_path)

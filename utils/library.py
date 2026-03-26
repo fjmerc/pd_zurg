@@ -704,6 +704,8 @@ class LibraryScanner:
 
         real_mount = os.path.realpath(rclone_mount)
         created = 0
+        symlinked_shows = set()   # titles that got new symlinks
+        symlinked_movies = set()  # titles that got new symlinks
 
         # --- Movies ---
         if self._local_movies_path:
@@ -762,6 +764,7 @@ class LibraryScanner:
                     os.makedirs(os.path.dirname(local_path), exist_ok=True)
                     os.symlink(symlink_target, local_path)
                     created += 1
+                    symlinked_movies.add(title)
                 except FileExistsError:
                     pass
                 except OSError as e:
@@ -821,6 +824,7 @@ class LibraryScanner:
                         os.makedirs(os.path.dirname(local_path), exist_ok=True)
                         os.symlink(symlink_target, local_path)
                         created += 1
+                        symlinked_shows.add(title)
                     except FileExistsError:
                         pass
                     except OSError as e:
@@ -831,6 +835,51 @@ class LibraryScanner:
 
         if created:
             logger.info(f"[library] Created {created} debrid symlink(s) in local library")
+            self._trigger_arr_rescan(symlinked_shows, symlinked_movies)
+
+    def _trigger_arr_rescan(self, show_titles, movie_titles):
+        """Trigger Sonarr/Radarr disk rescans for newly symlinked content.
+
+        Looks up each title in the arr library and triggers a rescan command
+        so the arr picks up the new symlinks without manual intervention.
+        Failures are logged but never block the scan.
+        """
+        try:
+            from utils.arr_client import get_download_service
+        except ImportError:
+            return
+
+        if show_titles:
+            try:
+                client, svc = get_download_service('show')
+                if client and svc == 'sonarr':
+                    all_series = client.get_all_series() or []
+                    title_map = {}
+                    for s in all_series:
+                        title_map[s.get('title', '').lower()] = s.get('id')
+                    for title in show_titles:
+                        sid = title_map.get(title.lower())
+                        if sid:
+                            client.rescan_series(sid)
+                            logger.debug(f"[library] Triggered Sonarr rescan for {title}")
+            except Exception as e:
+                logger.debug(f"[library] Sonarr rescan failed: {e}")
+
+        if movie_titles:
+            try:
+                client, svc = get_download_service('movie')
+                if client and svc == 'radarr':
+                    all_movies = client.get_all_movies() or []
+                    title_map = {}
+                    for m in all_movies:
+                        title_map[m.get('title', '').lower()] = m.get('id')
+                    for title in movie_titles:
+                        mid = title_map.get(title.lower())
+                        if mid:
+                            client.rescan_movie(mid)
+                            logger.debug(f"[library] Triggered Radarr rescan for {title}")
+            except Exception as e:
+                logger.debug(f"[library] Radarr rescan failed: {e}")
 
     # Category names that indicate TV/show content
     _SHOW_CATEGORIES = {'shows', 'tv', 'anime', 'series', 'television'}

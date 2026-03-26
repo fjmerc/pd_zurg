@@ -440,6 +440,7 @@ class LibraryScanner:
         preferences = get_all_preferences()
         self._enforce_preferences(shows, movies, preferences, path_index, local_path_index)
         self._clear_resolved_pending(shows, movies)
+        self._create_debrid_symlinks(shows, movies, path_index)
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         return {
@@ -677,6 +678,159 @@ class LibraryScanner:
                     resolved.append(ep)
             if resolved:
                 clear_pending(norm_title, resolved)
+
+    def _create_debrid_symlinks(self, shows, movies, path_index):
+        """Create local library symlinks for debrid-only content.
+
+        When content exists on the debrid mount but has no local presence,
+        create an organized symlink structure so Sonarr/Radarr can discover it:
+          TV:     {local_tv}/Show Name (Year)/Season XX/filename.mkv
+          Movies: {local_movies}/Movie Name (Year)/filename.mkv
+
+        Directory names use the parsed torrent title — Sonarr/Radarr's import
+        function will remap to canonical naming on import.
+
+        Runs when BLACKHOLE_SYMLINK_ENABLED=true and the required paths are set.
+        Idempotent — skips items that already have a local file or symlink.
+        """
+        if not str(os.environ.get('BLACKHOLE_SYMLINK_ENABLED', '')).lower() == 'true':
+            return
+        rclone_mount = os.environ.get('BLACKHOLE_RCLONE_MOUNT', '').strip()
+        symlink_base = os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', '').strip()
+        if not rclone_mount or not symlink_base:
+            return
+        if not self._local_tv_path and not self._local_movies_path:
+            return
+
+        real_mount = os.path.realpath(rclone_mount)
+        created = 0
+
+        # --- Movies ---
+        if self._local_movies_path:
+            real_movies_root = os.path.realpath(self._local_movies_path)
+            for movie in movies:
+                if movie.get('source') != 'debrid':
+                    continue
+                mount_dir = movie.get('path')
+                if not mount_dir:
+                    continue
+
+                title = movie['title']
+                year = movie.get('year')
+                movie_dir = f"{title} ({year})" if year else title
+
+                # Find the largest media file in the torrent folder
+                media_file = None
+                media_size = -1
+                try:
+                    for fname in os.listdir(mount_dir):
+                        ext = os.path.splitext(fname)[1].lower()
+                        if ext in MEDIA_EXTENSIONS:
+                            fpath = os.path.join(mount_dir, fname)
+                            try:
+                                sz = os.path.getsize(fpath)
+                            except OSError:
+                                sz = 0
+                            if sz > media_size:
+                                media_size = sz
+                                media_file = fname
+                except OSError:
+                    continue
+                if not media_file:
+                    continue
+
+                local_path = os.path.join(
+                    self._local_movies_path, movie_dir, media_file
+                )
+
+                real_local_dir = os.path.realpath(
+                    os.path.join(self._local_movies_path, movie_dir)
+                )
+                if not real_local_dir.startswith(real_movies_root + os.sep) and real_local_dir != real_movies_root:
+                    logger.warning("[library] Refusing movie symlink outside local library: %r", local_path)
+                    continue
+
+                if os.path.islink(local_path) or os.path.exists(local_path):
+                    continue
+
+                real_debrid = os.path.realpath(os.path.join(mount_dir, media_file))
+                if not real_debrid.startswith(real_mount + os.sep) and real_debrid != real_mount:
+                    continue
+                symlink_target = symlink_base + real_debrid[len(real_mount):]
+
+                try:
+                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                    os.symlink(symlink_target, local_path)
+                    created += 1
+                except FileExistsError:
+                    pass
+                except OSError as e:
+                    logger.warning(
+                        "[library] Failed to create movie symlink for %r: %s",
+                        title, e
+                    )
+
+        # --- TV Shows ---
+        if not self._local_tv_path:
+            if created:
+                logger.info(f"[library] Created {created} debrid symlink(s) in local library")
+            return
+
+        real_tv_root = os.path.realpath(self._local_tv_path)
+
+        for show in shows:
+            norm = _normalize_title(show['title'])
+            title = show['title']
+            year = show.get('year')
+            show_dir = f"{title} ({year})" if year else title
+
+            for sd in show.get('season_data', []):
+                snum = sd['number']
+                season_dir = f"Season {snum:02d}"
+                for ep in sd.get('episodes', []):
+                    if ep.get('source') != 'debrid':
+                        continue
+                    enum = ep['number']
+                    debrid_path = path_index.get((norm, snum, enum))
+                    if not debrid_path:
+                        continue
+
+                    filename = os.path.basename(debrid_path)
+                    local_path = os.path.join(
+                        self._local_tv_path, show_dir, season_dir, filename
+                    )
+
+                    # Validate output stays within local library root
+                    real_local_dir = os.path.realpath(
+                        os.path.join(self._local_tv_path, show_dir, season_dir)
+                    )
+                    if not real_local_dir.startswith(real_tv_root + os.sep) and real_local_dir != real_tv_root:
+                        logger.warning("[library] Refusing symlink outside local library: %r", local_path)
+                        continue
+
+                    if os.path.islink(local_path) or os.path.exists(local_path):
+                        continue
+
+                    # Translate mount path to Sonarr/arr namespace
+                    real_debrid = os.path.realpath(debrid_path)
+                    if not real_debrid.startswith(real_mount + os.sep) and real_debrid != real_mount:
+                        continue
+                    symlink_target = symlink_base + real_debrid[len(real_mount):]
+
+                    try:
+                        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                        os.symlink(symlink_target, local_path)
+                        created += 1
+                    except FileExistsError:
+                        pass
+                    except OSError as e:
+                        logger.warning(
+                            "[library] Failed to create symlink for %r S%02dE%02d: %s",
+                            title, snum, enum, e
+                        )
+
+        if created:
+            logger.info(f"[library] Created {created} debrid symlink(s) in local library")
 
     # Category names that indicate TV/show content
     _SHOW_CATEGORIES = {'shows', 'tv', 'anime', 'series', 'television'}

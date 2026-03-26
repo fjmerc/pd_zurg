@@ -133,7 +133,7 @@ def read_log_lines(lines=100, level=None, log_dir='./log'):
         log_files = glob_mod.glob(os.path.join(log_dir, 'PDZURG-*.log'))
         if not log_files:
             return []
-        log_file = max(log_files, key=os.path.getmtime)  # Most recently modified
+        log_file = max(log_files)  # Lexicographic sort — date-stamped names sort correctly
 
         with open(log_file, 'rb') as f:
             f.seek(0, 2)

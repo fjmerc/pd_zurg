@@ -251,6 +251,7 @@ let _pending = {};
 let _detailSeasons = [];
 let _downloadServices = {show: null, movie: null};
 let _searchTimer = null;
+let _refreshTimer = null;
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -694,7 +695,7 @@ function _renderShowDetail(show, meta) {
       html += '</td>';
       html += '<td class="ep-source">';
       var isPending = false;
-      if (isMissing && _detailItem) {
+      if (_detailItem) {
         var pnk = normTitle(_detailItem.title);
         var pendingEntry = _pending[pnk];
         if (pendingEntry && pendingEntry.episodes) {
@@ -787,6 +788,7 @@ function applyPreference() {
   if (pref === 'prefer-local' && showSvc) {
     // Collect debrid-only episodes (need download) and both-source episodes (need debrid removal)
     var dlTasks = [];
+    var dlPendingEps = [];
     var totalDlEps = 0;
     var totalBothEps = 0;
     var isOverseerr = showSvc === 'overseerr';
@@ -804,6 +806,9 @@ function applyPreference() {
             payload.episodes = isOverseerr ? [] : epList;
             return _postDownload(payload);
           });
+          for (var pe = 0; pe < epList.length; pe++) {
+            dlPendingEps.push({season: sNum, episode: epList[pe]});
+          }
         })(seasons[si].number, eps);
       }
     }
@@ -819,13 +824,21 @@ function applyPreference() {
       if (!confirm(isOverseerr
         ? 'Request ' + dlTasks.length + ' season(s) in Overseerr?'
         : 'Download ' + totalDlEps + ' episode(s) locally via ' + svcLabel + '?')) return;
-      _runSequential(dlTasks).then(function(ok) { if (ok) _savePref(nk, pref); });
+      _runSequential(dlTasks).then(function(ok) {
+        if (ok) {
+          _savePref(nk, pref);
+          if (dlPendingEps.length) _setPending(_detailItem.title, dlPendingEps, 'to-local');
+        }
+      });
       return;
     }
     // Case 2: only both-source episodes — remove debrid copies
     if (totalDlEps === 0 && totalBothEps > 0) {
       _postRemoveDebrid(_detailItem.title, _detailItem.year).then(function(ok) {
         if (ok) _savePref(nk, pref);
+      }).catch(function(e) {
+        var msg = document.getElementById('transfer-msg');
+        if (msg) msg.textContent = 'Operation failed: ' + e;
       });
       return;
     }
@@ -838,6 +851,9 @@ function applyPreference() {
       return _postRemoveDebrid(_detailItem.title, _detailItem.year);
     }).then(function(ok) {
       if (ok) _savePref(nk, pref);
+    }).catch(function(e) {
+      var msg = document.getElementById('transfer-msg');
+      if (msg) msg.textContent = 'Operation failed: ' + e;
     });
 
   } else if (pref === 'prefer-debrid') {
@@ -845,6 +861,7 @@ function applyPreference() {
     // to the debrid mount. No Sonarr search needed — content must already
     // exist on the mount (source=both).
     var switchEps = [];
+    var localOnlyEps = [];
     var totalSwitchable = 0;
     var totalLocalOnly = 0;
     for (var si2 = 0; si2 < seasons.length; si2++) {
@@ -854,6 +871,7 @@ function applyPreference() {
           switchEps.push({season: seasons[si2].number, episode: seasons[si2].episodes[ei2].number});
           totalSwitchable++;
         } else if (src === 'local') {
+          localOnlyEps.push({season: seasons[si2].number, episode: seasons[si2].episodes[ei2].number});
           totalLocalOnly++;
         }
       }
@@ -861,6 +879,7 @@ function applyPreference() {
     if (totalSwitchable === 0 && totalLocalOnly === 0) { _savePref(nk, pref); return; }
     if (totalSwitchable === 0) {
       _savePref(nk, pref).then(function(saved) {
+        if (saved && localOnlyEps.length) _setPending(_detailItem.title, localOnlyEps, 'to-debrid');
         var msg = document.getElementById('transfer-msg');
         if (msg) msg.textContent = saved
           ? 'Preference saved. ' + totalLocalOnly + ' episode(s) have no debrid copy — local files kept.'
@@ -869,7 +888,7 @@ function applyPreference() {
       return;
     }
     var confirmMsg2 = 'Switch ' + totalSwitchable + ' episode(s) to debrid streaming?'
-      + '\n\nLocal files will be replaced with symlinks to the debrid mount.';
+      + '\n\nLocal files will be removed. Playback will stream from your debrid service instead.';
     if (totalLocalOnly > 0) confirmMsg2 += '\n\n' + totalLocalOnly + ' episode(s) have no debrid copy and will stay local.';
     if (!confirm(confirmMsg2)) return;
     _actionInFlight = true;
@@ -885,8 +904,9 @@ function applyPreference() {
     }).then(function(res) {
       if (res.ok && res.d.switched > 0) {
         _savePref(nk, pref);
+        if (localOnlyEps.length) _setPending(_detailItem.title, localOnlyEps, 'to-debrid');
         if (msg) msg.textContent = res.d.message || ('Switched ' + res.d.switched + ' episode(s) to debrid.');
-        setTimeout(_refreshDetailData, 1000);
+        _scheduleRefresh(1000);
       } else {
         if (msg) msg.textContent = 'Error: ' + (res.d.error || res.d.message || 'Switch failed');
       }
@@ -930,7 +950,7 @@ function downloadEp(season, episode) {
 
 function removeEp(season, episode) {
   if (!_detailItem) return;
-  if (!confirm('Switch S' + (season < 10 ? '0' : '') + season + 'E' + (episode < 10 ? '0' : '') + episode + ' to debrid streaming?\n\nThe local copy will be removed.')) return;
+  if (!confirm('Switch S' + (season < 10 ? '0' : '') + season + 'E' + (episode < 10 ? '0' : '') + episode + ' to debrid streaming?\n\nThe local file will be permanently deleted from disk.')) return;
   var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
   _postRemove({
     title: _detailItem.title, type: _detailItem.type, tmdb_id: tmdbId,
@@ -978,7 +998,7 @@ function downloadMovie() {
 
 function removeMovie() {
   if (!_detailItem) return;
-  if (!confirm('Switch ' + _detailItem.title + ' to debrid streaming?\n\nThe local copy will be removed via Radarr.')) return;
+  if (!confirm('Switch ' + _detailItem.title + ' to debrid streaming?\n\nThe local file will be permanently deleted from disk via Radarr.')) return;
   var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
   _postRemove({
     title: _detailItem.title, type: 'movie', tmdb_id: tmdbId,
@@ -1018,9 +1038,9 @@ function applyMoviePreference() {
           : 'Failed to save preference.';
       });
     } else {
-      // source=both — replace local file with symlink to debrid mount
+      // source=both — replace local file with link to debrid mount
       if (!confirm('Switch ' + _detailItem.title + ' to debrid streaming?'
-        + '\n\nLocal file will be replaced with a symlink to the debrid mount.')) return;
+        + '\n\nLocal file will be removed. Playback will stream from your debrid service.')) return;
       _actionInFlight = true;
       _setActionsDisabled(true);
       var msg = document.getElementById('transfer-msg');
@@ -1035,7 +1055,7 @@ function applyMoviePreference() {
         }).then(function(ok) {
           if (!ok) { _savePref(nk, oldPref); }
           else if (msg) { msg.textContent = 'Local copy removed. Debrid copy is now the active source.'; }
-          setTimeout(_refreshDetailData, 1000);
+          _scheduleRefresh(1000);
         }).finally(function() {
           _actionInFlight = false;
           _setActionsDisabled(false);
@@ -1060,7 +1080,7 @@ function rmSeason(seasonIdx) {
     }
   }
   if (!epNums.length) return;
-  if (!confirm('Switch ' + epNums.length + ' episode(s) from Season ' + season.number + ' to debrid streaming?\n\nLocal copies will be removed.')) return;
+  if (!confirm('Switch ' + epNums.length + ' episode(s) from Season ' + season.number + ' to debrid streaming?\n\nLocal files will be permanently deleted from disk.')) return;
   var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
   _postRemove({
     title: _detailItem.title, type: _detailItem.type, tmdb_id: tmdbId,
@@ -1125,7 +1145,7 @@ function _postRemove(payload) {
       return false;
     } else {
       if (msg) msg.textContent = d.message || ('Removed ' + (d.removed || 0) + ' file(s).');
-      setTimeout(_refreshDetailData, 1000);
+      _scheduleRefresh(1000);
       return true;
     }
   }).catch(function(e) {
@@ -1186,7 +1206,7 @@ function _postRemoveDebrid(title, year) {
         return false;
       }
       if (msg) msg.textContent = res2.d.message || ('Removed ' + (res2.d.deleted || 0) + ' torrent(s).');
-      setTimeout(_refreshDetailData, 2000);
+      _scheduleRefresh(2000);
       return true;
     });
   }).catch(function(e) {
@@ -1196,6 +1216,14 @@ function _postRemoveDebrid(title, year) {
     _actionInFlight = false;
     _setActionsDisabled(false);
   });
+}
+
+function _scheduleRefresh(ms) {
+  if (_refreshTimer) clearTimeout(_refreshTimer);
+  _refreshTimer = setTimeout(function() {
+    _refreshTimer = null;
+    _refreshDetailData();
+  }, ms);
 }
 
 function _setPending(title, episodes, direction) {

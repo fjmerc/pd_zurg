@@ -437,11 +437,14 @@ class LibraryScanner:
 
         from utils.library_prefs import get_all_preferences
 
+        preferences = get_all_preferences()
+        self._enforce_preferences(shows, movies, preferences, path_index, local_path_index)
+
         elapsed_ms = int((time.monotonic() - start) * 1000)
         return {
             'movies': movies,
             'shows': shows,
-            'preferences': get_all_preferences(),
+            'preferences': preferences,
             'last_scan': datetime.now(timezone.utc).isoformat(timespec='seconds'),
             'scan_duration_ms': elapsed_ms,
         }
@@ -498,6 +501,114 @@ class LibraryScanner:
         """Get local library path for an episode."""
         with self._path_lock:
             return self._local_path_index.get((normalized_title, season, episode))
+
+    def _enforce_preferences(self, shows, movies, preferences, path_index, local_path_index):
+        """Auto-enforce source preferences after a scan.
+
+        For prefer-debrid: if an episode has source=both (debrid copy arrived),
+        replace the local file with a symlink to the debrid mount.
+
+        For prefer-local: if an episode has source=both (local copy arrived),
+        delete the debrid torrent via provider API.
+
+        Only runs if LIBRARY_PREFERENCE_AUTO_ENFORCE is true (default).
+        """
+        auto_enforce = os.environ.get('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'true').lower() == 'true'
+        if not auto_enforce:
+            return
+
+        rclone_mount = os.environ.get('BLACKHOLE_RCLONE_MOUNT', '').strip()
+        symlink_base = os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', '').strip()
+
+        if not preferences:
+            return
+
+        from utils.library_prefs import replace_local_with_symlinks, clear_pending
+
+        # Enforce prefer-debrid: replace local files with symlinks for source=both episodes
+        if rclone_mount and symlink_base and self._local_tv_path:
+            for show in shows:
+                norm = _normalize_title(show['title'])
+                pref = preferences.get(norm)
+                if pref != 'prefer-debrid':
+                    continue
+
+                to_switch = []
+                for sd in show.get('season_data', []):
+                    for ep in sd.get('episodes', []):
+                        if ep.get('source') != 'both':
+                            continue
+                        sn, en = sd['number'], ep['number']
+                        local_p = local_path_index.get((norm, sn, en))
+                        debrid_p = path_index.get((norm, sn, en))
+                        if local_p and debrid_p and not os.path.islink(local_p):
+                            to_switch.append({
+                                'local_path': local_p,
+                                'debrid_path': debrid_p,
+                                'season': sn,
+                                'episode': en,
+                            })
+
+                if to_switch:
+                    result = replace_local_with_symlinks(
+                        to_switch, self._local_tv_path, rclone_mount, symlink_base
+                    )
+                    if result.get('switched', 0) > 0:
+                        logger.info(
+                            f"[library] Auto-enforced prefer-debrid for {show['title']}: "
+                            f"switched {result['switched']} episode(s) to symlinks"
+                        )
+                        cleared = [{'season': e['season'], 'episode': e['episode']} for e in to_switch]
+                        clear_pending(norm, cleared)
+                        try:
+                            from utils.notifications import notify
+                            notify('library_refresh',
+                                   f"Source switch: {show['title']}",
+                                   f"Switched {result['switched']} episode(s) to debrid streaming")
+                        except Exception:
+                            pass
+
+        # Enforce prefer-local: delete debrid torrents for source=both episodes
+        # This is DESTRUCTIVE (permanent RD deletion) — only if auto-enforce is on
+        for show in shows:
+            norm = _normalize_title(show['title'])
+            pref = preferences.get(norm)
+            if pref != 'prefer-local':
+                continue
+
+            both_eps = []
+            for sd in show.get('season_data', []):
+                for ep in sd.get('episodes', []):
+                    if ep.get('source') == 'both':
+                        both_eps.append((sd['number'], ep['number']))
+
+            if both_eps:
+                try:
+                    from utils.debrid_client import get_debrid_client
+                    client, svc = get_debrid_client()
+                    if client:
+                        year = show.get('year')
+                        matches = client.find_torrents_by_title(norm, target_year=year)
+                        if matches:
+                            deleted = 0
+                            for m in matches:
+                                if client.delete_torrent(m['id']):
+                                    deleted += 1
+                            if deleted:
+                                logger.info(
+                                    f"[library] Auto-enforced prefer-local for {show['title']}: "
+                                    f"deleted {deleted} debrid torrent(s)"
+                                )
+                                clear_pending(norm)
+                                try:
+                                    from utils.notifications import notify
+                                    notify('library_refresh',
+                                           f"Source switch: {show['title']}",
+                                           f"Removed {deleted} debrid torrent(s) — now playing from local storage")
+                                except Exception:
+                                    pass
+                except Exception as e:
+                    logger.error(f"[library] Auto-enforce prefer-local failed for {show['title']}: {e}")
 
     # Category names that indicate TV/show content
     _SHOW_CATEGORIES = {'shows', 'tv', 'anime', 'series', 'television'}

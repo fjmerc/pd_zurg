@@ -1,8 +1,9 @@
-"""Tests for the symlink switch (replace local files with debrid mount symlinks)."""
+"""Tests for the symlink switch, pending transitions, and auto-enforcement."""
 
 import json
 import os
 import pytest
+from unittest.mock import patch, MagicMock
 import utils.library_prefs as lp
 
 
@@ -285,3 +286,169 @@ class TestPending:
 
     def test_pending_empty_on_fresh_start(self):
         assert lp.get_all_pending() == {}
+
+
+# ---------------------------------------------------------------------------
+# Auto-enforcement (_enforce_preferences)
+# ---------------------------------------------------------------------------
+
+class TestAutoEnforcement:
+    """Tests for LibraryScanner._enforce_preferences."""
+
+    def _make_scanner(self, local_tv, monkeypatch):
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_LOCAL_LIBRARY_TV', local_tv)
+        monkeypatch.setenv('RCLONE_MOUNT_NAME', '')
+        scanner = LibraryScanner()
+        scanner._local_tv_path = local_tv
+        return scanner
+
+    def _make_show(self, title, episodes):
+        """Build a show dict with season_data matching the scanner output format."""
+        season_data = []
+        by_season = {}
+        for sn, en, source in episodes:
+            if sn not in by_season:
+                by_season[sn] = []
+            by_season[sn].append({'number': en, 'file': f'ep{en}.mkv', 'source': source})
+        for sn in sorted(by_season.keys()):
+            season_data.append({'number': sn, 'episode_count': len(by_season[sn]), 'episodes': by_season[sn]})
+        return {'title': title, 'source': 'both', 'type': 'show', 'season_data': season_data}
+
+    def test_prefer_debrid_switches_both_to_symlink(self, tmp_dir, monkeypatch):
+        """source=both + prefer-debrid → local file replaced with symlink."""
+        local_tv = os.path.join(tmp_dir, 'tv')
+        show_dir = os.path.join(local_tv, 'Show (2025)', 'Season 01')
+        os.makedirs(show_dir)
+        local_file = os.path.join(show_dir, 'ep1.mkv')
+        with open(local_file, 'w') as f:
+            f.write('local content')
+
+        mount = os.path.join(tmp_dir, 'mount')
+        debrid_file = os.path.join(mount, 'shows', 'Show.S01E01', 'ep1.mkv')
+        os.makedirs(os.path.dirname(debrid_file))
+        with open(debrid_file, 'w') as f:
+            f.write('debrid content')
+
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', mount)
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.setenv('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'true')
+
+        scanner = self._make_scanner(local_tv, monkeypatch)
+        show = self._make_show('Show', [(1, 1, 'both')])
+        from utils.library import _normalize_title
+        norm = _normalize_title('Show')
+        path_index = {(norm, 1, 1): debrid_file}
+        local_path_index = {(norm, 1, 1): local_file}
+        preferences = {norm: 'prefer-debrid'}
+
+        scanner._enforce_preferences([show], [], preferences, path_index, local_path_index)
+
+        assert os.path.islink(local_file)
+        assert os.readlink(local_file).startswith('/mnt/debrid/')
+
+    def test_prefer_debrid_skips_already_symlinked(self, tmp_dir, monkeypatch):
+        """Already-symlinked files should not be re-processed."""
+        local_tv = os.path.join(tmp_dir, 'tv')
+        show_dir = os.path.join(local_tv, 'Show (2025)', 'Season 01')
+        os.makedirs(show_dir)
+        local_file = os.path.join(show_dir, 'ep1.mkv')
+        os.symlink('/mnt/debrid/shows/ep1.mkv', local_file)
+
+        mount = os.path.join(tmp_dir, 'mount')
+        debrid_file = os.path.join(mount, 'shows', 'Show.S01E01', 'ep1.mkv')
+        os.makedirs(os.path.dirname(debrid_file))
+        with open(debrid_file, 'w') as f:
+            f.write('debrid')
+
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', mount)
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.setenv('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'true')
+
+        scanner = self._make_scanner(local_tv, monkeypatch)
+        show = self._make_show('Show', [(1, 1, 'both')])
+        from utils.library import _normalize_title
+        norm = _normalize_title('Show')
+        path_index = {(norm, 1, 1): debrid_file}
+        local_path_index = {(norm, 1, 1): local_file}
+        preferences = {norm: 'prefer-debrid'}
+
+        # Should be a no-op since already symlinked
+        with patch.object(lp, 'replace_local_with_symlinks') as mock_switch:
+            scanner._enforce_preferences([show], [], preferences, path_index, local_path_index)
+            mock_switch.assert_not_called()
+
+    def test_prefer_local_deletes_debrid_torrents(self, tmp_dir, monkeypatch):
+        """source=both + prefer-local → debrid torrents deleted."""
+        local_tv = os.path.join(tmp_dir, 'tv')
+        os.makedirs(local_tv)
+
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', os.path.join(tmp_dir, 'mount'))
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.setenv('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'true')
+
+        scanner = self._make_scanner(local_tv, monkeypatch)
+        show = self._make_show('Show', [(1, 1, 'both')])
+        from utils.library import _normalize_title
+        norm = _normalize_title('Show')
+        preferences = {norm: 'prefer-local'}
+
+        mock_client = MagicMock()
+        mock_client.find_torrents_by_title.return_value = [{'id': 'ABC', 'filename': 'Show.S01.mkv', 'parsed_title': 'Show', 'year': None}]
+        mock_client.delete_torrent.return_value = True
+
+        with patch('utils.debrid_client.get_debrid_client', return_value=(mock_client, 'realdebrid')):
+            scanner._enforce_preferences([show], [], preferences, {}, {})
+
+        mock_client.delete_torrent.assert_called_once_with('ABC')
+
+    def test_disabled_by_config(self, tmp_dir, monkeypatch):
+        """LIBRARY_PREFERENCE_AUTO_ENFORCE=false disables enforcement."""
+        local_tv = os.path.join(tmp_dir, 'tv')
+        os.makedirs(local_tv)
+        monkeypatch.setenv('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'false')
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', '/mount')
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+
+        scanner = self._make_scanner(local_tv, monkeypatch)
+        show = self._make_show('Show', [(1, 1, 'both')])
+        from utils.library import _normalize_title
+        norm = _normalize_title('Show')
+        preferences = {norm: 'prefer-debrid'}
+
+        with patch.object(lp, 'replace_local_with_symlinks') as mock_switch:
+            scanner._enforce_preferences([show], [], preferences, {(norm, 1, 1): '/x'}, {(norm, 1, 1): '/y'})
+            mock_switch.assert_not_called()
+
+    def test_no_action_for_non_both_source(self, tmp_dir, monkeypatch):
+        """Episodes with source=local or source=debrid are not auto-enforced."""
+        local_tv = os.path.join(tmp_dir, 'tv')
+        os.makedirs(local_tv)
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', '/mount')
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.setenv('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'true')
+
+        scanner = self._make_scanner(local_tv, monkeypatch)
+        show = self._make_show('Show', [(1, 1, 'local'), (1, 2, 'debrid')])
+        from utils.library import _normalize_title
+        norm = _normalize_title('Show')
+        preferences = {norm: 'prefer-debrid'}
+
+        with patch.object(lp, 'replace_local_with_symlinks') as mock_switch:
+            scanner._enforce_preferences([show], [], preferences, {}, {})
+            mock_switch.assert_not_called()
+
+    def test_no_action_without_preference(self, tmp_dir, monkeypatch):
+        """Shows without a preference are not enforced."""
+        local_tv = os.path.join(tmp_dir, 'tv')
+        os.makedirs(local_tv)
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', '/mount')
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.setenv('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'true')
+
+        scanner = self._make_scanner(local_tv, monkeypatch)
+        show = self._make_show('Show', [(1, 1, 'both')])
+
+        with patch.object(lp, 'replace_local_with_symlinks') as mock_switch:
+            scanner._enforce_preferences([show], [], {}, {}, {})
+            mock_switch.assert_not_called()

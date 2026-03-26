@@ -1195,8 +1195,10 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 }))
             else:
                 from utils.arr_client import get_configured_services
+                from utils.library_prefs import get_all_pending
                 result = scanner.get_data()
                 result['download_services'] = get_configured_services()
+                result['pending'] = get_all_pending()
                 data = json.dumps(result)
                 self._send_json_response(200, data)
         elif self.path.startswith('/api/library/metadata'):
@@ -1280,6 +1282,39 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
             except Exception:
                 logger.exception("[preference] Unexpected error")
+                self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
+            return
+
+        if self.path == '/api/library/pending':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 100_000:
+                    self._send_json_response(400, json.dumps({'error': 'Request body too large'}))
+                    return
+                body = self.rfile.read(content_length)
+                values = json.loads(body.decode('utf-8'))
+                if not isinstance(values, dict):
+                    self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
+                    return
+                title = values.get('title', '').strip()
+                episodes = values.get('episodes', [])
+                direction = values.get('direction', 'to-debrid')
+                action = values.get('action', 'set')
+                if not title:
+                    self._send_json_response(400, json.dumps({'error': 'title required'}))
+                    return
+                from utils.library import normalize_title
+                from utils.library_prefs import set_pending, clear_pending
+                norm = normalize_title(title)
+                if action == 'clear':
+                    clear_pending(norm, episodes if episodes else None)
+                else:
+                    set_pending(norm, episodes, direction)
+                self._send_json_response(200, json.dumps({'status': 'ok'}))
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception:
+                logger.exception("[pending] Unexpected error")
                 self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
             return
 

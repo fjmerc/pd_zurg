@@ -66,6 +66,80 @@ def get_all_preferences():
 
 
 # ---------------------------------------------------------------------------
+# Pending transitions
+# ---------------------------------------------------------------------------
+
+PENDING_PATH = '/config/library_pending.json'
+_pending_lock = threading.Lock()
+
+
+def _load_pending():
+    try:
+        with open(PENDING_PATH, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_pending(pending):
+    os.makedirs(os.path.dirname(PENDING_PATH), exist_ok=True)
+    with atomic_write(PENDING_PATH) as f:
+        json.dump(pending, f, indent=2)
+
+
+def set_pending(normalized_title, episodes, direction='to-debrid'):
+    """Record episodes as pending transition. Thread-safe.
+
+    Args:
+        normalized_title: Normalized show/movie title
+        episodes: list of {season, episode} dicts
+        direction: 'to-debrid' or 'to-local'
+    """
+    with _pending_lock:
+        pending = _load_pending()
+        entry = pending.get(normalized_title, {})
+        entry['direction'] = direction
+        existing = entry.get('episodes', [])
+        existing_keys = {(e['season'], e['episode']) for e in existing}
+        for ep in episodes:
+            key = (ep['season'], ep['episode'])
+            if key not in existing_keys:
+                existing.append(ep)
+        entry['episodes'] = existing
+        pending[normalized_title] = entry
+        _save_pending(pending)
+
+
+def clear_pending(normalized_title, episodes=None):
+    """Clear pending episodes for a title. Thread-safe.
+
+    If episodes is None, clears all pending for that title.
+    Otherwise removes only the specified episodes.
+    """
+    with _pending_lock:
+        pending = _load_pending()
+        if normalized_title not in pending:
+            return
+        if episodes is None:
+            del pending[normalized_title]
+        else:
+            clear_keys = {(e['season'], e['episode']) for e in episodes}
+            existing = pending[normalized_title].get('episodes', [])
+            remaining = [e for e in existing if (e['season'], e['episode']) not in clear_keys]
+            if remaining:
+                pending[normalized_title]['episodes'] = remaining
+            else:
+                del pending[normalized_title]
+        _save_pending(pending)
+
+
+def get_all_pending():
+    """Return all pending transitions."""
+    return _load_pending()
+
+
+# ---------------------------------------------------------------------------
 # File removal (local copies)
 # ---------------------------------------------------------------------------
 

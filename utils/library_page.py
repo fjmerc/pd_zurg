@@ -148,6 +148,8 @@ a:hover{text-decoration:underline}
 .ep-missing td{color:var(--text3)}
 .badge-missing{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#d299220f;color:var(--yellow);border:1px solid #d2992233}
 [data-theme="light"] .badge-missing{background:#9a67001a;border-color:#9a670040}
+.badge-pending{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#ab7df80f;color:#ab7df8;border:1px solid #ab7df833}
+[data-theme="light"] .badge-pending{background:#8250df1a;border-color:#8250df40;color:#8250df}
 
 /* Season progress */
 .season-progress{font-size:.78em;color:var(--text3);margin-left:6px}
@@ -245,6 +247,7 @@ let _tsRefreshTimer = null;
 let _displayedItems = [];
 let _inDetailView = false;
 let _preferences = {};
+let _pending = {};
 let _detailSeasons = [];
 let _downloadServices = {show: null, movie: null};
 let _searchTimer = null;
@@ -404,6 +407,7 @@ function fetchLibrary() {
       _allMovies      = Array.isArray(data.movies) ? data.movies : [];
       _allShows       = Array.isArray(data.shows)  ? data.shows  : [];
       _preferences    = data.preferences || {};
+      _pending        = data.pending || {};
       _downloadServices = data.download_services || {show: null, movie: null};
       _lastScan       = data.last_scan || null;
       _scanDurationMs = data.scan_duration_ms || null;
@@ -689,8 +693,28 @@ function _renderShowDetail(show, meta) {
       if (ep.air_date) html += ' <span class="ep-date">' + esc(ep.air_date) + '</span>';
       html += '</td>';
       html += '<td class="ep-source">';
-      if (isMissing) html += '<span class="badge-missing">Missing</span>';
-      else html += buildBadges(ep.source);
+      var isPending = false;
+      if (isMissing && _detailItem) {
+        var pnk = normTitle(_detailItem.title);
+        var pendingEntry = _pending[pnk];
+        if (pendingEntry && pendingEntry.episodes) {
+          for (var pi = 0; pi < pendingEntry.episodes.length; pi++) {
+            if (pendingEntry.episodes[pi].season === season.number && pendingEntry.episodes[pi].episode === ep.number) {
+              isPending = true;
+              break;
+            }
+          }
+        }
+      }
+      if (isPending) {
+        var pendingLabel = (_pending[normTitle(_detailItem.title)] || {}).direction === 'to-local'
+          ? 'Downloading locally\u2026' : 'Switching to debrid\u2026';
+        html += '<span class="badge-pending">' + pendingLabel + '</span>';
+      } else if (isMissing) {
+        html += '<span class="badge-missing">Missing</span>';
+      } else {
+        html += buildBadges(ep.source);
+      }
       html += '</td>';
       html += '<td class="ep-actions">';
       if (!isMissing) {
@@ -819,84 +843,127 @@ function applyPreference() {
   } else if (pref === 'prefer-debrid' && canRemove) {
     // Collect episodes by source:
     // - source=both → remove local copies (debrid already available)
-    // - source=local → search for debrid copies via Sonarr, keep local until found
-    var rmTasks = [];
+    // - source=local → remove local first so Sonarr marks them missing, then search for debrid
+    var rmBothTasks = [];
+    var rmLocalTasks = [];
     var dlTasks2 = [];
+    var pendingEps = [];
     var totalBoth = 0;
     var totalLocalOnly = 0;
+    var svcLabel3 = _svcNames[showSvc] || showSvc;
     for (var si2 = 0; si2 < seasons.length; si2++) {
-      var rmEps = [];
-      var dlEps = [];
+      var rmBothEps = [];
+      var rmLocalEps = [];
       for (var ei2 = 0; ei2 < seasons[si2].episodes.length; ei2++) {
         var src = seasons[si2].episodes[ei2].source;
-        if (src === 'both') { rmEps.push(seasons[si2].episodes[ei2].number); totalBoth++; }
-        else if (src === 'local') { dlEps.push(seasons[si2].episodes[ei2].number); totalLocalOnly++; }
+        if (src === 'both') { rmBothEps.push(seasons[si2].episodes[ei2].number); totalBoth++; }
+        else if (src === 'local') { rmLocalEps.push(seasons[si2].episodes[ei2].number); totalLocalOnly++; }
       }
-      if (rmEps.length) {
+      if (rmBothEps.length) {
         (function(sNum, epList) {
-          rmTasks.push(function() {
+          rmBothTasks.push(function() {
             return _postRemove({
               title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
               season: sNum, episodes: epList
             });
           });
-        })(seasons[si2].number, rmEps);
+        })(seasons[si2].number, rmBothEps);
       }
-      if (dlEps.length) {
+      if (rmLocalEps.length) {
         (function(sNum, epList) {
+          rmLocalTasks.push(function() {
+            return _postRemove({
+              title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
+              season: sNum, episodes: epList
+            });
+          });
           dlTasks2.push(function() {
             return _postDownload({
               title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
               season: sNum, episodes: epList
             });
           });
-        })(seasons[si2].number, dlEps);
+          for (var pe = 0; pe < epList.length; pe++) {
+            pendingEps.push({season: sNum, episode: epList[pe]});
+          }
+        })(seasons[si2].number, rmLocalEps);
       }
     }
     if (totalBoth === 0 && totalLocalOnly === 0) { _savePref(nk, pref); return; }
 
-    // Case 1: only local-only episodes — search for debrid copies
+    // Case 1: only local-only episodes — remove local, then search for debrid replacements
     if (totalBoth === 0 && totalLocalOnly > 0) {
-      var svcLabel3 = _svcNames[showSvc] || showSvc;
-      if (!confirm('Search for debrid copies of ' + totalLocalOnly + ' episode(s) via ' + svcLabel3
-        + '?\n\nLocal copies will be kept until debrid versions are available.')) return;
-      _savePref(nk, pref).then(function(saved) {
-        if (!saved) return;
-        _runSequential(dlTasks2).then(function(ok) {
-          var msg = document.getElementById('transfer-msg');
-          if (msg) msg.textContent = ok
-            ? 'Searching for debrid copies. Local files kept until found.'
-            : 'Search request failed.';
-        });
-      });
-      return;
-    }
-
-    // Case 2: only both-source episodes — remove local copies
-    if (totalBoth > 0 && totalLocalOnly === 0) {
-      if (!confirm('Remove local copies of ' + totalBoth + ' episode(s) that already have debrid copies?')) return;
+      if (!confirm('Switch ' + totalLocalOnly + ' episode(s) to debrid via ' + svcLabel3 + '?'
+        + '\n\nLocal copies will be removed and Sonarr will search for debrid replacements.'
+        + '\nEpisodes may be temporarily unavailable until debrid copies are found.')) return;
       var oldPref = _savedPref;
       _savePref(nk, pref).then(function(saved) {
         if (!saved) return;
-        _runSequential(rmTasks).then(function(ok) {
-          if (!ok) _savePref(nk, oldPref);
+        var msg = document.getElementById('transfer-msg');
+        if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Step 1/2: Removing local copies...';
+        _runSequential(rmLocalTasks).then(function(rmOk) {
+          if (!rmOk) {
+            if (msg) msg.textContent = 'Failed to remove local copies. Preference rolled back.';
+            _savePref(nk, oldPref);
+            return;
+          }
+          _setPending(_detailItem.title, pendingEps, 'to-debrid');
+          if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Step 2/2: Sending search to ' + esc(svcLabel3) + '...';
+          _runSequential(dlTasks2).then(function(dlOk) {
+            if (msg) msg.textContent = dlOk
+              ? 'Done. ' + totalLocalOnly + ' local file(s) removed. ' + svcLabel3 + ' is searching for debrid replacements.'
+              : 'Local copies removed but search failed. Retry search manually in ' + svcLabel3 + '.';
+            setTimeout(_refreshDetailData, 2000);
+          });
         });
       });
       return;
     }
 
-    // Case 3: mixed — remove local for both-source, search for local-only
-    var confirmMsg = 'Remove local copies of ' + totalBoth + ' episode(s) with debrid copies'
-      + ' and search for debrid copies of ' + totalLocalOnly + ' local-only episode(s)?';
-    if (!confirm(confirmMsg)) return;
-    var oldPref2 = _savedPref;
+    // Case 2: only both-source episodes — remove local copies (debrid already available)
+    if (totalBoth > 0 && totalLocalOnly === 0) {
+      if (!confirm('Remove local copies of ' + totalBoth + ' episode(s) that already have debrid copies?')) return;
+      var oldPref2 = _savedPref;
+      _savePref(nk, pref).then(function(saved) {
+        if (!saved) return;
+        _runSequential(rmBothTasks).then(function(ok) {
+          if (!ok) _savePref(nk, oldPref2);
+        });
+      });
+      return;
+    }
+
+    // Case 3: mixed — remove local for all, then search for debrid replacements for local-only
+    if (!confirm('Switch to debrid for ' + (totalBoth + totalLocalOnly) + ' episode(s) via ' + svcLabel3 + '?'
+      + '\n\n' + totalBoth + ' episode(s) already have debrid copies — local files will be removed.'
+      + '\n' + totalLocalOnly + ' episode(s) need debrid copies — local files will be removed and Sonarr will search.'
+      + '\nSome episodes may be temporarily unavailable.')) return;
+    var oldPref3 = _savedPref;
     _savePref(nk, pref).then(function(saved) {
       if (!saved) return;
-      _runSequential(rmTasks).then(function(rmOk) {
-        if (!rmOk) { _savePref(nk, oldPref2); return; }
-        _runSequential(dlTasks2).then(function(dlOk) {
-          var msg = document.getElementById('transfer-msg');
-          if (!dlOk && msg) msg.textContent = 'Local copies removed. Debrid search failed — retry manually.';
+      var msg = document.getElementById('transfer-msg');
+      if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Step 1/3: Removing ' + totalBoth + ' local file(s) with debrid copies...';
+      var allRmTasks = rmBothTasks.concat(rmLocalTasks);
+      _runSequential(rmBothTasks).then(function(rmBothOk) {
+        if (!rmBothOk) {
+          if (msg) msg.textContent = 'Failed to remove local copies. Preference rolled back.';
+          _savePref(nk, oldPref3);
+          return;
+        }
+        if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Step 2/3: Removing ' + totalLocalOnly + ' local-only file(s)...';
+        _runSequential(rmLocalTasks).then(function(rmLocalOk) {
+          if (!rmLocalOk) {
+            if (msg) msg.textContent = totalBoth + ' file(s) removed. Failed to remove local-only files.';
+            return;
+          }
+          _setPending(_detailItem.title, pendingEps, 'to-debrid');
+          if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Step 3/3: Sending search to ' + esc(svcLabel3) + '...';
+          _runSequential(dlTasks2).then(function(dlOk) {
+            if (msg) msg.textContent = dlOk
+              ? 'Done. ' + (totalBoth + totalLocalOnly) + ' local file(s) removed. ' + svcLabel3 + ' is searching for ' + totalLocalOnly + ' debrid replacement(s).'
+              : (totalBoth + totalLocalOnly) + ' local file(s) removed. Search failed — retry manually in ' + svcLabel3 + '.';
+            setTimeout(_refreshDetailData, 2000);
+          });
         });
       });
     });
@@ -1027,19 +1094,34 @@ function applyMoviePreference() {
         });
       });
     } else {
-      // Local only — search for debrid copy, keep local until found
+      // Local only — remove local first so Radarr marks it missing, then search for debrid
       var svcLabel2 = _svcNames[movieSvc] || movieSvc;
-      if (!confirm('Search for debrid copy of ' + _detailItem.title + ' via ' + svcLabel2
-        + '?\n\nLocal copy will be kept until a debrid version is available.')) return;
+      if (!confirm('Switch ' + _detailItem.title + ' to debrid via ' + svcLabel2 + '?'
+        + '\n\nLocal copy will be removed and Radarr will search for a debrid replacement.'
+        + '\nThe movie may be temporarily unavailable.')) return;
+      var oldPref3 = _savedPref;
       _savePref(nk, pref).then(function(saved) {
         if (!saved) return;
-        _postDownload({
-          title: _detailItem.title, type: 'movie', tmdb_id: tmdbId
-        }).then(function(ok) {
-          var msg = document.getElementById('transfer-msg');
-          if (msg) msg.textContent = ok
-            ? 'Searching for debrid copy. Local file kept until found.'
-            : 'Search request failed. Preference saved.';
+        var msg = document.getElementById('transfer-msg');
+        if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Step 1/2: Removing local copy...';
+        _postRemove({
+          title: _detailItem.title, type: 'movie', tmdb_id: tmdbId,
+          episodes: []
+        }).then(function(rmOk) {
+          if (!rmOk) {
+            if (msg) msg.textContent = 'Failed to remove local copy. Preference rolled back.';
+            _savePref(nk, oldPref3);
+            return;
+          }
+          if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Step 2/2: Sending search to ' + esc(svcLabel2) + '...';
+          _postDownload({
+            title: _detailItem.title, type: 'movie', tmdb_id: tmdbId
+          }).then(function(dlOk) {
+            if (msg) msg.textContent = dlOk
+              ? 'Done. Local copy removed. ' + svcLabel2 + ' is searching for debrid replacement.'
+              : 'Local copy removed but search failed. Retry search manually in ' + svcLabel2 + '.';
+            setTimeout(_refreshDetailData, 2000);
+          });
         });
       });
     }
@@ -1199,6 +1281,14 @@ function _postRemoveDebrid(title, year) {
   });
 }
 
+function _setPending(title, episodes, direction) {
+  return fetch('/api/library/pending', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({title: title, episodes: episodes, direction: direction})
+  }).then(function(r) { return r.ok; }).catch(function() { return false; });
+}
+
 // Serialize an array of functions that each return a Promise<boolean>.
 // Returns true if at least one task succeeded.
 function _runSequential(tasks) {
@@ -1219,6 +1309,7 @@ function _refreshDetailData() {
       _allMovies = Array.isArray(data.movies) ? data.movies : [];
       _allShows  = Array.isArray(data.shows)  ? data.shows  : [];
       _preferences = data.preferences || {};
+      _pending = data.pending || {};
       _downloadServices = data.download_services || {show: null, movie: null};
       _lastScan = data.last_scan || null;
       if (_inDetailView && _detailItem) {

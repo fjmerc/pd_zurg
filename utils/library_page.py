@@ -163,8 +163,23 @@ a:hover{text-decoration:underline}
 [data-theme="light"] .badge-pending{background:#bc4c001a;border-color:#bc4c0040;color:#bc4c00}
 [data-theme="light"] .badge-pending::before{background:#bc4c00}
 
-/* Season progress */
-.season-progress{font-size:.78em;color:var(--text3);margin-left:6px}
+/* Season progress pill (Sonarr-style) */
+.season-progress-pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;margin-left:8px}
+.progress-complete{background:#3fb9501a;color:var(--green);border:1px solid #3fb95033}
+.progress-partial{background:#d299221a;color:var(--yellow);border:1px solid #d2992233}
+.progress-empty{background:var(--border);color:var(--text3);border:1px solid var(--border2)}
+[data-theme="light"] .progress-complete{background:#1a7f371a;border-color:#1a7f3740}
+[data-theme="light"] .progress-partial{background:#9a67001a;border-color:#9a670040}
+[data-theme="light"] .progress-empty{background:#d0d7de40;border-color:#d0d7de;color:var(--text3)}
+
+/* Expand/collapse all */
+.expand-all-row{display:flex;justify-content:flex-end;margin-bottom:8px}
+.expand-all-btn{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;padding:4px 12px;font-size:.78em;cursor:pointer;transition:border-color .15s,color .15s;display:flex;align-items:center;gap:4px;font-family:inherit}
+.expand-all-btn:hover{border-color:var(--blue);color:var(--blue)}
+
+/* Season collapse footer */
+.season-collapse-footer{text-align:center;padding:4px 0;background:var(--border2);cursor:pointer;border-top:1px solid var(--border);transition:background .15s;font-size:.75em;color:var(--text3)}
+.season-collapse-footer:hover{background:var(--border);color:var(--text2)}
 
 /* Footer */
 .footer{color:var(--text3);font-size:.78em;text-align:right;margin-top:16px}
@@ -646,7 +661,7 @@ function _mergeShowMeta(show, meta) {
     for (var ri = 0; ri < remaining.length; ri++) {
       episodes.push(fileEps[remaining[ri]]);
     }
-    episodes.sort(function(a, b) { return a.number - b.number; });
+    episodes.sort(function(a, b) { return b.number - a.number; });
     var haveCount = episodes.filter(function(e) { return e.source !== 'missing'; }).length;
     merged.push({number: tmdbS.number, total_episodes: tmdbS.total_episodes, episode_count: haveCount, episodes: episodes});
   });
@@ -656,8 +671,76 @@ function _mergeShowMeta(show, meta) {
       merged.push(s);
     }
   });
-  merged.sort(function(a, b) { return a.number - b.number; });
+  merged.sort(function(a, b) { return b.number - a.number; });
   return merged;
+}
+
+function _relativeDate(dateStr) {
+  if (!dateStr) return '';
+  var parts = dateStr.split('-');
+  if (parts.length !== 3) return dateStr;
+  var d = new Date(parseInt(parts[0],10), parseInt(parts[1],10)-1, parseInt(parts[2],10));
+  var now = new Date(); now.setHours(0,0,0,0);
+  var diff = Math.round((d - now) / 86400000);
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Tomorrow';
+  if (diff === -1) return 'Yesterday';
+  if (diff > 1 && diff <= 30) return 'In ' + diff + ' days';
+  if (diff < -1 && diff >= -30) return Math.abs(diff) + ' days ago';
+  if (diff > 30 && diff <= 365) return 'In ' + Math.ceil(diff/7) + ' weeks';
+  if (diff > 365) { var y = Math.floor(diff/365); return 'In ' + y + ' year' + (y !== 1 ? 's' : ''); }
+  if (diff < -30 && diff >= -365) return Math.ceil(Math.abs(diff)/30) + ' months ago';
+  if (diff < -365) { var y = Math.floor(Math.abs(diff)/365); return y + ' year' + (y !== 1 ? 's' : '') + ' ago'; }
+  return dateStr;
+}
+
+function _seasonProgressPill(season) {
+  if (!season.total_episodes) return '';
+  var count = season.episode_count || 0;
+  var total = season.total_episodes;
+  var cls = 'progress-empty';
+  if (count >= total && total > 0) cls = 'progress-complete';
+  else if (count > 0) cls = 'progress-partial';
+  return '<span class="season-progress-pill ' + cls + '">' + count + ' / ' + total + '</span>';
+}
+
+function _syncExpandAllBtn() {
+  var btn = document.querySelector('.expand-all-btn');
+  if (!btn) return;
+  var headers = document.querySelectorAll('.season-header');
+  var allExpanded = true;
+  for (var i = 0; i < headers.length; i++) {
+    if (!headers[i].classList.contains('expanded')) { allExpanded = false; break; }
+  }
+  btn.textContent = allExpanded ? 'Collapse All' : 'Expand All';
+}
+
+function toggleAllSeasons(btn) {
+  var headers = document.querySelectorAll('.season-header');
+  var anyCollapsed = false;
+  for (var i = 0; i < headers.length; i++) {
+    if (!headers[i].classList.contains('expanded')) { anyCollapsed = true; break; }
+  }
+  for (var i = 0; i < headers.length; i++) {
+    var ep = headers[i].nextElementSibling;
+    if (anyCollapsed) {
+      headers[i].classList.add('expanded');
+      headers[i].setAttribute('aria-expanded', 'true');
+      if (ep) ep.style.display = '';
+    } else {
+      headers[i].classList.remove('expanded');
+      headers[i].setAttribute('aria-expanded', 'false');
+      if (ep) ep.style.display = 'none';
+    }
+  }
+  _syncExpandAllBtn();
+}
+
+function collapseSeason(footerEl) {
+  var section = footerEl.closest('.season-section');
+  if (!section) return;
+  var header = section.querySelector('.season-header');
+  if (header) toggleSeason(header);
 }
 
 function _renderShowDetail(show, meta) {
@@ -665,7 +748,16 @@ function _renderShowDetail(show, meta) {
   var nk = normTitle(show.title);
   var curPref = _preferences[nk] || 'none';
   _savedPref = curPref;
-  var seasons = meta ? _mergeShowMeta(show, meta) : (show.season_data || []);
+  var seasons = meta ? _mergeShowMeta(show, meta) : (show.season_data || []).slice();
+  if (!meta) {
+    seasons.sort(function(a, b) { return b.number - a.number; });
+    for (var ri = 0; ri < seasons.length; ri++) {
+      seasons[ri] = Object.assign({}, seasons[ri]);
+      if (seasons[ri].episodes) {
+        seasons[ri].episodes = seasons[ri].episodes.slice().sort(function(a, b) { return b.number - a.number; });
+      }
+    }
+  }
   _detailSeasons = seasons;
 
   // Save expanded state from previous render
@@ -705,6 +797,11 @@ function _renderShowDetail(show, meta) {
   html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px">Prefer Local downloads debrid-only episodes. Prefer Debrid removes local copies and streams from debrid.</div>';
   html += '</div></div>';
 
+  if (seasons.length > 1) {
+    var allExpanded = hasPrev && seasons.every(function(s) { return !!expandedNums[String(s.number)]; });
+    html += '<div class="expand-all-row"><button class="expand-all-btn" onclick="toggleAllSeasons(this)">' + (allExpanded ? 'Collapse All' : 'Expand All') + '</button></div>';
+  }
+
   for (var si = 0; si < seasons.length; si++) {
     var season = seasons[si];
     var expanded = hasPrev ? !!expandedNums[String(season.number)] : si === 0;
@@ -713,14 +810,11 @@ function _renderShowDetail(show, meta) {
       if (season.episodes[ci].source === 'debrid') { hasDebrid = true; debridCount++; }
       if (season.episodes[ci].source === 'local' || season.episodes[ci].source === 'both') hasLocal = true;
     }
-    var progressText = '';
-    if (season.total_episodes) {
-      progressText = '<span class="season-progress">' + season.episode_count + '/' + season.total_episodes + '</span>';
-    }
+    var progressPill = _seasonProgressPill(season);
     html += '<div class="season-section">';
-    html += '<div class="season-header' + (expanded ? ' expanded' : '') + '" data-season="' + season.number + '" tabindex="0" role="button" aria-expanded="' + expanded + '" onclick="toggleSeason(this)" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();toggleSeason(this)}">';
+    html += '<div class="season-header' + (expanded ? ' expanded' : '') + '" data-season="' + esc(String(season.number)) + '" tabindex="0" role="button" aria-expanded="' + expanded + '" onclick="toggleSeason(this)" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();toggleSeason(this)}">';
     html += '<span class="season-chevron">&#9654;</span>';
-    html += 'Season ' + season.number + ' &mdash; ' + season.episode_count + ' episode' + (season.episode_count !== 1 ? 's' : '') + progressText;
+    html += 'Season ' + esc(String(season.number)) + ' &mdash; ' + esc(String(season.episode_count)) + ' episode' + (season.episode_count !== 1 ? 's' : '') + progressPill;
     html += '<span class="season-actions">';
     if (hasDebrid && _downloadServices.show) {
       if (_downloadServices.show === 'overseerr') {
@@ -755,7 +849,7 @@ function _renderShowDetail(show, meta) {
       if (ep.title) html += '<span class="ep-title">' + esc(ep.title) + '</span>';
       if (ep.file) html += esc(ep.file);
       else if (!ep.title) html += '<span style="color:var(--text3)">&mdash;</span>';
-      if (ep.air_date) html += ' <span class="ep-date">' + esc(ep.air_date) + '</span>';
+      if (ep.air_date) html += ' <span class="ep-date" title="' + esc(ep.air_date) + '">' + esc(_relativeDate(ep.air_date)) + '</span>';
       html += '</td>';
       html += '<td class="ep-source">';
       var isPending = false;
@@ -763,8 +857,8 @@ function _renderShowDetail(show, meta) {
         var pnk = normTitle(_detailItem.title);
         var pendingEntry = _pending[pnk];
         if (pendingEntry && pendingEntry.episodes) {
-          for (var pi = 0; pi < pendingEntry.episodes.length; pi++) {
-            if (pendingEntry.episodes[pi].season === season.number && pendingEntry.episodes[pi].episode === ep.number) {
+          for (var pei = 0; pei < pendingEntry.episodes.length; pei++) {
+            if (pendingEntry.episodes[pei].season === season.number && pendingEntry.episodes[pei].episode === ep.number) {
               isPending = true;
               break;
             }
@@ -793,7 +887,11 @@ function _renderShowDetail(show, meta) {
       html += '</td>';
       html += '</tr>';
     }
-    html += '</tbody></table></div></div>';
+    html += '</tbody></table>';
+    if (eps.length > 10) {
+      html += '<div class="season-collapse-footer" role="button" tabindex="0" onclick="collapseSeason(this)" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();collapseSeason(this)}" title="Collapse season">&#9650; Collapse</div>';
+    }
+    html += '</div></div>';
   }
 
   html += '<div id="transfer-msg" aria-live="polite"></div>';
@@ -805,6 +903,8 @@ function hideDetail() {
   _inDetailView = false;
   _detailItem = null;
   _detailSeasons = [];
+  _actionInFlight = false;
+  if (_pendingConfirmCleanup) { _pendingConfirmCleanup(); _pendingConfirmCleanup = null; }
   document.title = 'pd_zurg Library';
   document.querySelector('.tabs').style.display = '';
   document.querySelector('.controls').style.display = '';
@@ -818,6 +918,7 @@ function toggleSeason(headerEl) {
   var isExpanded = headerEl.classList.toggle('expanded');
   headerEl.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
   episodes.style.display = isExpanded ? '' : 'none';
+  _syncExpandAllBtn();
 }
 
 // ---------------------------------------------------------------------------
@@ -1097,10 +1198,11 @@ function applyMoviePreference() {
       if (!confirm('Switch ' + _detailItem.title + ' to debrid streaming?'
         + '\n\nLocal file will be removed. Playback will stream from your debrid service.')) return;
       var oldPref = _savedPref;
+      _actionInFlight = true;
       _setActionsDisabled(true);
       _showMsgHtml('<span class="scanning-dot"></span>Switching to debrid...');
       _savePref(nk, pref).then(function(saved) {
-        if (!saved) { _setActionsDisabled(false); return; }
+        if (!saved) return;
         return _postRemove({
           title: _detailItem.title, type: 'movie', tmdb_id: tmdbId,
           episodes: []
@@ -1109,6 +1211,11 @@ function applyMoviePreference() {
           else { _showMsg('Switched to debrid streaming. To get a local copy back, use the Switch to Local button.', 'success'); }
           _scheduleRefresh(1000);
         });
+      }).catch(function(e) {
+        _showMsg('Operation failed: ' + e, 'error');
+      }).finally(function() {
+        _actionInFlight = false;
+        _setActionsDisabled(false);
       });
     }
 
@@ -1204,7 +1311,10 @@ function _postRemove(payload) {
   });
 }
 
+var _pendingConfirmCleanup = null;
+
 function _showDebridConfirmation(torrents, title, service, onConfirm, onCancel) {
+  if (_pendingConfirmCleanup) { _pendingConfirmCleanup(); _pendingConfirmCleanup = null; }
   var el = document.getElementById('transfer-msg');
   if (!el) { onCancel(); return; }
   var html = '<div class="confirm-panel" role="alertdialog" aria-labelledby="confirm-panel-title">';
@@ -1224,9 +1334,10 @@ function _showDebridConfirmation(torrents, title, service, onConfirm, onCancel) 
   el.innerHTML = html;
   var confirmBtn = document.getElementById('confirm-delete-btn');
   var cancelBtn = document.getElementById('cancel-delete-btn');
-  function _cleanup() { document.removeEventListener('keydown', _onKey); }
+  function _cleanup() { document.removeEventListener('keydown', _onKey); _pendingConfirmCleanup = null; }
   function _onKey(e) { if (e.key === 'Escape') { _cleanup(); onCancel(); } }
   document.addEventListener('keydown', _onKey);
+  _pendingConfirmCleanup = _cleanup;
   if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.onclick = function() { _cleanup(); onConfirm(); }; }
   if (cancelBtn) { cancelBtn.disabled = false; cancelBtn.onclick = function() { _cleanup(); onCancel(); }; }
   if (cancelBtn) cancelBtn.focus();

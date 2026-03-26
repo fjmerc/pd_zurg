@@ -132,6 +132,16 @@ a:hover{text-decoration:underline}
 [data-theme="light"] .btn-apply:hover{background:#0860ca}
 .season-actions{margin-left:auto;display:flex;gap:4px}
 .transfer-msg{font-size:.78em;color:var(--yellow);margin-top:4px}
+.transfer-msg.msg-success{color:var(--green);border-left:3px solid var(--green);padding:6px 10px;background:#3fb9500a;border-radius:0 4px 4px 0}
+.transfer-msg.msg-error{color:var(--red);border-left:3px solid var(--red);padding:6px 10px;background:#f851490a;border-radius:0 4px 4px 0}
+.confirm-panel{border:1px solid var(--red);border-radius:8px;padding:12px;margin-top:8px;background:#f851490a}
+.confirm-panel .confirm-title{font-weight:600;color:var(--red);margin-bottom:8px}
+.confirm-panel .confirm-list{font-size:.8em;color:var(--text);margin:0 0 12px 16px;list-style:disc}
+.confirm-panel .confirm-list li{margin-bottom:2px}
+.confirm-panel .btn-confirm-delete{background:var(--red);color:#fff;border:1px solid var(--red);border-radius:4px;font-weight:600;padding:4px 14px;font-size:.82em;cursor:pointer;transition:background .15s}
+.confirm-panel .btn-confirm-delete:hover{filter:brightness(1.15)}
+.confirm-panel .btn-confirm-cancel{background:none;border:1px solid var(--border);color:var(--text2);border-radius:4px;padding:4px 14px;font-size:.82em;cursor:pointer;transition:border-color .15s,color .15s}
+.confirm-panel .btn-confirm-cancel:hover{border-color:var(--blue);color:var(--blue)}
 
 /* Detail hero with poster */
 .detail-hero{display:flex;gap:16px;margin-bottom:16px}
@@ -148,8 +158,10 @@ a:hover{text-decoration:underline}
 .ep-missing td{color:var(--text3)}
 .badge-missing{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#d299220f;color:var(--yellow);border:1px solid #d2992233}
 [data-theme="light"] .badge-missing{background:#9a67001a;border-color:#9a670040}
-.badge-pending{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#ab7df80f;color:#ab7df8;border:1px solid #ab7df833}
-[data-theme="light"] .badge-pending{background:#8250df1a;border-color:#8250df40;color:#8250df}
+.badge-pending{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#db6d280f;color:var(--orange);border:1px solid #db6d2833}
+.badge-pending::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--orange);margin-right:4px;vertical-align:middle;animation:pulse-dot 1s ease-in-out infinite}
+[data-theme="light"] .badge-pending{background:#bc4c001a;border-color:#bc4c0040;color:#bc4c00}
+[data-theme="light"] .badge-pending::before{background:#bc4c00}
 
 /* Season progress */
 .season-progress{font-size:.78em;color:var(--text3);margin-left:6px}
@@ -252,6 +264,9 @@ let _detailSeasons = [];
 let _downloadServices = {show: null, movie: null};
 let _searchTimer = null;
 let _refreshTimer = null;
+let _lastTransferText = '';
+let _lastTransferType = '';
+let _transferClearTimer = null;
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -283,6 +298,45 @@ function updateScanInfo() {
   } else {
     el.textContent = '';
   }
+}
+
+// ---------------------------------------------------------------------------
+// Transfer message helpers
+// ---------------------------------------------------------------------------
+function _showMsg(text, type) {
+  var el = document.getElementById('transfer-msg');
+  if (!el) return;
+  el.className = 'transfer-msg' + (type === 'success' ? ' msg-success' : type === 'error' ? ' msg-error' : '');
+  el.textContent = text;
+  _lastTransferText = text;
+  _lastTransferType = type || '';
+  if (_transferClearTimer) { clearTimeout(_transferClearTimer); _transferClearTimer = null; }
+  if (text && type !== 'error') {
+    _transferClearTimer = setTimeout(_clearTransferMsg, 10000);
+  }
+}
+
+function _showMsgHtml(html) {
+  var el = document.getElementById('transfer-msg');
+  if (!el) return;
+  el.className = 'transfer-msg';
+  el.innerHTML = html;
+}
+
+function _clearTransferMsg() {
+  _lastTransferText = '';
+  _lastTransferType = '';
+  _transferClearTimer = null;
+  var el = document.getElementById('transfer-msg');
+  if (el) { el.className = 'transfer-msg'; el.textContent = ''; }
+}
+
+function _restoreTransferMsg() {
+  if (!_lastTransferText) return;
+  var el = document.getElementById('transfer-msg');
+  if (!el) return;
+  el.className = 'transfer-msg' + (_lastTransferType === 'success' ? ' msg-success' : _lastTransferType === 'error' ? ' msg-error' : '');
+  el.textContent = _lastTransferText;
 }
 
 // ---------------------------------------------------------------------------
@@ -323,9 +377,15 @@ function buildCard(item, index) {
   var isClickable = isShow || isMovie;
   var cardClass = isShow ? ' show-card' : (isMovie ? ' movie-card' : '');
   var clickAttr = isClickable ? ' onclick="showDetail(' + index + ')" tabindex="0" role="button" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();showDetail(' + index + ')}"' : '';
+  var pendingBadge = '';
+  var pnk = normTitle(item.title);
+  if (_pending[pnk]) {
+    var dir = (_pending[pnk] || {}).direction;
+    pendingBadge = '<span class="badge-pending">' + (dir === 'to-local' ? 'Downloading' : 'Switching') + '</span>';
+  }
   return '<div class="media-card' + cardClass + '"' + clickAttr + '>'
     + '<div class="card-title">' + esc(item.title) + '</div>'
-    + '<div class="card-badges">' + buildBadges(item.source) + '</div>'
+    + '<div class="card-badges">' + buildBadges(item.source) + pendingBadge + '</div>'
     + metaLine
     + '</div>';
 }
@@ -464,6 +524,9 @@ function showDetail(index) {
   _inDetailView = true;
   _detailItem = item;
   _detailMeta = null;
+  _lastTransferText = '';
+  _lastTransferType = '';
+  if (_transferClearTimer) { clearTimeout(_transferClearTimer); _transferClearTimer = null; }
   document.title = (item.title || '') + ' \u2014 pd_zurg Library';
 
   document.querySelector('.tabs').style.display = 'none';
@@ -498,6 +561,7 @@ function _renderDetail() {
   } else {
     _renderShowDetail(item, meta);
   }
+  _restoreTransferMsg();
 }
 
 function _renderMovieDetail(movie, meta) {
@@ -550,7 +614,7 @@ function _renderMovieDetail(movie, meta) {
     html += '<div style="margin-top:10px;font-size:.82em;color:var(--text3)">To download locally, configure <a href="/settings">Radarr or Overseerr</a> in Settings.</div>';
   }
   html += '</div></div>';
-  html += '<div id="transfer-msg"></div>';
+  html += '<div id="transfer-msg" aria-live="polite"></div>';
   html += '</div>';
   area.innerHTML = html;
 }
@@ -732,7 +796,7 @@ function _renderShowDetail(show, meta) {
     html += '</tbody></table></div></div>';
   }
 
-  html += '<div id="transfer-msg"></div>';
+  html += '<div id="transfer-msg" aria-live="polite"></div>';
   html += '</div>';
   area.innerHTML = html;
 }
@@ -814,8 +878,7 @@ function applyPreference() {
     }
     if (totalDlEps === 0 && totalBothEps === 0) {
       _savePref(nk, pref);
-      var msg = document.getElementById('transfer-msg');
-      if (msg) msg.textContent = 'All episodes already local. Preference saved.';
+      _showMsg('All episodes already local. Preference saved.', 'success');
       return;
     }
     // Case 1: only debrid-only episodes (no both) — download them
@@ -837,8 +900,7 @@ function applyPreference() {
       _postRemoveDebrid(_detailItem.title, _detailItem.year).then(function(ok) {
         if (ok) _savePref(nk, pref);
       }).catch(function(e) {
-        var msg = document.getElementById('transfer-msg');
-        if (msg) msg.textContent = 'Operation failed: ' + e;
+        _showMsg('Operation failed: ' + e, 'error');
       });
       return;
     }
@@ -852,8 +914,7 @@ function applyPreference() {
     }).then(function(ok) {
       if (ok) _savePref(nk, pref);
     }).catch(function(e) {
-      var msg = document.getElementById('transfer-msg');
-      if (msg) msg.textContent = 'Operation failed: ' + e;
+      _showMsg('Operation failed: ' + e, 'error');
     });
 
   } else if (pref === 'prefer-debrid') {
@@ -880,10 +941,8 @@ function applyPreference() {
     if (totalSwitchable === 0) {
       _savePref(nk, pref).then(function(saved) {
         if (saved && localOnlyEps.length) _setPending(_detailItem.title, localOnlyEps, 'to-debrid');
-        var msg = document.getElementById('transfer-msg');
-        if (msg) msg.textContent = saved
-          ? 'Preference saved. ' + totalLocalOnly + ' episode(s) have no debrid copy — local files kept.'
-          : 'Failed to save preference.';
+        if (saved) _showMsg('Preference saved. ' + totalLocalOnly + ' episode(s) have no debrid copy \u2014 local files kept.', 'success');
+        else _showMsg('Failed to save preference.', 'error');
       });
       return;
     }
@@ -893,8 +952,7 @@ function applyPreference() {
     if (!confirm(confirmMsg2)) return;
     _actionInFlight = true;
     _setActionsDisabled(true);
-    var msg = document.getElementById('transfer-msg');
-    if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Switching to debrid...';
+    _showMsgHtml('<span class="scanning-dot"></span>Switching to debrid...');
     fetch('/api/library/switch-to-debrid', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -905,13 +963,13 @@ function applyPreference() {
       if (res.ok && res.d.switched > 0) {
         _savePref(nk, pref);
         if (localOnlyEps.length) _setPending(_detailItem.title, localOnlyEps, 'to-debrid');
-        if (msg) msg.textContent = res.d.message || ('Switched ' + res.d.switched + ' episode(s) to debrid.');
+        _showMsg('Switched ' + res.d.switched + ' episode(s) to debrid streaming. To get local copies back, use the Download button.', 'success');
         _scheduleRefresh(1000);
       } else {
-        if (msg) msg.textContent = 'Error: ' + (res.d.error || res.d.message || 'Switch failed');
+        _showMsg('Error: ' + (res.d.error || res.d.message || 'Switch failed'), 'error');
       }
     }).catch(function(e) {
-      if (msg) msg.textContent = 'Switch failed: ' + e;
+      _showMsg('Switch failed: ' + e, 'error');
     }).finally(function() {
       _actionInFlight = false;
       _setActionsDisabled(false);
@@ -919,8 +977,7 @@ function applyPreference() {
 
   } else {
     _savePref(nk, pref);
-    var msg = document.getElementById('transfer-msg');
-    if (msg) msg.textContent = 'Preference saved.';
+    _showMsg('Preference saved.', 'success');
   }
 }
 
@@ -1032,41 +1089,32 @@ function applyMoviePreference() {
     if (_detailItem.source === 'local') {
       // No debrid copy — just save preference
       _savePref(nk, pref).then(function(saved) {
-        var msg = document.getElementById('transfer-msg');
-        if (msg) msg.textContent = saved
-          ? 'Preference saved. No debrid copy available — local file kept.'
-          : 'Failed to save preference.';
+        if (saved) _showMsg('Preference saved. No debrid copy available \u2014 local file kept.', 'success');
+        else _showMsg('Failed to save preference.', 'error');
       });
     } else {
       // source=both — replace local file with link to debrid mount
       if (!confirm('Switch ' + _detailItem.title + ' to debrid streaming?'
         + '\n\nLocal file will be removed. Playback will stream from your debrid service.')) return;
-      _actionInFlight = true;
+      var oldPref = _savedPref;
       _setActionsDisabled(true);
-      var msg = document.getElementById('transfer-msg');
-      if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Switching to debrid...';
-      // Movies don't have season/episode structure in the scanner — use a general approach
+      _showMsgHtml('<span class="scanning-dot"></span>Switching to debrid...');
       _savePref(nk, pref).then(function(saved) {
-        if (!saved) { _actionInFlight = false; _setActionsDisabled(false); return; }
-        var oldPref = _savedPref;
-        _postRemove({
+        if (!saved) { _setActionsDisabled(false); return; }
+        return _postRemove({
           title: _detailItem.title, type: 'movie', tmdb_id: tmdbId,
           episodes: []
         }).then(function(ok) {
           if (!ok) { _savePref(nk, oldPref); }
-          else if (msg) { msg.textContent = 'Local copy removed. Debrid copy is now the active source.'; }
+          else { _showMsg('Switched to debrid streaming. To get a local copy back, use the Switch to Local button.', 'success'); }
           _scheduleRefresh(1000);
-        }).finally(function() {
-          _actionInFlight = false;
-          _setActionsDisabled(false);
         });
       });
     }
 
   } else {
     _savePref(nk, pref);
-    var msg = document.getElementById('transfer-msg');
-    if (msg) msg.textContent = 'Preference saved.';
+    _showMsg('Preference saved.', 'success');
   }
 }
 
@@ -1100,11 +1148,10 @@ function _postDownload(payload) {
   if (_actionInFlight) return Promise.resolve(false);
   _actionInFlight = true;
   _setActionsDisabled(true);
-  var msg = document.getElementById('transfer-msg');
   var svc = payload.type === 'movie' ? _downloadServices.movie : _downloadServices.show;
   var svcName = _svcNames[svc] || svc;
   var actionWord = svc === 'overseerr' ? 'Requesting' : 'Sending to ' + svcName;
-  if (msg) msg.innerHTML = '<span class="scanning-dot"></span>' + esc(actionWord) + '...';
+  _showMsgHtml('<span class="scanning-dot"></span>' + esc(actionWord) + '...');
   return fetch('/api/library/download', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -1114,10 +1161,11 @@ function _postDownload(payload) {
   }).then(function(res) {
     var d = res.d;
     var errMsg = (!res.ok || d.status === 'error') ? (d.error || d.message || 'Unknown error') : null;
-    if (msg) msg.textContent = errMsg ? 'Error: ' + errMsg : (d.message || 'Sent.');
-    return !errMsg;  // true on success, false on error
+    if (errMsg) _showMsg('Error: ' + errMsg, 'error');
+    else _showMsg(d.message || 'Sent.', 'success');
+    return !errMsg;
   }).catch(function(e) {
-    if (msg) msg.textContent = 'Request failed: ' + e;
+    _showMsg('Request failed: ' + e, 'error');
     return false;
   }).finally(function() {
     _actionInFlight = false;
@@ -1129,8 +1177,7 @@ function _postRemove(payload) {
   if (_actionInFlight) return Promise.resolve(false);
   _actionInFlight = true;
   _setActionsDisabled(true);
-  var msg = document.getElementById('transfer-msg');
-  if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Removing...';
+  _showMsgHtml('<span class="scanning-dot"></span>Removing...');
   return fetch('/api/library/remove-local', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -1141,15 +1188,15 @@ function _postRemove(payload) {
     var d = res.d;
     if (!res.ok || (d.status !== 'removed')) {
       var errMsg = d.error || d.message || 'Unknown error';
-      if (msg) msg.textContent = 'Error: ' + errMsg;
+      _showMsg('Error: ' + errMsg, 'error');
       return false;
     } else {
-      if (msg) msg.textContent = d.message || ('Removed ' + (d.removed || 0) + ' file(s).');
+      _showMsg('Switched ' + (d.removed || 0) + ' file(s) to debrid streaming. To re-download, trigger a search in your media manager.', 'success');
       _scheduleRefresh(1000);
       return true;
     }
   }).catch(function(e) {
-    if (msg) msg.textContent = 'Remove failed: ' + e;
+    _showMsg('Remove failed: ' + e, 'error');
     return false;
   }).finally(function() {
     _actionInFlight = false;
@@ -1157,12 +1204,40 @@ function _postRemove(payload) {
   });
 }
 
+function _showDebridConfirmation(torrents, title, service, onConfirm, onCancel) {
+  var el = document.getElementById('transfer-msg');
+  if (!el) { onCancel(); return; }
+  var html = '<div class="confirm-panel" role="alertdialog" aria-labelledby="confirm-panel-title">';
+  html += '<div class="confirm-title" id="confirm-panel-title">Permanently delete ' + esc(String(torrents.length)) + ' debrid torrent' + (torrents.length !== 1 ? 's' : '') + ' for ' + esc(title) + '?</div>';
+  html += '<div style="font-size:.82em;color:var(--text2);margin-bottom:8px">The following will be removed from your ' + esc(service || 'debrid') + ' account:</div>';
+  html += '<ul class="confirm-list">';
+  for (var i = 0; i < torrents.length && i < 10; i++) {
+    html += '<li>' + esc(torrents[i].filename || torrents[i].id || '(unknown)') + '</li>';
+  }
+  if (torrents.length > 10) html += '<li style="color:var(--text3)">... and ' + (torrents.length - 10) + ' more</li>';
+  html += '</ul>';
+  html += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
+  html += '<button class="btn-confirm-delete" id="confirm-delete-btn">Delete Permanently</button>';
+  html += '<button class="btn-confirm-cancel" id="cancel-delete-btn">Cancel</button>';
+  html += '</div></div>';
+  el.className = 'transfer-msg';
+  el.innerHTML = html;
+  var confirmBtn = document.getElementById('confirm-delete-btn');
+  var cancelBtn = document.getElementById('cancel-delete-btn');
+  function _cleanup() { document.removeEventListener('keydown', _onKey); }
+  function _onKey(e) { if (e.key === 'Escape') { _cleanup(); onCancel(); } }
+  document.addEventListener('keydown', _onKey);
+  if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.onclick = function() { _cleanup(); onConfirm(); }; }
+  if (cancelBtn) { cancelBtn.disabled = false; cancelBtn.onclick = function() { _cleanup(); onCancel(); }; }
+  if (cancelBtn) cancelBtn.focus();
+  el.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+
 function _postRemoveDebrid(title, year) {
   if (_actionInFlight) return Promise.resolve(false);
   _actionInFlight = true;
   _setActionsDisabled(true);
-  var msg = document.getElementById('transfer-msg');
-  if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Finding debrid torrents...';
+  _showMsgHtml('<span class="scanning-dot"></span>Finding debrid torrents...');
   var payload = {title: title};
   if (year) payload.year = year;
   return fetch('/api/library/remove-debrid', {
@@ -1173,44 +1248,45 @@ function _postRemoveDebrid(title, year) {
     return r.json().then(function(d) { return {ok: r.ok, d: d}; });
   }).then(function(res) {
     if (!res.ok) {
-      if (msg) msg.textContent = 'Error: ' + (res.d.error || 'Unknown error');
+      _showMsg('Error: ' + (res.d.error || 'Unknown error'), 'error');
       return false;
     }
     if (!res.d.count) {
-      if (msg) msg.textContent = 'No debrid torrents found for this title.';
+      _showMsg('No debrid torrents found for this title.', 'error');
       return false;
     }
-    // Show confirmation with torrent list
     var torrents = res.d.torrents || [];
-    var confirmMsg = 'Remove ' + torrents.length + ' debrid torrent(s) for ' + title + '?\n\nThis is PERMANENT — they will be deleted from your debrid account.\n';
-    for (var i = 0; i < torrents.length && i < 10; i++) {
-      confirmMsg += '\n  \u2022 ' + (torrents[i].filename || torrents[i].id || '(unknown)');
-    }
-    if (torrents.length > 10) confirmMsg += '\n  ... and ' + (torrents.length - 10) + ' more';
-    if (!confirm(confirmMsg)) {
-      if (msg) msg.textContent = 'Cancelled.';
-      return false;
-    }
-    // Confirm deletion
-    if (msg) msg.innerHTML = '<span class="scanning-dot"></span>Removing debrid torrents...';
-    var ids = torrents.map(function(t) { return t.id; });
-    return fetch('/api/library/remove-debrid/confirm', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({torrent_ids: ids, title: title, service: res.d.service || ''})
-    }).then(function(r2) {
-      return r2.json().then(function(d2) { return {ok: r2.ok, d: d2}; });
-    }).then(function(res2) {
-      if (!res2.ok || res2.d.status === 'error') {
-        if (msg) msg.textContent = 'Error: ' + (res2.d.error || res2.d.message || 'Deletion failed');
-        return false;
-      }
-      if (msg) msg.textContent = res2.d.message || ('Removed ' + (res2.d.deleted || 0) + ' torrent(s).');
-      _scheduleRefresh(2000);
-      return true;
+    var service = res.d.service || '';
+    return new Promise(function(resolve) {
+      _showDebridConfirmation(torrents, title, service, function() {
+        _showMsgHtml('<span class="scanning-dot"></span>Removing debrid torrents...');
+        var ids = torrents.map(function(t) { return t.id; });
+        fetch('/api/library/remove-debrid/confirm', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({torrent_ids: ids, title: title, service: service})
+        }).then(function(r2) {
+          return r2.json().then(function(d2) { return {ok: r2.ok, d: d2}; });
+        }).then(function(res2) {
+          if (!res2.ok || res2.d.status === 'error') {
+            _showMsg('Error: ' + (res2.d.error || res2.d.message || 'Deletion failed'), 'error');
+            resolve(false);
+          } else {
+            _showMsg('Removed ' + (res2.d.deleted || 0) + ' torrent(s). To restore, re-add the torrents to your debrid account.', 'success');
+            _scheduleRefresh(2000);
+            resolve(true);
+          }
+        }).catch(function(e) {
+          _showMsg('Remove debrid failed: ' + e, 'error');
+          resolve(false);
+        });
+      }, function() {
+        _clearTransferMsg();
+        resolve(false);
+      });
     });
   }).catch(function(e) {
-    if (msg) msg.textContent = 'Remove debrid failed: ' + e;
+    _showMsg('Remove debrid failed: ' + e, 'error');
     return false;
   }).finally(function() {
     _actionInFlight = false;

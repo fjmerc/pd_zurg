@@ -1459,7 +1459,10 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                         return
                     result = client.remove_episodes(title, tmdb_id, season, ep_nums)
                     if result.get('status') != 'error':
-                        from utils.library import get_scanner
+                        from utils.library import get_scanner, normalize_title as _norm_title
+                        from utils.library_prefs import clear_pending
+                        cleared = [{'season': season, 'episode': e} for e in ep_nums]
+                        clear_pending(_norm_title(title), cleared)
                         scanner = get_scanner()
                         if scanner:
                             scanner.refresh()
@@ -1605,7 +1608,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     }))
                     return
 
-                from utils.library_prefs import replace_local_with_symlinks
+                from utils.library_prefs import replace_local_with_symlinks, clear_pending
                 result = replace_local_with_symlinks(to_switch, local_tv, rclone_mount, symlink_base)
                 if not_on_debrid > 0:
                     result['not_on_debrid'] = not_on_debrid
@@ -1615,6 +1618,10 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     )
                 else:
                     result['message'] = f"Switched {result['switched']} episode(s) to debrid."
+
+                if result.get('switched', 0) > 0:
+                    cleared_eps = [{'season': e['season'], 'episode': e['episode']} for e in to_switch]
+                    clear_pending(norm, cleared_eps)
 
                 scanner.refresh()
                 status_code = 200 if result.get('switched', 0) > 0 else 400

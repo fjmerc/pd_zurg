@@ -439,6 +439,7 @@ class LibraryScanner:
 
         preferences = get_all_preferences()
         self._enforce_preferences(shows, movies, preferences, path_index, local_path_index)
+        self._clear_resolved_pending(shows, movies)
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         return {
@@ -634,6 +635,48 @@ class LibraryScanner:
                                     pass
             except Exception as e:
                 logger.error(f"[library] Auto-enforce prefer-local failed: {e}")
+
+    def _clear_resolved_pending(self, shows, movies):
+        """Clear pending entries for episodes whose source now matches the goal.
+
+        If pending direction is 'to-debrid' and the episode source is now
+        'debrid' or 'both', the pending is resolved. Same for 'to-local'
+        when source is 'local' or 'both'. Runs unconditionally on every scan.
+        """
+        from utils.library_prefs import get_all_pending, clear_pending
+
+        pending = get_all_pending()
+        if not pending:
+            return
+
+        # Build a source lookup: {norm_title: {(season, episode): source}}
+        source_map = {}
+        for show in shows:
+            norm = _normalize_title(show['title'])
+            ep_sources = {}
+            for sd in show.get('season_data', []):
+                for ep in sd.get('episodes', []):
+                    ep_sources[(sd['number'], ep['number'])] = ep.get('source', '')
+            source_map[norm] = ep_sources
+
+        for movie in movies:
+            norm = _normalize_title(movie['title'])
+            source_map[norm] = {(0, 0): movie.get('source', '')}
+
+        for norm_title, entry in pending.items():
+            direction = entry.get('direction', '')
+            episodes = entry.get('episodes', [])
+            sources = source_map.get(norm_title, {})
+            resolved = []
+            for ep in episodes:
+                key = (ep.get('season', 0), ep.get('episode', 0))
+                src = sources.get(key, '')
+                if direction == 'to-debrid' and src in ('debrid', 'both'):
+                    resolved.append(ep)
+                elif direction == 'to-local' and src in ('local', 'both'):
+                    resolved.append(ep)
+            if resolved:
+                clear_pending(norm_title, resolved)
 
     # Category names that indicate TV/show content
     _SHOW_CATEGORIES = {'shows', 'tv', 'anime', 'series', 'television'}

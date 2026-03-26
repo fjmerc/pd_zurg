@@ -1036,54 +1036,69 @@ class LibraryScanner:
 
     @staticmethod
     def _is_debrid_symlink_dir(path, symlink_base):
-        """Check if a directory contains only symlinks pointing to the debrid mount."""
+        """Check if a directory contains only debrid symlinks (no real media files).
+
+        Only considers media-extension files. Non-media files (.nfo, .srt, .jpg)
+        are ignored so Radarr metadata doesn't cause false local classification.
+        Returns False for empty directories.
+        """
+        prefix = symlink_base.rstrip(os.sep) + os.sep
+        has_debrid_symlink = False
         try:
-            for f in os.scandir(path):
-                if f.is_symlink():
-                    target = os.readlink(f.path)
-                    if not target.startswith(symlink_base + os.sep):
-                        return False  # symlink to non-debrid location
-                elif f.is_file(follow_symlinks=False):
-                    return False  # real file = genuine local content
-            return True  # all entries are debrid symlinks (or dir is empty)
+            with os.scandir(path) as it:
+                for f in it:
+                    ext = os.path.splitext(f.name)[1].lower()
+                    if ext not in MEDIA_EXTENSIONS:
+                        continue
+                    if f.is_symlink():
+                        target = os.readlink(f.path)
+                        if not target.startswith(prefix):
+                            return False  # symlink to non-debrid location
+                        has_debrid_symlink = True
+                    elif f.is_file(follow_symlinks=False):
+                        return False  # real media file = genuine local content
         except OSError:
             return False
+        return has_debrid_symlink  # False for empty dirs
 
     @staticmethod
     def _is_debrid_symlink_only(path, symlink_base):
-        """Check if a show directory tree contains only debrid symlinks (no real files).
+        """Check if a show directory tree contains only debrid symlinks (no real media files).
 
-        Walks into Season subdirectories to check episode files.
+        Walks into Season subdirectories to check episode files. Non-media files
+        are ignored. Returns False for empty directories.
         """
-        prefix = symlink_base + os.sep
+        prefix = symlink_base.rstrip(os.sep) + os.sep
         has_any_media = False
         try:
-            for entry in os.scandir(path):
-                if entry.is_dir(follow_symlinks=False):
-                    # Check inside Season dirs
-                    try:
-                        for f in os.scandir(entry.path):
-                            ext = os.path.splitext(f.name)[1].lower()
-                            if ext not in MEDIA_EXTENSIONS:
-                                continue
+            with os.scandir(path) as it:
+                for entry in it:
+                    if entry.is_dir(follow_symlinks=False):
+                        # Check inside Season dirs
+                        try:
+                            with os.scandir(entry.path) as season_it:
+                                for f in season_it:
+                                    ext = os.path.splitext(f.name)[1].lower()
+                                    if ext not in MEDIA_EXTENSIONS:
+                                        continue
+                                    has_any_media = True
+                                    if f.is_symlink():
+                                        if not os.readlink(f.path).startswith(prefix):
+                                            return False
+                                    elif f.is_file(follow_symlinks=False):
+                                        return False  # real file
+                        except OSError:
+                            pass
+                    elif entry.is_symlink():
+                        ext = os.path.splitext(entry.name)[1].lower()
+                        if ext in MEDIA_EXTENSIONS:
                             has_any_media = True
-                            if f.is_symlink():
-                                if not os.readlink(f.path).startswith(prefix):
-                                    return False
-                            elif f.is_file(follow_symlinks=False):
-                                return False  # real file
-                    except OSError:
-                        pass
-                elif entry.is_symlink():
-                    ext = os.path.splitext(entry.name)[1].lower()
-                    if ext in MEDIA_EXTENSIONS:
-                        has_any_media = True
-                        if not os.readlink(entry.path).startswith(prefix):
-                            return False
-                elif entry.is_file(follow_symlinks=False):
-                    ext = os.path.splitext(entry.name)[1].lower()
-                    if ext in MEDIA_EXTENSIONS:
-                        return False  # real file
+                            if not os.readlink(entry.path).startswith(prefix):
+                                return False
+                    elif entry.is_file(follow_symlinks=False):
+                        ext = os.path.splitext(entry.name)[1].lower()
+                        if ext in MEDIA_EXTENSIONS:
+                            return False  # real file
         except OSError:
             return False
         return has_any_media  # only True if we found media and all were debrid symlinks

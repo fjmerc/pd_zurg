@@ -1493,6 +1493,149 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
             return
 
+        if self.path == '/api/library/remove-debrid':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 100_000:
+                    self._send_json_response(400, json.dumps({'error': 'Request body too large'}))
+                    return
+                body = self.rfile.read(content_length)
+                values = json.loads(body.decode('utf-8'))
+                if not isinstance(values, dict):
+                    self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
+                    return
+                title = values.get('title', '').strip()
+                if not title:
+                    self._send_json_response(400, json.dumps({'error': 'title required'}))
+                    return
+
+                from utils.debrid_client import get_debrid_client
+                from utils.library import normalize_title
+                client, service_name = get_debrid_client()
+                if client is None:
+                    self._send_json_response(400, json.dumps({
+                        'error': 'No debrid provider configured (RD_API_KEY, AD_API_KEY, or TORBOX_API_KEY required)'
+                    }))
+                    return
+
+                norm = normalize_title(title)
+                year = values.get('year')
+                if year is not None:
+                    try:
+                        year = int(year)
+                    except (ValueError, TypeError):
+                        year = None
+
+                try:
+                    matches = client.find_torrents_by_title(norm, target_year=year)
+                except Exception as e:
+                    logger.error(f"[remove-debrid] Failed to query debrid provider: {e}")
+                    self._send_json_response(502, json.dumps({
+                        'error': 'Failed to query debrid provider API'
+                    }))
+                    return
+
+                self._send_json_response(200, json.dumps({
+                    'status': 'found',
+                    'service': service_name,
+                    'title': title,
+                    'normalized_title': norm,
+                    'torrents': matches,
+                    'count': len(matches),
+                }))
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception:
+                logger.exception("[remove-debrid] Unexpected error")
+                self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
+            return
+
+        if self.path == '/api/library/remove-debrid/confirm':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 100_000:
+                    self._send_json_response(400, json.dumps({'error': 'Request body too large'}))
+                    return
+                body = self.rfile.read(content_length)
+                values = json.loads(body.decode('utf-8'))
+                if not isinstance(values, dict):
+                    self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
+                    return
+                torrent_ids = values.get('torrent_ids', [])
+                if not isinstance(torrent_ids, list) or not torrent_ids:
+                    self._send_json_response(400, json.dumps({'error': 'torrent_ids list required'}))
+                    return
+                if not all(isinstance(t, (str, int)) for t in torrent_ids):
+                    self._send_json_response(400, json.dumps({'error': 'torrent_ids must contain strings or integers'}))
+                    return
+                from utils.debrid_client import get_debrid_client, MAX_BATCH_DELETE
+                if len(torrent_ids) > MAX_BATCH_DELETE:
+                    self._send_json_response(400, json.dumps({
+                        'error': f'Maximum {MAX_BATCH_DELETE} torrents per request'
+                    }))
+                    return
+                title = values.get('title', '').strip()
+                requested_service = values.get('service', '').strip()
+
+                client, service_name = get_debrid_client()
+                if client is None:
+                    self._send_json_response(400, json.dumps({
+                        'error': 'No debrid provider configured'
+                    }))
+                    return
+
+                if requested_service and requested_service != service_name:
+                    self._send_json_response(409, json.dumps({
+                        'error': f'Provider mismatch: found with {requested_service}, '
+                                 f'but current provider is {service_name}'
+                    }))
+                    return
+
+                deleted = 0
+                failed = []
+                for tid in torrent_ids:
+                    tid_str = str(tid)
+                    if client.delete_torrent(tid_str):
+                        deleted += 1
+                    else:
+                        failed.append(tid_str)
+
+                # Trigger library refresh — Zurg auto-detects torrent deletion
+                # within its check_for_changes_every_secs cycle (typically 10s),
+                # then rclone mount updates after RCLONE_DIR_CACHE_TIME expires.
+                from utils.library import get_scanner
+                scanner = get_scanner()
+                if scanner:
+                    scanner.refresh()
+
+                if deleted > 0 and failed:
+                    status = 'partial'
+                elif deleted > 0:
+                    status = 'removed'
+                else:
+                    status = 'error'
+
+                result = {
+                    'status': status,
+                    'service': service_name,
+                    'deleted': deleted,
+                    'message': f'Removed {deleted} torrent(s) from {service_name}',
+                }
+                if title:
+                    result['title'] = title
+                if failed:
+                    result['failed'] = failed
+                    result['message'] += f' ({len(failed)} failed)'
+
+                status_code = 200 if deleted > 0 else 400
+                self._send_json_response(status_code, json.dumps(result))
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception:
+                logger.exception("[remove-debrid/confirm] Unexpected error")
+                self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
+            return
+
         if self.path == '/api/settings/env':
             try:
                 content_length = int(self.headers.get('Content-Length', 0))

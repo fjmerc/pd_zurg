@@ -688,24 +688,6 @@ function _formatDate(dateStr) {
   return _shortMonths[m - 1] + ' ' + d + ', ' + y;
 }
 
-function _relativeDate(dateStr) {
-  if (!dateStr) return '';
-  var parts = dateStr.split('-');
-  if (parts.length !== 3) return dateStr;
-  var d = new Date(parseInt(parts[0],10), parseInt(parts[1],10)-1, parseInt(parts[2],10));
-  var now = new Date(); now.setHours(0,0,0,0);
-  var diff = Math.round((d - now) / 86400000);
-  if (diff === 0) return 'Today';
-  if (diff === 1) return 'Tomorrow';
-  if (diff === -1) return 'Yesterday';
-  if (diff > 1 && diff <= 30) return 'In ' + diff + ' days';
-  if (diff < -1 && diff >= -30) return Math.abs(diff) + ' days ago';
-  if (diff > 30 && diff <= 365) return 'In ' + Math.ceil(diff/7) + ' weeks';
-  if (diff > 365) { var y = Math.floor(diff/365); return 'In ' + y + ' year' + (y !== 1 ? 's' : ''); }
-  if (diff < -30 && diff >= -365) return Math.ceil(Math.abs(diff)/30) + ' months ago';
-  if (diff < -365) { var y = Math.floor(Math.abs(diff)/365); return y + ' year' + (y !== 1 ? 's' : '') + ' ago'; }
-  return dateStr;
-}
 
 function _seasonProgressPill(season) {
   if (!season.total_episodes) return '';
@@ -862,7 +844,7 @@ function _renderShowDetail(show, meta) {
       if (ep.title) html += '<span class="ep-title">' + esc(ep.title) + '</span>';
       if (ep.file) html += esc(ep.file);
       else if (!ep.title) html += '<span style="color:var(--text3)">&mdash;</span>';
-      if (ep.air_date) html += ' <span class="ep-date" title="' + esc(_relativeDate(ep.air_date)) + '">' + esc(_formatDate(ep.air_date)) + '</span>';
+      if (ep.air_date) html += ' <span class="ep-date">' + esc(_formatDate(ep.air_date)) + '</span>';
       html += '</td>';
       html += '<td class="ep-source">';
       var isPending = false;

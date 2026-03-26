@@ -1311,6 +1311,8 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 else:
                     set_pending(norm, episodes, direction)
                 self._send_json_response(200, json.dumps({'status': 'ok'}))
+            except ValueError as e:
+                self._send_json_response(400, json.dumps({'error': str(e)}))
             except json.JSONDecodeError:
                 self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
             except Exception:
@@ -1459,10 +1461,10 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                         return
                     result = client.remove_episodes(title, tmdb_id, season, ep_nums)
                     if result.get('status') != 'error':
-                        from utils.library import get_scanner, normalize_title as _norm_title
+                        from utils.library import get_scanner, normalize_title
                         from utils.library_prefs import clear_pending
                         cleared = [{'season': season, 'episode': e} for e in ep_nums]
-                        clear_pending(_norm_title(title), cleared)
+                        clear_pending(normalize_title(title), cleared)
                         scanner = get_scanner()
                         if scanner:
                             scanner.refresh()
@@ -1492,7 +1494,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 if not episodes:
                     self._send_json_response(400, json.dumps({'error': 'episodes required'}))
                     return
-                from utils.library import get_scanner, normalize_title as _normalize_title
+                from utils.library import get_scanner, normalize_title
                 scanner = get_scanner()
                 if scanner is None:
                     self._send_json_response(503, json.dumps({'error': 'Scanner not initialized'}))
@@ -1503,7 +1505,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     }))
                     return
 
-                norm = _normalize_title(title)
+                norm = normalize_title(title)
                 resolved = []
                 for ep in episodes:
                     try:
@@ -1520,8 +1522,11 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     self._send_json_response(404, json.dumps({'error': 'No local episodes found'}))
                     return
 
-                from utils.library_prefs import remove_local_episodes
+                from utils.library_prefs import remove_local_episodes, clear_pending
                 result = remove_local_episodes(resolved, scanner._local_tv_path)
+                if result.get('removed', 0) > 0:
+                    cleared = [{'season': int(ep.get('season', 0)), 'episode': int(ep.get('episode', 0))} for ep in episodes]
+                    clear_pending(norm, cleared)
                 scanner.refresh()
                 self._send_json_response(200, json.dumps(result))
             except json.JSONDecodeError:
@@ -1620,8 +1625,12 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     result['message'] = f"Switched {result['switched']} episode(s) to debrid."
 
                 if result.get('switched', 0) > 0:
-                    cleared_eps = [{'season': e['season'], 'episode': e['episode']} for e in to_switch]
-                    clear_pending(norm, cleared_eps)
+                    cleared_eps = [
+                        {'season': e['season'], 'episode': e['episode']}
+                        for e in to_switch if os.path.islink(e['local_path'])
+                    ]
+                    if cleared_eps:
+                        clear_pending(norm, cleared_eps)
 
                 scanner.refresh()
                 status_code = 200 if result.get('switched', 0) > 0 else 400

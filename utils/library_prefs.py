@@ -88,6 +88,9 @@ def _save_pending(pending):
         json.dump(pending, f, indent=2)
 
 
+_VALID_DIRECTIONS = {'to-debrid', 'to-local'}
+
+
 def set_pending(normalized_title, episodes, direction='to-debrid'):
     """Record episodes as pending transition. Thread-safe.
 
@@ -96,6 +99,8 @@ def set_pending(normalized_title, episodes, direction='to-debrid'):
         episodes: list of {season, episode} dicts
         direction: 'to-debrid' or 'to-local'
     """
+    if direction not in _VALID_DIRECTIONS:
+        raise ValueError(f"Invalid direction: {direction!r}")
     with _pending_lock:
         pending = _load_pending()
         entry = pending.get(normalized_title, {})
@@ -136,7 +141,8 @@ def clear_pending(normalized_title, episodes=None):
 
 def get_all_pending():
     """Return all pending transitions."""
-    return _load_pending()
+    with _pending_lock:
+        return _load_pending()
 
 
 # ---------------------------------------------------------------------------

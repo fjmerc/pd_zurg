@@ -24,6 +24,7 @@ from utils.logger import get_logger
 logger = get_logger()
 
 _TIMEOUT = 15  # seconds — Arr APIs can be slow on large libraries
+_NOT_FOUND = object()  # sentinel for "looked up, not found" in tag cache
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +95,9 @@ class _ArrClientBase:
     def _post(self, path, body=None):
         return self._request('POST', path, body=body)
 
+    def _put(self, path, body=None):
+        return self._request('PUT', path, body=body)
+
     def _delete(self, path, params=None):
         return self._request('DELETE', path, params=params)
 
@@ -109,6 +113,7 @@ class SonarrClient(_ArrClientBase):
         url = url or os.environ.get('SONARR_URL', '')
         api_key = api_key or load_secret_or_env('sonarr_api_key') or ''
         super().__init__(url, api_key, 'sonarr')
+        self._blackhole_tag_id = None  # None=not looked up, _NOT_FOUND=not found
 
     def _add_auth(self, req):
         req.add_header('X-Api-Key', self._api_key)
@@ -117,6 +122,54 @@ class SonarrClient(_ArrClientBase):
         """Test API connectivity. Returns True if reachable."""
         result = self._get('/api/v3/system/status')
         return result is not None
+
+    def _get_blackhole_tag_id(self):
+        """Find the tag ID used by the TorrentBlackhole download client."""
+        if self._blackhole_tag_id is not None:
+            return None if self._blackhole_tag_id is _NOT_FOUND else self._blackhole_tag_id
+        clients = self._get('/api/v3/downloadclient') or []
+        for c in clients:
+            if c.get('implementation') == 'TorrentBlackhole' and c.get('enable'):
+                tags = c.get('tags', [])
+                if tags:
+                    self._blackhole_tag_id = tags[0]
+                    logger.debug(f"[sonarr] Blackhole download client uses tag {self._blackhole_tag_id}")
+                    return self._blackhole_tag_id
+        self._blackhole_tag_id = _NOT_FOUND
+        logger.debug("[sonarr] No tagged TorrentBlackhole download client found")
+        return None
+
+    def _ensure_debrid_routing(self, series):
+        """Add the blackhole tag to a series so downloads route through debrid."""
+        tag_id = self._get_blackhole_tag_id()
+        if tag_id is None:
+            return series
+        tags = list(series.get('tags', []))
+        if tag_id in tags:
+            return series
+        tags.append(tag_id)
+        series_copy = dict(series, tags=tags)
+        result = self._put(f'/api/v3/series/{series["id"]}', series_copy)
+        if result:
+            logger.info(f"[sonarr] Added debrid tag to series: {series.get('title')}")
+            return result
+        return series
+
+    def _ensure_local_routing(self, series):
+        """Remove the blackhole tag from a series so downloads route locally."""
+        tag_id = self._get_blackhole_tag_id()
+        if tag_id is None:
+            return series
+        tags = list(series.get('tags', []))
+        if tag_id not in tags:
+            return series
+        tags.remove(tag_id)
+        series_copy = dict(series, tags=tags)
+        result = self._put(f'/api/v3/series/{series["id"]}', series_copy)
+        if result:
+            logger.info(f"[sonarr] Removed debrid tag from series: {series.get('title')}")
+            return result
+        return series
 
     def lookup_series(self, title=None, tmdb_id=None):
         """Find a series by title or TMDB ID.
@@ -156,7 +209,7 @@ class SonarrClient(_ArrClientBase):
                 return s
         return None
 
-    def add_series(self, lookup_result):
+    def add_series(self, lookup_result, tags=None):
         """Add a series to Sonarr from a lookup result.
 
         Uses the first available root folder and quality profile.
@@ -183,6 +236,7 @@ class SonarrClient(_ArrClientBase):
             'qualityProfileId': quality_profiles[0]['id'],
             'rootFolderPath': root_folders[0]['path'],
             'monitored': True,
+            'tags': tags or [],
             'addOptions': {
                 'searchForMissingEpisodes': False,
             },
@@ -212,7 +266,7 @@ class SonarrClient(_ArrClientBase):
             'seriesId': series_id,
         })
 
-    def ensure_and_search(self, title, tmdb_id, season_number, episode_numbers):
+    def ensure_and_search(self, title, tmdb_id, season_number, episode_numbers, prefer_debrid=None):
         """High-level: ensure series exists in Sonarr, then search for episodes.
 
         Args:
@@ -220,6 +274,7 @@ class SonarrClient(_ArrClientBase):
             tmdb_id: TMDB ID (preferred for matching)
             season_number: Season number to search
             episode_numbers: List of episode numbers within the season
+            prefer_debrid: True=route via blackhole, False=route locally, None=don't touch
 
         Returns dict with status info, or raises on failure.
         """
@@ -232,7 +287,12 @@ class SonarrClient(_ArrClientBase):
             if not lookup:
                 return {'status': 'error', 'message': f'Series not found: {title}'}
 
-            series = self.add_series(lookup)
+            add_tags = []
+            if prefer_debrid is True:
+                tag_id = self._get_blackhole_tag_id()
+                if tag_id:
+                    add_tags = [tag_id]
+            series = self.add_series(lookup, tags=add_tags)
             if not series:
                 # Race condition: may have been added between find and add
                 series = self.find_series_in_library(tmdb_id=tmdb_id, title=title)
@@ -245,6 +305,12 @@ class SonarrClient(_ArrClientBase):
         series_id = series.get('id')
         if series_id is None:
             return {'status': 'error', 'message': f'Sonarr returned series without ID for: {title}'}
+
+        # Route downloads through the correct client
+        if prefer_debrid is True:
+            series = self._ensure_debrid_routing(series)
+        elif prefer_debrid is False:
+            series = self._ensure_local_routing(series)
 
         # Get episodes and find the ones we want
         episodes = self.get_episodes(series_id)
@@ -335,6 +401,7 @@ class RadarrClient(_ArrClientBase):
         url = url or os.environ.get('RADARR_URL', '')
         api_key = api_key or load_secret_or_env('radarr_api_key') or ''
         super().__init__(url, api_key, 'radarr')
+        self._blackhole_tag_id = None
 
     def _add_auth(self, req):
         req.add_header('X-Api-Key', self._api_key)
@@ -343,6 +410,54 @@ class RadarrClient(_ArrClientBase):
         """Test API connectivity. Returns True if reachable."""
         result = self._get('/api/v3/system/status')
         return result is not None
+
+    def _get_blackhole_tag_id(self):
+        """Find the tag ID used by the TorrentBlackhole download client."""
+        if self._blackhole_tag_id is not None:
+            return None if self._blackhole_tag_id is _NOT_FOUND else self._blackhole_tag_id
+        clients = self._get('/api/v3/downloadclient') or []
+        for c in clients:
+            if c.get('implementation') == 'TorrentBlackhole' and c.get('enable'):
+                tags = c.get('tags', [])
+                if tags:
+                    self._blackhole_tag_id = tags[0]
+                    logger.debug(f"[radarr] Blackhole download client uses tag {self._blackhole_tag_id}")
+                    return self._blackhole_tag_id
+        self._blackhole_tag_id = _NOT_FOUND
+        logger.debug("[radarr] No tagged TorrentBlackhole download client found")
+        return None
+
+    def _ensure_debrid_routing(self, movie):
+        """Add the blackhole tag to a movie so downloads route through debrid."""
+        tag_id = self._get_blackhole_tag_id()
+        if tag_id is None:
+            return movie
+        tags = list(movie.get('tags', []))
+        if tag_id in tags:
+            return movie
+        tags.append(tag_id)
+        movie_copy = dict(movie, tags=tags)
+        result = self._put(f'/api/v3/movie/{movie["id"]}', movie_copy)
+        if result:
+            logger.info(f"[radarr] Added debrid tag to movie: {movie.get('title')}")
+            return result
+        return movie
+
+    def _ensure_local_routing(self, movie):
+        """Remove the blackhole tag from a movie so downloads route locally."""
+        tag_id = self._get_blackhole_tag_id()
+        if tag_id is None:
+            return movie
+        tags = list(movie.get('tags', []))
+        if tag_id not in tags:
+            return movie
+        tags.remove(tag_id)
+        movie_copy = dict(movie, tags=tags)
+        result = self._put(f'/api/v3/movie/{movie["id"]}', movie_copy)
+        if result:
+            logger.info(f"[radarr] Removed debrid tag from movie: {movie.get('title')}")
+            return result
+        return movie
 
     def lookup_movie(self, title=None, tmdb_id=None):
         """Find a movie by title or TMDB ID.
@@ -378,7 +493,7 @@ class RadarrClient(_ArrClientBase):
                 return m
         return None
 
-    def add_movie(self, lookup_result):
+    def add_movie(self, lookup_result, tags=None):
         """Add a movie to Radarr from a lookup result.
 
         Uses the first available root folder and quality profile.
@@ -404,6 +519,7 @@ class RadarrClient(_ArrClientBase):
             'qualityProfileId': quality_profiles[0]['id'],
             'rootFolderPath': root_folders[0]['path'],
             'monitored': True,
+            'tags': tags or [],
             'addOptions': {
                 'searchForMovie': True,
             },
@@ -427,12 +543,13 @@ class RadarrClient(_ArrClientBase):
             'movieId': movie_id,
         })
 
-    def ensure_and_search(self, title, tmdb_id):
+    def ensure_and_search(self, title, tmdb_id, prefer_debrid=None):
         """High-level: ensure movie exists in Radarr, then trigger search.
 
         Args:
             title: Movie title for lookup
             tmdb_id: TMDB ID (preferred for matching)
+            prefer_debrid: True=route via blackhole, False=route locally, None=don't touch
 
         Returns dict with status info.
         """
@@ -440,8 +557,14 @@ class RadarrClient(_ArrClientBase):
         movie = self.find_movie_in_library(tmdb_id=tmdb_id, title=title)
 
         if movie:
-            # Already in Radarr — trigger a search
-            if movie.get('hasFile'):
+            # Route downloads through the correct client before any search
+            if prefer_debrid is True:
+                movie = self._ensure_debrid_routing(movie)
+            elif prefer_debrid is False:
+                movie = self._ensure_local_routing(movie)
+
+            # Already in Radarr — skip search only if no routing preference
+            if movie.get('hasFile') and prefer_debrid is None:
                 return {
                     'status': 'exists',
                     'service': 'radarr',
@@ -450,6 +573,7 @@ class RadarrClient(_ArrClientBase):
             movie_id = movie.get('id')
             if movie_id is None:
                 return {'status': 'error', 'message': 'Radarr returned movie without ID'}
+
             cmd = self.search_movie(movie_id)
             if cmd is None:
                 return {'status': 'error', 'message': 'Failed to trigger movie search'}
@@ -465,13 +589,23 @@ class RadarrClient(_ArrClientBase):
         if not lookup:
             return {'status': 'error', 'message': f'Movie not found: {title}'}
 
-        movie = self.add_movie(lookup)
+        add_tags = []
+        if prefer_debrid is True:
+            tag_id = self._get_blackhole_tag_id()
+            if tag_id:
+                add_tags = [tag_id]
+        movie = self.add_movie(lookup, tags=add_tags)
         if not movie:
             # Race condition: may have been added between find and add
             movie = self.find_movie_in_library(tmdb_id=tmdb_id, title=title)
             if not movie:
                 return {'status': 'error', 'message': f'Failed to add movie to Radarr: {title}'}
             logger.info(f"[radarr] Movie already existed (race): {title} (ID: {movie.get('id')})")
+            # Apply routing to the race-found movie
+            if prefer_debrid is True:
+                self._ensure_debrid_routing(movie)
+            elif prefer_debrid is False:
+                self._ensure_local_routing(movie)
         else:
             logger.info(f"[radarr] Added movie: {title} (ID: {movie.get('id')})")
         return {

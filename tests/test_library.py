@@ -970,6 +970,74 @@ class TestBuildSeasonData:
         assert result[0]['episodes'][0]['source'] == 'both'
         assert result[0]['episodes'][1]['source'] == 'debrid'
 
+    def test_folder_ep_count_stripped(self):
+        """_folder_ep_count metadata should not appear in output."""
+        eps = {
+            (1, 1): {'file': 'S01E01.mkv', '_folder_ep_count': 10},
+            (1, 2): {'file': 'S01E02.mkv', '_folder_ep_count': 10},
+        }
+        result = _build_season_data(eps, 'debrid')
+        for ep in result[0]['episodes']:
+            assert '_folder_ep_count' not in ep
+
+
+# ---------------------------------------------------------------------------
+# Season pack preference in episode merge
+# ---------------------------------------------------------------------------
+
+class TestSeasonPackPreference:
+    """Season packs should be preferred over individual episode downloads."""
+
+    def test_pack_beats_individual(self):
+        """A season pack (10 eps) should win over a single-episode folder."""
+        existing = {
+            (1, 1): {'file': 'individual.S01E01.mkv', 'path': '/a', '_folder_ep_count': 1},
+        }
+        pack_eps = {
+            (1, 1): {'file': 'pack.S01E01.mkv', 'path': '/b', '_folder_ep_count': 10},
+            (1, 2): {'file': 'pack.S01E02.mkv', 'path': '/b', '_folder_ep_count': 10},
+        }
+        for ep_key, ep_info in pack_eps.items():
+            if ep_key not in existing:
+                existing[ep_key] = ep_info
+            elif ep_info.get('_folder_ep_count', 1) > existing[ep_key].get('_folder_ep_count', 1):
+                existing[ep_key] = ep_info
+        # Pack should win for S01E01
+        assert existing[(1, 1)]['file'] == 'pack.S01E01.mkv'
+        # Pack's S01E02 should be added
+        assert existing[(1, 2)]['file'] == 'pack.S01E02.mkv'
+
+    def test_individual_does_not_overwrite_pack(self):
+        """A single-episode folder should not overwrite a season pack entry."""
+        existing = {
+            (1, 1): {'file': 'pack.S01E01.mkv', 'path': '/b', '_folder_ep_count': 10},
+        }
+        individual = {
+            (1, 1): {'file': 'individual.S01E01.mkv', 'path': '/a', '_folder_ep_count': 1},
+        }
+        for ep_key, ep_info in individual.items():
+            if ep_key not in existing:
+                existing[ep_key] = ep_info
+            elif ep_info.get('_folder_ep_count', 1) > existing[ep_key].get('_folder_ep_count', 1):
+                existing[ep_key] = ep_info
+        # Pack should still be there
+        assert existing[(1, 1)]['file'] == 'pack.S01E01.mkv'
+
+    def test_equal_size_first_wins(self):
+        """On ties (same folder ep count), first-seen wins."""
+        existing = {
+            (1, 1): {'file': 'first.S01E01.mkv', 'path': '/a', '_folder_ep_count': 5},
+        }
+        second = {
+            (1, 1): {'file': 'second.S01E01.mkv', 'path': '/b', '_folder_ep_count': 5},
+        }
+        for ep_key, ep_info in second.items():
+            if ep_key not in existing:
+                existing[ep_key] = ep_info
+            elif ep_info.get('_folder_ep_count', 1) > existing[ep_key].get('_folder_ep_count', 1):
+                existing[ep_key] = ep_info
+        assert existing[(1, 1)]['file'] == 'first.S01E01.mkv'
+
 
 # ---------------------------------------------------------------------------
 # season_data in scan results

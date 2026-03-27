@@ -1356,6 +1356,19 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     }))
                     return
 
+                # Determine download routing from source preference
+                prefer_debrid = values.get('prefer_debrid')
+                if prefer_debrid is None and service_name in ('sonarr', 'radarr'):
+                    from utils.library_prefs import get_all_preferences
+                    from utils.library import normalize_title
+                    prefs = get_all_preferences()
+                    nk = normalize_title(title)
+                    pref = prefs.get(nk, 'none')
+                    if pref == 'prefer-debrid':
+                        prefer_debrid = True
+                    elif pref == 'prefer-local':
+                        prefer_debrid = False
+
                 if service_name == 'sonarr':
                     season = values.get('season')
                     episodes = values.get('episodes', [])
@@ -1377,10 +1390,10 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                             'error': 'season and episodes must be integers'
                         }))
                         return
-                    result = client.ensure_and_search(title, tmdb_id, season, episodes)
+                    result = client.ensure_and_search(title, tmdb_id, season, episodes, prefer_debrid=prefer_debrid)
 
                 elif service_name == 'radarr':
-                    result = client.ensure_and_search(title, tmdb_id)
+                    result = client.ensure_and_search(title, tmdb_id, prefer_debrid=prefer_debrid)
 
                 elif service_name == 'overseerr':
                     if media_type == 'show':

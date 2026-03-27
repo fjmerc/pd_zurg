@@ -690,7 +690,7 @@ function _renderMovieDetail(movie, meta) {
     html += '</select>';
     html += '<button class="btn-apply" id="movie-pref-apply-btn" style="display:none" onclick="applyMoviePreference()">Apply</button>';
     html += '</div>';
-    html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px">Prefer Local switches the movie to a local copy. Prefer Debrid removes the local copy and streams from debrid.</div>';
+    html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px;line-height:1.5"><strong style="color:var(--text2)">Prefer Local</strong> &mdash; switches the movie to a local copy.<br><strong style="color:var(--text2)">Prefer Debrid</strong> &mdash; removes the local copy and streams from debrid.</div>';
     html += '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">';
     if (movie.source === 'debrid') {
       var movieDlLabel = _downloadServices.movie === 'overseerr' ? 'Request in Overseerr' : 'Switch to Local';
@@ -996,7 +996,7 @@ function _renderShowDetail(show, meta) {
   html += '</select>';
   html += '<button class="btn-apply" id="show-pref-apply-btn" style="display:none" onclick="applyPreference()">Apply</button>';
   html += '</div>';
-  html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px">Prefer Local switches debrid-only episodes to local copies. Prefer Debrid removes local copies and streams from debrid.</div>';
+  html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px;line-height:1.5"><strong style="color:var(--text2)">Prefer Local</strong> &mdash; switches debrid-only episodes to local copies.<br><strong style="color:var(--text2)">Prefer Debrid</strong> &mdash; removes local copies and streams from debrid.</div>';
   html += '</div></div>';
 
   if (seasons.length > 1) {

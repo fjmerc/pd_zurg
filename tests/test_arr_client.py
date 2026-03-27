@@ -399,6 +399,7 @@ class TestRadarrClient:
             _mock_urlopen([]),  # get_all_movies
             _mock_urlopen([{'title': 'New Movie', 'tmdbId': 999, 'titleSlug': 'new-movie',
                            'images': [], 'year': 2024}]),  # lookup
+            _mock_urlopen([]),  # download clients (for routing tag discovery)
             _mock_urlopen([{'id': 1, 'path': '/movies'}]),  # rootfolder
             _mock_urlopen([{'id': 1, 'name': 'HD'}]),  # qualityprofile
             _mock_urlopen({'id': 10, 'title': 'New Movie'}),  # add_movie

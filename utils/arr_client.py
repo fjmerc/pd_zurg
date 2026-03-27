@@ -114,6 +114,7 @@ class SonarrClient(_ArrClientBase):
         api_key = api_key or load_secret_or_env('sonarr_api_key') or ''
         super().__init__(url, api_key, 'sonarr')
         self._blackhole_tag_id = None  # None=not looked up, _NOT_FOUND=not found
+        self._local_tag_id = None
 
     def _add_auth(self, req):
         req.add_header('X-Api-Key', self._api_key)
@@ -123,51 +124,77 @@ class SonarrClient(_ArrClientBase):
         result = self._get('/api/v3/system/status')
         return result is not None
 
+    def _discover_routing_tags(self):
+        """Discover tags used by download clients for routing."""
+        if self._blackhole_tag_id is not None:
+            return
+        clients = self._get('/api/v3/downloadclient') or []
+        self._blackhole_tag_id = _NOT_FOUND
+        self._local_tag_id = _NOT_FOUND
+        for c in clients:
+            if not c.get('enable'):
+                continue
+            tags = c.get('tags', [])
+            if not tags:
+                continue
+            if c.get('implementation') == 'TorrentBlackhole':
+                self._blackhole_tag_id = tags[0]
+                logger.debug(f"[sonarr] Blackhole client uses tag {self._blackhole_tag_id}")
+            elif self._local_tag_id is _NOT_FOUND:
+                self._local_tag_id = tags[0]
+                logger.debug(f"[sonarr] Local client uses tag {self._local_tag_id}")
+
     def _get_blackhole_tag_id(self):
         """Find the tag ID used by the TorrentBlackhole download client."""
-        if self._blackhole_tag_id is not None:
-            return None if self._blackhole_tag_id is _NOT_FOUND else self._blackhole_tag_id
-        clients = self._get('/api/v3/downloadclient') or []
-        for c in clients:
-            if c.get('implementation') == 'TorrentBlackhole' and c.get('enable'):
-                tags = c.get('tags', [])
-                if tags:
-                    self._blackhole_tag_id = tags[0]
-                    logger.debug(f"[sonarr] Blackhole download client uses tag {self._blackhole_tag_id}")
-                    return self._blackhole_tag_id
-        self._blackhole_tag_id = _NOT_FOUND
-        logger.debug("[sonarr] No tagged TorrentBlackhole download client found")
-        return None
+        self._discover_routing_tags()
+        return None if self._blackhole_tag_id is _NOT_FOUND else self._blackhole_tag_id
+
+    def _get_local_tag_id(self):
+        """Find the tag ID used by non-blackhole download clients."""
+        self._discover_routing_tags()
+        return None if self._local_tag_id is _NOT_FOUND else self._local_tag_id
 
     def _ensure_debrid_routing(self, series):
-        """Add the blackhole tag to a series so downloads route through debrid."""
-        tag_id = self._get_blackhole_tag_id()
-        if tag_id is None:
+        """Add debrid tag and remove local tag so downloads route through blackhole."""
+        debrid_tag = self._get_blackhole_tag_id()
+        local_tag = self._get_local_tag_id()
+        if debrid_tag is None:
             return series
         tags = list(series.get('tags', []))
-        if tag_id in tags:
+        changed = False
+        if debrid_tag not in tags:
+            tags.append(debrid_tag)
+            changed = True
+        if local_tag is not None and local_tag in tags:
+            tags.remove(local_tag)
+            changed = True
+        if not changed:
             return series
-        tags.append(tag_id)
         series_copy = dict(series, tags=tags)
         result = self._put(f'/api/v3/series/{series["id"]}', series_copy)
         if result:
-            logger.info(f"[sonarr] Added debrid tag to series: {series.get('title')}")
+            logger.info(f"[sonarr] Routed to debrid: {series.get('title')}")
             return result
         return series
 
     def _ensure_local_routing(self, series):
-        """Remove the blackhole tag from a series so downloads route locally."""
-        tag_id = self._get_blackhole_tag_id()
-        if tag_id is None:
-            return series
+        """Add local tag and remove debrid tag so downloads route to local clients."""
+        debrid_tag = self._get_blackhole_tag_id()
+        local_tag = self._get_local_tag_id()
         tags = list(series.get('tags', []))
-        if tag_id not in tags:
+        changed = False
+        if debrid_tag is not None and debrid_tag in tags:
+            tags.remove(debrid_tag)
+            changed = True
+        if local_tag is not None and local_tag not in tags:
+            tags.append(local_tag)
+            changed = True
+        if not changed:
             return series
-        tags.remove(tag_id)
         series_copy = dict(series, tags=tags)
         result = self._put(f'/api/v3/series/{series["id"]}', series_copy)
         if result:
-            logger.info(f"[sonarr] Removed debrid tag from series: {series.get('title')}")
+            logger.info(f"[sonarr] Routed to local: {series.get('title')}")
             return result
         return series
 
@@ -290,8 +317,17 @@ class SonarrClient(_ArrClientBase):
             add_tags = []
             if prefer_debrid is True:
                 tag_id = self._get_blackhole_tag_id()
-                if tag_id:
-                    add_tags = [tag_id]
+                if tag_id is not None:
+                    add_tags.append(tag_id)
+            elif prefer_debrid is False:
+                tag_id = self._get_local_tag_id()
+                if tag_id is not None:
+                    add_tags.append(tag_id)
+            else:
+                # No preference — default to local tag so standard clients work
+                tag_id = self._get_local_tag_id()
+                if tag_id is not None:
+                    add_tags.append(tag_id)
             series = self.add_series(lookup, tags=add_tags)
             if not series:
                 # Race condition: may have been added between find and add
@@ -401,7 +437,8 @@ class RadarrClient(_ArrClientBase):
         url = url or os.environ.get('RADARR_URL', '')
         api_key = api_key or load_secret_or_env('radarr_api_key') or ''
         super().__init__(url, api_key, 'radarr')
-        self._blackhole_tag_id = None
+        self._blackhole_tag_id = None  # None=not looked up, _NOT_FOUND=not found
+        self._local_tag_id = None
 
     def _add_auth(self, req):
         req.add_header('X-Api-Key', self._api_key)
@@ -411,51 +448,77 @@ class RadarrClient(_ArrClientBase):
         result = self._get('/api/v3/system/status')
         return result is not None
 
+    def _discover_routing_tags(self):
+        """Discover tags used by download clients for routing."""
+        if self._blackhole_tag_id is not None:
+            return
+        clients = self._get('/api/v3/downloadclient') or []
+        self._blackhole_tag_id = _NOT_FOUND
+        self._local_tag_id = _NOT_FOUND
+        for c in clients:
+            if not c.get('enable'):
+                continue
+            tags = c.get('tags', [])
+            if not tags:
+                continue
+            if c.get('implementation') == 'TorrentBlackhole':
+                self._blackhole_tag_id = tags[0]
+                logger.debug(f"[radarr] Blackhole client uses tag {self._blackhole_tag_id}")
+            elif self._local_tag_id is _NOT_FOUND:
+                self._local_tag_id = tags[0]
+                logger.debug(f"[radarr] Local client uses tag {self._local_tag_id}")
+
     def _get_blackhole_tag_id(self):
         """Find the tag ID used by the TorrentBlackhole download client."""
-        if self._blackhole_tag_id is not None:
-            return None if self._blackhole_tag_id is _NOT_FOUND else self._blackhole_tag_id
-        clients = self._get('/api/v3/downloadclient') or []
-        for c in clients:
-            if c.get('implementation') == 'TorrentBlackhole' and c.get('enable'):
-                tags = c.get('tags', [])
-                if tags:
-                    self._blackhole_tag_id = tags[0]
-                    logger.debug(f"[radarr] Blackhole download client uses tag {self._blackhole_tag_id}")
-                    return self._blackhole_tag_id
-        self._blackhole_tag_id = _NOT_FOUND
-        logger.debug("[radarr] No tagged TorrentBlackhole download client found")
-        return None
+        self._discover_routing_tags()
+        return None if self._blackhole_tag_id is _NOT_FOUND else self._blackhole_tag_id
+
+    def _get_local_tag_id(self):
+        """Find the tag ID used by non-blackhole download clients."""
+        self._discover_routing_tags()
+        return None if self._local_tag_id is _NOT_FOUND else self._local_tag_id
 
     def _ensure_debrid_routing(self, movie):
-        """Add the blackhole tag to a movie so downloads route through debrid."""
-        tag_id = self._get_blackhole_tag_id()
-        if tag_id is None:
+        """Add debrid tag and remove local tag so downloads route through blackhole."""
+        debrid_tag = self._get_blackhole_tag_id()
+        local_tag = self._get_local_tag_id()
+        if debrid_tag is None:
             return movie
         tags = list(movie.get('tags', []))
-        if tag_id in tags:
+        changed = False
+        if debrid_tag not in tags:
+            tags.append(debrid_tag)
+            changed = True
+        if local_tag is not None and local_tag in tags:
+            tags.remove(local_tag)
+            changed = True
+        if not changed:
             return movie
-        tags.append(tag_id)
         movie_copy = dict(movie, tags=tags)
         result = self._put(f'/api/v3/movie/{movie["id"]}', movie_copy)
         if result:
-            logger.info(f"[radarr] Added debrid tag to movie: {movie.get('title')}")
+            logger.info(f"[radarr] Routed to debrid: {movie.get('title')}")
             return result
         return movie
 
     def _ensure_local_routing(self, movie):
-        """Remove the blackhole tag from a movie so downloads route locally."""
-        tag_id = self._get_blackhole_tag_id()
-        if tag_id is None:
-            return movie
+        """Add local tag and remove debrid tag so downloads route to local clients."""
+        debrid_tag = self._get_blackhole_tag_id()
+        local_tag = self._get_local_tag_id()
         tags = list(movie.get('tags', []))
-        if tag_id not in tags:
+        changed = False
+        if debrid_tag is not None and debrid_tag in tags:
+            tags.remove(debrid_tag)
+            changed = True
+        if local_tag is not None and local_tag not in tags:
+            tags.append(local_tag)
+            changed = True
+        if not changed:
             return movie
-        tags.remove(tag_id)
         movie_copy = dict(movie, tags=tags)
         result = self._put(f'/api/v3/movie/{movie["id"]}', movie_copy)
         if result:
-            logger.info(f"[radarr] Removed debrid tag from movie: {movie.get('title')}")
+            logger.info(f"[radarr] Routed to local: {movie.get('title')}")
             return result
         return movie
 
@@ -592,8 +655,16 @@ class RadarrClient(_ArrClientBase):
         add_tags = []
         if prefer_debrid is True:
             tag_id = self._get_blackhole_tag_id()
-            if tag_id:
-                add_tags = [tag_id]
+            if tag_id is not None:
+                add_tags.append(tag_id)
+        elif prefer_debrid is False:
+            tag_id = self._get_local_tag_id()
+            if tag_id is not None:
+                add_tags.append(tag_id)
+        else:
+            tag_id = self._get_local_tag_id()
+            if tag_id is not None:
+                add_tags.append(tag_id)
         movie = self.add_movie(lookup, tags=add_tags)
         if not movie:
             # Race condition: may have been added between find and add

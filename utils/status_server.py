@@ -1195,10 +1195,11 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 }))
             else:
                 from utils.arr_client import get_configured_services
-                from utils.library_prefs import get_all_pending
+                from utils.library_prefs import get_all_pending, get_all_preferences
                 result = scanner.get_data()
                 result['download_services'] = get_configured_services()
                 result['pending'] = get_all_pending()
+                result['preferences'] = get_all_preferences()
                 data = json.dumps(result)
                 self._send_json_response(200, data)
         elif self.path.startswith('/api/library/metadata'):

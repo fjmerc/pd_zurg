@@ -62,10 +62,10 @@ a:hover{text-decoration:underline}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;margin-top:4px}
 
 /* Media card */
-.media-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:6px;transition:border-color .15s}
-.media-card:hover{border-color:var(--border2)}
+.media-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:6px;transition:border-color .15s,transform .15s,box-shadow .15s}
+.media-card:hover{border-color:var(--border2);transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,.15)}
 .media-card.show-card,.media-card.movie-card{cursor:pointer;position:relative;padding-right:32px}
-.media-card.show-card:hover,.media-card.movie-card:hover{border-color:var(--blue)}
+.media-card.show-card:hover,.media-card.movie-card:hover{border-color:var(--blue);box-shadow:0 4px 12px rgba(88,166,255,.1)}
 .media-card.show-card::after,.media-card.movie-card::after{content:'\203A';position:absolute;right:14px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:1.2em;transition:color .15s,transform .15s}
 .media-card.show-card:hover::after,.media-card.movie-card:hover::after{color:var(--blue);transform:translateY(-50%) translateX(2px)}
 .card-title{font-size:.9em;font-weight:500;color:var(--text);line-height:1.35}
@@ -76,12 +76,27 @@ a:hover{text-decoration:underline}
 /* Source badges */
 .badge-local{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#3fb9500f;color:var(--green);border:1px solid #3fb95033}
 .badge-debrid{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#58a6ff0f;color:var(--blue);border:1px solid #58a6ff33}
+.badge-local .badge-full,.badge-debrid .badge-full,.badge-missing .badge-full,.badge-pending .badge-full{display:inline}
+.badge-local .badge-mini,.badge-debrid .badge-mini,.badge-missing .badge-mini,.badge-pending .badge-mini{display:none}
+@media(max-width:640px){
+  .badge-local .badge-full,.badge-debrid .badge-full,.badge-missing .badge-full,.badge-pending .badge-full{display:none}
+  .badge-local .badge-mini,.badge-debrid .badge-mini,.badge-missing .badge-mini,.badge-pending .badge-mini{display:inline}
+  .ep-actions .btn-action{font-size:.68em;padding:2px 5px}
+}
 [data-theme="light"] .badge-local{background:#1a7f371a;border-color:#1a7f3740}
 [data-theme="light"] .badge-debrid{background:#0969da1a;border-color:#0969da40}
 
 /* Spinner */
 .spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle}
 @keyframes spin{to{transform:rotate(360deg)}}
+
+/* Skeleton loading */
+.skeleton-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:8px}
+.skeleton-line{background:linear-gradient(90deg,var(--border) 25%,var(--border2) 50%,var(--border) 75%);background-size:200% 100%;border-radius:4px;animation:skeleton-shimmer 1.5s ease-in-out infinite}
+.skeleton-title{height:16px;width:70%}
+.skeleton-meta{height:12px;width:40%}
+.skeleton-badges{height:20px;width:50%}
+@keyframes skeleton-shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 
 /* State panels */
 .state-panel{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;min-height:220px;color:var(--text2);font-size:.9em;text-align:center;padding:24px}
@@ -112,7 +127,7 @@ a:hover{text-decoration:underline}
 .episode-table tr{border-top:1px solid var(--border)}
 .episode-table td{padding:7px 14px;font-size:.82em;color:var(--text)}
 .ep-num{font-weight:600;color:var(--text2);white-space:nowrap;width:50px}
-.ep-file{color:var(--text);word-break:break-all}
+.ep-file{color:var(--text)}
 .ep-source{white-space:nowrap;text-align:right}
 .ep-actions{white-space:nowrap;text-align:right;width:80px}
 
@@ -125,6 +140,9 @@ a:hover{text-decoration:underline}
 .btn-action.danger{color:var(--red);border-color:#f8514933}
 .btn-action.danger:hover{border-color:var(--red);background:#f851490f}
 .btn-action:disabled{opacity:.5;cursor:not-allowed}
+.btn-action.confirming{border-color:var(--orange);color:var(--orange);font-weight:600;animation:pulse-confirm .8s ease-in-out infinite}
+.btn-action.confirming.danger{border-color:var(--red);color:var(--red)}
+@keyframes pulse-confirm{0%,100%{opacity:1}50%{opacity:.7}}
 .btn-apply{background:var(--blue);color:#fff;border:none;border-radius:6px;padding:6px 16px;font-size:.82em;font-weight:600;cursor:pointer;transition:background .15s,opacity .15s;min-height:32px}
 .btn-apply:hover{background:#4c9aff}
 .btn-apply:disabled{opacity:.5;cursor:not-allowed}
@@ -153,13 +171,20 @@ a:hover{text-decoration:underline}
 .detail-runtime{font-size:.82em;color:var(--text2);margin-top:6px}
 
 /* Episode titles and missing */
-.ep-title{color:var(--text2);font-size:.78em;display:block}
-.ep-date{color:var(--text3);font-size:.75em;white-space:nowrap}
+.ep-title{color:var(--text);font-size:.95em;font-weight:600;display:inline}
+.ep-date{color:var(--text2);font-size:.82em;white-space:nowrap;margin-left:8px}
+.ep-relative{color:var(--text3);font-size:.9em;margin-left:4px}
+.ep-filename{color:var(--text3);font-size:.75em;display:block;word-break:break-all;margin-top:2px}
 .ep-missing td{color:var(--text3)}
-.badge-missing{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#d299220f;color:var(--yellow);border:1px solid #d2992233}
-[data-theme="light"] .badge-missing{background:#9a67001a;border-color:#9a670040}
-.badge-pending{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#db6d280f;color:var(--orange);border:1px solid #db6d2833}
+.badge-missing{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#f851490f;color:var(--red);border:1px solid #f8514933}
+.badge-upcoming{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#58a6ff0f;color:var(--blue);border:1px solid #58a6ff33}
+.badge-tba{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:var(--border);color:var(--text3);border:1px solid var(--border2)}
+[data-theme="light"] .badge-missing{background:#cf222e1a;border-color:#cf222e40}
+[data-theme="light"] .badge-upcoming{background:#0969da1a;border-color:#0969da40}
+[data-theme="light"] .badge-tba{background:#d0d7de40;border-color:#d0d7de}
+.badge-pending{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:var(--orange);border:1px solid #db6d2833;position:relative;overflow:hidden;background:linear-gradient(90deg,#db6d2818 0%,#db6d2808 50%,#db6d2818 100%);background-size:200% 100%;animation:pending-shimmer 2s ease-in-out infinite}
 .badge-pending::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--orange);margin-right:4px;vertical-align:middle;animation:pulse-dot 1s ease-in-out infinite}
+@keyframes pending-shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 [data-theme="light"] .badge-pending{background:#bc4c001a;border-color:#bc4c0040;color:#bc4c00}
 [data-theme="light"] .badge-pending::before{background:#bc4c00}
 
@@ -167,15 +192,25 @@ a:hover{text-decoration:underline}
 .season-progress-pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;margin-left:8px}
 .progress-complete{background:#3fb9501a;color:var(--green);border:1px solid #3fb95033}
 .progress-partial{background:#d299221a;color:var(--yellow);border:1px solid #d2992233}
+.progress-missing{background:#f851490f;color:var(--red);border:1px solid #f8514933}
+.progress-pending{background:#db6d280f;color:var(--orange);border:1px solid #db6d2833}
 .progress-empty{background:var(--border);color:var(--text3);border:1px solid var(--border2)}
 [data-theme="light"] .progress-complete{background:#1a7f371a;border-color:#1a7f3740}
 [data-theme="light"] .progress-partial{background:#9a67001a;border-color:#9a670040}
+[data-theme="light"] .progress-missing{background:#cf222e1a;border-color:#cf222e40}
+[data-theme="light"] .progress-pending{background:#bc4c001a;border-color:#bc4c0040}
 [data-theme="light"] .progress-empty{background:#d0d7de40;border-color:#d0d7de;color:var(--text3)}
 
 /* Expand/collapse all */
 .expand-all-row{display:flex;justify-content:flex-end;margin-bottom:8px}
 .expand-all-btn{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;padding:4px 12px;font-size:.78em;cursor:pointer;transition:border-color .15s,color .15s;display:flex;align-items:center;gap:4px;font-family:inherit}
 .expand-all-btn:hover{border-color:var(--blue);color:var(--blue)}
+
+/* Ping dot for pending seasons */
+.ping-dot{position:relative;display:inline-block;width:8px;height:8px;margin-left:6px;vertical-align:middle}
+.ping-dot::before,.ping-dot::after{content:'';position:absolute;top:0;left:0;width:8px;height:8px;border-radius:50%;background:var(--orange)}
+.ping-dot::after{animation:ping-anim 1.2s cubic-bezier(0,0,.2,1) infinite}
+@keyframes ping-anim{0%{transform:scale(1);opacity:.8}75%,100%{transform:scale(2.2);opacity:0}}
 
 /* Season collapse footer */
 .season-collapse-footer{text-align:center;padding:4px 0;background:var(--border2);cursor:pointer;border-top:1px solid var(--border);transition:background .15s;font-size:.75em;color:var(--text3)}
@@ -236,11 +271,11 @@ a:hover{text-decoration:underline}
 </div>
 
 <div id="content-area">
-  <div class="state-panel">
-    <span class="spinner"></span>
-    <span>Loading library...</span>
-  </div>
+  <div class="grid" id="skeleton-grid"></div>
 </div>
+<script>
+(function(){var g=document.getElementById('skeleton-grid');if(!g)return;var h='';for(var i=0;i<12;i++)h+='<div class="skeleton-card"><div class="skeleton-line skeleton-title"></div><div class="skeleton-line skeleton-meta"></div><div class="skeleton-line skeleton-badges"></div></div>';g.innerHTML=h})();
+</script>
 
 <div class="footer" id="footer"></div>
 
@@ -282,6 +317,8 @@ let _refreshTimer = null;
 let _lastTransferText = '';
 let _lastTransferType = '';
 let _transferClearTimer = null;
+let _pollTimer = null;
+let _pollActive = false;
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -354,6 +391,42 @@ function _restoreTransferMsg() {
   el.textContent = _lastTransferText;
 }
 
+var _activeConfirmTimer = null;
+var _activeConfirmBtn = null;
+
+function _confirmBtn(btn, callback) {
+  if (btn.classList.contains('confirming')) {
+    // Second click — execute
+    clearTimeout(_activeConfirmTimer);
+    _activeConfirmTimer = null;
+    _activeConfirmBtn = null;
+    btn.classList.remove('confirming');
+    btn.textContent = btn._origText;
+    callback();
+    return;
+  }
+  // Cancel any other button's confirmation
+  if (_activeConfirmTimer) { clearTimeout(_activeConfirmTimer); }
+  if (_activeConfirmBtn && _activeConfirmBtn !== btn) {
+    try { _activeConfirmBtn.classList.remove('confirming'); _activeConfirmBtn.textContent = _activeConfirmBtn._origText; } catch(e) {}
+  }
+  // First click — enter confirmation state
+  btn._origText = btn.textContent;
+  btn.textContent = 'Are you sure?';
+  btn.classList.add('confirming');
+  _activeConfirmBtn = btn;
+  _activeConfirmTimer = setTimeout(function() {
+    _activeConfirmTimer = null;
+    _activeConfirmBtn = null;
+    try { btn.classList.remove('confirming'); btn.textContent = btn._origText; } catch(e) {}
+  }, 3000);
+}
+
+function _clearConfirmState() {
+  if (_activeConfirmTimer) { clearTimeout(_activeConfirmTimer); _activeConfirmTimer = null; }
+  _activeConfirmBtn = null;
+}
+
 // ---------------------------------------------------------------------------
 // Tab switching
 // ---------------------------------------------------------------------------
@@ -372,11 +445,11 @@ function switchTab(name) {
 // ---------------------------------------------------------------------------
 function buildBadges(source) {
   if (source === 'both') {
-    return '<span class="badge-local">Local</span><span class="badge-debrid">Debrid</span>';
+    return '<span class="badge-local"><span class="badge-full">Local</span><span class="badge-mini">L</span></span><span class="badge-debrid"><span class="badge-full">Debrid</span><span class="badge-mini">D</span></span>';
   }
-  if (source === 'local') return '<span class="badge-local">Local</span>';
-  if (source === 'debrid') return '<span class="badge-debrid">Debrid</span>';
-  return '<span class="badge-debrid">' + esc(source) + '</span>';
+  if (source === 'local') return '<span class="badge-local"><span class="badge-full">Local</span><span class="badge-mini">L</span></span>';
+  if (source === 'debrid') return '<span class="badge-debrid"><span class="badge-full">Debrid</span><span class="badge-mini">D</span></span>';
+  return '<span class="badge-debrid"><span class="badge-full">' + esc(source) + '</span><span class="badge-mini">?</span></span>';
 }
 
 function buildCard(item, index) {
@@ -396,7 +469,7 @@ function buildCard(item, index) {
   var pnk = normTitle(item.title);
   if (_pending[pnk]) {
     var dir = (_pending[pnk] || {}).direction;
-    pendingBadge = '<span class="badge-pending">' + (dir === 'to-local' ? 'Downloading' : 'Switching') + '</span>';
+    pendingBadge = '<span class="badge-pending">' + (dir === 'to-local' ? 'Switching to local' : 'Switching to debrid') + '</span>';
   }
   return '<div class="media-card' + cardClass + '"' + clickAttr + '>'
     + '<div class="card-title">' + esc(item.title) + '</div>'
@@ -490,6 +563,7 @@ function fetchLibrary() {
 
       applyFilters();
       updateScanInfo();
+      _checkSmartPoll();
 
       if (_scanDurationMs != null) {
         const footerEl = document.getElementById('footer');
@@ -567,6 +641,7 @@ function showDetail(index) {
 }
 
 function _renderDetail() {
+  _clearConfirmState();
   var item = _detailItem;
   var meta = _detailMeta;
   if (!item) return;
@@ -615,18 +690,18 @@ function _renderMovieDetail(movie, meta) {
     html += '</select>';
     html += '<button class="btn-apply" id="movie-pref-apply-btn" style="display:none" onclick="applyMoviePreference()">Apply</button>';
     html += '</div>';
-    html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px">Prefer Local downloads the movie. Prefer Debrid removes the local copy and streams from debrid.</div>';
+    html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px">Prefer Local switches the movie to a local copy. Prefer Debrid removes the local copy and streams from debrid.</div>';
     html += '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">';
     if (movie.source === 'debrid') {
       var movieDlLabel = _downloadServices.movie === 'overseerr' ? 'Request in Overseerr' : 'Switch to Local';
-      html += '<button class="btn-action" onclick="downloadMovie()">' + movieDlLabel + '</button>';
+      html += '<button class="btn-action" onclick="_confirmBtn(this,function(){downloadMovie()})">' + movieDlLabel + '</button>';
     }
     if ((movie.source === 'local' || movie.source === 'both') && _downloadServices.movie === 'radarr') {
-      html += '<button class="btn-action danger" onclick="removeMovie()">Switch to Debrid</button>';
+      html += '<button class="btn-action danger" onclick="_confirmBtn(this,function(){removeMovie()})">Switch to Debrid</button>';
     }
     html += '</div>';
   } else if (movie.source === 'debrid') {
-    html += '<div style="margin-top:10px;font-size:.82em;color:var(--text3)">To download locally, configure <a href="/settings">Radarr or Overseerr</a> in Settings.</div>';
+    html += '<div style="margin-top:10px;font-size:.82em;color:var(--text3)">To switch to local, configure <a href="/settings">Radarr or Overseerr</a> in Settings.</div>';
   }
   html += '</div></div>';
   html += '<div id="transfer-msg" aria-live="polite"></div>';
@@ -684,19 +759,142 @@ function _formatDate(dateStr) {
   var m = parseInt(parts[1],10);
   var d = parseInt(parts[2],10);
   var y = parseInt(parts[0],10);
-  if (isNaN(m) || isNaN(d) || isNaN(y)) return dateStr;
+  if (isNaN(m) || isNaN(d) || isNaN(y) || m < 1 || m > 12) return dateStr;
   return _shortMonths[m - 1] + ' ' + d + ', ' + y;
 }
 
 
-function _seasonProgressPill(season) {
+function _relativeDate(dateStr) {
+  if (!dateStr) return '';
+  var airMs = new Date(dateStr + 'T00:00:00').getTime();
+  if (isNaN(airMs)) return '';
+  var now = new Date(); now.setHours(0,0,0,0);
+  var diffDays = Math.round((airMs - now.getTime()) / (24*60*60*1000));
+  if (diffDays === 0) return '(today)';
+  if (diffDays === 1) return '(tomorrow)';
+  if (diffDays === -1) return '(yesterday)';
+  if (diffDays > 1 && diffDays <= 8) return '(in ' + diffDays + ' days)';
+  if (diffDays < -1 && diffDays >= -8) return '(' + Math.abs(diffDays) + ' days ago)';
+  return '';
+}
+
+function _seasonProgressPill(season, hasPending) {
   if (!season.total_episodes) return '';
   var count = season.episode_count || 0;
   var total = season.total_episodes;
   var cls = 'progress-empty';
-  if (count >= total && total > 0) cls = 'progress-complete';
+  if (hasPending) cls = 'progress-pending';
+  else if (count >= total && total > 0) cls = 'progress-complete';
   else if (count > 0) cls = 'progress-partial';
+  else cls = 'progress-missing';
   return '<span class="season-progress-pill ' + cls + '">' + count + ' / ' + total + '</span>';
+}
+
+function _renderSeasonEpisodes(season, si) {
+  var html = '<table class="episode-table"><tbody>';
+  var eps = season.episodes || [];
+  for (var ei = 0; ei < eps.length; ei++) {
+    var ep = eps[ei];
+    var epNum = String(ep.number);
+    if (epNum.length < 2) epNum = '0' + epNum;
+    var isMissing = ep.source === 'missing';
+    var epLabel = 'S' + (season.number < 10 ? '0' : '') + season.number + 'E' + epNum;
+    html += '<tr' + (isMissing ? ' class="ep-missing"' : '') + '>';
+    html += '<td class="ep-num">E' + esc(epNum) + '</td>';
+    html += '<td class="ep-file">';
+    if (ep.title) html += '<span class="ep-title">' + esc(ep.title) + '</span>';
+    if (ep.air_date) {
+      var rel = _relativeDate(ep.air_date);
+      html += '<span class="ep-date">' + esc(_formatDate(ep.air_date));
+      if (rel) html += ' <span class="ep-relative">' + esc(rel) + '</span>';
+      html += '</span>';
+    }
+    if (ep.file) html += '<span class="ep-filename">' + esc(ep.file) + '</span>';
+    else if (!ep.title) html += '<span style="color:var(--text3)">&mdash;</span>';
+    html += '</td>';
+    html += '<td class="ep-source">';
+    var isPending = false;
+    if (_detailItem) {
+      var pnk = normTitle(_detailItem.title);
+      var pendingEntry = _pending[pnk];
+      if (pendingEntry && pendingEntry.episodes) {
+        for (var pei = 0; pei < pendingEntry.episodes.length; pei++) {
+          if (pendingEntry.episodes[pei].season === season.number && pendingEntry.episodes[pei].episode === ep.number) {
+            isPending = true;
+            break;
+          }
+        }
+      }
+    }
+    if (isPending) {
+      var pendingLabel = (_pending[normTitle(_detailItem.title)] || {}).direction === 'to-local'
+        ? '\u2192 Local' : '\u2192 Debrid';
+      html += '<span class="badge-pending">' + pendingLabel + '</span>';
+    } else if (isMissing) {
+      if (!ep.air_date) {
+        html += '<span class="badge-tba">TBA</span>';
+      } else {
+        var airMs = new Date(ep.air_date + 'T00:00:00').getTime();
+        if (!isNaN(airMs) && airMs > Date.now()) {
+          html += '<span class="badge-upcoming">Upcoming</span>';
+        } else {
+          html += '<span class="badge-missing"><span class="badge-full">Missing</span><span class="badge-mini">!</span></span>';
+        }
+      }
+    } else {
+      html += buildBadges(ep.source);
+    }
+    html += '</td>';
+    html += '<td class="ep-actions">';
+    if (isPending) {
+      html += '<button class="btn-action" disabled>\u2026</button>';
+    } else if (_downloadServices.show && _downloadServices.show !== 'overseerr') {
+      if (ep.source === 'debrid') {
+        html += '<button class="btn-action" aria-label="Switch ' + epLabel + ' to Local" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ')})">Switch to Local</button>';
+      } else if (ep.source === 'local') {
+        html += '<button class="btn-action danger" aria-label="Switch ' + epLabel + ' to Debrid" onclick="_confirmBtn(this,function(){removeEp(' + season.number + ',' + ep.number + ')})">Switch to Debrid</button>';
+      } else if (ep.source === 'both') {
+        html += '<button class="btn-action danger" aria-label="Switch ' + epLabel + ' to Debrid" onclick="_confirmBtn(this,function(){removeEp(' + season.number + ',' + ep.number + ')})">Switch to Debrid</button>';
+      } else if (isMissing && (!ep.air_date || new Date(ep.air_date + 'T00:00:00').getTime() <= Date.now())) {
+        html += '<button class="btn-action" aria-label="Search ' + epLabel + '" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ')})">Search</button>';
+      }
+    }
+    html += '</td>';
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  if (eps.length > 10) {
+    html += '<div class="season-collapse-footer" role="button" tabindex="0" onclick="collapseSeason(this)" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();collapseSeason(this)}" title="Collapse season">&#9650; Collapse</div>';
+  }
+  return html;
+}
+
+function _shouldAutoExpand(season, showTitle) {
+  // Expand seasons with pending transitions
+  if (showTitle) {
+    var pnk = normTitle(showTitle);
+    var pe = _pending[pnk];
+    if (pe && pe.episodes) {
+      for (var i = 0; i < pe.episodes.length; i++) {
+        if (pe.episodes[i].season === season.number) return true;
+      }
+    }
+  }
+  // Expand seasons with recent or upcoming episodes (within 30 days)
+  var now = Date.now();
+  var thirtyDays = 30 * 24 * 60 * 60 * 1000;
+  var eps = season.episodes || [];
+  for (var i = 0; i < eps.length; i++) {
+    if (eps[i].air_date) {
+      var airMs = new Date(eps[i].air_date + 'T00:00:00').getTime();
+      if (!isNaN(airMs) && Math.abs(now - airMs) <= thirtyDays) return true;
+    }
+  }
+  // Expand incomplete seasons (have some but not all episodes)
+  var count = season.episode_count || 0;
+  var total = season.total_episodes || 0;
+  if (count > 0 && count < total) return true;
+  return false;
 }
 
 function _syncExpandAllBtn() {
@@ -721,7 +919,16 @@ function toggleAllSeasons(btn) {
     if (anyCollapsed) {
       headers[i].classList.add('expanded');
       headers[i].setAttribute('aria-expanded', 'true');
-      if (ep) ep.style.display = '';
+      if (ep) {
+        ep.style.display = '';
+        // Lazy-render: populate if empty
+        if (!ep.querySelector('.episode-table')) {
+          var idx = parseInt(ep.getAttribute('data-season-idx'), 10);
+          if (!isNaN(idx) && _detailSeasons[idx]) {
+            ep.innerHTML = _renderSeasonEpisodes(_detailSeasons[idx], idx);
+          }
+        }
+      }
     } else {
       headers[i].classList.remove('expanded');
       headers[i].setAttribute('aria-expanded', 'false');
@@ -779,7 +986,7 @@ function _renderShowDetail(show, meta) {
   html += '<div class="card-badges">' + buildBadges(show.source) + '</div>';
   if (meta && meta.overview) html += '<div class="detail-overview">' + esc(meta.overview) + '</div>';
   if ((show.source === 'debrid' || show.source === 'both') && !_downloadServices.show) {
-    html += '<div style="font-size:.82em;color:var(--text3);margin-top:8px">To download episodes locally, configure <a href="/settings">Sonarr or Overseerr</a> in Settings.</div>';
+    html += '<div style="font-size:.82em;color:var(--text3);margin-top:8px">To switch episodes to local, configure <a href="/settings">Sonarr or Overseerr</a> in Settings.</div>';
   }
   html += '<div class="pref-row"><label for="show-pref-select" style="font-size:.82em;color:var(--text2)">Source preference:</label>';
   html += '<select class="pref-select" id="show-pref-select" onchange="onPrefSelectChange(this.value)">';
@@ -789,7 +996,7 @@ function _renderShowDetail(show, meta) {
   html += '</select>';
   html += '<button class="btn-apply" id="show-pref-apply-btn" style="display:none" onclick="applyPreference()">Apply</button>';
   html += '</div>';
-  html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px">Prefer Local downloads debrid-only episodes. Prefer Debrid removes local copies and streams from debrid.</div>';
+  html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px">Prefer Local switches debrid-only episodes to local copies. Prefer Debrid removes local copies and streams from debrid.</div>';
   html += '</div></div>';
 
   if (seasons.length > 1) {
@@ -799,24 +1006,42 @@ function _renderShowDetail(show, meta) {
 
   for (var si = 0; si < seasons.length; si++) {
     var season = seasons[si];
-    var expanded = hasPrev ? !!expandedNums[String(season.number)] : si === 0;
-    var hasDebrid = false, hasLocal = false, debridCount = 0;
-    for (var ci = 0; ci < season.episodes.length; ci++) {
+    var expanded = hasPrev ? !!expandedNums[String(season.number)] : _shouldAutoExpand(season, show.title) || si === 0;
+    var hasDebrid = false, hasLocal = false, hasMissing = false, debridCount = 0, missingCount = 0;
+    for (var ci = 0; ci < (season.episodes || []).length; ci++) {
       if (season.episodes[ci].source === 'debrid') { hasDebrid = true; debridCount++; }
       if (season.episodes[ci].source === 'local' || season.episodes[ci].source === 'both') hasLocal = true;
+      if (season.episodes[ci].source === 'missing') { hasMissing = true; missingCount++; }
     }
-    var progressPill = _seasonProgressPill(season);
+    var seasonPending = false;
+    if (_detailItem) {
+      var pnk = normTitle(_detailItem.title);
+      var pe = _pending[pnk];
+      if (pe && pe.episodes) {
+        for (var spi = 0; spi < pe.episodes.length; spi++) {
+          if (pe.episodes[spi].season === season.number) { seasonPending = true; break; }
+        }
+      }
+    }
+    var progressPill = _seasonProgressPill(season, seasonPending);
     html += '<div class="season-section">';
     html += '<div class="season-header' + (expanded ? ' expanded' : '') + '" data-season="' + esc(String(season.number)) + '" tabindex="0" role="button" aria-expanded="' + expanded + '" onclick="toggleSeason(this)" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();toggleSeason(this)}">';
     html += '<span class="season-chevron">&#9654;</span>';
     html += 'Season ' + esc(String(season.number)) + ' &mdash; ' + esc(String(season.episode_count)) + ' episode' + (season.episode_count !== 1 ? 's' : '') + progressPill;
+    if (seasonPending) html += '<span class="ping-dot"></span>';
     html += '<span class="season-actions">';
-    if (hasDebrid && _downloadServices.show) {
+    if ((hasDebrid || hasMissing) && _downloadServices.show) {
       if (_downloadServices.show === 'overseerr') {
-        html += '<button class="btn-action" onclick="event.stopPropagation();requestSeason(' + season.number + ')">Request Season</button>';
+        html += '<button class="btn-action" onclick="event.stopPropagation();_confirmBtn(this,function(){requestSeason(' + season.number + ')})">Request Season</button>';
       } else {
-        var dlLabel = 'Download ' + debridCount + ' Episode' + (debridCount !== 1 ? 's' : '');
-        html += '<button class="btn-action" onclick="event.stopPropagation();dlSeason(' + si + ')">' + dlLabel + '</button>';
+        if (hasDebrid) {
+          var dlLabel = 'Switch ' + debridCount + ' Episode' + (debridCount !== 1 ? 's' : '') + ' to Local';
+          html += '<button class="btn-action" onclick="event.stopPropagation();_confirmBtn(this,function(){dlSeason(' + si + ')})">' + dlLabel + '</button>';
+        }
+        if (hasMissing) {
+          var searchLabel = 'Search ' + missingCount + ' Missing';
+          html += '<button class="btn-action" onclick="event.stopPropagation();_confirmBtn(this,function(){searchMissingSeason(' + si + ')})">' + searchLabel + '</button>';
+        }
       }
     }
     if (hasLocal && _downloadServices.show && _downloadServices.show !== 'overseerr') {
@@ -825,67 +1050,17 @@ function _renderShowDetail(show, meta) {
         if (season.episodes[lci].source === 'local' || season.episodes[lci].source === 'both') localCount++;
       }
       var rmLabel = 'Switch ' + localCount + ' to Debrid';
-      html += '<button class="btn-action danger" onclick="event.stopPropagation();rmSeason(' + si + ')">' + rmLabel + '</button>';
+      html += '<button class="btn-action danger" onclick="event.stopPropagation();_confirmBtn(this,function(){rmSeason(' + si + ')})">' + rmLabel + '</button>';
     }
     html += '</span>';
     html += '</div>';
-    html += '<div class="season-episodes"' + (expanded ? '' : ' style="display:none"') + '>';
-    html += '<table class="episode-table"><tbody>';
-    var eps = season.episodes || [];
-    for (var ei = 0; ei < eps.length; ei++) {
-      var ep = eps[ei];
-      var epNum = String(ep.number);
-      if (epNum.length < 2) epNum = '0' + epNum;
-      var isMissing = ep.source === 'missing';
-      var epLabel = 'S' + (season.number < 10 ? '0' : '') + season.number + 'E' + epNum;
-      html += '<tr' + (isMissing ? ' class="ep-missing"' : '') + '>';
-      html += '<td class="ep-num">E' + esc(epNum) + '</td>';
-      html += '<td class="ep-file">';
-      if (ep.title) html += '<span class="ep-title">' + esc(ep.title) + '</span>';
-      if (ep.file) html += esc(ep.file);
-      else if (!ep.title) html += '<span style="color:var(--text3)">&mdash;</span>';
-      if (ep.air_date) html += ' <span class="ep-date">' + esc(_formatDate(ep.air_date)) + '</span>';
-      html += '</td>';
-      html += '<td class="ep-source">';
-      var isPending = false;
-      if (_detailItem) {
-        var pnk = normTitle(_detailItem.title);
-        var pendingEntry = _pending[pnk];
-        if (pendingEntry && pendingEntry.episodes) {
-          for (var pei = 0; pei < pendingEntry.episodes.length; pei++) {
-            if (pendingEntry.episodes[pei].season === season.number && pendingEntry.episodes[pei].episode === ep.number) {
-              isPending = true;
-              break;
-            }
-          }
-        }
-      }
-      if (isPending) {
-        var pendingLabel = (_pending[normTitle(_detailItem.title)] || {}).direction === 'to-local'
-          ? 'Downloading locally\u2026' : 'Switching to debrid\u2026';
-        html += '<span class="badge-pending">' + pendingLabel + '</span>';
-      } else if (isMissing) {
-        html += '<span class="badge-missing">Missing</span>';
-      } else {
-        html += buildBadges(ep.source);
-      }
-      html += '</td>';
-      html += '<td class="ep-actions">';
-      if (!isMissing) {
-        if (ep.source === 'debrid' && _downloadServices.show && _downloadServices.show !== 'overseerr') {
-          html += '<button class="btn-action" aria-label="Download ' + epLabel + '" onclick="downloadEp(' + season.number + ',' + ep.number + ')">Download</button>';
-        }
-        if ((ep.source === 'local' || ep.source === 'both') && _downloadServices.show && _downloadServices.show !== 'overseerr') {
-          html += '<button class="btn-action danger" aria-label="Switch ' + epLabel + ' to Debrid" onclick="removeEp(' + season.number + ',' + ep.number + ')">Switch to Debrid</button>';
-        }
-      }
-      html += '</td>';
-      html += '</tr>';
+    html += '<div class="season-episodes" data-season-idx="' + si + '"' + (expanded ? '' : ' style="display:none"') + '>';
+    if (!expanded) {
+      // Lazy-render: defer episode table until first expand
+      html += '</div></div>';
+      continue;
     }
-    html += '</tbody></table>';
-    if (eps.length > 10) {
-      html += '<div class="season-collapse-footer" role="button" tabindex="0" onclick="collapseSeason(this)" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();collapseSeason(this)}" title="Collapse season">&#9650; Collapse</div>';
-    }
+    html += _renderSeasonEpisodes(season, si);
     html += '</div></div>';
   }
 
@@ -899,6 +1074,8 @@ function hideDetail() {
   _detailItem = null;
   _detailSeasons = [];
   _actionInFlight = false;
+  _stopSmartPoll();
+  if (_refreshTimer) { clearTimeout(_refreshTimer); _refreshTimer = null; }
   if (_pendingConfirmCleanup) { _pendingConfirmCleanup(); _pendingConfirmCleanup = null; }
   document.title = 'pd_zurg Library';
   document.querySelector('.tabs').style.display = '';
@@ -913,6 +1090,13 @@ function toggleSeason(headerEl) {
   var isExpanded = headerEl.classList.toggle('expanded');
   headerEl.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
   episodes.style.display = isExpanded ? '' : 'none';
+  // Lazy-render: populate episode table on first expand
+  if (isExpanded && !episodes.querySelector('.episode-table')) {
+    var idx = parseInt(episodes.getAttribute('data-season-idx'), 10);
+    if (!isNaN(idx) && _detailSeasons[idx]) {
+      episodes.innerHTML = _renderSeasonEpisodes(_detailSeasons[idx], idx);
+    }
+  }
   _syncExpandAllBtn();
 }
 
@@ -982,7 +1166,7 @@ function applyPreference() {
       var svcLabel = _svcNames[showSvc] || showSvc;
       if (!confirm(isOverseerr
         ? 'Request ' + dlTasks.length + ' season(s) in Overseerr?'
-        : 'Download ' + totalDlEps + ' episode(s) locally via ' + svcLabel + '?')) return;
+        : 'Switch ' + totalDlEps + ' episode(s) to local via ' + svcLabel + '?')) return;
       _runSequential(dlTasks).then(function(ok) {
         if (ok) {
           _savePref(nk, pref);
@@ -1002,7 +1186,7 @@ function applyPreference() {
     }
     // Case 3: mixed — download debrid-only, then remove debrid for both-source
     var svcLabel2 = _svcNames[showSvc] || showSvc;
-    if (!confirm('Download ' + totalDlEps + ' episode(s) via ' + svcLabel2
+    if (!confirm('Switch ' + totalDlEps + ' episode(s) to local via ' + svcLabel2
       + ' and remove ' + totalBothEps + ' debrid duplicate(s)?')) return;
     _runSequential(dlTasks).then(function(ok) {
       if (!ok) return false;
@@ -1059,7 +1243,7 @@ function applyPreference() {
       if (res.ok && res.d.switched > 0) {
         _savePref(nk, pref);
         if (localOnlyEps.length) _setPending(_detailItem.title, localOnlyEps, 'to-debrid');
-        _showMsg('Switched ' + res.d.switched + ' episode(s) to debrid streaming. To get local copies back, use the Download button.', 'success');
+        _showMsg('Switched ' + res.d.switched + ' episode(s) to debrid streaming. To get local copies back, use Switch to Local.', 'success');
         _scheduleRefresh(1000);
       } else {
         _showMsg('Error: ' + (res.d.error || res.d.message || 'Switch failed'), 'error');
@@ -1103,7 +1287,6 @@ function downloadEp(season, episode) {
 
 function removeEp(season, episode) {
   if (!_detailItem) return;
-  if (!confirm('Switch S' + (season < 10 ? '0' : '') + season + 'E' + (episode < 10 ? '0' : '') + episode + ' to debrid streaming?\n\nThe local file will be permanently deleted from disk.')) return;
   var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
   _postRemove({
     title: _detailItem.title, type: _detailItem.type, tmdb_id: tmdbId,
@@ -1121,9 +1304,23 @@ function dlSeason(seasonIdx) {
     }
   }
   if (!eps.length) return;
-  var svc = _downloadServices.show;
-  var svcName = _svcNames[svc] || svc;
-  if (!confirm('Download ' + eps.length + ' episode(s) from Season ' + season.number + ' via ' + svcName + '?')) return;
+  var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
+  _postDownload({
+    title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
+    season: season.number, episodes: eps
+  });
+}
+
+function searchMissingSeason(seasonIdx) {
+  if (!_detailItem || !_detailSeasons[seasonIdx]) return;
+  var season = _detailSeasons[seasonIdx];
+  var eps = [];
+  for (var i = 0; i < season.episodes.length; i++) {
+    if (season.episodes[i].source === 'missing') {
+      eps.push(season.episodes[i].number);
+    }
+  }
+  if (!eps.length) return;
   var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
   _postDownload({
     title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
@@ -1133,7 +1330,6 @@ function dlSeason(seasonIdx) {
 
 function requestSeason(seasonNumber) {
   if (!_detailItem) return;
-  if (!confirm('Request Season ' + seasonNumber + ' in Overseerr?')) return;
   var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
   _postDownload({
     title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
@@ -1151,7 +1347,6 @@ function downloadMovie() {
 
 function removeMovie() {
   if (!_detailItem) return;
-  if (!confirm('Switch ' + _detailItem.title + ' to debrid streaming?\n\nThe local file will be permanently deleted from disk via Radarr.')) return;
   var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
   _postRemove({
     title: _detailItem.title, type: 'movie', tmdb_id: tmdbId,
@@ -1170,7 +1365,7 @@ function applyMoviePreference() {
 
   if (pref === 'prefer-local' && movieSvc && _detailItem.source === 'debrid') {
     var svcLabel = _svcNames[movieSvc] || movieSvc;
-    if (!confirm('Download ' + _detailItem.title + ' locally via ' + svcLabel + '?')) return;
+    if (!confirm('Switch ' + _detailItem.title + ' to local via ' + svcLabel + '?')) return;
     _postDownload({
       title: _detailItem.title, type: 'movie', tmdb_id: tmdbId
     }).then(function(ok) { if (ok) _savePref(nk, pref); });
@@ -1230,7 +1425,6 @@ function rmSeason(seasonIdx) {
     }
   }
   if (!epNums.length) return;
-  if (!confirm('Switch ' + epNums.length + ' episode(s) from Season ' + season.number + ' to debrid streaming?\n\nLocal files will be permanently deleted from disk.')) return;
   var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
   _postRemove({
     title: _detailItem.title, type: _detailItem.type, tmdb_id: tmdbId,
@@ -1293,7 +1487,7 @@ function _postRemove(payload) {
       _showMsg('Error: ' + errMsg, 'error');
       return false;
     } else {
-      _showMsg('Switched ' + (d.removed || 0) + ' file(s) to debrid streaming. To re-download, trigger a search in your media manager.', 'success');
+      _showMsg('Switched ' + (d.removed || 0) + ' file(s) to debrid streaming. To switch back to local, trigger a search in your media manager.', 'success');
       _scheduleRefresh(1000);
       return true;
     }
@@ -1408,6 +1602,44 @@ function _scheduleRefresh(ms) {
   }, ms);
 }
 
+function _startSmartPoll() {
+  if (_pollActive) return;
+  _pollActive = true;
+  _pollTick();
+}
+
+function _stopSmartPoll() {
+  _pollActive = false;
+  if (_pollTimer) { clearTimeout(_pollTimer); _pollTimer = null; }
+}
+
+function _pollTick() {
+  if (!_pollActive) return;
+  _pollTimer = setTimeout(function() {
+    _pollTimer = null;
+    if (!_pollActive) return;
+    _refreshDetailData().then(function() {
+      if (_hasPendingTransitions()) {
+        _pollTick();
+      } else {
+        _pollActive = false;
+      }
+    });
+  }, 15000);
+}
+
+function _hasPendingTransitions() {
+  return Object.keys(_pending).length > 0;
+}
+
+function _checkSmartPoll() {
+  if (_hasPendingTransitions()) {
+    _startSmartPoll();
+  } else {
+    _stopSmartPoll();
+  }
+}
+
 function _setPending(title, episodes, direction) {
   return fetch('/api/library/pending', {
     method: 'POST',
@@ -1429,7 +1661,7 @@ function _runSequential(tasks) {
 
 function _refreshDetailData() {
   // Refresh library data and stay in detail view if still open
-  fetch('/api/library')
+  return fetch('/api/library')
     .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(data) {
       if (!data) return;
@@ -1447,11 +1679,13 @@ function _refreshDetailData() {
           if (normTitle(items[i].title) === nk) {
             _detailItem = items[i];
             _renderDetail();
+            _checkSmartPoll();
             return;
           }
         }
       }
       applyFilters();
+      _checkSmartPoll();
     })
     .catch(function() {});
 }

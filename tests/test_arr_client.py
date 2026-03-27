@@ -270,6 +270,79 @@ class TestSonarrClient:
         assert result['status'] == 'error'
         assert 'No files' in result['message']
 
+    @patch('urllib.request.urlopen')
+    def test_get_blackhole_tag_id_found(self, mock_urlopen, sonarr):
+        mock_urlopen.return_value = _mock_urlopen([
+            {'implementation': 'QBittorrent', 'enable': True, 'tags': []},
+            {'implementation': 'TorrentBlackhole', 'enable': True, 'tags': [7]},
+        ])
+        assert sonarr._get_blackhole_tag_id() == 7
+
+    @patch('urllib.request.urlopen')
+    def test_get_blackhole_tag_id_not_found(self, mock_urlopen, sonarr):
+        mock_urlopen.return_value = _mock_urlopen([
+            {'implementation': 'QBittorrent', 'enable': True, 'tags': []},
+        ])
+        assert sonarr._get_blackhole_tag_id() is None
+
+    @patch('urllib.request.urlopen')
+    def test_get_blackhole_tag_id_cached(self, mock_urlopen, sonarr):
+        mock_urlopen.return_value = _mock_urlopen([
+            {'implementation': 'TorrentBlackhole', 'enable': True, 'tags': [7]},
+        ])
+        assert sonarr._get_blackhole_tag_id() == 7
+        # Second call should not hit the API
+        mock_urlopen.side_effect = Exception('should not be called')
+        assert sonarr._get_blackhole_tag_id() == 7
+
+    @patch('urllib.request.urlopen')
+    def test_get_blackhole_tag_id_zero(self, mock_urlopen, sonarr):
+        """Tag ID 0 should be handled correctly, not treated as falsy."""
+        mock_urlopen.return_value = _mock_urlopen([
+            {'implementation': 'TorrentBlackhole', 'enable': True, 'tags': [0]},
+        ])
+        assert sonarr._get_blackhole_tag_id() == 0
+
+    @patch('urllib.request.urlopen')
+    def test_ensure_debrid_routing_adds_tag(self, mock_urlopen, sonarr):
+        sonarr._blackhole_tag_id = 7
+        series = {'id': 5, 'title': 'My Show', 'tags': []}
+        mock_urlopen.return_value = _mock_urlopen(dict(series, tags=[7]))
+        result = sonarr._ensure_debrid_routing(series)
+        assert 7 in result['tags']
+
+    @patch('urllib.request.urlopen')
+    def test_ensure_debrid_routing_already_tagged(self, mock_urlopen, sonarr):
+        sonarr._blackhole_tag_id = 7
+        series = {'id': 5, 'title': 'My Show', 'tags': [7]}
+        result = sonarr._ensure_debrid_routing(series)
+        assert result is series  # no API call needed
+        mock_urlopen.assert_not_called()
+
+    @patch('urllib.request.urlopen')
+    def test_ensure_local_routing_removes_tag(self, mock_urlopen, sonarr):
+        sonarr._blackhole_tag_id = 7
+        series = {'id': 5, 'title': 'My Show', 'tags': [7, 8]}
+        mock_urlopen.return_value = _mock_urlopen(dict(series, tags=[8]))
+        result = sonarr._ensure_local_routing(series)
+        assert 7 not in result['tags']
+
+    @patch('urllib.request.urlopen')
+    def test_ensure_and_search_with_prefer_debrid(self, mock_urlopen, sonarr):
+        """prefer_debrid=True should add the blackhole tag before searching."""
+        sonarr._blackhole_tag_id = 7
+        responses = [
+            _mock_urlopen([{'id': 5, 'title': 'My Show', 'tmdbId': 123, 'tags': []}]),
+            _mock_urlopen({'id': 5, 'title': 'My Show', 'tmdbId': 123, 'tags': [7]}),  # PUT
+            _mock_urlopen([
+                {'id': 100, 'seasonNumber': 1, 'episodeNumber': 1},
+            ]),
+            _mock_urlopen({'id': 42}),  # search
+        ]
+        mock_urlopen.side_effect = responses
+        result = sonarr.ensure_and_search('My Show', 123, 1, [1], prefer_debrid=True)
+        assert result['status'] == 'sent'
+
 
 # ---------------------------------------------------------------------------
 # Radarr client
@@ -292,10 +365,22 @@ class TestRadarrClient:
     @patch('urllib.request.urlopen')
     def test_ensure_and_search_existing_with_file(self, mock_urlopen, radarr):
         mock_urlopen.return_value = _mock_urlopen([
-            {'id': 1, 'title': 'Inception', 'tmdbId': 27205, 'hasFile': True}
+            {'id': 1, 'title': 'Inception', 'tmdbId': 27205, 'hasFile': True, 'tags': []}
         ])
         result = radarr.ensure_and_search('Inception', 27205)
         assert result['status'] == 'exists'
+
+    @patch('urllib.request.urlopen')
+    def test_ensure_and_search_existing_with_file_prefer_debrid_triggers_search(self, mock_urlopen, radarr):
+        """When prefer_debrid is set, hasFile should not block routing + search."""
+        responses = [
+            _mock_urlopen([{'id': 1, 'title': 'Inception', 'tmdbId': 27205, 'hasFile': True, 'tags': []}]),
+            _mock_urlopen([]),  # download clients (no blackhole)
+            _mock_urlopen({'id': 42}),  # search_movie
+        ]
+        mock_urlopen.side_effect = responses
+        result = radarr.ensure_and_search('Inception', 27205, prefer_debrid=False)
+        assert result['status'] == 'sent'
 
     @patch('urllib.request.urlopen')
     def test_ensure_and_search_existing_no_file(self, mock_urlopen, radarr):
@@ -332,6 +417,36 @@ class TestRadarrClient:
         mock_urlopen.side_effect = responses
         result = radarr.ensure_and_search('Missing', None)
         assert result['status'] == 'error'
+
+    @patch('urllib.request.urlopen')
+    def test_get_blackhole_tag_id_found(self, mock_urlopen, radarr):
+        mock_urlopen.return_value = _mock_urlopen([
+            {'implementation': 'TorrentBlackhole', 'enable': True, 'tags': [3]},
+        ])
+        assert radarr._get_blackhole_tag_id() == 3
+
+    @patch('urllib.request.urlopen')
+    def test_get_blackhole_tag_id_not_found(self, mock_urlopen, radarr):
+        mock_urlopen.return_value = _mock_urlopen([
+            {'implementation': 'QBittorrent', 'enable': True, 'tags': []},
+        ])
+        assert radarr._get_blackhole_tag_id() is None
+
+    @patch('urllib.request.urlopen')
+    def test_ensure_debrid_routing_adds_tag(self, mock_urlopen, radarr):
+        radarr._blackhole_tag_id = 3
+        movie = {'id': 1, 'title': 'Inception', 'tags': []}
+        mock_urlopen.return_value = _mock_urlopen(dict(movie, tags=[3]))
+        result = radarr._ensure_debrid_routing(movie)
+        assert 3 in result['tags']
+
+    @patch('urllib.request.urlopen')
+    def test_ensure_local_routing_removes_tag(self, mock_urlopen, radarr):
+        radarr._blackhole_tag_id = 3
+        movie = {'id': 1, 'title': 'Inception', 'tags': [3, 5]}
+        mock_urlopen.return_value = _mock_urlopen(dict(movie, tags=[5]))
+        result = radarr._ensure_local_routing(movie)
+        assert 3 not in result['tags']
 
     @patch('urllib.request.urlopen')
     def test_remove_movie(self, mock_urlopen, radarr):

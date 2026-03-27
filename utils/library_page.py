@@ -694,7 +694,8 @@ function _renderMovieDetail(movie, meta) {
     html += '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">';
     if (movie.source === 'debrid') {
       var movieDlLabel = _downloadServices.movie === 'overseerr' ? 'Request in Overseerr' : 'Switch to Local';
-      html += '<button class="btn-action" onclick="_confirmBtn(this,function(){downloadMovie()})">' + movieDlLabel + '</button>';
+      var movieDebridPref = _downloadServices.movie === 'overseerr' ? undefined : false;
+      html += '<button class="btn-action" onclick="_confirmBtn(this,function(){downloadMovie(' + (movieDebridPref === undefined ? '' : movieDebridPref) + ')})">' + movieDlLabel + '</button>';
     }
     if ((movie.source === 'local' || movie.source === 'both') && _downloadServices.movie === 'radarr') {
       html += '<button class="btn-action danger" onclick="_confirmBtn(this,function(){removeMovie()})">Switch to Debrid</button>';
@@ -850,13 +851,13 @@ function _renderSeasonEpisodes(season, si) {
       html += '<button class="btn-action" disabled>\u2026</button>';
     } else if (_downloadServices.show && _downloadServices.show !== 'overseerr') {
       if (ep.source === 'debrid') {
-        html += '<button class="btn-action" aria-label="Switch ' + epLabel + ' to Local" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ')})">Switch to Local</button>';
+        html += '<button class="btn-action" aria-label="Switch ' + epLabel + ' to Local" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ',false)})">Switch to Local</button>';
       } else if (ep.source === 'local') {
         html += '<button class="btn-action danger" aria-label="Switch ' + epLabel + ' to Debrid" onclick="_confirmBtn(this,function(){removeEp(' + season.number + ',' + ep.number + ')})">Switch to Debrid</button>';
       } else if (ep.source === 'both') {
         html += '<button class="btn-action danger" aria-label="Switch ' + epLabel + ' to Debrid" onclick="_confirmBtn(this,function(){removeEp(' + season.number + ',' + ep.number + ')})">Switch to Debrid</button>';
       } else if (isMissing && (!ep.air_date || new Date(ep.air_date + 'T00:00:00').getTime() <= Date.now())) {
-        html += '<button class="btn-action" aria-label="Search ' + epLabel + '" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ')})">Search</button>';
+        html += '<button class="btn-action" aria-label="Search ' + epLabel + '" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ',true)})">Search</button>';
       }
     }
     html += '</td>';
@@ -1146,7 +1147,7 @@ function applyPreference() {
       if (eps.length) {
         (function(sNum, epList) {
           dlTasks.push(function() {
-            var payload = {title: _detailItem.title, type: 'show', tmdb_id: tmdbId, season: sNum};
+            var payload = {title: _detailItem.title, type: 'show', tmdb_id: tmdbId, season: sNum, prefer_debrid: false};
             payload.episodes = isOverseerr ? [] : epList;
             return _postDownload(payload);
           });
@@ -1276,13 +1277,15 @@ function _savePref(nk, pref) {
   }).catch(function(e) { alert('Failed to save preference: ' + e); return false; });
 }
 
-function downloadEp(season, episode) {
+function downloadEp(season, episode, preferDebrid) {
   if (!_detailItem) return;
   var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
-  _postDownload({
+  var payload = {
     title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
     season: season, episodes: [episode]
-  });
+  };
+  if (preferDebrid !== undefined) payload.prefer_debrid = preferDebrid;
+  _postDownload(payload);
 }
 
 function removeEp(season, episode) {
@@ -1307,7 +1310,7 @@ function dlSeason(seasonIdx) {
   var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
   _postDownload({
     title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
-    season: season.number, episodes: eps
+    season: season.number, episodes: eps, prefer_debrid: false
   });
 }
 
@@ -1324,7 +1327,7 @@ function searchMissingSeason(seasonIdx) {
   var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
   _postDownload({
     title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
-    season: season.number, episodes: eps
+    season: season.number, episodes: eps, prefer_debrid: true
   });
 }
 
@@ -1337,12 +1340,14 @@ function requestSeason(seasonNumber) {
   });
 }
 
-function downloadMovie() {
+function downloadMovie(preferDebrid) {
   if (!_detailItem) return;
   var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
-  _postDownload({
+  var payload = {
     title: _detailItem.title, type: 'movie', tmdb_id: tmdbId
-  });
+  };
+  if (preferDebrid !== undefined) payload.prefer_debrid = preferDebrid;
+  _postDownload(payload);
 }
 
 function removeMovie() {
@@ -1367,7 +1372,8 @@ function applyMoviePreference() {
     var svcLabel = _svcNames[movieSvc] || movieSvc;
     if (!confirm('Switch ' + _detailItem.title + ' to local via ' + svcLabel + '?')) return;
     _postDownload({
-      title: _detailItem.title, type: 'movie', tmdb_id: tmdbId
+      title: _detailItem.title, type: 'movie', tmdb_id: tmdbId,
+      prefer_debrid: false
     }).then(function(ok) { if (ok) _savePref(nk, pref); });
 
   } else if (pref === 'prefer-local' && _detailItem.source === 'both') {

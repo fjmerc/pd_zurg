@@ -8,6 +8,7 @@ in both sources.
 import os
 import re
 import threading
+import unicodedata
 import time
 from datetime import datetime, timezone
 from utils.logger import get_logger
@@ -292,6 +293,23 @@ def _normalize_title(title):
     t = title.lower()
     t = re.sub(r'\s*\(\d{4}\)\s*$', '', t)
     t = t.strip()
+    return t
+
+
+def _norm_for_matching(title):
+    """Normalize title for fuzzy matching across systems.
+
+    Transliterates unicode to ASCII (e.g., Amélie → Amelie), strips
+    punctuation but keeps digits (including years) for disambiguation.
+    Titles like "(500) Days of Summer" and "500 Days of Summer" match,
+    while "Flash (2014)" and "Flash (2023)" remain distinct.
+    """
+    t = title.lower()
+    # Transliterate unicode to ASCII (é → e, ñ → n, etc.)
+    t = unicodedata.normalize('NFKD', t).encode('ascii', 'ignore').decode('ascii')
+    # Strip punctuation but keep alphanumeric and spaces
+    t = re.sub(r'[^a-z0-9\s]', '', t)
+    t = re.sub(r'\s+', ' ', t).strip()
     return t
 
 
@@ -707,31 +725,50 @@ class LibraryScanner:
         symlinked_shows = set()   # titles that got new symlinks
         symlinked_movies = set()  # titles that got new symlinks
 
-        # Fetch arr libraries for canonical folder names and rescan IDs
-        sonarr_map = {}  # lowercase title -> {'folder': str, 'id': int, 'client': obj}
-        radarr_map = {}  # lowercase title -> {'folder': str, 'id': int, 'client': obj}
+        # Fetch arr libraries for canonical folder names and rescan IDs.
+        # Index by both exact lowercase title and normalized title (stripped
+        # of punctuation) so titles like "(500) Days of Summer" match
+        # "500 Days of Summer" from the torrent folder name.
+        sonarr_map = {}  # lowercase title -> info
+        sonarr_map_norm = {}  # normalized title -> info
+        radarr_map = {}
+        radarr_map_norm = {}
         try:
             from utils.arr_client import get_download_service
             client, svc = get_download_service('show')
             if client and svc == 'sonarr':
                 for s in (client.get_all_series() or []):
+                    t = s.get('title', '')
+                    if not t:
+                        continue
                     p = s.get('path', '')
-                    sonarr_map[s.get('title', '').lower()] = {
+                    info = {
                         'folder': os.path.basename(p) if p else '',
                         'id': s.get('id'),
                         'client': client,
                     }
+                    sonarr_map[t.lower()] = info
+                    nk = _norm_for_matching(t)
+                    if nk and nk not in sonarr_map_norm:
+                        sonarr_map_norm[nk] = info
             client, svc = get_download_service('movie')
             if client and svc == 'radarr':
                 for m in (client.get_all_movies() or []):
+                    t = m.get('title', '')
+                    if not t:
+                        continue
                     p = m.get('path', '')
-                    radarr_map[m.get('title', '').lower()] = {
+                    info = {
                         'folder': os.path.basename(p) if p else '',
                         'id': m.get('id'),
                         'client': client,
                     }
+                    radarr_map[t.lower()] = info
+                    nk = _norm_for_matching(t)
+                    if nk and nk not in radarr_map_norm:
+                        radarr_map_norm[nk] = info
         except Exception as e:
-            logger.debug(f"[library] Could not fetch arr libraries for folder naming: {e}")
+            logger.warning(f"[library] Could not fetch arr libraries for folder naming: {e}")
 
         # --- Movies ---
         if self._local_movies_path:
@@ -745,7 +782,7 @@ class LibraryScanner:
 
                 title = movie['title']
                 year = movie.get('year')
-                arr_info = radarr_map.get(title.lower())
+                arr_info = radarr_map.get(title.lower()) or radarr_map_norm.get(_norm_for_matching(title))
                 if arr_info and arr_info['folder']:
                     movie_dir = arr_info['folder']
                 else:
@@ -815,7 +852,7 @@ class LibraryScanner:
             norm = _normalize_title(show['title'])
             title = show['title']
             year = show.get('year')
-            arr_info = sonarr_map.get(title.lower())
+            arr_info = sonarr_map.get(title.lower()) or sonarr_map_norm.get(_norm_for_matching(title))
             if arr_info and arr_info['folder']:
                 show_dir = arr_info['folder']
             else:
@@ -871,7 +908,7 @@ class LibraryScanner:
             logger.info(f"[library] Created {created} debrid symlink(s) in local library")
             # Trigger arr rescans using already-fetched library data
             for title in symlinked_shows:
-                info = sonarr_map.get(title.lower())
+                info = sonarr_map.get(title.lower()) or sonarr_map_norm.get(_norm_for_matching(title))
                 if info and info.get('id') and info.get('client'):
                     try:
                         info['client'].rescan_series(info['id'])
@@ -879,7 +916,7 @@ class LibraryScanner:
                     except Exception as e:
                         logger.debug(f"[library] Sonarr rescan failed for {title}: {e}")
             for title in symlinked_movies:
-                info = radarr_map.get(title.lower())
+                info = radarr_map.get(title.lower()) or radarr_map_norm.get(_norm_for_matching(title))
                 if info and info.get('id') and info.get('client'):
                     try:
                         info['client'].rescan_movie(info['id'])

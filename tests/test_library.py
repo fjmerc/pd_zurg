@@ -12,6 +12,7 @@ from utils.library import (
     _collect_episodes,
     _build_season_data,
     _discover_mount,
+    _norm_for_matching,
     LibraryScanner,
     setup,
     get_scanner,
@@ -1037,6 +1038,40 @@ class TestSeasonPackPreference:
             elif ep_info.get('_folder_ep_count', 1) > existing[ep_key].get('_folder_ep_count', 1):
                 existing[ep_key] = ep_info
         assert existing[(1, 1)]['file'] == 'first.S01E01.mkv'
+
+
+# ---------------------------------------------------------------------------
+# _norm_for_matching
+# ---------------------------------------------------------------------------
+
+class TestNormForMatching:
+    """Fuzzy title normalization for arr matching."""
+
+    def test_strips_punctuation(self):
+        assert _norm_for_matching("Mission: Impossible - Rogue Nation") == "mission impossible rogue nation"
+
+    def test_strips_parentheses(self):
+        assert _norm_for_matching("(500) Days of Summer") == "500 days of summer"
+
+    def test_preserves_year_for_disambiguation(self):
+        """Years should be kept so 'Flash (2014)' != 'Flash (2023)'."""
+        assert _norm_for_matching("Lioness (2023)") == "lioness 2023"
+        assert _norm_for_matching("Flash (2014)") != _norm_for_matching("Flash (2023)")
+
+    def test_matches_across_naming(self):
+        """Titles from torrent names and arr canonical names should normalize the same."""
+        assert _norm_for_matching("500 Days of Summer") == _norm_for_matching("(500) Days of Summer")
+        assert _norm_for_matching("Mission Impossible Rogue Nation") == _norm_for_matching("Mission: Impossible - Rogue Nation")
+        assert _norm_for_matching("Monsters Inc") == _norm_for_matching("Monsters, Inc.")
+        assert _norm_for_matching("I Tonya") == _norm_for_matching("I, Tonya")
+
+    def test_empty_string(self):
+        assert _norm_for_matching("") == ""
+
+    def test_unicode_transliteration(self):
+        """Accented characters should be transliterated, not dropped."""
+        assert _norm_for_matching("Amélie") == "amelie"
+        assert _norm_for_matching("Señor") == "senor"
 
 
 # ---------------------------------------------------------------------------

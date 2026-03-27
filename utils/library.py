@@ -942,6 +942,19 @@ class LibraryScanner:
                         is_show = len(episodes) > 0 or category_is_shows
 
                         if is_show:
+                            # Tag episodes with per-season episode count so
+                            # season packs are preferred over individual
+                            # episode downloads. Per-season count ensures a
+                            # high-quality S03 pack (20 eps) isn't beaten by
+                            # a lower-quality S01-S08 mega-pack just because
+                            # the mega-pack has more total files.
+                            # On ties (equal per-season count), first-seen wins.
+                            season_counts = {}
+                            for ep_key in episodes:
+                                season_counts[ep_key[0]] = season_counts.get(ep_key[0], 0) + 1
+                            for ep_key in episodes:
+                                episodes[ep_key]['_folder_ep_count'] = season_counts[ep_key[0]]
+
                             key = _normalize_title(title)
                             if key not in show_groups:
                                 show_groups[key] = {
@@ -951,7 +964,12 @@ class LibraryScanner:
                                     'path': entry.path,
                                 }
                             else:
-                                show_groups[key]['episodes'].update(episodes)
+                                existing = show_groups[key]['episodes']
+                                for ep_key, ep_info in episodes.items():
+                                    if ep_key not in existing:
+                                        existing[ep_key] = ep_info
+                                    elif ep_info.get('_folder_ep_count', 1) > existing[ep_key].get('_folder_ep_count', 1):
+                                        existing[ep_key] = ep_info
                                 # Prefer title with year or better capitalization
                                 if year and not show_groups[key]['year']:
                                     show_groups[key]['year'] = year

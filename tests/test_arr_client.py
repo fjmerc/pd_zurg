@@ -9,6 +9,7 @@ from unittest.mock import patch, MagicMock
 from utils.arr_client import (
     SonarrClient, RadarrClient, OverseerrClient,
     get_download_service, get_configured_services,
+    _NOT_FOUND,
 )
 
 
@@ -322,10 +323,20 @@ class TestSonarrClient:
     @patch('urllib.request.urlopen')
     def test_ensure_local_routing_removes_tag(self, mock_urlopen, sonarr):
         sonarr._blackhole_tag_id = 7
-        series = {'id': 5, 'title': 'My Show', 'tags': [7, 8]}
+        sonarr._local_tag_id = 8
+        series = {'id': 5, 'title': 'My Show', 'tags': [7]}
         mock_urlopen.return_value = _mock_urlopen(dict(series, tags=[8]))
         result = sonarr._ensure_local_routing(series)
         assert 7 not in result['tags']
+        assert 8 in result['tags']
+
+    def test_ensure_local_routing_noop_when_no_local_tag(self, sonarr):
+        """When no local tag exists, don't remove debrid tag (would leave series unroutable)."""
+        sonarr._blackhole_tag_id = 7
+        sonarr._local_tag_id = _NOT_FOUND
+        series = {'id': 5, 'title': 'My Show', 'tags': [7]}
+        result = sonarr._ensure_local_routing(series)
+        assert result is series  # unchanged, no PUT
 
     @patch('urllib.request.urlopen')
     def test_ensure_and_search_with_prefer_debrid(self, mock_urlopen, sonarr):
@@ -444,10 +455,12 @@ class TestRadarrClient:
     @patch('urllib.request.urlopen')
     def test_ensure_local_routing_removes_tag(self, mock_urlopen, radarr):
         radarr._blackhole_tag_id = 3
-        movie = {'id': 1, 'title': 'Inception', 'tags': [3, 5]}
+        radarr._local_tag_id = 5
+        movie = {'id': 1, 'title': 'Inception', 'tags': [3]}
         mock_urlopen.return_value = _mock_urlopen(dict(movie, tags=[5]))
         result = radarr._ensure_local_routing(movie)
         assert 3 not in result['tags']
+        assert 5 in result['tags']
 
     @patch('urllib.request.urlopen')
     def test_remove_movie(self, mock_urlopen, radarr):

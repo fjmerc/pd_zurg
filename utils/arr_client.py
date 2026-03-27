@@ -174,6 +174,7 @@ class SonarrClient(_ArrClientBase):
         debrid_tag = self._get_blackhole_tag_id()
         local_tag = self._get_local_tag_id()
         if debrid_tag is None:
+            logger.warning(f"[sonarr] No blackhole tag configured — cannot route to debrid: {series.get('title')}")
             return series
         tags = list(series.get('tags', []))
         changed = False
@@ -190,18 +191,25 @@ class SonarrClient(_ArrClientBase):
         if result:
             logger.info(f"[sonarr] Routed to debrid: {series.get('title')}")
             return result
+        logger.warning(f"[sonarr] Failed to update routing tags for: {series.get('title')}")
         return series
 
     def _ensure_local_routing(self, series):
         """Add local tag and remove debrid tag so downloads route to local clients."""
         debrid_tag = self._get_blackhole_tag_id()
         local_tag = self._get_local_tag_id()
+        if local_tag is None and debrid_tag is None:
+            return series
+        if local_tag is None:
+            # Can't add local tag — only safe to remove debrid if local tag exists
+            logger.warning(f"[sonarr] No local torrent client tag configured — cannot route to local: {series.get('title')}")
+            return series
         tags = list(series.get('tags', []))
         changed = False
         if debrid_tag is not None and debrid_tag in tags:
             tags.remove(debrid_tag)
             changed = True
-        if local_tag is not None and local_tag not in tags:
+        if local_tag not in tags:
             tags.append(local_tag)
             changed = True
         if not changed:
@@ -211,6 +219,7 @@ class SonarrClient(_ArrClientBase):
         if result:
             logger.info(f"[sonarr] Routed to local: {series.get('title')}")
             return result
+        logger.warning(f"[sonarr] Failed to update routing tags for: {series.get('title')}")
         return series
 
     def lookup_series(self, title=None, tmdb_id=None):
@@ -323,6 +332,7 @@ class SonarrClient(_ArrClientBase):
         # Check if already in Sonarr
         series = self.find_series_in_library(tmdb_id=tmdb_id, title=title)
 
+        just_added = False
         if not series:
             # Look up and add
             lookup = self.lookup_series(title=title, tmdb_id=tmdb_id)
@@ -350,8 +360,10 @@ class SonarrClient(_ArrClientBase):
                 if not series:
                     return {'status': 'error', 'message': f'Failed to add series to Sonarr: {title}'}
                 logger.info(f"[sonarr] Series already existed (race): {title} (ID: {series.get('id')})")
+                just_added = True
             else:
                 logger.info(f"[sonarr] Added series: {title} (ID: {series.get('id')})")
+                just_added = True
 
         series_id = series.get('id')
         if series_id is None:
@@ -374,6 +386,12 @@ class SonarrClient(_ArrClientBase):
                     target_ids.append(ep_id)
 
         if not target_ids:
+            if just_added:
+                return {
+                    'status': 'pending',
+                    'service': 'sonarr',
+                    'message': f'Added {title} to Sonarr — episode data is loading. Try again in a moment.',
+                }
             return {
                 'status': 'error',
                 'message': f'No matching episodes found in Sonarr for S{season_number:02d}',
@@ -506,6 +524,7 @@ class RadarrClient(_ArrClientBase):
         debrid_tag = self._get_blackhole_tag_id()
         local_tag = self._get_local_tag_id()
         if debrid_tag is None:
+            logger.warning(f"[radarr] No blackhole tag configured — cannot route to debrid: {movie.get('title')}")
             return movie
         tags = list(movie.get('tags', []))
         changed = False
@@ -522,18 +541,24 @@ class RadarrClient(_ArrClientBase):
         if result:
             logger.info(f"[radarr] Routed to debrid: {movie.get('title')}")
             return result
+        logger.warning(f"[radarr] Failed to update routing tags for: {movie.get('title')}")
         return movie
 
     def _ensure_local_routing(self, movie):
         """Add local tag and remove debrid tag so downloads route to local clients."""
         debrid_tag = self._get_blackhole_tag_id()
         local_tag = self._get_local_tag_id()
+        if local_tag is None and debrid_tag is None:
+            return movie
+        if local_tag is None:
+            logger.warning(f"[radarr] No local torrent client tag configured — cannot route to local: {movie.get('title')}")
+            return movie
         tags = list(movie.get('tags', []))
         changed = False
         if debrid_tag is not None and debrid_tag in tags:
             tags.remove(debrid_tag)
             changed = True
-        if local_tag is not None and local_tag not in tags:
+        if local_tag not in tags:
             tags.append(local_tag)
             changed = True
         if not changed:
@@ -543,6 +568,7 @@ class RadarrClient(_ArrClientBase):
         if result:
             logger.info(f"[radarr] Routed to local: {movie.get('title')}")
             return result
+        logger.warning(f"[radarr] Failed to update routing tags for: {movie.get('title')}")
         return movie
 
     def lookup_movie(self, title=None, tmdb_id=None):

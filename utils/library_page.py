@@ -1220,10 +1220,39 @@ function applyPreference() {
     }
     if (totalSwitchable === 0 && totalLocalOnly === 0) { _savePref(nk, pref); return; }
     if (totalSwitchable === 0) {
+      // No episodes have both sources — trigger a debrid search for
+      // local-only episodes so debrid copies get acquired.
       _savePref(nk, pref).then(function(saved) {
-        if (saved && localOnlyEps.length) _setPending(_detailItem.title, localOnlyEps, 'to-debrid');
-        if (saved) _showMsg('Preference saved. ' + totalLocalOnly + ' episode(s) have no debrid copy \u2014 local files kept.', 'success');
-        else _showMsg('Failed to save preference.', 'error');
+        if (!saved) { _showMsg('Failed to save preference.', 'error'); return; }
+        if (!localOnlyEps.length) return;
+        // Group by season and trigger searches.
+        // Capture title/tmdbId before async to avoid null-read if user navigates away.
+        var capturedTitle = _detailItem.title;
+        var capturedTmdbId = tmdbId;
+        var bySeason = {};
+        for (var li = 0; li < localOnlyEps.length; li++) {
+          var sn = localOnlyEps[li].season;
+          if (!bySeason[sn]) bySeason[sn] = [];
+          bySeason[sn].push(localOnlyEps[li].episode);
+        }
+        var tasks = [];
+        Object.keys(bySeason).forEach(function(sn) {
+          tasks.push(function() {
+            return _postDownload({
+              title: capturedTitle, type: 'show', tmdb_id: capturedTmdbId,
+              season: parseInt(sn), episodes: bySeason[sn], prefer_debrid: true
+            });
+          });
+        });
+        _runSequential(tasks).then(function(ok) {
+          if (ok) {
+            _setPending(capturedTitle, localOnlyEps, 'to-debrid');
+            _showMsg('Preference saved. Searching for debrid copies of ' + totalLocalOnly + ' episode(s).', 'success');
+            _scheduleRefresh(1000);
+          } else {
+            _showMsg('Preference saved but search failed for some episodes.', 'error');
+          }
+        });
       });
       return;
     }
@@ -1279,13 +1308,20 @@ function _savePref(nk, pref) {
 
 function downloadEp(season, episode, preferDebrid) {
   if (!_detailItem) return;
+  var itemTitle = _detailItem.title;
   var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
   var payload = {
-    title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
+    title: itemTitle, type: 'show', tmdb_id: tmdbId,
     season: season, episodes: [episode]
   };
   if (preferDebrid !== undefined) payload.prefer_debrid = preferDebrid;
-  _postDownload(payload);
+  _postDownload(payload).then(function(ok) {
+    if (ok) {
+      var dir = preferDebrid === false ? 'to-local' : 'to-debrid';
+      _setPending(itemTitle, [{season: season, episode: episode}], dir);
+      _scheduleRefresh(1000);
+    }
+  });
 }
 
 function removeEp(season, episode) {
@@ -1308,9 +1344,13 @@ function dlSeason(seasonIdx) {
   }
   if (!eps.length) return;
   var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
+  var pendingEps = eps.map(function(e) { return {season: season.number, episode: e}; });
+  var itemTitle = _detailItem.title;
   _postDownload({
-    title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
+    title: itemTitle, type: 'show', tmdb_id: tmdbId,
     season: season.number, episodes: eps, prefer_debrid: false
+  }).then(function(ok) {
+    if (ok) { _setPending(itemTitle, pendingEps, 'to-local'); _scheduleRefresh(1000); }
   });
 }
 
@@ -1324,19 +1364,33 @@ function searchMissingSeason(seasonIdx) {
     }
   }
   if (!eps.length) return;
+  var itemTitle = _detailItem.title;
   var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
+  var nk = normTitle(itemTitle);
+  var pref = _preferences[nk] || 'none';
+  var dir = pref === 'prefer-local' ? 'to-local' : 'to-debrid';
+  var pendingEps = eps.map(function(e) { return {season: season.number, episode: e}; });
   _postDownload({
-    title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
-    season: season.number, episodes: eps, prefer_debrid: true
+    title: itemTitle, type: 'show', tmdb_id: tmdbId,
+    season: season.number, episodes: eps
+  }).then(function(ok) {
+    if (ok) { _setPending(itemTitle, pendingEps, dir); _scheduleRefresh(1000); }
   });
 }
 
 function requestSeason(seasonNumber) {
   if (!_detailItem) return;
   var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
-  _postDownload({
+  var nk = normTitle(_detailItem.title);
+  var pref = _preferences[nk] || 'none';
+  var payload = {
     title: _detailItem.title, type: 'show', tmdb_id: tmdbId,
     season: seasonNumber, episodes: []
+  };
+  if (pref === 'prefer-debrid') payload.prefer_debrid = true;
+  else if (pref === 'prefer-local') payload.prefer_debrid = false;
+  _postDownload(payload).then(function(ok) {
+    if (ok) _scheduleRefresh(2000);
   });
 }
 

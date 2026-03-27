@@ -124,8 +124,21 @@ class SonarrClient(_ArrClientBase):
         result = self._get('/api/v3/system/status')
         return result is not None
 
+    # Usenet client implementations (lowercase for case-insensitive matching).
+    # These should NOT be tagged exclusively because they don't compete with
+    # torrent clients for the same protocol.
+    _USENET_IMPLEMENTATIONS = frozenset({
+        'nzbget', 'sabnzbd', 'nzbvortex', 'pneumatic',
+        'usenetblackhole', 'usenetdownloadstation',
+    })
+
     def _discover_routing_tags(self):
-        """Discover tags used by download clients for routing."""
+        """Discover tags used by torrent download clients for routing.
+
+        Only considers torrent clients (QBittorrent, Transmission, etc.)
+        for the local tag. Usenet clients (NZBget, SABnzbd) are skipped
+        because they handle a different protocol and should serve all items.
+        """
         if self._blackhole_tag_id is not None:
             return
         clients = self._get('/api/v3/downloadclient') or []
@@ -134,15 +147,17 @@ class SonarrClient(_ArrClientBase):
         for c in clients:
             if not c.get('enable'):
                 continue
+            impl = c.get('implementation', '')
+            impl_lower = impl.lower()
             tags = c.get('tags', [])
             if not tags:
                 continue
-            if c.get('implementation') == 'TorrentBlackhole':
+            if impl_lower == 'torrentblackhole':
                 self._blackhole_tag_id = tags[0]
                 logger.debug(f"[sonarr] Blackhole client uses tag {self._blackhole_tag_id}")
-            elif self._local_tag_id is _NOT_FOUND:
+            elif impl_lower not in self._USENET_IMPLEMENTATIONS and self._local_tag_id is _NOT_FOUND:
                 self._local_tag_id = tags[0]
-                logger.debug(f"[sonarr] Local client uses tag {self._local_tag_id}")
+                logger.debug(f"[sonarr] Local torrent client ({impl}) uses tag {self._local_tag_id}")
 
     def _get_blackhole_tag_id(self):
         """Find the tag ID used by the TorrentBlackhole download client."""
@@ -448,8 +463,14 @@ class RadarrClient(_ArrClientBase):
         result = self._get('/api/v3/system/status')
         return result is not None
 
+    _USENET_IMPLEMENTATIONS = SonarrClient._USENET_IMPLEMENTATIONS
+
     def _discover_routing_tags(self):
-        """Discover tags used by download clients for routing."""
+        """Discover tags used by torrent download clients for routing.
+
+        Only considers torrent clients for the local tag. Usenet clients
+        are skipped because they handle a different protocol.
+        """
         if self._blackhole_tag_id is not None:
             return
         clients = self._get('/api/v3/downloadclient') or []
@@ -458,15 +479,17 @@ class RadarrClient(_ArrClientBase):
         for c in clients:
             if not c.get('enable'):
                 continue
+            impl = c.get('implementation', '')
+            impl_lower = impl.lower()
             tags = c.get('tags', [])
             if not tags:
                 continue
-            if c.get('implementation') == 'TorrentBlackhole':
+            if impl_lower == 'torrentblackhole':
                 self._blackhole_tag_id = tags[0]
                 logger.debug(f"[radarr] Blackhole client uses tag {self._blackhole_tag_id}")
-            elif self._local_tag_id is _NOT_FOUND:
+            elif impl_lower not in self._USENET_IMPLEMENTATIONS and self._local_tag_id is _NOT_FOUND:
                 self._local_tag_id = tags[0]
-                logger.debug(f"[radarr] Local client uses tag {self._local_tag_id}")
+                logger.debug(f"[radarr] Local torrent client ({impl}) uses tag {self._local_tag_id}")
 
     def _get_blackhole_tag_id(self):
         """Find the tag ID used by the TorrentBlackhole download client."""

@@ -12,12 +12,14 @@ from utils import ffprobe_monitor
 from utils import status_server
 from utils.config_validator import run_validation
 from utils.config_reload import handle_sighup
+from utils.task_scheduler import scheduler
 
 
 def shutdown(signum, frame):
     logger = get_logger()
     logger.info("Shutdown signal received. Cleaning up...")
 
+    scheduler.stop()
     shutdown_all_processes(logger)
 
     for mount_point in os.listdir('/data'):
@@ -118,6 +120,14 @@ def main():
         settings_watcher.start()
     except Exception as e:
         logger.error(f"Error starting settings watcher: {e}", exc_info=True)
+
+    # Start the centralized task scheduler (tasks registered during setup above)
+    try:
+        from utils import scheduled_tasks
+        scheduled_tasks.register_all()
+        scheduler.start()
+    except Exception as e:
+        logger.error(f"Error starting task scheduler: {e}", exc_info=True)
 
     while True:
         signal.pause()

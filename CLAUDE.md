@@ -25,21 +25,23 @@ The Dockerfile is a multi-stage Alpine build: copies rclone binary from `rclone:
 
 ## Testing
 
+A local `.venv` virtualenv has all dependencies installed. Always use `.venv/bin/pytest` (or `.venv/bin/python`) — the system Python does not have the project's packages.
+
 ```bash
 # Run all tests
-pytest
+.venv/bin/pytest
 
 # Run a single test file
-pytest tests/test_blackhole.py
+.venv/bin/pytest tests/test_blackhole.py
 
 # Run with coverage
-pytest --cov=utils --cov=base --cov-report=term-missing
+.venv/bin/pytest --cov=utils --cov=base --cov-report=term-missing
 
 # Run a specific test
-pytest tests/test_blackhole.py::test_function_name -v
+.venv/bin/pytest tests/test_blackhole.py::test_function_name -v
 ```
 
-Test dependencies: `pip install -r requirements-dev.txt` (pytest, pytest-cov, pytest-mock).
+Test dependencies: `.venv/bin/pip install -r requirements-dev.txt` (pytest, pytest-cov, pytest-mock).
 
 Tests use three shared fixtures from `tests/conftest.py`: `tmp_dir` (temp directory), `env_vars` (set env vars via monkeypatch), `clean_env` (remove all pd_zurg env vars).
 

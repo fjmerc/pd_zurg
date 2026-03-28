@@ -608,6 +608,53 @@ class SonarrClient(_ArrClientBase):
             'removed': deleted,
         }
 
+    def audit_routing(self):
+        """Re-audit download client and indexer routing tags.
+
+        Resets cached tag state and re-runs discovery so any manual changes
+        in Sonarr are detected and corrected. Fixes are logged individually
+        by _discover_routing_tags.
+        """
+        self._blackhole_tag_id = None
+        self._local_tag_id = None
+        self._discover_routing_tags()
+
+    def clean_all_stale_queue_items(self, max_age_seconds=120):
+        """Remove ALL downloadClientUnavailable queue items older than max_age.
+
+        Unlike _clear_stale_queue_items (which targets specific client names),
+        this sweeps the entire queue.
+
+        Returns number of items removed.
+        """
+        queue = self._get('/api/v3/queue', {'pageSize': 1000, 'includeUnknownSeriesItems': 'true'})
+        if not queue:
+            return 0
+        removed = 0
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for r in queue.get('records', []):
+            if r.get('status') != 'downloadClientUnavailable':
+                continue
+            added = r.get('added', '')
+            try:
+                added_dt = datetime.datetime.fromisoformat(added.replace('Z', '+00:00'))
+                if (now - added_dt).total_seconds() < max_age_seconds:
+                    continue
+            except (ValueError, TypeError, AttributeError):
+                continue  # Can't determine age — skip rather than delete
+            item_id = r.get('id')
+            if item_id is None:
+                continue
+            title = r.get('title', '?')[:60]
+            result = self._delete(f'/api/v3/queue/{item_id}',
+                                  {'removeFromClient': 'true', 'blocklist': 'false'})
+            if result is not None:
+                removed += 1
+                logger.info(f"[sonarr] Cleaned stale queue item '{title}'")
+            else:
+                logger.warning(f"[sonarr] Failed to clean stale queue item '{title}'")
+        return removed
+
 
 # ---------------------------------------------------------------------------
 # Radarr
@@ -1059,6 +1106,50 @@ class RadarrClient(_ArrClientBase):
             'message': f'Removed {title} via Radarr',
             'removed': 1,
         }
+
+    def audit_routing(self):
+        """Re-audit download client and indexer routing tags.
+
+        Resets cached tag state and re-runs discovery so any manual changes
+        in Radarr are detected and corrected. Fixes are logged individually
+        by _discover_routing_tags.
+        """
+        self._blackhole_tag_id = None
+        self._local_tag_id = None
+        self._discover_routing_tags()
+
+    def clean_all_stale_queue_items(self, max_age_seconds=120):
+        """Remove ALL downloadClientUnavailable queue items older than max_age.
+
+        Returns number of items removed.
+        """
+        queue = self._get('/api/v3/queue', {'pageSize': 1000, 'includeUnknownMovieItems': 'true'})
+        if not queue:
+            return 0
+        removed = 0
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for r in queue.get('records', []):
+            if r.get('status') != 'downloadClientUnavailable':
+                continue
+            added = r.get('added', '')
+            try:
+                added_dt = datetime.datetime.fromisoformat(added.replace('Z', '+00:00'))
+                if (now - added_dt).total_seconds() < max_age_seconds:
+                    continue
+            except (ValueError, TypeError, AttributeError):
+                continue  # Can't determine age — skip rather than delete
+            item_id = r.get('id')
+            if item_id is None:
+                continue
+            title = r.get('title', '?')[:60]
+            result = self._delete(f'/api/v3/queue/{item_id}',
+                                  {'removeFromClient': 'true', 'blocklist': 'false'})
+            if result is not None:
+                removed += 1
+                logger.info(f"[radarr] Cleaned stale queue item '{title}'")
+            else:
+                logger.warning(f"[radarr] Failed to clean stale queue item '{title}'")
+        return removed
 
 
 # ---------------------------------------------------------------------------

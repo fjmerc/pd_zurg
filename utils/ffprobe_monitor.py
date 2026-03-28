@@ -219,8 +219,20 @@ class FfprobeMonitor:
                 self._stuck_since.pop(pid, None)
                 self._poke_state.pop(pid, None)
 
+    def check_once(self):
+        """Run a single pass of stuck-process detection and recovery.
+
+        Called by the task scheduler. Returns a result dict for status tracking.
+        """
+        try:
+            self._check_and_recover()
+            return {'status': 'success'}
+        except Exception as e:
+            logger.error(f"[ffprobe_monitor] Error in check pass: {e}")
+            return {'status': 'error', 'message': str(e)}
+
     def run(self):
-        """Main monitor loop."""
+        """Main monitor loop (legacy — prefer scheduler registration)."""
         logger.info(
             f"[ffprobe_monitor] Started (stuck_timeout={self.stuck_timeout}s, "
             f"poll={self.poll_interval}s, max_pokes={self.max_poke_attempts})"
@@ -238,7 +250,7 @@ class FfprobeMonitor:
 
 
 def setup():
-    """Initialize and start the ffprobe monitor if enabled."""
+    """Register the ffprobe monitor with the task scheduler if enabled."""
     enabled = os.environ.get('FFPROBE_MONITOR_ENABLED', 'true').lower() == 'true'
     if not enabled:
         return None
@@ -253,6 +265,13 @@ def setup():
         poll_interval = 30
 
     monitor = FfprobeMonitor(stuck_timeout=stuck_timeout, poll_interval=poll_interval)
-    thread = threading.Thread(target=monitor.run, daemon=True)
-    thread.start()
+
+    from utils.task_scheduler import scheduler
+    scheduler.register(
+        'ffprobe_monitor',
+        monitor.check_once,
+        interval_seconds=poll_interval,
+        description='Detect and recover stuck ffprobe processes on debrid mounts',
+        initial_delay=poll_interval,
+    )
     return monitor

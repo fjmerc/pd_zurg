@@ -201,7 +201,10 @@ class TestReadEnvValues:
         for key in _ALL_KEYS:
             assert key in values
 
-    def test_missing_file_returns_empty_values(self):
+    def test_missing_file_returns_empty_values(self, monkeypatch):
+        # Clear any env vars that match schema keys so only .env file matters
+        for key in _ALL_KEYS:
+            monkeypatch.delenv(key, raising=False)
         with patch('utils.settings_api.ENV_FILE', '/nonexistent/.env'):
             values = read_env_values()
         assert all(v == '' for v in values.values())

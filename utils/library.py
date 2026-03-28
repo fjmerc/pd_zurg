@@ -342,7 +342,7 @@ class LibraryScanner:
         if self._local_tv_path:
             logger.info(f"[library] Local TV: {self._local_tv_path}")
 
-    def scan(self):
+    def scan(self, force_enforce=False):
         start = time.monotonic()
         deadline = start + 30
 
@@ -456,7 +456,8 @@ class LibraryScanner:
         from utils.library_prefs import get_all_preferences
 
         preferences = get_all_preferences()
-        self._enforce_preferences(shows, movies, preferences, path_index, local_path_index)
+        self._enforce_preferences(shows, movies, preferences, path_index, local_path_index,
+                                  force=force_enforce)
         self._clear_resolved_pending(shows, movies)
         self._create_debrid_symlinks(shows, movies, path_index)
 
@@ -522,7 +523,8 @@ class LibraryScanner:
         with self._path_lock:
             return self._local_path_index.get((normalized_title, season, episode))
 
-    def _enforce_preferences(self, shows, movies, preferences, path_index, local_path_index):
+    def _enforce_preferences(self, shows, movies, preferences, path_index, local_path_index,
+                              force=False):
         """Auto-enforce source preferences after a scan.
 
         For prefer-debrid: if an episode has source=both (debrid copy arrived),
@@ -531,11 +533,12 @@ class LibraryScanner:
         For prefer-local: if an episode has source=both (local copy arrived),
         delete the debrid torrent via provider API.
 
-        Only runs if LIBRARY_PREFERENCE_AUTO_ENFORCE is true (default).
+        Only runs if LIBRARY_PREFERENCE_AUTO_ENFORCE is true, or force=True.
         """
-        auto_enforce = os.environ.get('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'false').lower() == 'true'
-        if not auto_enforce:
-            return
+        if not force:
+            auto_enforce = os.environ.get('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'false').lower() == 'true'
+            if not auto_enforce:
+                return
 
         rclone_mount = os.environ.get('BLACKHOLE_RCLONE_MOUNT', '').strip()
         symlink_base = os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', '').strip()

@@ -175,6 +175,9 @@ _CONFIG_PREFIXES = (
     'PDZURG', 'AUTO_UPDATE', 'CLEANUP', 'TORBOX',
     'MDBLIST', 'SHOW_MENU', 'GITHUB', 'SKIP_VALIDATION',
     'TZ', 'SONARR_', 'RADARR_', 'TMDB_',
+    'ROUTING_AUDIT', 'QUEUE_CLEANUP', 'LIBRARY_SCAN',
+    'SYMLINK_VERIFY', 'PREFERENCE_ENFORCE', 'HOUSEKEEPING',
+    'CONFIG_BACKUP', 'MOUNT_LIVENESS',
 )
 
 
@@ -553,9 +556,11 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .stat-value{font-size:1.8em;font-weight:600;color:var(--blue)}
 .stat-label{font-size:.75em;color:var(--text2);margin-top:2px}
 .stats-row{display:flex;gap:32px}.stats-row>div{flex:1;text-align:center}
-.btn-restart{background:none;border:1px solid var(--border);color:var(--text2);border-radius:4px;cursor:pointer;padding:2px 8px;font-size:.8em}
-.btn-restart:hover{border-color:var(--blue);color:var(--blue)}
-.btn-restart:disabled{opacity:.4;cursor:not-allowed}
+.btn-restart,.btn-run{background:none;border:1px solid var(--border);color:var(--text2);border-radius:4px;cursor:pointer;padding:2px 8px;font-size:.8em}
+.btn-restart:hover,.btn-run:hover{border-color:var(--blue);color:var(--blue)}
+.btn-restart:disabled,.btn-run:disabled{opacity:.4;cursor:not-allowed}
+.task-ok{color:var(--green)}.task-err{color:var(--red)}.task-running{color:var(--blue)}
+.task-desc{color:var(--text2);font-size:.85em}
 .log-controls{display:flex;gap:8px;align-items:center;margin-bottom:8px}
 .log-controls select{background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:.8em}
 .log-controls label{font-size:.8em;color:var(--text2)}
@@ -627,6 +632,13 @@ dialog .dlg-confirm{background:var(--blue);color:#fff}
   <div class="card">
     <h2>Recent Events</h2>
     <div class="events" id="events"></div>
+  </div>
+</div>
+<div class="grid full">
+  <div class="card">
+    <h2>Scheduled Tasks</h2>
+    <table><thead><tr><th>Task</th><th>Interval</th><th>Last Run</th><th>Duration</th><th>Result</th><th>Next Run</th><th id="task-actions-hdr"></th></tr></thead>
+    <tbody id="tasks"></tbody></table>
   </div>
 </div>
 <div class="grid full">
@@ -1032,19 +1044,71 @@ function updateMountHistory(){
   }).catch(()=>{});
 }
 
+// Tasks
+function fmtInterval(s){
+  if(s<60)return s+'s';
+  if(s<3600)return Math.floor(s/60)+'m';
+  if(s<86400)return Math.floor(s/3600)+'h';
+  return Math.floor(s/86400)+'d';
+}
+function updateTasks(){
+  fetch('/api/tasks').then(r=>r.json()).then(tasks=>{
+    const el=document.getElementById('tasks');
+    const hasAuth=window._hasAuth;
+    document.getElementById('task-actions-hdr').textContent=hasAuth?'Actions':'';
+    if(!tasks||!tasks.length){el.innerHTML='<tr><td colspan="7" style="color:var(--text2)">No tasks registered</td></tr>';return;}
+    let h='';
+    tasks.forEach(t=>{
+      const intv=fmtInterval(t.interval);
+      const lastRun=t.last_run?timeAgo(t.last_run):'Never';
+      const dur=t.last_duration!==null?t.last_duration+'s':'-';
+      let result='-';
+      if(t.running){result='<span class="task-running">Running...</span>';}
+      else if(t.last_result){
+        const r=t.last_result;
+        if(r.status==='success'){
+          let msg=r.message||'OK';
+          if(r.items!==undefined&&r.items!==null)msg+=' ('+r.items+')';
+          result='<span class="task-ok">'+esc(msg)+'</span>';
+        }else{
+          result='<span class="task-err">'+esc(r.message||'Error')+'</span>';
+        }
+      }
+      const next=t.next_run?timeAgo(t.next_run).replace(' ago','').replace(/^(\d+)/,'-$1'):'—';
+      const nextLabel=t.next_run?(new Date(t.next_run)>new Date()?'in '+fmtInterval(Math.max(0,Math.floor((new Date(t.next_run)-Date.now())/1000))):'due'):'—';
+      const runBtn=hasAuth&&!t.running?'<td><button class="btn-run" onclick="runTask(this,\\x27'+esc(t.name)+'\\x27)">Run</button></td>':'<td>'+(t.running?'<span class="task-running" style="font-size:.8em">...</span>':'')+'</td>';
+      const enabledDot=t.enabled?'':'<span style="color:var(--text3);font-size:.75em" title="Disabled"> (off)</span>';
+      h+='<tr><td><span title="'+esc(t.description||'')+'">'+esc(t.name)+'</span>'+enabledDot+'</td><td>'+intv+'</td><td>'+lastRun+'</td><td>'+dur+'</td><td>'+result+'</td><td>'+nextLabel+'</td>'+runBtn+'</tr>';
+    });
+    el.innerHTML=h;
+  }).catch(()=>{});
+}
+async function runTask(btn,name){
+  btn.disabled=true;btn.textContent='...';
+  try{
+    const r=await fetch('/api/tasks/'+encodeURIComponent(name)+'/run',{method:'POST'});
+    const d=await r.json();
+    btn.textContent=d.status==='started'?'OK':'Err';
+    setTimeout(()=>{btn.disabled=false;btn.textContent='Run';updateTasks();},3000);
+  }catch(e){btn.disabled=false;btn.textContent='Run';}
+}
+
 // Configurable refresh
+let _taskTimer;
 function setRefreshInterval(sec){
   _refreshSec=parseInt(sec)||0;
   if(_statusTimer)clearInterval(_statusTimer);
   if(_logTimer)clearInterval(_logTimer);
   if(_mtTimer)clearInterval(_mtTimer);
+  if(_taskTimer)clearInterval(_taskTimer);
   if(_refreshSec>0){
     _statusTimer=setInterval(update,_refreshSec*1000);
     _logTimer=setInterval(updateLogs,_refreshSec*1000);
     _mtTimer=setInterval(updateMountHistory,Math.max(_refreshSec*3,30)*1000);
+    _taskTimer=setInterval(updateTasks,Math.max(_refreshSec*2,15)*1000);
   }
 }
-update();updateLogs();
+update();updateLogs();updateTasks();
 setRefreshInterval(10);
 setTimeout(updateMountHistory,1000);
 </script>
@@ -1111,6 +1175,10 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             self._send_json_response(200, data)
         elif self.path == '/api/mount-history':
             data = json.dumps(mount_history.to_dict())
+            self._send_json_response(200, data)
+        elif self.path == '/api/tasks':
+            from utils.task_scheduler import scheduler
+            data = json.dumps(scheduler.get_status())
             self._send_json_response(200, data)
         elif self.path == '/settings':
             # Settings editor — requires auth
@@ -1921,6 +1989,32 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json_response(200, json.dumps(defaults))
             except Exception as e:
                 self._send_json_response(500, json.dumps({'error': str(e)}))
+            return
+
+        if self.path.startswith('/api/tasks/') and self.path.endswith('/run'):
+            # POST /api/tasks/{name}/run — trigger a task manually
+            task_name = self.path[len('/api/tasks/'):-len('/run')]
+            if task_name:
+                from utils.task_scheduler import scheduler
+                task_status = scheduler.get_task(task_name)
+                if task_status is None:
+                    self._send_json_response(404, json.dumps({
+                        'error': f'Unknown task: {task_name}'
+                    }))
+                elif task_status.get('running'):
+                    self._send_json_response(409, json.dumps({
+                        'error': f'Task {task_name} is already running'
+                    }))
+                else:
+                    scheduler.run_now(task_name)
+                    self._send_json_response(200, json.dumps({
+                        'status': 'started', 'task': task_name
+                    }))
+                    self.status_data_ref.add_event(
+                        'admin', f'Manual run triggered for task: {task_name}'
+                    )
+            else:
+                self._send_json_response(400, json.dumps({'error': 'Invalid task path'}))
             return
 
         if self.path.startswith('/api/restart/'):

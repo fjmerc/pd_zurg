@@ -153,6 +153,7 @@ def process_duplicates(plex_server, section_type, libtype):
         logger.error(f"Error while processing {section_type} library: {e}")
 
 def setup():
+    """Register duplicate cleanup with the task scheduler if configured."""
     try:
         app_env_variables = {
             "PLEX_ADDRESS": PLEXADD,
@@ -167,14 +168,17 @@ def setup():
             else:
                 logger.debug(f"Application environment variable '{var_name}' is set.")
 
-        if all(app_env_variables.values()):
-            if DUPECLEAN is not None and cleanup_interval() == 24:
-                logger.info("Duplicate cleanup interval missing")
-                logger.info("Defaulting to " + format_time(cleanup_interval()))
-                cleanup_thread()
-            elif DUPECLEAN is not None:
-                logger.info("Duplicate cleanup interval set to " + format_time(cleanup_interval()))
-                cleanup_thread()
+        if all(app_env_variables.values()) and DUPECLEAN is not None:
+            from utils.task_scheduler import scheduler
+            interval = get_interval_seconds()
+            logger.info(f"Duplicate cleanup interval: {format_time(cleanup_interval())}")
+            scheduler.register(
+                'duplicate_cleanup',
+                start_cleanup,
+                interval_seconds=interval,
+                description=f'Remove duplicate Plex media (local vs Zurg copies)',
+                initial_delay=60,  # wait 60s after startup before first run
+            )
     except Exception as e:
         logger.error(e)
 
@@ -184,17 +188,6 @@ def cleanup_interval():
     else:
         interval = float(CLEANUPINT)
     return interval
-
-def cleanup_schedule():
-    time.sleep(60)
-    while True:
-        start_cleanup()
-        # Re-read interval each cycle so WebUI changes take effect
-        from base import config
-        interval_hours = float(config.CLEANUPINT) if config.CLEANUPINT else 24
-        interval_seconds = int(interval_hours * 3600)
-        logger.debug(f"Next duplicate cleanup in {interval_hours}h")
-        time.sleep(interval_seconds)
 
 def start_cleanup():
     logger.info("Starting duplicate cleanup")
@@ -215,7 +208,8 @@ def start_cleanup():
     from utils.notifications import notify
     notify('library_refresh', 'Duplicate Cleanup Complete', f'Cleaned up in {total_time}')
 
-def cleanup_thread():
-    thread = threading.Thread(target=cleanup_schedule)
-    thread.daemon = True
-    thread.start()
+def get_interval_seconds():
+    """Return cleanup interval in seconds (for task scheduler)."""
+    from base import config
+    hours = float(config.CLEANUPINT) if config.CLEANUPINT else 24
+    return int(hours * 3600)

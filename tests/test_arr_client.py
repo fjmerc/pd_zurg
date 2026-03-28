@@ -189,7 +189,7 @@ class TestSonarrClient:
 
     @patch('urllib.request.urlopen')
     def test_ensure_and_search_existing_series(self, mock_urlopen, sonarr):
-        # First call: get_all_series, second: get_episodes, third: search_episodes
+        # get_all_series, get_episodes, queue cleanup, search_episodes
         responses = [
             _mock_urlopen([{'id': 5, 'title': 'My Show', 'tmdbId': 123}]),
             _mock_urlopen([
@@ -197,6 +197,7 @@ class TestSonarrClient:
                 {'id': 101, 'seasonNumber': 1, 'episodeNumber': 2},
                 {'id': 102, 'seasonNumber': 1, 'episodeNumber': 3},
             ]),
+            _mock_urlopen({'records': []}),  # queue cleanup
             _mock_urlopen({'id': 42}),
         ]
         mock_urlopen.side_effect = responses
@@ -348,6 +349,7 @@ class TestSonarrClient:
             _mock_urlopen([
                 {'id': 100, 'seasonNumber': 1, 'episodeNumber': 1},
             ]),
+            _mock_urlopen({'records': []}),  # queue cleanup
             _mock_urlopen({'id': 42}),  # search
         ]
         mock_urlopen.side_effect = responses
@@ -387,6 +389,7 @@ class TestRadarrClient:
         responses = [
             _mock_urlopen([{'id': 1, 'title': 'Inception', 'tmdbId': 27205, 'hasFile': True, 'tags': []}]),
             _mock_urlopen([]),  # download clients (no blackhole)
+            _mock_urlopen({'records': []}),  # queue cleanup
             _mock_urlopen({'id': 42}),  # search_movie
         ]
         mock_urlopen.side_effect = responses
@@ -397,6 +400,7 @@ class TestRadarrClient:
     def test_ensure_and_search_existing_no_file(self, mock_urlopen, radarr):
         responses = [
             _mock_urlopen([{'id': 1, 'title': 'Inception', 'tmdbId': 27205, 'hasFile': False}]),
+            _mock_urlopen({'records': []}),  # queue cleanup
             _mock_urlopen({'id': 42}),
         ]
         mock_urlopen.side_effect = responses

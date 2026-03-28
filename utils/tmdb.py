@@ -356,6 +356,29 @@ def get_cached_posters(items):
     return result
 
 
+def get_cached_tmdb_ids():
+    """Return cached TMDB IDs grouped by section (no API calls).
+
+    Used by the library scanner to build alias maps so differently-named
+    items that share a TMDB ID can be merged.
+
+    Returns: {'shows': {norm_title: tmdb_id, ...}, 'movies': {norm_title: tmdb_id, ...}}
+    """
+    with _cache_lock:
+        cache = _load_cache()
+
+    result = {}
+    for section in ('shows', 'movies'):
+        entries = {}
+        for norm_title, entry in cache.get(section, {}).items():
+            if _is_fresh(entry):
+                tmdb_id = entry.get('tmdb_id')
+                if tmdb_id:
+                    entries[norm_title] = tmdb_id
+        result[section] = entries
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Background cache population
 # ---------------------------------------------------------------------------

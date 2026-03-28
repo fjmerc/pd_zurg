@@ -462,6 +462,45 @@ parse_folder_name = _parse_folder_name
 normalize_title = _normalize_title
 
 
+def _build_tmdb_aliases():
+    """Build alias maps from TMDB cache for title cross-referencing.
+
+    When different sources use different names for the same title
+    (e.g. debrid "Star Wars Andor" vs Sonarr "Andor"), both resolve
+    to the same TMDB ID in the cache.  This reads the cache (no API
+    calls) and returns mappings so the merge phase can match them.
+
+    Returns (show_aliases, movie_aliases) where each is a dict of
+    {normalized_title: set of other normalized_titles with same TMDB ID}.
+    """
+    try:
+        from utils.tmdb import get_cached_tmdb_ids
+    except ImportError:
+        return {}, {}
+
+    try:
+        cached_ids = get_cached_tmdb_ids()
+    except Exception as e:
+        logger.debug(f"[library] TMDB alias cache load failed, skipping: {e}")
+        return {}, {}
+
+    def _aliases_for_section(section):
+        id_to_titles = {}
+        for norm_title, tmdb_id in section.items():
+            id_to_titles.setdefault(tmdb_id, set()).add(norm_title)
+        aliases = {}
+        for titles in id_to_titles.values():
+            if len(titles) > 1:
+                for t in titles:
+                    aliases[t] = titles - {t}
+        return aliases
+
+    return (
+        _aliases_for_section(cached_ids.get('shows', {})),
+        _aliases_for_section(cached_ids.get('movies', {})),
+    )
+
+
 class LibraryScanner:
     def __init__(self):
         self._mount_path = _discover_mount()
@@ -476,6 +515,7 @@ class LibraryScanner:
         self._local_path_index = {}
         self._path_lock = threading.Lock()
         self._search_cooldown = {}  # {(norm, sn): timestamp} — suppress re-search for 1 hour
+        self._alias_norms = {}     # {debrid_norm: local_norm, local_norm: debrid_norm}
 
         if self._mount_path:
             logger.info(f"[library] Mount path: {self._mount_path}")
@@ -486,6 +526,15 @@ class LibraryScanner:
             logger.info(f"[library] Local movies: {self._local_movies_path}")
         if self._local_tv_path:
             logger.info(f"[library] Local TV: {self._local_tv_path}")
+
+    def _get_pref(self, norm, preferences):
+        """Look up a preference by normalized title, checking alias if needed."""
+        pref = preferences.get(norm)
+        if not pref:
+            alias = self._alias_norms.get(norm)
+            if alias:
+                pref = preferences.get(alias)
+        return pref
 
     def scan(self, force_enforce=False):
         start = time.monotonic()
@@ -513,29 +562,67 @@ class LibraryScanner:
 
         local_movie_keys = {_normalize_title(lm['title']) for lm in local_movies}
 
+        # TMDB-based alias maps: when debrid and local use different names
+        # for the same title (e.g. "Star Wars Andor" vs "Andor"), both
+        # resolve to the same TMDB ID.  Alias maps let us merge them.
+        show_aliases, movie_aliases = _build_tmdb_aliases()
+        self._alias_norms = {}
+
         movies = []
-        # Merge debrid + local movies (title-level, unchanged)
+        merged_local_movie_keys = set()
+        # Merge debrid + local movies (title-level)
         for item in debrid_movies:
             key = _normalize_title(item['title'])
+            matched_key = None
             if key in local_movie_keys:
+                matched_key = key
+            else:
+                for alias in sorted(movie_aliases.get(key, ())):
+                    if alias in local_movie_keys:
+                        matched_key = alias
+                        break
+            if matched_key is not None:
+                if matched_key != key:
+                    logger.debug(
+                        f"[library] TMDB alias match (movie): debrid '{key}' ↔ local '{matched_key}'"
+                    )
+                    self._alias_norms[key] = matched_key
+                    self._alias_norms[matched_key] = key
                 item = dict(item)
                 item['source'] = 'both'
+                merged_local_movie_keys.add(matched_key)
             movies.append(item)
 
         for lm in local_movies:
             key = _normalize_title(lm['title'])
-            if key not in debrid_movie_keys:
+            if key not in debrid_movie_keys and key not in merged_local_movie_keys:
                 movies.append(lm)
 
         # Merge debrid + local shows with episode-level cross-referencing
         local_show_map = {_normalize_title(ls['title']): ls for ls in local_shows}
 
         shows = []
+        merged_local_show_keys = set()
         for item in debrid_shows:
             key = _normalize_title(item['title'])
+            local_key = None
             if key in local_show_map:
+                local_key = key
+            else:
+                for alias in sorted(show_aliases.get(key, ())):
+                    if alias in local_show_map:
+                        local_key = alias
+                        break
+            if local_key is not None:
+                if local_key != key:
+                    logger.debug(
+                        f"[library] TMDB alias match: debrid '{key}' ↔ local '{local_key}'"
+                    )
+                    self._alias_norms[key] = local_key
+                    self._alias_norms[local_key] = key
+                merged_local_show_keys.add(local_key)
                 item = dict(item)
-                local_item = local_show_map[key]
+                local_item = local_show_map[local_key]
                 debrid_eps = item.get('_episodes', {})
                 local_eps = local_item.get('_episodes', {})
 
@@ -563,13 +650,13 @@ class LibraryScanner:
                     item['source'] = 'debrid'
 
                 # Update counts from merged episodes
-                item['seasons'] = len({s for s, _ in merged})
+                item['seasons'] = len({ek[0] for ek in merged})
                 item['episodes'] = len(merged)
             shows.append(item)
 
         for ls in local_shows:
             key = _normalize_title(ls['title'])
-            if key not in debrid_show_keys:
+            if key not in debrid_show_keys and key not in merged_local_show_keys:
                 shows.append(ls)
 
         # Build path indexes and season_data, then strip internal _episodes
@@ -663,12 +750,22 @@ class LibraryScanner:
     def get_episode_path(self, normalized_title, season, episode):
         """Get debrid mount path for an episode."""
         with self._path_lock:
-            return self._path_index.get((normalized_title, season, episode))
+            result = self._path_index.get((normalized_title, season, episode))
+            if not result:
+                alias = self._alias_norms.get(normalized_title)
+                if alias:
+                    result = self._path_index.get((alias, season, episode))
+            return result
 
     def get_local_episode_path(self, normalized_title, season, episode):
         """Get local library path for an episode."""
         with self._path_lock:
-            return self._local_path_index.get((normalized_title, season, episode))
+            result = self._local_path_index.get((normalized_title, season, episode))
+            if not result:
+                alias = self._alias_norms.get(normalized_title)
+                if alias:
+                    result = self._local_path_index.get((alias, season, episode))
+            return result
 
     def _enforce_preferences(self, shows, movies, preferences, path_index, local_path_index,
                               force=False):
@@ -702,7 +799,7 @@ class LibraryScanner:
         if rclone_mount and symlink_base and self._local_tv_path:
             for show in shows:
                 norm = _normalize_title(show['title'])
-                pref = preferences.get(norm)
+                pref = self._get_pref(norm, preferences)
                 if pref != 'prefer-debrid':
                     continue
 
@@ -753,7 +850,7 @@ class LibraryScanner:
         prefer_local_safe = {}
         for show in shows:
             norm = _normalize_title(show['title'])
-            if preferences.get(norm) != 'prefer-local':
+            if self._get_pref(norm, preferences) != 'prefer-local':
                 continue
             has_debrid_only = False
             has_both = False
@@ -770,7 +867,7 @@ class LibraryScanner:
 
         for movie in movies:
             norm = _normalize_title(movie['title'])
-            if preferences.get(norm) == 'prefer-local' and movie.get('source') == 'both':
+            if self._get_pref(norm, preferences) == 'prefer-local' and movie.get('source') == 'both':
                 prefer_local_safe[norm] = movie
 
         if prefer_local_safe:
@@ -848,11 +945,11 @@ class LibraryScanner:
                     logger.info("[library] Search budget exhausted, deferring remaining to next scan")
                     break
                 norm = _normalize_title(show['title'])
-                if preferences.get(norm) != 'prefer-debrid':
+                if self._get_pref(norm, preferences) != 'prefer-debrid':
                     continue
 
                 # Skip if title has a pending entry in to-debrid direction
-                pending_entry = pending.get(norm, {})
+                pending_entry = pending.get(norm) or pending.get(self._alias_norms.get(norm, '')) or {}
                 pending_keys = {
                     (e['season'], e['episode'])
                     for e in pending_entry.get('episodes', [])
@@ -918,11 +1015,12 @@ class LibraryScanner:
                     logger.info("[library] Search budget exhausted, deferring remaining to next scan")
                     break
                 norm = _normalize_title(movie['title'])
-                if preferences.get(norm) != 'prefer-debrid':
+                if self._get_pref(norm, preferences) != 'prefer-debrid':
                     continue
                 if movie.get('source') in ('debrid', 'both'):
                     continue  # already on debrid
-                if pending.get(norm, {}).get('direction') == 'to-debrid':
+                pending_entry = pending.get(norm) or pending.get(self._alias_norms.get(norm, '')) or {}
+                if pending_entry.get('direction') == 'to-debrid':
                     continue  # already searching
                 if (norm, 0) in self._search_cooldown:
                     continue  # recently attempted
@@ -965,6 +1063,8 @@ class LibraryScanner:
             return
 
         # Build a source lookup: {norm_title: {(season, episode): source}}
+        # Also register alias keys so pending entries stored under either
+        # the debrid or local title can be resolved.
         source_map = {}
         for show in shows:
             norm = _normalize_title(show['title'])
@@ -973,10 +1073,16 @@ class LibraryScanner:
                 for ep in sd.get('episodes', []):
                     ep_sources[(sd['number'], ep['number'])] = ep.get('source', '')
             source_map[norm] = ep_sources
+            alias = self._alias_norms.get(norm)
+            if alias and alias not in source_map:
+                source_map[alias] = ep_sources
 
         for movie in movies:
             norm = _normalize_title(movie['title'])
             source_map[norm] = {(0, 0): movie.get('source', '')}
+            alias = self._alias_norms.get(norm)
+            if alias and alias not in source_map:
+                source_map[alias] = {(0, 0): movie.get('source', '')}
 
         # Snapshot pending; clear_pending re-reads under lock so concurrent writes are safe
         for norm_title, entry in list(pending.items()):

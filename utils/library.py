@@ -17,6 +17,15 @@ logger = get_logger()
 
 MEDIA_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m4v', '.webm'}
 
+# Folders to skip during library scans (non-media content)
+_SKIP_FOLDERS = {
+    'plex versions', 'subs', 'subtitles', 'featurettes',
+    'behind the scenes', 'behind-the-scenes', 'deleted scenes',
+    'interviews', 'scenes', 'trailers', 'sample', 'samples',
+    '.actors', 'bonus', 'bonuses',
+    '.recycle', '@eadir', '@recently-snapshot',
+}
+
 # Quality and codec markers stripped when parsing folder names
 _QUALITY_PATTERN = re.compile(
     r'[\s.\-_(\[]('
@@ -28,7 +37,7 @@ _QUALITY_PATTERN = re.compile(
     r'AAC|AC3|DTS|TrueHD|FLAC|MP3|EAC3|'
     r'HDR|HDR10|DV|DoVi|Atmos|'
     r'PROPER|REPACK|EXTENDED|THEATRICAL|'
-    r'NF|AMZN|HULU|DSNP|ATVP|PCOK|HBO|MAX|IMAX'
+    r'NF|AMZN|HULU|DSNP|ATVP|PCOK|HBOMAX|HBO|IMAX'
     r').*$',
     re.IGNORECASE,
 )
@@ -57,6 +66,7 @@ _SEASON_TEXT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _MID_YEAR_PATTERN = re.compile(r'\s*\((\d{4})\)')
+_EMPTY_PARENS_PATTERN = re.compile(r'\s*\(\s*\)')
 _CONTAINER_SUFFIX_PATTERN = re.compile(r'\s+(?:Mp4|MKV|AVI)\s*$', re.IGNORECASE)
 _EXTRAS_PATTERN = re.compile(r'\s*\+\s*\w+.*$')
 _TRAILING_YEAR_PATTERN = re.compile(r'\s+(\d{4})\s*$')
@@ -121,6 +131,9 @@ def _clean_title(title, year):
     # Convert dots/dashes/underscores to spaces
     title = _DOTS_DASHES_PATTERN.sub(' ', title)
     title = _MULTI_SPACE_PATTERN.sub(' ', title).strip()
+
+    # Strip empty parentheses: "Badlands ()" → "Badlands"
+    title = _EMPTY_PARENS_PATTERN.sub('', title).strip()
 
     # Strip container suffixes: "Mp4", "MKV", "AVI"
     title = _CONTAINER_SUFFIX_PATTERN.sub('', title).strip()
@@ -1109,7 +1122,11 @@ class LibraryScanner:
                             break
                         if not entry.is_dir(follow_symlinks=False):
                             continue
+                        if entry.name.lower() in _SKIP_FOLDERS:
+                            continue
                         title, year = _parse_folder_name(entry.name)
+                        if not title:
+                            continue
                         episodes = _collect_episodes(entry.path)
                         is_show = len(episodes) > 0 or category_is_shows
 
@@ -1207,10 +1224,15 @@ class LibraryScanner:
                 for entry in it:
                     if not entry.is_dir(follow_symlinks=False):
                         continue
+                    # Skip known non-media folders before any I/O
+                    if entry.name.lower() in _SKIP_FOLDERS:
+                        continue
                     # Skip folders that only contain debrid symlinks
                     if symlink_base and self._is_debrid_symlink_dir(entry.path, symlink_base):
                         continue
                     title, year = _parse_folder_name(entry.name)
+                    if not title:
+                        continue
                     items.append({
                         'title': title,
                         'year': year,
@@ -1306,10 +1328,15 @@ class LibraryScanner:
                 for entry in it:
                     if not entry.is_dir(follow_symlinks=False):
                         continue
+                    # Skip known non-media folders before any I/O
+                    if entry.name.lower() in _SKIP_FOLDERS:
+                        continue
                     # Skip show folders that are entirely debrid symlinks
                     if symlink_base and self._is_debrid_symlink_only(entry.path, symlink_base):
                         continue
                     title, year = _parse_folder_name(entry.name)
+                    if not title:
+                        continue
                     eps = _collect_episodes(entry.path)
                     if eps:
                         unique_seasons = {s for s, _e in eps}

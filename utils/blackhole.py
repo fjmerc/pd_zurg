@@ -221,7 +221,7 @@ class BlackholeWatcher:
                 return False, 'Real-Debrid response missing torrent id'
             select_url = f'https://api.real-debrid.com/rest/1.0/torrents/selectFiles/{torrent_id}'
             select_resp = requests.post(select_url, headers=headers, data={'files': 'all'}, timeout=30)
-            if select_resp.status_code not in (200, 204):
+            if select_resp.status_code not in (200, 202, 204):
                 logger.warning(f"[blackhole] selectFiles failed for {torrent_id}: HTTP {select_resp.status_code}")
             return True, torrent_id
         else:
@@ -296,6 +296,9 @@ class BlackholeWatcher:
         if response.status_code == 200:
             info = response.json()
             return info.get('status', 'unknown'), info
+        if response.status_code == 404:
+            logger.warning(f"[blackhole] RD torrent {torrent_id} no longer exists (404)")
+            return 'dead', {}  # Treat as terminal so monitor stops immediately
         logger.warning(f"[blackhole] RD status check failed for {torrent_id}: HTTP {response.status_code}")
         return 'api_error', {}
 

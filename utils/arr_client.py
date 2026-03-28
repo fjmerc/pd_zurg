@@ -214,7 +214,13 @@ class SonarrClient(_ArrClientBase):
                 # newly-tagged clients — otherwise the indexer forces results to
                 # the client regardless of tags, defeating debrid routing.
                 if tagged_client_ids:
+                    tagged_client_names = {
+                        c['name'] for c in untagged_clients
+                        if c['id'] in tagged_client_ids and c.get('name')
+                    }
                     self._clear_indexer_client_overrides(tagged_client_ids)
+                    if tagged_client_names:
+                        self._clear_stale_queue_items(tagged_client_names)
 
     def _clear_indexer_client_overrides(self, client_ids):
         """Remove downloadClientId from indexers that point to given clients."""
@@ -230,6 +236,24 @@ class SonarrClient(_ArrClientBase):
                     logger.info(f"[sonarr] Cleared downloadClientId override on indexer '{ix_name}' — tag-based routing will apply")
                 else:
                     logger.warning(f"[sonarr] Failed to clear downloadClientId on indexer '{ix_name}'")
+
+    def _clear_stale_queue_items(self, client_names):
+        """Remove queue items stuck as unavailable for newly-tagged clients."""
+        queue = self._get('/api/v3/queue', {'pageSize': 1000, 'includeUnknownSeriesItems': 'true'})
+        if not queue:
+            return
+        for r in queue.get('records', []):
+            if (r.get('status') == 'downloadClientUnavailable'
+                    and r.get('downloadClient') in client_names):
+                item_id = r.get('id')
+                if item_id is None:
+                    continue
+                title = r.get('title', '?')[:60]
+                result = self._delete(f'/api/v3/queue/{item_id}', {'removeFromClient': 'true', 'blocklist': 'false'})
+                if result is not None:
+                    logger.info(f"[sonarr] Removed stale queue item '{title}' (was assigned to re-tagged client)")
+                else:
+                    logger.warning(f"[sonarr] Failed to remove stale queue item '{title}'")
 
     def _get_blackhole_tag_id(self):
         """Find the tag ID used by the TorrentBlackhole download client."""
@@ -633,7 +657,13 @@ class RadarrClient(_ArrClientBase):
                     else:
                         logger.warning(f"[radarr] Failed to tag client '{c_name}'")
                 if tagged_client_ids:
+                    tagged_client_names = {
+                        c['name'] for c in untagged_clients
+                        if c['id'] in tagged_client_ids and c.get('name')
+                    }
                     self._clear_indexer_client_overrides(tagged_client_ids)
+                    if tagged_client_names:
+                        self._clear_stale_queue_items(tagged_client_names)
 
     def _clear_indexer_client_overrides(self, client_ids):
         """Remove downloadClientId from indexers that point to given clients."""
@@ -649,6 +679,24 @@ class RadarrClient(_ArrClientBase):
                     logger.info(f"[radarr] Cleared downloadClientId override on indexer '{ix_name}' — tag-based routing will apply")
                 else:
                     logger.warning(f"[radarr] Failed to clear downloadClientId on indexer '{ix_name}'")
+
+    def _clear_stale_queue_items(self, client_names):
+        """Remove queue items stuck as unavailable for newly-tagged clients."""
+        queue = self._get('/api/v3/queue', {'pageSize': 1000, 'includeUnknownMovieItems': 'true'})
+        if not queue:
+            return
+        for r in queue.get('records', []):
+            if (r.get('status') == 'downloadClientUnavailable'
+                    and r.get('downloadClient') in client_names):
+                item_id = r.get('id')
+                if item_id is None:
+                    continue
+                title = r.get('title', '?')[:60]
+                result = self._delete(f'/api/v3/queue/{item_id}', {'removeFromClient': 'true', 'blocklist': 'false'})
+                if result is not None:
+                    logger.info(f"[radarr] Removed stale queue item '{title}' (was assigned to re-tagged client)")
+                else:
+                    logger.warning(f"[radarr] Failed to remove stale queue item '{title}'")
 
     def _get_blackhole_tag_id(self):
         """Find the tag ID used by the TorrentBlackhole download client."""

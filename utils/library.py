@@ -804,11 +804,17 @@ class LibraryScanner:
                 logger.error(f"[library] Auto-enforce prefer-local failed: {e}")
 
     def _clear_resolved_pending(self, shows, movies):
-        """Clear pending entries for episodes whose source now matches the goal.
+        """Clear pending entries that are resolved or stale.
 
-        If pending direction is 'to-debrid' and the episode source is now
-        'debrid' or 'both', the pending is resolved. Same for 'to-local'
-        when source is 'local' or 'both'. Runs unconditionally on every scan.
+        Resolved: direction is 'to-debrid' and source is now 'debrid'/'both',
+        or direction is 'to-local' and source is now 'local'/'both'.
+
+        Stale: episode no longer exists in any source (deleted or never
+        existed). Note: episodes whose source is the opposite of the goal
+        (e.g., 'to-debrid' but still 'local') are legitimately in-progress
+        and must NOT be cleared.
+
+        Runs unconditionally on every scan.
         """
         from utils.library_prefs import get_all_pending, clear_pending
 
@@ -830,11 +836,14 @@ class LibraryScanner:
             norm = _normalize_title(movie['title'])
             source_map[norm] = {(0, 0): movie.get('source', '')}
 
-        for norm_title, entry in pending.items():
+        # Snapshot pending; clear_pending re-reads under lock so concurrent writes are safe
+        for norm_title, entry in list(pending.items()):
             direction = entry.get('direction', '')
             episodes = entry.get('episodes', [])
             sources = source_map.get(norm_title, {})
             resolved = []
+            # If the title itself isn't in the library at all, clear everything
+            title_exists = norm_title in source_map
             for ep in episodes:
                 key = (ep.get('season', 0), ep.get('episode', 0))
                 src = sources.get(key, '')
@@ -842,7 +851,12 @@ class LibraryScanner:
                     resolved.append(ep)
                 elif direction == 'to-local' and src in ('local', 'both'):
                     resolved.append(ep)
+                elif not src and not title_exists:
+                    # Title gone from library entirely — stale
+                    resolved.append(ep)
             if resolved:
+                logger.debug(f"[library] Clearing {len(resolved)} pending episode(s) for "
+                             f"{norm_title!r} (direction={direction!r})")
                 clear_pending(norm_title, resolved)
 
     def _create_debrid_symlinks(self, shows, movies, path_index):

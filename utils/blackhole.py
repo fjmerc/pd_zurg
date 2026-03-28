@@ -885,7 +885,6 @@ class BlackholeWatcher:
         Skips the original release's info hash.
         """
         import tempfile
-        import urllib.parse
 
         # Extract original info hash to skip it
         orig_hash = self._extract_info_hash_from_file(orig_path)
@@ -1034,13 +1033,27 @@ class BlackholeWatcher:
                 # in a background thread to avoid blocking the scan loop.
                 # Skip if alts were already exhausted in a prior attempt.
                 if self._is_debrid_rejection(result) and not self._alt_exhausted(file_path):
-                    threading.Thread(
-                        target=self._try_alternative_release,
-                        args=(filename, file_path, handler),
-                        daemon=True,
-                        name=f'alt-retry-{filename[:30]}',
-                    ).start()
-                    return  # Alt-retry thread handles cleanup
+                    # Move file out of watch_dir BEFORE launching the thread
+                    # to prevent the next scan cycle from picking it up again
+                    staging_dir = os.path.join(self.watch_dir, '.alt_pending')
+                    os.makedirs(staging_dir, exist_ok=True)
+                    staged_path = os.path.join(staging_dir, filename)
+                    try:
+                        os.rename(file_path, staged_path)
+                    except OSError as e:
+                        logger.warning(
+                            f"[blackhole] Could not stage {filename} for alt-retry: {e}. "
+                            f"Skipping alt-retry to prevent duplicate submission."
+                        )
+                        # Fall through to normal failed/ path below
+                    else:
+                        threading.Thread(
+                            target=self._try_alternative_release,
+                            args=(filename, staged_path, handler),
+                            daemon=True,
+                            name=f'alt-retry-{filename[:30]}',
+                        ).start()
+                        return  # Alt-retry thread handles cleanup
 
                 error_dir = os.path.join(self.watch_dir, 'failed')
                 os.makedirs(error_dir, exist_ok=True)
@@ -1084,6 +1097,11 @@ class BlackholeWatcher:
             retries, last_attempt = RetryMeta.read(file_path)
 
             if retries >= MAX_RETRIES:
+                continue
+
+            # Don't retry files where alt-release search was already exhausted
+            # (the original hash is debrid-blocked, retrying submits the same hash)
+            if self._alt_exhausted(file_path):
                 continue
 
             # Determine backoff delay for this retry
@@ -1138,9 +1156,42 @@ class BlackholeWatcher:
             if ext in self.SUPPORTED_EXTENSIONS:
                 self._process_file(file_path)
 
+    def _recover_alt_pending(self):
+        """On startup, move stranded .alt_pending files to failed/.
+
+        If the container was killed while an alt-retry thread was running,
+        files in .alt_pending/ would be orphaned with no recovery path.
+        """
+        staging_dir = os.path.join(self.watch_dir, '.alt_pending')
+        if not os.path.isdir(staging_dir):
+            return
+        error_dir = os.path.join(self.watch_dir, 'failed')
+        for filename in os.listdir(staging_dir):
+            src = os.path.join(staging_dir, filename)
+            if not os.path.isfile(src):
+                continue
+            os.makedirs(error_dir, exist_ok=True)
+            dest = os.path.join(error_dir, filename)
+            if os.path.exists(dest):
+                base, fext = os.path.splitext(filename)
+                dest = os.path.join(error_dir, f"{base}_{int(time.time())}{fext}")
+            try:
+                os.rename(src, dest)
+                # Mark alt_exhausted so retries don't repeat the search
+                try:
+                    with open(RetryMeta.meta_path(dest), 'w') as f:
+                        json.dump({'retries': 1, 'last_attempt': time.time(),
+                                   'alt_exhausted': True}, f)
+                except IOError:
+                    pass
+                logger.warning(f"[blackhole] Recovered stranded alt-pending file: {filename}")
+            except OSError as e:
+                logger.warning(f"[blackhole] Could not recover {filename} from alt_pending: {e}")
+
     def run(self):
         """Main loop - scan at poll_interval."""
         logger.info(f"[blackhole] Watching {self.watch_dir} (poll: {self.poll_interval}s, service: {self.debrid_service})")
+        self._recover_alt_pending()
         if self.symlink_enabled:
             logger.info(f"[blackhole] Symlink mode enabled: completed={self.completed_dir}, "
                         f"mount={self.rclone_mount}, target_base={self.symlink_target_base}, "

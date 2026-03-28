@@ -129,40 +129,51 @@ def library_scan():
 # ---------------------------------------------------------------------------
 
 def verify_symlinks():
-    """Walk local library symlinks pointing to debrid mount and remove broken ones."""
+    """Walk completed dir and local library for debrid-pointing symlinks, remove broken ones."""
     completed_dir = os.environ.get('BLACKHOLE_COMPLETED_DIR', '/completed')
+    local_tv = os.environ.get('BLACKHOLE_LOCAL_LIBRARY_TV', '').strip()
+    local_movies = os.environ.get('BLACKHOLE_LOCAL_LIBRARY_MOVIES', '').strip()
     rclone_mount = os.path.realpath(os.environ.get('BLACKHOLE_RCLONE_MOUNT', '/data'))
     mount_prefix = rclone_mount + '/'
 
-    if not os.path.isdir(completed_dir):
-        return {'status': 'success', 'message': 'Completed dir does not exist'}
+    scan_dirs = []
+    if os.path.isdir(completed_dir):
+        scan_dirs.append(completed_dir)
+    if local_tv and os.path.isdir(local_tv):
+        scan_dirs.append(local_tv)
+    if local_movies and os.path.isdir(local_movies):
+        scan_dirs.append(local_movies)
+
+    if not scan_dirs:
+        return {'status': 'success', 'message': 'No directories to check'}
 
     broken = 0
     checked = 0
 
-    for root, dirs, files in os.walk(completed_dir):
-        for fname in files:
-            fpath = os.path.join(root, fname)
-            if not os.path.islink(fpath):
-                continue
+    for scan_dir in scan_dirs:
+        for root, dirs, files in os.walk(scan_dir):
+            for fname in files:
+                fpath = os.path.join(root, fname)
+                if not os.path.islink(fpath):
+                    continue
 
-            target = os.readlink(fpath)
-            # Resolve relative symlinks to absolute paths
-            if not os.path.isabs(target):
-                target = os.path.realpath(os.path.join(os.path.dirname(fpath), target))
-            # Only check symlinks pointing to the debrid mount
-            if not (target.startswith(mount_prefix) or target == rclone_mount):
-                continue
+                target = os.readlink(fpath)
+                # Resolve relative symlinks to absolute paths
+                if not os.path.isabs(target):
+                    target = os.path.realpath(os.path.join(os.path.dirname(fpath), target))
+                # Only check symlinks pointing to the debrid mount
+                if not (target.startswith(mount_prefix) or target == rclone_mount):
+                    continue
 
-            checked += 1
-            if not os.path.exists(fpath):
-                # Target is gone (expired debrid content)
-                broken += 1
-                try:
-                    os.remove(fpath)
-                    logger.info(f"[scheduler] Removed broken symlink: {fpath} -> {target}")
-                except OSError as e:
-                    logger.warning(f"[scheduler] Failed to remove broken symlink {fpath}: {e}")
+                checked += 1
+                if not os.path.exists(fpath):
+                    # Target is gone (expired debrid content)
+                    broken += 1
+                    try:
+                        os.remove(fpath)
+                        logger.info(f"[scheduler] Removed broken symlink: {fpath} -> {target}")
+                    except OSError as e:
+                        logger.warning(f"[scheduler] Failed to remove broken symlink {fpath}: {e}")
 
     msg = f'Checked {checked} symlinks'
     if broken:

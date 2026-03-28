@@ -2021,7 +2021,10 @@ function _refreshDetailData() {
           }
         }
       }
-      applyFilters();
+      // In grid view: data is updated but skip full re-render to avoid
+      // flicker from destroying/recreating all poster images.  The grid
+      // will pick up the latest data on next user interaction (filter
+      // change, tab switch, manual refresh, or clicking into a card).
       _checkSmartPoll();
     })
     .catch(function() {});

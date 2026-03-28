@@ -315,6 +315,7 @@ def get_cached_posters(items):
 
     shows_cache = cache.get('shows', {})
     movies_cache = cache.get('movies', {})
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     result = {}
 
     for item in items:
@@ -326,14 +327,18 @@ def get_cached_posters(items):
         if item_type == 'show':
             entry = shows_cache.get(key)
             if entry and _is_fresh(entry):
-                total_eps = sum(
-                    s.get('total_episodes', 0)
-                    for s in entry.get('seasons', [])
-                )
+                # Only count aired episodes (air_date non-empty and <= today)
+                # to match Sonarr behavior — unaired episodes are not "missing"
+                aired_eps = 0
+                for s in entry.get('seasons', []):
+                    for ep in s.get('episodes', []):
+                        ad = ep.get('air_date', '')
+                        if ad and ad <= today:
+                            aired_eps += 1
                 result[key] = {
                     'poster_url': _poster_url(entry.get('poster_path', '')),
                     'tmdb_status': entry.get('status', ''),
-                    'total_episodes': total_eps,
+                    'total_episodes': aired_eps,
                 }
         elif item_type == 'movie':
             entry = movies_cache.get(key)

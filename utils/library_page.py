@@ -525,13 +525,10 @@ function buildCard(item, index) {
   var progressHtml = '<div class="progress-bar"><div class="progress-fill" style="width:' + prog.width + ';background:' + prog.color + '" title="' + esc(prog.tooltip) + '"></div></div>';
 
   // Meta line
-  var metaParts = [];
-  if (item.type === 'show') {
-    if (item.seasons) metaParts.push(item.seasons + 'S');
-    if (item.episodes) metaParts.push(item.episodes + 'E');
-    if (item.missing_episodes > 0) metaParts.push('<span style="color:var(--red)">' + item.missing_episodes + ' missing</span>');
+  var metaLine = '';
+  if (item.type === 'show' && item.missing_episodes > 0) {
+    metaLine = '<div class="card-meta"><span style="color:var(--red)">' + item.missing_episodes + ' missing</span></div>';
   }
-  var metaLine = metaParts.length ? '<div class="card-meta">' + metaParts.join(' &middot; ') + '</div>' : '';
 
   // Pending badge
   var pendingBadge = '';
@@ -542,8 +539,6 @@ function buildCard(item, index) {
   }
 
   var badges = buildBadges(item.source) + pendingBadge;
-  var yearSpan = item.year ? ' <span class="card-year">(' + item.year + ')</span>' : '';
-
   return '<div class="poster-card" data-title="' + esc(item.title) + '" data-type="' + esc(item.type) + '"'
     + (item.year ? ' data-year="' + item.year + '"' : '')
     + ' onclick="showDetail(' + index + ')" tabindex="0" role="button"'
@@ -551,7 +546,7 @@ function buildCard(item, index) {
     + '<div class="poster-container">' + posterHtml + cornerBadge + '</div>'
     + progressHtml
     + '<div class="card-info">'
-    + '<div class="card-title">' + esc(item.title) + yearSpan + '</div>'
+    + '<div class="card-title">' + esc(item.title) + '</div>'
     + '<div class="card-badges">' + badges + '</div>'
     + metaLine
     + '</div></div>';
@@ -695,11 +690,16 @@ function _applyMeta(card, meta) {
     container.appendChild(badge);
   }
 
-  // Update progress bar with TMDB total_episodes
+  // Update progress bar — only count AIRED episodes (air_date <= today)
   if (type === 'show' && meta.seasons) {
     var totalEps = 0;
+    var today = new Date().toISOString().slice(0, 10);
     for (var si = 0; si < meta.seasons.length; si++) {
-      totalEps += meta.seasons[si].total_episodes || 0;
+      var eps = meta.seasons[si].episodes || [];
+      for (var ei = 0; ei < eps.length; ei++) {
+        var ad = eps[ei].air_date;
+        if (ad && ad <= today) totalEps++;
+      }
     }
     if (totalEps > 0) {
       var title = card.getAttribute('data-title');
@@ -727,9 +727,18 @@ function _applyMeta(card, meta) {
       var missing = totalEps - haveEps;
       if (missing > 0) {
         var metaEl = card.querySelector('.card-meta');
+        if (!metaEl) {
+          // Create meta element if it didn't exist (no initial missing count)
+          var infoEl = card.querySelector('.card-info');
+          if (infoEl) {
+            metaEl = document.createElement('div');
+            metaEl.className = 'card-meta';
+            infoEl.appendChild(metaEl);
+          }
+        }
         if (metaEl && !metaEl.hasAttribute('data-enriched')) {
           metaEl.setAttribute('data-enriched', '1');
-          metaEl.innerHTML += ' &middot; <span style="color:var(--red)">' + missing + ' missing</span>';
+          metaEl.innerHTML = '<span style="color:var(--red)">' + missing + ' missing</span>';
         }
       }
     }

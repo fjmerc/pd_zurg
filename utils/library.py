@@ -19,7 +19,7 @@ MEDIA_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m4v
 
 # Quality and codec markers stripped when parsing folder names
 _QUALITY_PATTERN = re.compile(
-    r'[\s.\-_]('
+    r'[\s.\-_(\[]('
     r'2160p|1080p|1080i|720p|480p|4K|UHD|HD|SD|'
     r'BluRay|Blu-Ray|BDRip|BDRemux|REMUX|BDMV|'
     r'WEB-DL|WEBRip|WEBRIP|WEBDL|WEB|'
@@ -62,6 +62,48 @@ _EXTRAS_PATTERN = re.compile(r'\s*\+\s*\w+.*$')
 _TRAILING_YEAR_PATTERN = re.compile(r'\s+(\d{4})\s*$')
 _COMPLETE_SUFFIX_PATTERN = re.compile(r'\s+Complete\s*$', re.IGNORECASE)
 
+# Parenthesized/bracketed blocks containing quality keywords
+_QUALITY_KEYWORDS = (
+    r'1080p|720p|2160p|480p|4K|BluRay|BDRip|BDRemux|BDmux|REMUX|'
+    r'WEB-DL|WEBRip|WEBDL|WEB DL|x264|x265|H264|H265|HEVC|AVC|'
+    r'AAC|AC3|DTS|EAC3|FLAC|TrueHD|Atmos|HDR|DDP\d'
+)
+_PAREN_QUALITY_PATTERN = re.compile(
+    r'\s*\([^)]*(?:' + _QUALITY_KEYWORDS + r')[^)]*\)',
+    re.IGNORECASE,
+)
+_BRACKET_QUALITY_PATTERN = re.compile(
+    r'\s*\[[^\]]*(?:' + _QUALITY_KEYWORDS + r')[^\]]*\]',
+    re.IGNORECASE,
+)
+
+# Edition/cut tags that appear between title and quality info
+_EDITION_PATTERN = re.compile(
+    r'\s+(?:'
+    r'DC|Director\'?s?\s*Cut|Extended(?:\s+(?:Edition|Cut))?|'
+    r'Theatrical(?:\s+Cut)?|Unrated|Remastered|'
+    r'Criterion|Special\s+Edition|Platinum\s+Edition|'
+    r'Anniversary(?:\s+\w+)*\s+Edition|'
+    r'\d+(?:st|nd|rd|th)\s+Anniversary(?:\s+\w+)*\s+Edition'
+    r')\s*$',
+    re.IGNORECASE,
+)
+
+# Language tag followed by codec/audio info (e.g., "ITA Ac3 2.0 ENG ...")
+# or trailing standalone language tags (e.g., "Title ITA")
+_LANG_CODEC_PATTERN = re.compile(
+    r'\s+(?:ITA|ENG|FRA|GER|ESP|MULTI|DUAL|LATINO)\s+'
+    r'(?:Ac3|AAC|DTS|DD|DDP|FLAC).*$',
+    re.IGNORECASE,
+)
+_TRAILING_LANG_PATTERN = re.compile(
+    r'\s+(?:ITA|FRA|GER|ESP|MULTI|DUAL|LATINO)\s*$',
+    re.IGNORECASE,
+)
+
+# Bracketed year: "[2011]" — strip brackets, extract year
+_BRACKET_YEAR_PATTERN = re.compile(r'\s*\[(\d{4})\]\s*$')
+
 
 def _clean_title(title, year):
     """Normalize a partially-parsed title by stripping season text, container
@@ -86,6 +128,25 @@ def _clean_title(title, year):
     # Strip "Complete" suffix
     title = _COMPLETE_SUFFIX_PATTERN.sub('', title).strip()
 
+    # Strip parenthesized/bracketed quality blocks: "(1080p BluRay...)", "[BDremux 1080p]"
+    title = _PAREN_QUALITY_PATTERN.sub('', title).strip()
+    title = _BRACKET_QUALITY_PATTERN.sub('', title).strip()
+
+    # Strip language + codec patterns: "ITA Ac3 2.0 ENG Ac3 5.1..."
+    title = _LANG_CODEC_PATTERN.sub('', title).strip()
+    # Strip trailing standalone language tags: "Title ITA"
+    title = _TRAILING_LANG_PATTERN.sub('', title).strip()
+
+    # Extract bracketed year: "[2011]" → year field
+    if year is None:
+        bracket_year_match = _BRACKET_YEAR_PATTERN.search(title)
+        if bracket_year_match:
+            candidate = int(bracket_year_match.group(1))
+            if 1900 <= candidate <= 2100:
+                year = candidate
+                title = title[:bracket_year_match.start()] + title[bracket_year_match.end():]
+                title = _MULTI_SPACE_PATTERN.sub(' ', title).strip()
+
     # Extract mid-string year in parens: "(2003)" → year field
     if year is None:
         mid_match = _MID_YEAR_PATTERN.search(title)
@@ -105,6 +166,12 @@ def _clean_title(title, year):
             if 1900 <= candidate <= 2100 and remaining:
                 year = candidate
                 title = remaining
+
+    # Strip edition/cut tags: "Criterion", "Extended Edition", etc.
+    # Guard: don't strip if it would empty the title
+    stripped = _EDITION_PATTERN.sub('', title).strip()
+    if stripped:
+        title = stripped
 
     return title, year
 

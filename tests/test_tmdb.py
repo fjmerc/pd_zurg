@@ -283,6 +283,11 @@ class TestCachedPosters:
 
     def test_returns_enrichment_for_cached_shows(self, monkeypatch):
         from datetime import datetime, timezone
+        # 7 aired episodes in S1, 3 aired + 2 unaired in S2
+        s1_eps = [{'number': i, 'title': f'Ep{i}', 'air_date': '2008-01-20'} for i in range(1, 8)]
+        s2_eps = [{'number': i, 'title': f'Ep{i}', 'air_date': '2009-03-08'} for i in range(1, 4)]
+        s2_eps += [{'number': 4, 'title': 'Future', 'air_date': '2099-12-31'},
+                   {'number': 5, 'title': 'TBA', 'air_date': ''}]
         cache = {
             'shows': {
                 'breaking bad': {
@@ -291,8 +296,8 @@ class TestCachedPosters:
                     'poster_path': '/bb.jpg',
                     'status': 'Ended',
                     'seasons': [
-                        {'number': 1, 'total_episodes': 7, 'episodes': []},
-                        {'number': 2, 'total_episodes': 13, 'episodes': []},
+                        {'number': 1, 'total_episodes': 7, 'episodes': s1_eps},
+                        {'number': 2, 'total_episodes': 5, 'episodes': s2_eps},
                     ],
                     'cached_at': datetime.now(timezone.utc).isoformat(),
                 }
@@ -305,7 +310,8 @@ class TestCachedPosters:
         info = result['breaking bad']
         assert info['poster_url'] == 'https://image.tmdb.org/t/p/w300/bb.jpg'
         assert info['tmdb_status'] == 'Ended'
-        assert info['total_episodes'] == 20
+        # Only counts aired episodes (7 + 3 = 10), not unaired (future + TBA)
+        assert info['total_episodes'] == 10
 
     def test_returns_enrichment_for_cached_movies(self, monkeypatch):
         from datetime import datetime, timezone

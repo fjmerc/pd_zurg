@@ -536,6 +536,84 @@ class LibraryScanner:
                 pref = preferences.get(alias)
         return pref
 
+    @staticmethod
+    def _dedup_by_tmdb(items, aliases):
+        """Merge items that share a TMDB ID but have different normalized titles.
+
+        Torrents on the debrid mount may use different names for the same
+        show (e.g. "Andor" vs "Star Wars Andor").  _scan_mount groups by
+        normalized title, so they end up as separate entries.  This merges
+        them using the TMDB alias map, combining episodes and preferring
+        the title with a year or better capitalization.
+        """
+        if not aliases:
+            return items
+
+        # Map each norm key to its canonical (first-seen) key via aliases
+        canon = {}  # norm_key -> canonical norm_key
+        for item in items:
+            key = _normalize_title(item['title'])
+            if key in canon:
+                continue
+            # Check if any existing canonical key is an alias of this key
+            for alias in sorted(aliases.get(key, ())):
+                if alias in canon:
+                    canon[key] = canon[alias]
+                    break
+            if key not in canon:
+                canon[key] = key
+
+        # Group items by canonical key
+        groups = {}  # canonical_key -> list of items
+        for item in items:
+            key = _normalize_title(item['title'])
+            ckey = canon[key]
+            groups.setdefault(ckey, []).append(item)
+
+        # Merge each group
+        result = []
+        for ckey, group in groups.items():
+            if len(group) == 1:
+                result.append(group[0])
+                continue
+
+            # Pick the best title: prefer one with a year, then better caps
+            best = group[0]
+            for item in group[1:]:
+                if item.get('year') and not best.get('year'):
+                    best = item
+                elif item['title'][0:1].isupper() and not best['title'][0:1].isupper():
+                    best = item
+
+            merged = dict(best)
+            # Merge episodes from all items in the group
+            merged_eps = dict(merged.get('_episodes', {}))
+            for item in group:
+                if item is best:
+                    continue
+                for ep_key, ep_info in item.get('_episodes', {}).items():
+                    if ep_key not in merged_eps:
+                        merged_eps[ep_key] = ep_info
+                    elif ep_info.get('_folder_ep_count', 1) > merged_eps[ep_key].get('_folder_ep_count', 1):
+                        merged_eps[ep_key] = ep_info
+
+            merged['_episodes'] = merged_eps
+            merged['seasons'] = len({ek[0] for ek in merged_eps})
+            merged['episodes'] = len(merged_eps)
+
+            # Record alias mapping for preference/pending lookups
+            merged_key = _normalize_title(merged['title'])
+            for item in group:
+                item_key = _normalize_title(item['title'])
+                if item_key != merged_key:
+                    logger.debug(
+                        f"[library] TMDB dedup (debrid): '{item_key}' merged into '{merged_key}'"
+                    )
+
+            result.append(merged)
+
+        return result
+
     def scan(self, force_enforce=False):
         start = time.monotonic()
         deadline = start + 30
@@ -553,6 +631,18 @@ class LibraryScanner:
         if self._mount_path:
             debrid_movies, debrid_shows = self._scan_mount(self._mount_path, deadline)
 
+        # TMDB-based alias maps: when different sources (or different
+        # torrents) use different names for the same title (e.g. "Star
+        # Wars Andor" vs "Andor"), both resolve to the same TMDB ID in
+        # the cache.  Alias maps let us merge them.
+        show_aliases, movie_aliases = _build_tmdb_aliases()
+
+        # Deduplicate debrid entries that share a TMDB ID but have
+        # different parsed titles (e.g. "Andor" and "Star Wars Andor"
+        # both on the debrid mount as separate torrent groups).
+        debrid_shows = self._dedup_by_tmdb(debrid_shows, show_aliases)
+        debrid_movies = self._dedup_by_tmdb(debrid_movies, movie_aliases)
+
         local_movies = self._scan_local_movies()
         local_shows = self._scan_local_shows()
 
@@ -562,11 +652,17 @@ class LibraryScanner:
 
         local_movie_keys = {_normalize_title(lm['title']) for lm in local_movies}
 
-        # TMDB-based alias maps: when debrid and local use different names
-        # for the same title (e.g. "Star Wars Andor" vs "Andor"), both
-        # resolve to the same TMDB ID.  Alias maps let us merge them.
-        show_aliases, movie_aliases = _build_tmdb_aliases()
+        # Seed alias_norms with all known TMDB aliases so preference
+        # lookups work regardless of which name was used.
         self._alias_norms = {}
+        for norm_key, alias_set in show_aliases.items():
+            for alias in alias_set:
+                self._alias_norms.setdefault(norm_key, alias)
+                self._alias_norms.setdefault(alias, norm_key)
+        for norm_key, alias_set in movie_aliases.items():
+            for alias in alias_set:
+                self._alias_norms.setdefault(norm_key, alias)
+                self._alias_norms.setdefault(alias, norm_key)
 
         movies = []
         merged_local_movie_keys = set()

@@ -12,6 +12,7 @@ Service priority:
   content not yet in the library.
 """
 
+import datetime
 import json
 import os
 import threading
@@ -493,6 +494,9 @@ class SonarrClient(_ArrClientBase):
                 'message': f'No matching episodes found in Sonarr for S{season_number:02d}',
             }
 
+        # Clear any stale queue items for this series before searching
+        self._clear_unavailable_queue_items(series_id)
+
         # Trigger search
         cmd = self.search_episodes(target_ids)
         if cmd is None:
@@ -504,6 +508,37 @@ class SonarrClient(_ArrClientBase):
             'message': f'Searching for {len(target_ids)} episode(s) of {title} S{season_number:02d}',
             'command_id': cmd.get('id'),
         }
+
+    def _clear_unavailable_queue_items(self, series_id):
+        """Remove 'downloadClientUnavailable' queue items for the given series.
+
+        Only removes items that have been stuck for at least 2 minutes to avoid
+        deleting transiently unavailable items that may self-heal.
+        """
+        queue = self._get('/api/v3/queue', {'pageSize': 1000})
+        if not queue:
+            return
+        now = datetime.datetime.utcnow()
+        for r in queue.get('records', []):
+            if (r.get('status') == 'downloadClientUnavailable'
+                    and r.get('seriesId') == series_id):
+                added = r.get('added', '')
+                try:
+                    added_dt = datetime.datetime.fromisoformat(added.rstrip('Z'))
+                    if (now - added_dt).total_seconds() < 120:
+                        continue
+                except (ValueError, TypeError, AttributeError):
+                    pass
+                item_id = r.get('id')
+                if item_id is None:
+                    continue
+                title = r.get('title', '?')[:60]
+                result = self._delete(f'/api/v3/queue/{item_id}',
+                                      {'removeFromClient': 'true', 'blocklist': 'false'})
+                if result is not None:
+                    logger.info(f"[sonarr] Removed stale queue item '{title}'")
+                else:
+                    logger.warning(f"[sonarr] Failed to remove stale queue item '{title}'")
 
     def delete_episode_file(self, file_id):
         """Delete an episode file by its Sonarr file ID."""
@@ -698,6 +733,37 @@ class RadarrClient(_ArrClientBase):
                 else:
                     logger.warning(f"[radarr] Failed to remove stale queue item '{title}'")
 
+    def _clear_unavailable_queue_items(self, movie_id):
+        """Remove 'downloadClientUnavailable' queue items for the given movie.
+
+        Only removes items that have been stuck for at least 2 minutes to avoid
+        deleting transiently unavailable items that may self-heal.
+        """
+        queue = self._get('/api/v3/queue', {'pageSize': 1000})
+        if not queue:
+            return
+        now = datetime.datetime.utcnow()
+        for r in queue.get('records', []):
+            if (r.get('status') == 'downloadClientUnavailable'
+                    and r.get('movieId') == movie_id):
+                added = r.get('added', '')
+                try:
+                    added_dt = datetime.datetime.fromisoformat(added.rstrip('Z'))
+                    if (now - added_dt).total_seconds() < 120:
+                        continue
+                except (ValueError, TypeError, AttributeError):
+                    pass
+                item_id = r.get('id')
+                if item_id is None:
+                    continue
+                title = r.get('title', '?')[:60]
+                result = self._delete(f'/api/v3/queue/{item_id}',
+                                      {'removeFromClient': 'true', 'blocklist': 'false'})
+                if result is not None:
+                    logger.info(f"[radarr] Removed stale queue item '{title}'")
+                else:
+                    logger.warning(f"[radarr] Failed to remove stale queue item '{title}'")
+
     def _get_blackhole_tag_id(self):
         """Find the tag ID used by the TorrentBlackhole download client."""
         self._discover_routing_tags()
@@ -875,6 +941,9 @@ class RadarrClient(_ArrClientBase):
             if movie_id is None:
                 return {'status': 'error', 'message': 'Radarr returned movie without ID'}
 
+            # Clear any stale queue items for this movie before searching
+            self._clear_unavailable_queue_items(movie_id)
+
             cmd = self.search_movie(movie_id)
             if cmd is None:
                 return {'status': 'error', 'message': 'Failed to trigger movie search'}
@@ -915,6 +984,8 @@ class RadarrClient(_ArrClientBase):
                 movie = self._ensure_debrid_routing(movie)
             elif prefer_debrid is False:
                 movie = self._ensure_local_routing(movie)
+            if movie.get('id') is not None:
+                self._clear_unavailable_queue_items(movie['id'])
         else:
             logger.info(f"[radarr] Added movie: {title} (ID: {movie.get('id')})")
         return {

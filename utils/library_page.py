@@ -88,6 +88,15 @@ a:hover{text-decoration:underline}
 .legend-item{display:inline-flex;align-items:center;gap:6px}
 .legend-swatch{width:16px;height:5px;border-radius:1px;display:inline-block}
 
+/* Alphabetical jump bar */
+.jump-bar{position:fixed;right:6px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;align-items:center;gap:0;z-index:10;padding:4px 2px;border-radius:8px;background:var(--card);border:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,.2)}
+.jump-letter{font-size:.65em;font-weight:600;line-height:1;padding:2px 5px;cursor:pointer;color:var(--blue);border-radius:3px;user-select:none;transition:background .1s,color .1s}
+.jump-letter:hover{background:var(--blue);color:var(--bg)}
+.jump-letter.inactive{color:var(--text3);cursor:default;opacity:.4;pointer-events:none}
+.poster-card.jump-highlight{outline:2px solid var(--blue);outline-offset:2px}
+@media(max-width:640px){.jump-bar{right:2px;padding:2px 1px}.jump-letter{font-size:.55em;padding:1px 3px}.grid{padding-right:20px}}
+@media(max-width:480px){.jump-bar{display:none}.grid{padding-right:0}}
+
 /* Media card (detail view only) */
 .media-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:6px;transition:border-color .15s,transform .15s,box-shadow .15s}
 .media-card:hover{border-color:var(--border2);transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,.15)}
@@ -306,6 +315,7 @@ a:hover{text-decoration:underline}
 <div id="content-area">
   <div class="grid" id="skeleton-grid"></div>
 </div>
+<div class="jump-bar" id="jump-bar" role="navigation" aria-label="Alphabetical jump bar" style="display:none"></div>
 <script>
 (function(){var g=document.getElementById('skeleton-grid');if(!g)return;var h='';for(var i=0;i<12;i++)h+='<div class="skeleton-poster"><div class="poster-container"><div class="skeleton-line" style="width:100%;height:100%;border-radius:0"></div></div><div class="skeleton-line" style="height:5px;width:100%;border-radius:0"></div><div class="card-info"><div class="skeleton-line skeleton-title"></div><div class="skeleton-line skeleton-meta"></div></div></div>';g.innerHTML=h})();
 </script>
@@ -610,6 +620,7 @@ function renderGrid(items) {
   const area = document.getElementById('content-area');
   _displayedItems = items;
   if (!items.length) {
+    _updateJumpBar([]);
     const isFiltered = document.getElementById('search-input').value.trim()
       || document.getElementById('source-filter').value;
     if (isFiltered) {
@@ -644,6 +655,59 @@ function renderGrid(items) {
 
   area.innerHTML = gridHtml;
   _observeUncachedCards();
+  _updateJumpBar(items);
+}
+
+var _JUMP_LETTERS = ['#','A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z'];
+
+function _getItemLetter(title) {
+  var ch = (title || '').charAt(0).toUpperCase();
+  // Normalize diacritics: A->A, E->E, etc.
+  var base = ch.normalize ? ch.normalize('NFD').charAt(0) : ch;
+  if (base >= 'A' && base <= 'Z') return base;
+  return '#';
+}
+
+function _updateJumpBar(items) {
+  var bar = document.getElementById('jump-bar');
+  if (!bar) return;
+  if (!items || !items.length) { bar.style.display = 'none'; return; }
+
+  // Build set of letters that have items
+  var activeLetters = {};
+  for (var i = 0; i < items.length; i++) {
+    activeLetters[_getItemLetter(items[i].title)] = true;
+  }
+
+  var html = '';
+  for (var li = 0; li < _JUMP_LETTERS.length; li++) {
+    var letter = _JUMP_LETTERS[li];
+    var active = !!activeLetters[letter];
+    if (active) {
+      html += '<span class="jump-letter" tabindex="0" role="button" aria-label="Jump to ' + letter + '"'
+        + ' onclick="jumpToLetter(\'' + letter + '\')"'
+        + ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();jumpToLetter(\'' + letter + '\')}"'
+        + '>' + letter + '</span>';
+    } else {
+      html += '<span class="jump-letter inactive" aria-hidden="true">' + letter + '</span>';
+    }
+  }
+  bar.innerHTML = html;
+  bar.style.display = '';
+}
+
+function jumpToLetter(letter) {
+  var cards = document.querySelectorAll('.poster-card[data-title]');
+  var prefersReduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  for (var i = 0; i < cards.length; i++) {
+    var cardLetter = _getItemLetter(cards[i].getAttribute('data-title'));
+    if (cardLetter === letter) {
+      cards[i].scrollIntoView({behavior: prefersReduced ? 'auto' : 'smooth', block: 'start'});
+      cards[i].classList.add('jump-highlight');
+      setTimeout(function(el) { el.classList.remove('jump-highlight'); }.bind(null, cards[i]), 1500);
+      return;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -863,6 +927,7 @@ function showDetail(index) {
   document.querySelector('.tabs').style.display = 'none';
   document.querySelector('.controls').style.display = 'none';
   document.getElementById('footer').style.display = 'none';
+  document.getElementById('jump-bar').style.display = 'none';
 
   _renderDetail();
   var backBtn = document.querySelector('.detail-back');

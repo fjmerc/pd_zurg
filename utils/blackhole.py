@@ -69,7 +69,7 @@ def _local_episodes(season_dir):
     eps = set()
     try:
         for f in os.listdir(season_dir):
-            for m in re.finditer(r'[Ee](\d+)', f):
+            for m in re.finditer(r'(?<![a-zA-Z])[Ee](\d+)', f):
                 eps.add(int(m.group(1)))
     except OSError:
         pass

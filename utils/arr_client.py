@@ -14,6 +14,7 @@ Service priority:
 
 import json
 import os
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,6 +26,7 @@ logger = get_logger()
 
 _TIMEOUT = 15  # seconds — Arr APIs can be slow on large libraries
 _NOT_FOUND = object()  # sentinel for "looked up, not found" in tag cache
+_tag_creation_lock = threading.Lock()  # prevents duplicate tags from concurrent requests
 
 
 # ---------------------------------------------------------------------------
@@ -125,39 +127,87 @@ class SonarrClient(_ArrClientBase):
         return result is not None
 
     # Usenet client implementations (lowercase for case-insensitive matching).
-    # These should NOT be tagged exclusively because they don't compete with
-    # torrent clients for the same protocol.
+    # Used to distinguish usenet from torrent clients during tag discovery.
     _USENET_IMPLEMENTATIONS = frozenset({
         'nzbget', 'sabnzbd', 'nzbvortex', 'pneumatic',
         'usenetblackhole', 'usenetdownloadstation',
     })
 
-    def _discover_routing_tags(self):
-        """Discover tags used by torrent download clients for routing.
+    def _get_or_create_tag(self, label):
+        """Find an existing tag by label or create one. Returns tag ID or None."""
+        with _tag_creation_lock:
+            tags = self._get('/api/v3/tag') or []
+            for t in tags:
+                if t.get('label', '').lower() == label.lower():
+                    return t['id']
+            result = self._post('/api/v3/tag', {'label': label})
+            if result and 'id' in result:
+                logger.info(f"[sonarr] Created tag '{label}' (ID: {result['id']})")
+                return result['id']
+            return None
 
-        Only considers torrent clients (QBittorrent, Transmission, etc.)
-        for the local tag. Usenet clients (NZBget, SABnzbd) are skipped
-        because they handle a different protocol and should serve all items.
+    def _discover_routing_tags(self):
+        """Discover tags used by download clients for routing.
+
+        Identifies the blackhole tag and local tag from existing clients.
+        When a blackhole client exists, ensures all other enabled clients
+        are tagged so they don't act as universal catch-alls that intercept
+        downloads meant for the blackhole (debrid).
         """
         if self._blackhole_tag_id is not None:
             return
-        clients = self._get('/api/v3/downloadclient') or []
+        clients_raw = self._get('/api/v3/downloadclient')
+        if clients_raw is None:
+            return  # API error — leave uncached so next call retries
         self._blackhole_tag_id = _NOT_FOUND
         self._local_tag_id = _NOT_FOUND
-        for c in clients:
+        untagged_clients = []
+        for c in clients_raw:
             if not c.get('enable'):
                 continue
             impl = c.get('implementation', '')
             impl_lower = impl.lower()
             tags = c.get('tags', [])
-            if not tags:
-                continue
             if impl_lower == 'torrentblackhole':
-                self._blackhole_tag_id = tags[0]
-                logger.debug(f"[sonarr] Blackhole client uses tag {self._blackhole_tag_id}")
-            elif impl_lower not in self._USENET_IMPLEMENTATIONS and self._local_tag_id is _NOT_FOUND:
+                if tags:
+                    self._blackhole_tag_id = tags[0]
+                    logger.debug(f"[sonarr] Blackhole client uses tag {self._blackhole_tag_id}")
+                else:
+                    bh_tag = self._get_or_create_tag('debrid')
+                    if bh_tag is not None:
+                        updated = dict(c, tags=[bh_tag])
+                        if self._put(f'/api/v3/downloadclient/{c["id"]}', updated):
+                            self._blackhole_tag_id = bh_tag
+                            logger.info(f"[sonarr] Auto-tagged blackhole client '{c.get('name', '?')}' with debrid tag {bh_tag}")
+                        else:
+                            logger.warning(f"[sonarr] Failed to auto-tag blackhole client '{c.get('name', '?')}'")
+                    else:
+                        logger.warning(f"[sonarr] TorrentBlackhole client '{c.get('name', '?')}' has no tags — download routing will not work")
+                continue
+            if not tags:
+                untagged_clients.append(c)
+                continue
+            if impl_lower not in self._USENET_IMPLEMENTATIONS and self._local_tag_id is _NOT_FOUND:
                 self._local_tag_id = tags[0]
                 logger.debug(f"[sonarr] Local torrent client ({impl}) uses tag {self._local_tag_id}")
+
+        # When a blackhole exists, untagged clients intercept debrid downloads.
+        # Tag them with the local tag so debrid routing is exclusive.
+        if self._blackhole_tag_id is not _NOT_FOUND and untagged_clients:
+            local_tag = self._local_tag_id if self._local_tag_id is not _NOT_FOUND else None
+            if local_tag is None:
+                local_tag = self._get_or_create_tag('local')
+                if local_tag is not None:
+                    self._local_tag_id = local_tag
+            if local_tag is not None:
+                for c in untagged_clients:
+                    c_name = c.get('name', c.get('implementation', '?'))
+                    updated = dict(c, tags=[local_tag])
+                    result = self._put(f'/api/v3/downloadclient/{c["id"]}', updated)
+                    if result:
+                        logger.info(f"[sonarr] Tagged untagged client '{c_name}' with local tag {local_tag} to prevent debrid interception")
+                    else:
+                        logger.warning(f"[sonarr] Failed to tag client '{c_name}'")
 
     def _get_blackhole_tag_id(self):
         """Find the tag ID used by the TorrentBlackhole download client."""
@@ -483,31 +533,81 @@ class RadarrClient(_ArrClientBase):
 
     _USENET_IMPLEMENTATIONS = SonarrClient._USENET_IMPLEMENTATIONS
 
-    def _discover_routing_tags(self):
-        """Discover tags used by torrent download clients for routing.
+    def _get_or_create_tag(self, label):
+        """Find an existing tag by label or create one. Returns tag ID or None."""
+        with _tag_creation_lock:
+            tags = self._get('/api/v3/tag') or []
+            for t in tags:
+                if t.get('label', '').lower() == label.lower():
+                    return t['id']
+            result = self._post('/api/v3/tag', {'label': label})
+            if result and 'id' in result:
+                logger.info(f"[radarr] Created tag '{label}' (ID: {result['id']})")
+                return result['id']
+            return None
 
-        Only considers torrent clients for the local tag. Usenet clients
-        are skipped because they handle a different protocol.
+    def _discover_routing_tags(self):
+        """Discover tags used by download clients for routing.
+
+        Identifies the blackhole tag and local tag from existing clients.
+        When a blackhole client exists, ensures all other enabled clients
+        are tagged so they don't act as universal catch-alls that intercept
+        downloads meant for the blackhole (debrid).
         """
         if self._blackhole_tag_id is not None:
             return
-        clients = self._get('/api/v3/downloadclient') or []
+        clients_raw = self._get('/api/v3/downloadclient')
+        if clients_raw is None:
+            return  # API error — leave uncached so next call retries
         self._blackhole_tag_id = _NOT_FOUND
         self._local_tag_id = _NOT_FOUND
-        for c in clients:
+        untagged_clients = []
+        for c in clients_raw:
             if not c.get('enable'):
                 continue
             impl = c.get('implementation', '')
             impl_lower = impl.lower()
             tags = c.get('tags', [])
-            if not tags:
-                continue
             if impl_lower == 'torrentblackhole':
-                self._blackhole_tag_id = tags[0]
-                logger.debug(f"[radarr] Blackhole client uses tag {self._blackhole_tag_id}")
-            elif impl_lower not in self._USENET_IMPLEMENTATIONS and self._local_tag_id is _NOT_FOUND:
+                if tags:
+                    self._blackhole_tag_id = tags[0]
+                    logger.debug(f"[radarr] Blackhole client uses tag {self._blackhole_tag_id}")
+                else:
+                    bh_tag = self._get_or_create_tag('debrid')
+                    if bh_tag is not None:
+                        updated = dict(c, tags=[bh_tag])
+                        if self._put(f'/api/v3/downloadclient/{c["id"]}', updated):
+                            self._blackhole_tag_id = bh_tag
+                            logger.info(f"[radarr] Auto-tagged blackhole client '{c.get('name', '?')}' with debrid tag {bh_tag}")
+                        else:
+                            logger.warning(f"[radarr] Failed to auto-tag blackhole client '{c.get('name', '?')}'")
+                    else:
+                        logger.warning(f"[radarr] TorrentBlackhole client '{c.get('name', '?')}' has no tags — download routing will not work")
+                continue
+            if not tags:
+                untagged_clients.append(c)
+                continue
+            if impl_lower not in self._USENET_IMPLEMENTATIONS and self._local_tag_id is _NOT_FOUND:
                 self._local_tag_id = tags[0]
                 logger.debug(f"[radarr] Local torrent client ({impl}) uses tag {self._local_tag_id}")
+
+        # When a blackhole exists, untagged clients intercept debrid downloads.
+        # Tag them with the local tag so debrid routing is exclusive.
+        if self._blackhole_tag_id is not _NOT_FOUND and untagged_clients:
+            local_tag = self._local_tag_id if self._local_tag_id is not _NOT_FOUND else None
+            if local_tag is None:
+                local_tag = self._get_or_create_tag('local')
+                if local_tag is not None:
+                    self._local_tag_id = local_tag
+            if local_tag is not None:
+                for c in untagged_clients:
+                    c_name = c.get('name', c.get('implementation', '?'))
+                    updated = dict(c, tags=[local_tag])
+                    result = self._put(f'/api/v3/downloadclient/{c["id"]}', updated)
+                    if result:
+                        logger.info(f"[radarr] Tagged untagged client '{c_name}' with local tag {local_tag} to prevent debrid interception")
+                    else:
+                        logger.warning(f"[radarr] Failed to tag client '{c_name}'")
 
     def _get_blackhole_tag_id(self):
         """Find the tag ID used by the TorrentBlackhole download client."""
@@ -723,9 +823,9 @@ class RadarrClient(_ArrClientBase):
             logger.info(f"[radarr] Movie already existed (race): {title} (ID: {movie.get('id')})")
             # Apply routing to the race-found movie
             if prefer_debrid is True:
-                self._ensure_debrid_routing(movie)
+                movie = self._ensure_debrid_routing(movie)
             elif prefer_debrid is False:
-                self._ensure_local_routing(movie)
+                movie = self._ensure_local_routing(movie)
         else:
             logger.info(f"[radarr] Added movie: {title} (ID: {movie.get('id')})")
         return {

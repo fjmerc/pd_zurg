@@ -103,11 +103,11 @@ a:hover{text-decoration:underline}
 /* Source badges */
 .badge-local{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#3fb9500f;color:var(--green);border:1px solid #3fb95033}
 .badge-debrid{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#58a6ff0f;color:var(--blue);border:1px solid #58a6ff33}
-.badge-local .badge-full,.badge-debrid .badge-full,.badge-missing .badge-full,.badge-pending .badge-full{display:inline}
-.badge-local .badge-mini,.badge-debrid .badge-mini,.badge-missing .badge-mini,.badge-pending .badge-mini{display:none}
+.badge-local .badge-full,.badge-debrid .badge-full,.badge-missing .badge-full,.badge-pending .badge-full,.badge-migrating .badge-full{display:inline}
+.badge-local .badge-mini,.badge-debrid .badge-mini,.badge-missing .badge-mini,.badge-pending .badge-mini,.badge-migrating .badge-mini{display:none}
 @media(max-width:640px){
-  .badge-local .badge-full,.badge-debrid .badge-full,.badge-missing .badge-full,.badge-pending .badge-full{display:none}
-  .badge-local .badge-mini,.badge-debrid .badge-mini,.badge-missing .badge-mini,.badge-pending .badge-mini{display:inline}
+  .badge-local .badge-full,.badge-debrid .badge-full,.badge-missing .badge-full,.badge-pending .badge-full,.badge-migrating .badge-full{display:none}
+  .badge-local .badge-mini,.badge-debrid .badge-mini,.badge-missing .badge-mini,.badge-pending .badge-mini,.badge-migrating .badge-mini{display:inline}
   .ep-actions .btn-action{font-size:.68em;padding:2px 5px}
 }
 [data-theme="light"] .badge-local{background:#1a7f371a;border-color:#1a7f3740}
@@ -214,6 +214,8 @@ a:hover{text-decoration:underline}
 @keyframes pending-shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 [data-theme="light"] .badge-pending{background:#bc4c001a;border-color:#bc4c0040;color:#bc4c00}
 [data-theme="light"] .badge-pending::before{background:#bc4c00}
+.badge-migrating{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:var(--text3);border:1px solid var(--border2);margin-left:4px}
+[data-theme="light"] .badge-migrating{color:var(--text3);border-color:var(--border2)}
 
 /* Season progress pill (Sonarr-style) */
 .season-progress-pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;margin-left:8px}
@@ -530,12 +532,34 @@ function buildCard(item, index) {
     metaLine = '<div class="card-meta"><span style="color:var(--red)">' + item.missing_episodes + ' missing</span></div>';
   }
 
-  // Pending badge
+  // Pending badge — distinguish migrating (available) vs searching (missing)
   var pendingBadge = '';
   var pnk = normTitle(item.title);
   if (_pending[pnk]) {
-    var dir = (_pending[pnk] || {}).direction;
-    pendingBadge = '<span class="badge-pending">' + (dir === 'to-local' ? '\u2192 Local' : '\u2192 Debrid') + '</span>';
+    var pe = _pending[pnk];
+    var dir = pe.direction || '';
+    var hasMissingPending = false;
+    if (item.type === 'movie') {
+      // Movie: searching if current source doesn't include the target
+      var targetHas = (dir === 'to-local')
+        ? (item.source === 'local' || item.source === 'both')
+        : (item.source === 'debrid' || item.source === 'both');
+      if (!targetHas) hasMissingPending = true;
+    } else if (pe.episodes && item.season_data) {
+      var availEps = {};
+      item.season_data.forEach(function(s) {
+        (s.episodes || []).forEach(function(e) { if (e.source && e.source !== 'missing') availEps[s.number + ',' + e.number] = true; });
+      });
+      for (var pi = 0; pi < pe.episodes.length; pi++) {
+        if (!availEps[pe.episodes[pi].season + ',' + pe.episodes[pi].episode]) { hasMissingPending = true; break; }
+      }
+    }
+    if (hasMissingPending) {
+      pendingBadge = '<span class="badge-pending">Searching</span>';
+    } else {
+      var upDir = dir === 'to-local' ? 'Local' : 'Debrid';
+      pendingBadge = '<span class="badge-migrating">Migrating to ' + upDir + '</span>';
+    }
   }
 
   var badges = buildBadges(item.source) + pendingBadge;
@@ -1045,10 +1069,14 @@ function _renderSeasonEpisodes(season, si) {
         }
       }
     }
-    if (isPending) {
-      var pendingLabel = (_pending[normTitle(_detailItem.title)] || {}).direction === 'to-local'
-        ? '\u2192 Local' : '\u2192 Debrid';
-      html += '<span class="badge-pending">' + pendingLabel + '</span>';
+    var isMigrating = isPending && !isMissing && !!ep.source;
+    if (isMigrating) {
+      // Episode is available — show source badge + subtle upgrade indicator
+      html += buildBadges(ep.source);
+      html += '<span class="badge-migrating"><span class="badge-full">Migrating</span><span class="badge-mini">\u2197</span></span>';
+    } else if (isPending) {
+      // Episode is missing — actively searching
+      html += '<span class="badge-pending">Searching</span>';
     } else if (isMissing) {
       if (!ep.air_date) {
         html += '<span class="badge-tba">TBA</span>';
@@ -1066,7 +1094,8 @@ function _renderSeasonEpisodes(season, si) {
     html += '</td>';
     html += '<td class="ep-actions">';
     if (isPending) {
-      html += '<button class="btn-action" disabled>\u2026</button>';
+      // Searching: disabled placeholder; Migrating: no button (already in-flight)
+      if (!isMigrating) html += '<button class="btn-action" disabled>\u2026</button>';
     } else if (_downloadServices.show && _downloadServices.show !== 'overseerr') {
       if (ep.source === 'debrid') {
         html += '<button class="btn-action" aria-label="Switch ' + epLabel + ' to Local" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ',false)})">Switch to Local</button>';
@@ -1089,13 +1118,17 @@ function _renderSeasonEpisodes(season, si) {
 }
 
 function _shouldAutoExpand(season, showTitle) {
-  // Expand seasons with pending transitions
+  // Expand seasons with missing episodes being searched (not upgrade-only)
   if (showTitle) {
     var pnk = normTitle(showTitle);
     var pe = _pending[pnk];
     if (pe && pe.episodes) {
+      var missingInSeason = {};
+      (season.episodes || []).forEach(function(e) {
+        if (e.source === 'missing') missingInSeason[e.number] = true;
+      });
       for (var i = 0; i < pe.episodes.length; i++) {
-        if (pe.episodes[i].season === season.number) return true;
+        if (pe.episodes[i].season === season.number && missingInSeason[pe.episodes[i].episode]) return true;
       }
     }
   }
@@ -1232,13 +1265,22 @@ function _renderShowDetail(show, meta) {
       if (season.episodes[ci].source === 'local' || season.episodes[ci].source === 'both') hasLocal = true;
       if (season.episodes[ci].source === 'missing') { hasMissing = true; missingCount++; }
     }
+    // Season is "pending" (orange pill) only if it has missing episodes
+    // that are being searched for.  Available episodes being upgraded to
+    // a preferred source don't warrant the alarming pending style.
     var seasonPending = false;
-    if (_detailItem) {
+    if (hasMissing && _detailItem) {
       var pnk = normTitle(_detailItem.title);
       var pe = _pending[pnk];
       if (pe && pe.episodes) {
+        var missingEps = {};
+        for (var mi = 0; mi < (season.episodes || []).length; mi++) {
+          if (season.episodes[mi].source === 'missing') missingEps[season.episodes[mi].number] = true;
+        }
         for (var spi = 0; spi < pe.episodes.length; spi++) {
-          if (pe.episodes[spi].season === season.number) { seasonPending = true; break; }
+          if (pe.episodes[spi].season === season.number && missingEps[pe.episodes[spi].episode]) {
+            seasonPending = true; break;
+          }
         }
       }
     }

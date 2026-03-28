@@ -211,32 +211,51 @@ class SonarrClient(_ArrClientBase):
                         logger.info(f"[sonarr] Tagged untagged client '{c_name}' with local tag {local_tag} to prevent debrid interception")
                     else:
                         logger.warning(f"[sonarr] Failed to tag client '{c_name}'")
-                # Clear indexer-level downloadClientId overrides that point to
-                # newly-tagged clients — otherwise the indexer forces results to
-                # the client regardless of tags, defeating debrid routing.
+                # Fix indexer routing and clean up stale queue items
+                self._fix_indexer_routing(tagged_client_ids, local_tag)
                 if tagged_client_ids:
                     tagged_client_names = {
                         c['name'] for c in untagged_clients
                         if c['id'] in tagged_client_ids and c.get('name')
                     }
-                    self._clear_indexer_client_overrides(tagged_client_ids)
                     if tagged_client_names:
                         self._clear_stale_queue_items(tagged_client_names)
 
-    def _clear_indexer_client_overrides(self, client_ids):
-        """Remove downloadClientId from indexers that point to given clients."""
+    def _fix_indexer_routing(self, tagged_client_ids, local_tag):
+        """Fix indexer routing after auto-tagging download clients.
+
+        1. Clear downloadClientId overrides pointing to newly-tagged clients
+        2. Tag untagged usenet indexers with the local tag so they don't
+           provide results for debrid-tagged series (which creates stale
+           queue items that can't be delivered)
+        """
         indexers = self._get('/api/v3/indexer')
         if not indexers:
             return
         for ix in indexers:
-            if ix.get('downloadClientId', 0) in client_ids:
-                ix_name = ix.get('name', '?')
-                updated = dict(ix, downloadClientId=0)
+            ix_name = ix.get('name', '?')
+            changed = False
+            updated = dict(ix)
+            # Clear hardcoded downloadClientId pointing to re-tagged clients
+            if updated.get('downloadClientId', 0) in tagged_client_ids:
+                updated['downloadClientId'] = 0
+                changed = True
+                logger.debug(f"[sonarr] Clearing downloadClientId on indexer '{ix_name}'")
+            # Tag untagged usenet indexers so they only serve local-tagged series
+            if ix.get('protocol') == 'usenet' and local_tag is not None:
+                existing_tags = ix.get('tags', [])
+                if not existing_tags:
+                    updated['tags'] = [local_tag]
+                    changed = True
+                    logger.debug(f"[sonarr] Tagging usenet indexer '{ix_name}' with local tag")
+                elif local_tag not in existing_tags:
+                    logger.info(f"[sonarr] Usenet indexer '{ix_name}' has existing tags {existing_tags} — verify it excludes debrid series")
+            if changed:
                 result = self._put(f'/api/v3/indexer/{ix["id"]}', updated)
                 if result:
-                    logger.info(f"[sonarr] Cleared downloadClientId override on indexer '{ix_name}' — tag-based routing will apply")
+                    logger.info(f"[sonarr] Fixed indexer routing for '{ix_name}'")
                 else:
-                    logger.warning(f"[sonarr] Failed to clear downloadClientId on indexer '{ix_name}'")
+                    logger.warning(f"[sonarr] Failed to fix indexer routing for '{ix_name}'")
 
     def _clear_stale_queue_items(self, client_names):
         """Remove queue items stuck as unavailable for newly-tagged clients."""
@@ -691,29 +710,47 @@ class RadarrClient(_ArrClientBase):
                         logger.info(f"[radarr] Tagged untagged client '{c_name}' with local tag {local_tag} to prevent debrid interception")
                     else:
                         logger.warning(f"[radarr] Failed to tag client '{c_name}'")
+                self._fix_indexer_routing(tagged_client_ids, local_tag)
                 if tagged_client_ids:
                     tagged_client_names = {
                         c['name'] for c in untagged_clients
                         if c['id'] in tagged_client_ids and c.get('name')
                     }
-                    self._clear_indexer_client_overrides(tagged_client_ids)
                     if tagged_client_names:
                         self._clear_stale_queue_items(tagged_client_names)
 
-    def _clear_indexer_client_overrides(self, client_ids):
-        """Remove downloadClientId from indexers that point to given clients."""
+    def _fix_indexer_routing(self, tagged_client_ids, local_tag):
+        """Fix indexer routing after auto-tagging download clients.
+
+        1. Clear downloadClientId overrides pointing to newly-tagged clients
+        2. Tag untagged usenet indexers with the local tag so they don't
+           provide results for debrid-tagged series
+        """
         indexers = self._get('/api/v3/indexer')
         if not indexers:
             return
         for ix in indexers:
-            if ix.get('downloadClientId', 0) in client_ids:
-                ix_name = ix.get('name', '?')
-                updated = dict(ix, downloadClientId=0)
+            ix_name = ix.get('name', '?')
+            changed = False
+            updated = dict(ix)
+            if updated.get('downloadClientId', 0) in tagged_client_ids:
+                updated['downloadClientId'] = 0
+                changed = True
+                logger.debug(f"[radarr] Clearing downloadClientId on indexer '{ix_name}'")
+            if ix.get('protocol') == 'usenet' and local_tag is not None:
+                existing_tags = ix.get('tags', [])
+                if not existing_tags:
+                    updated['tags'] = [local_tag]
+                    changed = True
+                    logger.debug(f"[radarr] Tagging usenet indexer '{ix_name}' with local tag")
+                elif local_tag not in existing_tags:
+                    logger.info(f"[radarr] Usenet indexer '{ix_name}' has existing tags {existing_tags} — verify it excludes debrid series")
+            if changed:
                 result = self._put(f'/api/v3/indexer/{ix["id"]}', updated)
                 if result:
-                    logger.info(f"[radarr] Cleared downloadClientId override on indexer '{ix_name}' — tag-based routing will apply")
+                    logger.info(f"[radarr] Fixed indexer routing for '{ix_name}'")
                 else:
-                    logger.warning(f"[radarr] Failed to clear downloadClientId on indexer '{ix_name}'")
+                    logger.warning(f"[radarr] Failed to fix indexer routing for '{ix_name}'")
 
     def _clear_stale_queue_items(self, client_names):
         """Remove queue items stuck as unavailable for newly-tagged clients."""

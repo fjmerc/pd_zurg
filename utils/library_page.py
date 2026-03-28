@@ -1417,13 +1417,13 @@ function applyPreference() {
     });
 
   } else if (pref === 'prefer-debrid') {
-    // Switch local episodes to debrid by replacing local files with symlinks
-    // to the debrid mount. No Sonarr search needed — content must already
-    // exist on the mount (source=both).
-    var switchEps = [];
-    var localOnlyEps = [];
+    // Collect episodes by current source state
+    var switchEps = [];    // source='both' -> switch to symlink now
+    var localOnlyEps = []; // source='local' -> need debrid search
+    var missingEps = [];   // source='missing' -> need debrid search
     var totalSwitchable = 0;
     var totalLocalOnly = 0;
+    var totalMissing = 0;
     for (var si2 = 0; si2 < seasons.length; si2++) {
       for (var ei2 = 0; ei2 < seasons[si2].episodes.length; ei2++) {
         var src = seasons[si2].episodes[ei2].source;
@@ -1433,74 +1433,113 @@ function applyPreference() {
         } else if (src === 'local') {
           localOnlyEps.push({season: seasons[si2].number, episode: seasons[si2].episodes[ei2].number});
           totalLocalOnly++;
+        } else if (src === 'missing') {
+          missingEps.push({season: seasons[si2].number, episode: seasons[si2].episodes[ei2].number});
+          totalMissing++;
         }
       }
     }
-    if (totalSwitchable === 0 && totalLocalOnly === 0) { _savePref(nk, pref); return; }
-    if (totalSwitchable === 0) {
-      // No episodes have both sources — trigger a debrid search for
-      // local-only episodes so debrid copies get acquired.
-      _savePref(nk, pref).then(function(saved) {
-        if (!saved) { _showMsg('Failed to save preference.', 'error'); return; }
-        if (!localOnlyEps.length) return;
-        // Group by season and trigger searches.
-        // Capture title/tmdbId before async to avoid null-read if user navigates away.
-        var capturedTitle = _detailItem.title;
-        var capturedTmdbId = tmdbId;
-        var bySeason = {};
-        for (var li = 0; li < localOnlyEps.length; li++) {
-          var sn = localOnlyEps[li].season;
-          if (!bySeason[sn]) bySeason[sn] = [];
-          bySeason[sn].push(localOnlyEps[li].episode);
-        }
-        var tasks = [];
-        Object.keys(bySeason).forEach(function(sn) {
-          tasks.push(function() {
-            return _postDownload({
-              title: capturedTitle, type: 'show', tmdb_id: capturedTmdbId,
-              season: parseInt(sn), episodes: bySeason[sn], prefer_debrid: true
-            });
+    // Combine local-only and missing into episodes that need a debrid search
+    var searchEps = localOnlyEps.concat(missingEps);
+    var totalSearchable = totalLocalOnly + totalMissing;
+
+    if (totalSwitchable === 0 && totalSearchable === 0) { _savePref(nk, pref); return; }
+
+    // Helper: trigger debrid searches for episodes grouped by season
+    var _searchForDebrid = function(capturedTitle, capturedTmdbId, eps, onDone) {
+      if (!eps.length) { if (onDone) onDone(true); return; }
+      var bySeason = {};
+      for (var li = 0; li < eps.length; li++) {
+        var sn = eps[li].season;
+        if (!bySeason[sn]) bySeason[sn] = [];
+        bySeason[sn].push(eps[li].episode);
+      }
+      var tasks = [];
+      Object.keys(bySeason).forEach(function(sn) {
+        tasks.push(function() {
+          return _postDownload({
+            title: capturedTitle, type: 'show', tmdb_id: capturedTmdbId,
+            season: parseInt(sn), episodes: bySeason[sn], prefer_debrid: true
           });
         });
-        _runSequential(tasks).then(function(ok) {
+      });
+      _runSequential(tasks).then(function(ok) {
+        if (onDone) onDone(ok);
+      }).catch(function() {
+        if (onDone) onDone(false);
+      });
+    };
+
+    if (totalSwitchable === 0) {
+      // No episodes can switch now — save pref and search for debrid copies
+      var capturedTitle = _detailItem.title;
+      var capturedTmdbId = tmdbId;
+      _savePref(nk, pref).then(function(saved) {
+        if (!saved) { _showMsg('Failed to save preference.', 'error'); return; }
+        _setPending(capturedTitle, searchEps, 'to-debrid');
+        _searchForDebrid(capturedTitle, capturedTmdbId, searchEps, function(ok) {
           if (ok) {
-            _setPending(capturedTitle, localOnlyEps, 'to-debrid');
-            _showMsg('Preference saved. Searching for debrid copies of ' + totalLocalOnly + ' episode(s).', 'success');
-            _scheduleRefresh(1000);
+            _showMsg('Preference saved. Searching for debrid copies of ' + totalSearchable + ' episode(s).', 'success');
           } else {
             _showMsg('Preference saved but search failed for some episodes.', 'error');
           }
+          _scheduleRefresh(1000);
         });
       });
       return;
     }
+
+    // Mixed case: some episodes can switch now, others need searching
     var confirmMsg2 = 'Switch ' + totalSwitchable + ' episode(s) to debrid streaming?'
       + '\n\nLocal files will be removed. Playback will stream from your debrid service instead.';
-    if (totalLocalOnly > 0) confirmMsg2 += '\n\n' + totalLocalOnly + ' episode(s) have no debrid copy and will stay local.';
+    if (totalSearchable > 0) confirmMsg2 += '\n\n' + totalSearchable + ' additional episode(s) will be searched for debrid copies.';
     if (!confirm(confirmMsg2)) return;
     _actionInFlight = true;
     _setActionsDisabled(true);
     _showMsgHtml('<span class="scanning-dot"></span>Switching to debrid...');
+    var capturedTitle2 = _detailItem.title;
+    var capturedTmdbId2 = tmdbId;
     fetch('/api/library/switch-to-debrid', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({title: _detailItem.title, episodes: switchEps})
+      body: JSON.stringify({title: capturedTitle2, episodes: switchEps})
     }).then(function(r) {
       return r.json().then(function(d) { return {ok: r.ok, d: d}; });
     }).then(function(res) {
       if (res.ok && res.d.switched > 0) {
-        _savePref(nk, pref);
-        if (localOnlyEps.length) _setPending(_detailItem.title, localOnlyEps, 'to-debrid');
-        _showMsg('Switched ' + res.d.switched + ' episode(s) to debrid streaming. To get local copies back, use Switch to Local.', 'success');
-        _scheduleRefresh(1000);
+        // Clear action-in-flight before triggering searches (which use _postDownload)
+        // Keep buttons disabled until the full chain completes
+        _actionInFlight = false;
+        _savePref(nk, pref).then(function(saved) {
+          if (!saved) { _showMsg('Switched ' + res.d.switched + ' episode(s) but failed to save preference.', 'error'); return; }
+          if (searchEps.length) {
+            _setPending(capturedTitle2, searchEps, 'to-debrid');
+            _searchForDebrid(capturedTitle2, capturedTmdbId2, searchEps, function(ok) {
+              if (ok) {
+                _showMsg('Switched ' + res.d.switched + ' episode(s). Searching for debrid copies of ' + totalSearchable + ' more.', 'success');
+              } else {
+                _showMsg('Switched ' + res.d.switched + ' episode(s) but search failed for remaining.', 'error');
+              }
+              _scheduleRefresh(1000);
+              _setActionsDisabled(false);
+            });
+          } else {
+            _showMsg('Switched ' + res.d.switched + ' episode(s) to debrid streaming.', 'success');
+            _scheduleRefresh(1000);
+            _setActionsDisabled(false);
+          }
+        }).catch(function() { _setActionsDisabled(false); });
       } else {
         _showMsg('Error: ' + (res.d.error || res.d.message || 'Switch failed'), 'error');
       }
     }).catch(function(e) {
       _showMsg('Switch failed: ' + e, 'error');
     }).finally(function() {
-      _actionInFlight = false;
-      _setActionsDisabled(false);
+      // Only clear if not already cleared by the success path above
+      if (_actionInFlight) {
+        _actionInFlight = false;
+        _setActionsDisabled(false);
+      }
     });
 
   } else {
@@ -1656,23 +1695,43 @@ function applyMoviePreference() {
 
   } else if (pref === 'prefer-debrid' && (_detailItem.source === 'local' || _detailItem.source === 'both')) {
     if (_detailItem.source === 'local') {
-      // No debrid copy — just save preference
+      // No debrid copy — save preference and search if download service available
+      var capturedMovieTitle = _detailItem.title;
       _savePref(nk, pref).then(function(saved) {
-        if (saved) _showMsg('Preference saved. No debrid copy available \u2014 local file kept.', 'success');
-        else _showMsg('Failed to save preference.', 'error');
+        if (!saved) { _showMsg('Failed to save preference.', 'error'); return; }
+        if (movieSvc) {
+          _setPending(capturedMovieTitle, [{season: 0, episode: 0}], 'to-debrid');
+          _postDownload({
+            title: capturedMovieTitle, type: 'movie', tmdb_id: tmdbId,
+            prefer_debrid: true
+          }).then(function(ok) {
+            if (ok) {
+              _showMsg('Preference saved. Searching for debrid copy.', 'success');
+            } else {
+              _showMsg('Preference saved but search failed.', 'error');
+            }
+            _scheduleRefresh(1000);
+          });
+        } else {
+          _showMsg('Preference saved. Configure Radarr or Overseerr to search for debrid copies.', 'success');
+        }
       });
     } else {
       // source=both — replace local file with link to debrid mount
       if (!confirm('Switch ' + _detailItem.title + ' to debrid streaming?'
         + '\n\nLocal file will be removed. Playback will stream from your debrid service.')) return;
       var oldPref = _savedPref;
+      var capturedBothTitle = _detailItem.title;
       _actionInFlight = true;
       _setActionsDisabled(true);
       _showMsgHtml('<span class="scanning-dot"></span>Switching to debrid...');
       _savePref(nk, pref).then(function(saved) {
         if (!saved) return;
+        // Clear before _postRemove which has its own _actionInFlight guard
+        // Keep buttons disabled until the full chain completes
+        _actionInFlight = false;
         return _postRemove({
-          title: _detailItem.title, type: 'movie', tmdb_id: tmdbId,
+          title: capturedBothTitle, type: 'movie', tmdb_id: tmdbId,
           episodes: []
         }).then(function(ok) {
           if (!ok) { _savePref(nk, oldPref); }

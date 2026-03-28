@@ -475,6 +475,7 @@ class LibraryScanner:
         self._path_index = {}
         self._local_path_index = {}
         self._path_lock = threading.Lock()
+        self._search_cooldown = {}  # {(norm, sn): timestamp} — suppress re-search for 1 hour
 
         if self._mount_path:
             logger.info(f"[library] Mount path: {self._mount_path}")
@@ -602,6 +603,7 @@ class LibraryScanner:
         preferences = get_all_preferences()
         self._enforce_preferences(shows, movies, preferences, path_index, local_path_index,
                                   force=force_enforce)
+        self._search_for_debrid_copies(shows, movies, preferences)
         self._clear_resolved_pending(shows, movies)
         self._create_debrid_symlinks(shows, movies, path_index)
         _enrich_with_tmdb_cache(movies, shows)
@@ -802,6 +804,146 @@ class LibraryScanner:
                                     pass
             except Exception as e:
                 logger.error(f"[library] Auto-enforce prefer-local failed: {e}")
+
+    _SEARCH_BUDGET_SECONDS = 30
+
+    def _search_for_debrid_copies(self, shows, movies, preferences):
+        """Trigger Sonarr/Radarr searches for prefer-debrid titles missing debrid copies.
+
+        Finds episodes/movies that are local-only (no debrid copy) under a
+        prefer-debrid preference and triggers a search via the arr client.
+        Skips episodes already pending (to-debrid direction) or on cooldown
+        from a recent failed search to avoid repeated API calls.
+        Respects a time budget to avoid blocking the scan thread too long.
+        """
+        if not preferences:
+            return
+
+        from utils.library_prefs import get_all_pending, set_pending
+
+        # pending is a snapshot; set_pending calls below write new entries
+        # that won't be visible in this snapshot — acceptable since each
+        # title is processed at most once per scan.
+        pending = get_all_pending()
+        now = time.monotonic()
+        deadline = now + self._SEARCH_BUDGET_SECONDS
+
+        # Expire old cooldown entries (older than 1 hour)
+        cooldown = getattr(self, '_search_cooldown', {})
+        self._search_cooldown = {
+            k: t for k, t in cooldown.items()
+            if now - t < 3600
+        }
+
+        # --- Shows via Sonarr ---
+        try:
+            from utils.arr_client import get_download_service
+            show_client, show_svc = get_download_service('show')
+        except Exception:
+            show_client, show_svc = None, None
+
+        if show_client and show_svc == 'sonarr':
+            for show in shows:
+                if time.monotonic() > deadline:
+                    logger.info("[library] Search budget exhausted, deferring remaining to next scan")
+                    break
+                norm = _normalize_title(show['title'])
+                if preferences.get(norm) != 'prefer-debrid':
+                    continue
+
+                # Skip if title has a pending entry in to-debrid direction
+                pending_entry = pending.get(norm, {})
+                pending_keys = {
+                    (e['season'], e['episode'])
+                    for e in pending_entry.get('episodes', [])
+                } if pending_entry.get('direction') == 'to-debrid' else set()
+
+                # Find local-only episodes not already pending or on cooldown
+                by_season = {}
+                for sd in show.get('season_data', []):
+                    for ep in sd.get('episodes', []):
+                        src = ep.get('source')
+                        if src in ('debrid', 'both'):
+                            continue  # already on debrid
+                        sn, en = sd['number'], ep['number']
+                        if (sn, en) in pending_keys:
+                            continue  # already searching
+                        if (norm, sn) in self._search_cooldown:
+                            continue  # recently attempted
+                        if sn not in by_season:
+                            by_season[sn] = []
+                        by_season[sn].append(en)
+
+                if not by_season:
+                    continue
+
+                total = sum(len(eps) for eps in by_season.values())
+                logger.info(
+                    f"[library] Prefer-debrid search for {show['title']}: "
+                    f"{total} episode(s) across {len(by_season)} season(s)"
+                )
+
+                new_pending = []
+                for sn, ep_nums in by_season.items():
+                    try:
+                        result = show_client.ensure_and_search(
+                            show['title'], None, sn, ep_nums, prefer_debrid=True
+                        )
+                        status = result.get('status', '')
+                        if status in ('sent', 'pending'):
+                            for en in ep_nums:
+                                new_pending.append({'season': sn, 'episode': en})
+                        elif status == 'error':
+                            logger.warning(
+                                f"[library] Search failed for {show['title']} S{sn:02d}: "
+                                f"{result.get('message', 'unknown error')}"
+                            )
+                            self._search_cooldown[(norm, sn)] = now
+                    except Exception as e:
+                        logger.error(f"[library] Search error for {show['title']} S{sn:02d}: {e}")
+                        self._search_cooldown[(norm, sn)] = now
+
+                if new_pending:
+                    set_pending(norm, new_pending, 'to-debrid')
+
+        # --- Movies via Radarr ---
+        try:
+            movie_client, movie_svc = get_download_service('movie')
+        except Exception:
+            movie_client, movie_svc = None, None
+
+        if movie_client and movie_svc == 'radarr':
+            for movie in movies:
+                if time.monotonic() > deadline:
+                    logger.info("[library] Search budget exhausted, deferring remaining to next scan")
+                    break
+                norm = _normalize_title(movie['title'])
+                if preferences.get(norm) != 'prefer-debrid':
+                    continue
+                if movie.get('source') in ('debrid', 'both'):
+                    continue  # already on debrid
+                if pending.get(norm, {}).get('direction') == 'to-debrid':
+                    continue  # already searching
+                if (norm, 0) in self._search_cooldown:
+                    continue  # recently attempted
+
+                logger.info(f"[library] Prefer-debrid search for movie: {movie['title']}")
+                try:
+                    result = movie_client.ensure_and_search(
+                        movie['title'], None, prefer_debrid=True
+                    )
+                    status = result.get('status', '')
+                    if status in ('sent', 'pending'):
+                        set_pending(norm, [{'season': 0, 'episode': 0}], 'to-debrid')
+                    elif status == 'error':
+                        logger.warning(
+                            f"[library] Search failed for movie {movie['title']}: "
+                            f"{result.get('message', 'unknown error')}"
+                        )
+                        self._search_cooldown[(norm, 0)] = now
+                except Exception as e:
+                    logger.error(f"[library] Search error for movie {movie['title']}: {e}")
+                    self._search_cooldown[(norm, 0)] = now
 
     def _clear_resolved_pending(self, shows, movies):
         """Clear pending entries that are resolved or stale.

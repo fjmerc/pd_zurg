@@ -43,6 +43,39 @@ AD_TERMINAL_ERRORS = {'Error'}
 TB_TERMINAL_ERRORS = {'error', 'failed'}
 
 
+def _parse_episodes(filename):
+    """Extract episode numbers from a release filename.
+
+    Returns a set of episode ints, or empty set for season packs.
+    Handles S01E04, S01E04E05, S01E04-E06, etc.
+    """
+    name = re.sub(r'\.(torrent|magnet)$', '', filename, flags=re.IGNORECASE)
+    # Match S01E04, S01E04E05, S01E04-E06, etc.
+    m = re.search(r'S\d+(E\d+(?:[E\-]E?\d+)*)', name, re.IGNORECASE)
+    if not m:
+        return set()
+    ep_str = m.group(1)
+    nums = [int(x) for x in re.findall(r'\d+', ep_str)]
+    if len(nums) == 2 and '-' in ep_str:
+        lo, hi = nums
+        if lo <= hi:
+            return set(range(lo, hi + 1))
+        return {lo, hi}
+    return set(nums)
+
+
+def _local_episodes(season_dir):
+    """Extract episode numbers from files in a local season directory."""
+    eps = set()
+    try:
+        for f in os.listdir(season_dir):
+            for m in re.finditer(r'[Ee](\d+)', f):
+                eps.add(int(m.group(1)))
+    except OSError:
+        pass
+    return eps
+
+
 def parse_release_name(filename):
     """Extract show/movie name and season from a release filename.
 
@@ -695,8 +728,18 @@ class BlackholeWatcher:
                 if season is not None:
                     season_dir = os.path.join(show_path, f"Season {season:02d}")
                     if os.path.isdir(season_dir) and os.listdir(season_dir):
-                        logger.info(f"[blackhole] Skipping {filename}: '{folder}' Season {season} exists locally")
-                        return True
+                        # Check at episode level if the torrent targets specific episodes
+                        target_eps = _parse_episodes(filename)
+                        if target_eps:
+                            local_eps = _local_episodes(season_dir)
+                            if target_eps <= local_eps:
+                                logger.info(f"[blackhole] Skipping {filename}: '{folder}' S{season:02d} episodes {sorted(target_eps)} exist locally")
+                                return True
+                            logger.debug(f"[blackhole] '{folder}' S{season:02d} has local eps {sorted(local_eps)} but torrent has {sorted(target_eps)} — not skipping")
+                        else:
+                            # Season pack — skip if season folder has content
+                            logger.info(f"[blackhole] Skipping {filename}: '{folder}' Season {season} exists locally")
+                            return True
                 else:
                     if os.path.isdir(show_path) and os.listdir(show_path):
                         logger.info(f"[blackhole] Skipping {filename}: '{folder}' exists locally")

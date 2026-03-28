@@ -771,22 +771,33 @@ class TestCheckLocalLibrary:
         )
         return watcher, tv_dir, movies_dir
 
-    def test_skips_existing_tv_season(self, tmp_dir):
-        """Should skip if the show and season exist locally."""
+    def test_skips_existing_tv_episode(self, tmp_dir):
+        """Should skip if the specific episode exists locally."""
         watcher, tv_dir, _ = self._make_watcher(tmp_dir)
         season_dir = os.path.join(tv_dir, 'Fargo (2014)', 'Season 05')
         os.makedirs(season_dir)
-        with open(os.path.join(season_dir, 'ep01.mkv'), 'w') as f:
+        with open(os.path.join(season_dir, 'Fargo (2014) - S05E01 - The Tragedy of the Commons.mkv'), 'w') as f:
             f.write('data')
 
         assert watcher._check_local_library('Fargo.S05E01.1080p.WEB.torrent') is True
+
+    def test_allows_missing_episode(self, tmp_dir):
+        """Should allow if the season exists but the specific episode doesn't."""
+        watcher, tv_dir, _ = self._make_watcher(tmp_dir)
+        season_dir = os.path.join(tv_dir, 'Fargo (2014)', 'Season 05')
+        os.makedirs(season_dir)
+        with open(os.path.join(season_dir, 'Fargo (2014) - S05E01 - The Tragedy of the Commons.mkv'), 'w') as f:
+            f.write('data')
+
+        # E03 is not present locally — should NOT skip
+        assert watcher._check_local_library('Fargo.S05E03.1080p.WEB.torrent') is False
 
     def test_allows_missing_season(self, tmp_dir):
         """Should allow if the show exists but the season doesn't."""
         watcher, tv_dir, _ = self._make_watcher(tmp_dir)
         season_dir = os.path.join(tv_dir, 'Fargo (2014)', 'Season 01')
         os.makedirs(season_dir)
-        with open(os.path.join(season_dir, 'ep01.mkv'), 'w') as f:
+        with open(os.path.join(season_dir, 'Fargo (2014) - S01E01 - The Crocodiles Dilemma.mkv'), 'w') as f:
             f.write('data')
 
         assert watcher._check_local_library('Fargo.S05E01.1080p.WEB.torrent') is False

@@ -414,6 +414,47 @@ class SonarrClient(_ArrClientBase):
         """Get all episodes for a series."""
         return self._get('/api/v3/episode', {'seriesId': series_id}) or []
 
+    def get_episode_releases(self, episode_id):
+        """Fetch available releases for an episode from all indexers.
+
+        Returns list of release dicts, or empty list on failure.
+        """
+        result = self._get('/api/v3/release', {'episodeId': episode_id})
+        return result if isinstance(result, list) else []
+
+    def get_episode_id(self, series_title, season_number, episode_number):
+        """Find a Sonarr episode ID by series title and S/E numbers.
+
+        Returns the episode ID int, or None.
+        """
+        series = self.find_series_in_library(title=series_title)
+        if not series:
+            return None
+        # Use season filter to avoid fetching all episodes for long-running shows
+        episodes = self._get('/api/v3/episode', {
+            'seriesId': series['id'],
+            'seasonNumber': season_number,
+        }) or []
+        for ep in episodes:
+            if ep.get('episodeNumber') == episode_number:
+                return ep.get('id')
+        return None
+
+    def get_recent_grabs(self, page_size=50):
+        """Fetch recent 'grabbed' history events.
+
+        Returns list of history records with eventType='grabbed'.
+        """
+        result = self._get('/api/v3/history', {
+            'pageSize': page_size,
+            'sortKey': 'date',
+            'sortDirection': 'descending',
+            'eventType': 'grabbed',
+        })
+        if result and isinstance(result, dict):
+            return result.get('records', [])
+        return []
+
     def search_episodes(self, episode_ids):
         """Trigger a search for specific episodes by their Sonarr episode IDs.
 
@@ -976,6 +1017,29 @@ class RadarrClient(_ArrClientBase):
             },
         }
         return self._post('/api/v3/movie', body)
+
+    def get_movie_releases(self, movie_id):
+        """Fetch available releases for a movie from all indexers.
+
+        Returns list of release dicts, or empty list on failure.
+        """
+        result = self._get('/api/v3/release', {'movieId': movie_id})
+        return result if isinstance(result, list) else []
+
+    def get_recent_grabs(self, page_size=50):
+        """Fetch recent 'grabbed' history events.
+
+        Returns list of history records with eventType='grabbed'.
+        """
+        result = self._get('/api/v3/history', {
+            'pageSize': page_size,
+            'sortKey': 'date',
+            'sortDirection': 'descending',
+            'eventType': 'grabbed',
+        })
+        if result and isinstance(result, dict):
+            return result.get('records', [])
+        return []
 
     def search_movie(self, movie_id):
         """Trigger a search for a specific movie.

@@ -19,6 +19,7 @@ logger = get_logger()
 _DEFAULTS = {
     'ROUTING_AUDIT_INTERVAL': 6 * 3600,       # 6 hours
     'QUEUE_CLEANUP_INTERVAL': 15 * 60,         # 15 minutes
+    'STALE_GRAB_INTERVAL': 15 * 60,            # 15 minutes
     'LIBRARY_SCAN_INTERVAL': 3600,             # 1 hour
     'SYMLINK_VERIFY_INTERVAL': 6 * 3600,       # 6 hours
     'PREFERENCE_ENFORCE_INTERVAL': 6 * 3600,   # 6 hours
@@ -269,6 +270,121 @@ def housekeeping():
 
 
 # ---------------------------------------------------------------------------
+# Task: Detect Stale Grabs (Priority 1)
+# ---------------------------------------------------------------------------
+
+# Track recently re-triggered IDs to prevent search storms.
+# Key: ('sonarr', ep_id) or ('radarr', movie_id), Value: epoch time of last trigger.
+_retrigger_history = {}
+_RETRIGGER_COOLDOWN = 7200  # 2 hours — don't re-trigger the same item within this window
+
+
+def detect_stale_grabs():
+    """Detect Sonarr/Radarr grabs that silently failed to reach the blackhole.
+
+    Compares recent 'grabbed' history events against live episode/movie state
+    (not the snapshot in history). If a grab is older than 10 minutes but the
+    content still has no file, re-triggers a search. Each item is only
+    re-triggered once per 2-hour window to prevent search storms.
+    """
+    import datetime as dt
+    from utils.arr_client import SonarrClient, RadarrClient
+
+    stale_found = 0
+    searches_triggered = 0
+    now_epoch = time.time()
+
+    # Prune old entries from retrigger history
+    stale_keys = [k for k, v in _retrigger_history.items() if now_epoch - v > _RETRIGGER_COOLDOWN]
+    for k in stale_keys:
+        del _retrigger_history[k]
+
+    for ClientClass, name in [
+        (SonarrClient, 'sonarr'),
+        (RadarrClient, 'radarr'),
+    ]:
+        client = ClientClass()
+        if not client.configured:
+            continue
+
+        grabs = client.get_recent_grabs(page_size=30)
+        if not grabs:
+            continue
+
+        now = dt.datetime.now(dt.timezone.utc)
+        for record in grabs:
+            # Only check grabs older than 10 minutes
+            date_str = record.get('date', '')
+            try:
+                grab_time = dt.datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                age_minutes = (now - grab_time).total_seconds() / 60
+                if age_minutes < 10:
+                    continue
+                # Only check grabs from last 2 hours
+                if age_minutes > 120:
+                    continue
+            except (ValueError, TypeError):
+                continue
+
+            # Only act on blackhole grabs
+            data = record.get('data', {})
+            dl_client = data.get('downloadClient', '')
+            if 'blackhole' not in dl_client.lower():
+                continue
+
+            # Fetch LIVE state (history embeds a snapshot, not current hasFile)
+            if name == 'sonarr':
+                ep_data = record.get('episode', {})
+                ep_id = ep_data.get('id')
+                if not ep_id:
+                    continue
+                live = client._get(f'/api/v3/episode/{ep_id}')
+                if live and live.get('hasFile'):
+                    continue
+                item_key = ('sonarr', ep_id)
+            else:
+                movie_data = record.get('movie', {})
+                movie_id = movie_data.get('id')
+                if not movie_id:
+                    continue
+                live = client._get(f'/api/v3/movie/{movie_id}')
+                if live and live.get('hasFile'):
+                    continue
+                item_key = ('radarr', movie_id)
+
+            source_title = record.get('sourceTitle', '?')[:60]
+            stale_found += 1
+
+            # Dedup: skip if already re-triggered recently
+            if item_key in _retrigger_history:
+                continue
+
+            # Re-trigger search
+            if name == 'sonarr':
+                sn = ep_data.get('seasonNumber', 0)
+                en = ep_data.get('episodeNumber', 0)
+                logger.info(
+                    f"[scheduler] Stale grab detected: {source_title} "
+                    f"(S{sn:02d}E{en:02d}, grabbed {int(age_minutes)}m ago) — re-triggering search"
+                )
+                client.search_episodes([ep_id])
+            else:
+                logger.info(
+                    f"[scheduler] Stale grab detected: {source_title} "
+                    f"(grabbed {int(age_minutes)}m ago) — re-triggering search"
+                )
+                client.search_movie(movie_id)
+
+            _retrigger_history[item_key] = now_epoch
+            searches_triggered += 1
+
+    msg = f'Found {stale_found} stale grabs'
+    if searches_triggered:
+        msg += f', re-triggered {searches_triggered} searches'
+    return {'status': 'success', 'message': msg, 'items': stale_found}
+
+
+# ---------------------------------------------------------------------------
 # Task: Config Backup (Priority 3)
 # ---------------------------------------------------------------------------
 
@@ -386,6 +502,14 @@ def register_all():
             interval_seconds=_get_interval('QUEUE_CLEANUP_INTERVAL'),
             description='Remove stale downloadClientUnavailable queue items',
             initial_delay=120,  # 2 min after startup
+        )
+
+        scheduler.register(
+            'detect_stale_grabs',
+            detect_stale_grabs,
+            interval_seconds=_get_interval('STALE_GRAB_INTERVAL'),
+            description='Detect grabs that silently failed and re-trigger searches',
+            initial_delay=600,  # 10 min after startup
         )
 
     # Library Scan — only if status UI is enabled (scanner depends on it)

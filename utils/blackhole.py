@@ -756,6 +756,216 @@ class BlackholeWatcher:
 
         return False
 
+    # ── Debrid rejection auto-retry ──────────────────────────────────
+
+    # RD error codes that mean "this specific hash is blocked, try another"
+    _REJECTION_CODES = {35, 30}  # infringing_file, torrent_file_invalid
+    _REJECTION_KEYWORDS = {'infringing_file', 'torrent_file_invalid'}
+
+    @staticmethod
+    def _alt_exhausted(file_path):
+        """Check if alternative releases were already tried and exhausted."""
+        meta_path = RetryMeta.meta_path(file_path)
+        if not os.path.exists(meta_path):
+            return False
+        try:
+            with open(meta_path, 'r') as f:
+                return json.load(f).get('alt_exhausted', False)
+        except (json.JSONDecodeError, IOError):
+            return False
+
+    @classmethod
+    def _is_debrid_rejection(cls, result_text):
+        """Check if a debrid error response indicates the hash is blocked."""
+        if not isinstance(result_text, str):
+            return False
+        rt = result_text.lower()
+        if any(kw in rt for kw in cls._REJECTION_KEYWORDS):
+            return True
+        return any(
+            f'"error_code": {c}' in rt or f'"error_code":{c}' in rt
+            for c in cls._REJECTION_CODES
+        )
+
+    def _try_alternative_release(self, filename, file_path, debrid_handler):
+        """On debrid rejection, query Sonarr/Radarr for an alternative release.
+
+        Parses the episode/movie info from the filename, fetches available
+        releases, filters to a different info hash, and tries them until
+        one succeeds or all are exhausted.
+
+        Runs in a background thread. On failure, moves the original file
+        to the failed/ directory (same as the normal failure path).
+        """
+        alt_ok = False
+        try:
+            from utils.arr_client import SonarrClient, RadarrClient
+
+            name, season, is_tv = parse_release_name(filename)
+            if not name:
+                logger.debug(f"[blackhole] Cannot parse release name for alt-retry: {filename}")
+            elif is_tv and season is not None and _parse_episodes(filename):
+                alt_ok = self._try_alt_episode(name, season, _parse_episodes(filename),
+                                               debrid_handler, filename, file_path)
+            elif not is_tv:
+                alt_ok = self._try_alt_movie(name, debrid_handler, filename, file_path)
+            else:
+                logger.debug(f"[blackhole] Cannot determine content type for alt-retry: {filename}")
+        except Exception as e:
+            logger.error(f"[blackhole] Error during alternative release search: {e}")
+
+        if not alt_ok and os.path.exists(file_path):
+            # No alternative worked — move to failed/ and mark alts exhausted
+            # so retries don't repeat the same alt-release search
+            error_dir = os.path.join(self.watch_dir, 'failed')
+            os.makedirs(error_dir, exist_ok=True)
+            dest = os.path.join(error_dir, filename)
+            if os.path.exists(dest):
+                base, fext = os.path.splitext(filename)
+                dest = os.path.join(error_dir, f"{base}_{int(time.time())}{fext}")
+            try:
+                os.rename(file_path, dest)
+                # Mark alt-exhausted in retry metadata
+                meta_path = RetryMeta.meta_path(dest)
+                try:
+                    with open(meta_path, 'w') as f:
+                        json.dump({'retries': 1, 'last_attempt': time.time(),
+                                   'alt_exhausted': True}, f)
+                except IOError:
+                    pass
+            except OSError as e:
+                logger.warning(f"[blackhole] Could not move {filename} to failed/: {e}")
+
+    def _try_alt_episode(self, series_name, season, episodes, debrid_handler, orig_filename, orig_path):
+        """Try alternative releases for a TV episode via Sonarr."""
+        from utils.arr_client import SonarrClient
+
+        client = SonarrClient()
+        if not client.configured:
+            return False
+
+        ep_num = min(episodes)  # primary episode number
+        episode_id = client.get_episode_id(series_name, season, ep_num)
+        if not episode_id:
+            logger.debug(f"[blackhole] Could not find {series_name} S{season:02d}E{ep_num:02d} in Sonarr")
+            return False
+
+        releases = client.get_episode_releases(episode_id)
+        if not releases:
+            logger.debug(f"[blackhole] No alternative releases found for {series_name} S{season:02d}E{ep_num:02d}")
+            return False
+
+        return self._try_releases(releases, debrid_handler, orig_filename, orig_path)
+
+    def _try_alt_movie(self, movie_name, debrid_handler, orig_filename, orig_path):
+        """Try alternative releases for a movie via Radarr."""
+        from utils.arr_client import RadarrClient
+
+        client = RadarrClient()
+        if not client.configured:
+            return False
+
+        movie = client.find_movie_in_library(title=movie_name)
+        if not movie:
+            logger.debug(f"[blackhole] Could not find '{movie_name}' in Radarr")
+            return False
+
+        releases = client.get_movie_releases(movie['id'])
+        if not releases:
+            logger.debug(f"[blackhole] No alternative releases found for '{movie_name}'")
+            return False
+
+        return self._try_releases(releases, debrid_handler, orig_filename, orig_path)
+
+    def _try_releases(self, releases, debrid_handler, orig_filename, orig_path):
+        """Try magnet releases one by one until one succeeds on the debrid service.
+
+        Only tries releases with magnet links (direct hashes) to avoid
+        the 404 problem with torrent file download URLs.
+        Skips the original release's info hash.
+        """
+        import tempfile
+        import urllib.parse
+
+        # Extract original info hash to skip it
+        orig_hash = self._extract_info_hash_from_file(orig_path)
+        tried = 0
+        max_tries = 5
+
+        for r in releases:
+            if tried >= max_tries:
+                break
+            if r.get('rejected'):
+                continue
+            guid = r.get('guid', '')
+            if not guid.startswith('magnet:'):
+                continue
+
+            # Extract info hash from magnet URI
+            m = re.search(r'btih:([A-Fa-f0-9]+)', guid, re.IGNORECASE)
+            if not m:
+                continue
+            info_hash = m.group(1).upper()
+
+            # Skip if same hash as the one that was rejected
+            if orig_hash and info_hash == orig_hash.upper():
+                continue
+
+            tried += 1
+            alt_title = r.get('title', 'unknown')
+            logger.info(f"[blackhole] Trying alternative release: {alt_title[:60]} (hash {info_hash})")
+
+            # Write magnet to a temp file outside watch_dir to avoid scanner pickup
+            import tempfile
+            tmp_fd, tmp_path = tempfile.mkstemp(suffix='.magnet', prefix='_alt_')
+            try:
+                with os.fdopen(tmp_fd, 'w') as f:
+                    f.write(guid)
+                success, result = debrid_handler(tmp_path)
+                if success:
+                    logger.info(f"[blackhole] Alternative release accepted: {alt_title[:60]}")
+                    # Clean up original file
+                    try:
+                        os.remove(orig_path)
+                    except OSError as e:
+                        logger.warning(f"[blackhole] Could not remove original after alt-retry: {e}")
+                    # Start symlink monitoring
+                    if self.symlink_enabled:
+                        torrent_id = self._extract_torrent_id(result)
+                        if torrent_id:
+                            self._start_monitor(torrent_id, orig_filename)
+                    if _notify:
+                        _notify('download_complete', 'Blackhole: Alt Release Found',
+                                f'Original rejected, using: {alt_title[:60]}')
+                    return True
+                else:
+                    logger.debug(f"[blackhole] Alternative also rejected: {alt_title[:60]}: {str(result)[:100]}")
+            except Exception as e:
+                logger.debug(f"[blackhole] Error trying alternative {alt_title[:60]}: {e}")
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+        logger.warning(f"[blackhole] No working alternative found for {orig_filename} (tried {tried})")
+        return False
+
+    @staticmethod
+    def _extract_info_hash_from_file(file_path):
+        """Extract info hash from a .magnet file or .torrent filename."""
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext == '.magnet':
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                    content = f.read().strip()
+                m = re.search(r'btih:([A-Fa-f0-9]+)', content, re.IGNORECASE)
+                if m:
+                    return m.group(1).upper()
+            except OSError:
+                pass
+        return None
+
     # ── File processing ──────────────────────────────────────────────
 
     def _process_file(self, file_path):
@@ -819,6 +1029,19 @@ class BlackholeWatcher:
                                 f'{filename} added to {self.debrid_service}')
             else:
                 logger.error(f"[blackhole] Failed to add {filename}: {result}")
+
+                # On debrid rejection (infringing/blocked), try alternative release
+                # in a background thread to avoid blocking the scan loop.
+                # Skip if alts were already exhausted in a prior attempt.
+                if self._is_debrid_rejection(result) and not self._alt_exhausted(file_path):
+                    threading.Thread(
+                        target=self._try_alternative_release,
+                        args=(filename, file_path, handler),
+                        daemon=True,
+                        name=f'alt-retry-{filename[:30]}',
+                    ).start()
+                    return  # Alt-retry thread handles cleanup
+
                 error_dir = os.path.join(self.watch_dir, 'failed')
                 os.makedirs(error_dir, exist_ok=True)
                 dest = os.path.join(error_dir, filename)

@@ -200,14 +200,36 @@ class SonarrClient(_ArrClientBase):
                 if local_tag is not None:
                     self._local_tag_id = local_tag
             if local_tag is not None:
+                tagged_client_ids = set()
                 for c in untagged_clients:
                     c_name = c.get('name', c.get('implementation', '?'))
                     updated = dict(c, tags=[local_tag])
                     result = self._put(f'/api/v3/downloadclient/{c["id"]}', updated)
                     if result:
+                        tagged_client_ids.add(c['id'])
                         logger.info(f"[sonarr] Tagged untagged client '{c_name}' with local tag {local_tag} to prevent debrid interception")
                     else:
                         logger.warning(f"[sonarr] Failed to tag client '{c_name}'")
+                # Clear indexer-level downloadClientId overrides that point to
+                # newly-tagged clients — otherwise the indexer forces results to
+                # the client regardless of tags, defeating debrid routing.
+                if tagged_client_ids:
+                    self._clear_indexer_client_overrides(tagged_client_ids)
+
+    def _clear_indexer_client_overrides(self, client_ids):
+        """Remove downloadClientId from indexers that point to given clients."""
+        indexers = self._get('/api/v3/indexer')
+        if not indexers:
+            return
+        for ix in indexers:
+            if ix.get('downloadClientId', 0) in client_ids:
+                ix_name = ix.get('name', '?')
+                updated = dict(ix, downloadClientId=0)
+                result = self._put(f'/api/v3/indexer/{ix["id"]}', updated)
+                if result:
+                    logger.info(f"[sonarr] Cleared downloadClientId override on indexer '{ix_name}' — tag-based routing will apply")
+                else:
+                    logger.warning(f"[sonarr] Failed to clear downloadClientId on indexer '{ix_name}'")
 
     def _get_blackhole_tag_id(self):
         """Find the tag ID used by the TorrentBlackhole download client."""
@@ -600,14 +622,33 @@ class RadarrClient(_ArrClientBase):
                 if local_tag is not None:
                     self._local_tag_id = local_tag
             if local_tag is not None:
+                tagged_client_ids = set()
                 for c in untagged_clients:
                     c_name = c.get('name', c.get('implementation', '?'))
                     updated = dict(c, tags=[local_tag])
                     result = self._put(f'/api/v3/downloadclient/{c["id"]}', updated)
                     if result:
+                        tagged_client_ids.add(c['id'])
                         logger.info(f"[radarr] Tagged untagged client '{c_name}' with local tag {local_tag} to prevent debrid interception")
                     else:
                         logger.warning(f"[radarr] Failed to tag client '{c_name}'")
+                if tagged_client_ids:
+                    self._clear_indexer_client_overrides(tagged_client_ids)
+
+    def _clear_indexer_client_overrides(self, client_ids):
+        """Remove downloadClientId from indexers that point to given clients."""
+        indexers = self._get('/api/v3/indexer')
+        if not indexers:
+            return
+        for ix in indexers:
+            if ix.get('downloadClientId', 0) in client_ids:
+                ix_name = ix.get('name', '?')
+                updated = dict(ix, downloadClientId=0)
+                result = self._put(f'/api/v3/indexer/{ix["id"]}', updated)
+                if result:
+                    logger.info(f"[radarr] Cleared downloadClientId override on indexer '{ix_name}' — tag-based routing will apply")
+                else:
+                    logger.warning(f"[radarr] Failed to clear downloadClientId on indexer '{ix_name}'")
 
     def _get_blackhole_tag_id(self):
         """Find the tag ID used by the TorrentBlackhole download client."""

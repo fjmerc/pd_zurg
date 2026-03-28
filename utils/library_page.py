@@ -59,9 +59,36 @@ a:hover{text-decoration:underline}
 @keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:.3}}
 
 /* Card grid */
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;margin-top:4px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:16px;margin-top:4px}
 
-/* Media card */
+/* Poster card (Sonarr-style grid cards) */
+.poster-card{background:var(--card);border-radius:8px;overflow:hidden;cursor:pointer;transition:transform 200ms ease-in,box-shadow 200ms ease-in;position:relative}
+.poster-card:hover{transform:translateY(-4px);box-shadow:0 0 12px rgba(0,0,0,.5);z-index:2}
+.poster-card:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.poster-container{position:relative;aspect-ratio:2/3;overflow:hidden;background:var(--border)}
+.poster-img{width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .3s}
+.poster-img.loaded{opacity:1}
+.poster-placeholder{display:flex;align-items:center;justify-content:center;height:100%;padding:16px;text-align:center;font-size:.9em;color:var(--text2);background:linear-gradient(135deg,var(--card),var(--border));overflow:hidden;word-break:break-word;line-height:1.4}
+.corner-badge{position:absolute;top:0;right:0;width:0;height:0;border-style:solid;border-width:0 28px 28px 0;border-color:transparent transparent transparent transparent;z-index:1}
+.corner-badge.ended{border-color:transparent #f05050 transparent transparent}
+.progress-bar{height:5px;background:#5b5b5b;width:100%}
+.progress-fill{height:100%;transition:width .3s ease}
+[data-theme="light"] .progress-bar{background:#d0d7de}
+.card-info{padding:8px 10px}
+.card-info .card-title{font-size:.85em;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.35}
+.card-info .card-meta{font-size:.72em;color:var(--text2);margin-top:2px}
+.card-info .card-badges{margin-top:4px;display:flex;gap:4px;flex-wrap:wrap}
+
+/* Poster skeleton */
+.skeleton-poster{overflow:hidden;border-radius:8px;background:var(--card)}
+.skeleton-poster .poster-container{aspect-ratio:2/3}
+
+/* Color legend */
+.legend{display:flex;flex-wrap:wrap;gap:8px 16px;padding:12px 0;font-size:.78em;color:var(--text2)}
+.legend-item{display:inline-flex;align-items:center;gap:6px}
+.legend-swatch{width:16px;height:5px;border-radius:1px;display:inline-block}
+
+/* Media card (detail view only) */
 .media-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:6px;transition:border-color .15s,transform .15s,box-shadow .15s}
 .media-card:hover{border-color:var(--border2);transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,.15)}
 .media-card.show-card,.media-card.movie-card{cursor:pointer;position:relative;padding-right:32px}
@@ -221,6 +248,7 @@ a:hover{text-decoration:underline}
 
 /* Responsive */
 @media(max-width:640px){
+  .grid{grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px}
   .controls{gap:6px}
   .search-wrap{min-width:120px}
   .scan-info{display:none}
@@ -228,6 +256,9 @@ a:hover{text-decoration:underline}
   .episode-table{display:block;overflow-x:auto}
   .detail-hero{flex-direction:column}
   .detail-poster{width:120px}
+  .card-info .card-title{font-size:.78em}
+  .card-info .card-badges{gap:3px}
+  .legend{gap:6px 12px;font-size:.72em}
 }
 :focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 @media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
@@ -274,7 +305,7 @@ a:hover{text-decoration:underline}
   <div class="grid" id="skeleton-grid"></div>
 </div>
 <script>
-(function(){var g=document.getElementById('skeleton-grid');if(!g)return;var h='';for(var i=0;i<12;i++)h+='<div class="skeleton-card"><div class="skeleton-line skeleton-title"></div><div class="skeleton-line skeleton-meta"></div><div class="skeleton-line skeleton-badges"></div></div>';g.innerHTML=h})();
+(function(){var g=document.getElementById('skeleton-grid');if(!g)return;var h='';for(var i=0;i<12;i++)h+='<div class="skeleton-poster"><div class="poster-container"><div class="skeleton-line" style="width:100%;height:100%;border-radius:0"></div></div><div class="skeleton-line" style="height:5px;width:100%;border-radius:0"></div><div class="card-info"><div class="skeleton-line skeleton-title"></div><div class="skeleton-line skeleton-meta"></div></div></div>';g.innerHTML=h})();
 </script>
 
 <div class="footer" id="footer"></div>
@@ -452,30 +483,78 @@ function buildBadges(source) {
   return '<span class="badge-debrid"><span class="badge-full">' + esc(source) + '</span><span class="badge-mini">?</span></span>';
 }
 
-function buildCard(item, index) {
-  var metaLine = '';
-  if (item.type === 'show' && (item.seasons || item.episodes)) {
-    var parts = [];
-    if (item.seasons) parts.push(item.seasons + ' Season' + (item.seasons !== 1 ? 's' : ''));
-    if (item.episodes) parts.push(item.episodes + ' Episode' + (item.episodes !== 1 ? 's' : ''));
-    metaLine = '<div class="card-meta">' + parts.join(' &middot; ') + '</div>';
+function computeProgress(item) {
+  var nk = normTitle(item.title);
+  var isPending = !!_pending[nk];
+  if (item.type === 'movie') {
+    return {width:'100%', color: isPending ? '#7a43b6' : '#27c24c',
+            tooltip: isPending ? 'Switching source' : 'Available'};
   }
-  var isShow = item.type === 'show' && item.season_data && item.season_data.length > 0;
-  var isMovie = item.type === 'movie';
-  var isClickable = isShow || isMovie;
-  var cardClass = isShow ? ' show-card' : (isMovie ? ' movie-card' : '');
-  var clickAttr = isClickable ? ' onclick="showDetail(' + index + ')" tabindex="0" role="button" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();showDetail(' + index + ')}"' : '';
+  // Show — no TMDB data: invisible bar
+  if (!item.total_episodes || item.total_episodes <= 0) {
+    return {width:'100%', color:'transparent', tooltip: (item.episodes || 0) + ' episodes'};
+  }
+  var pct = Math.min(100, Math.round((item.episodes || 0) / item.total_episodes * 100));
+  var color;
+  if (isPending) color = '#7a43b6';
+  else if (pct >= 100 && item.tmdb_status === 'Ended') color = '#27c24c';
+  else if (pct >= 100) color = '#5d9cec';
+  else color = '#f05050';
+  return {width: pct + '%', color: color,
+          tooltip: (item.episodes || 0) + ' / ' + item.total_episodes + ' episodes'};
+}
+
+function buildCard(item, index) {
+  // Poster image or placeholder
+  var posterHtml;
+  if (item.poster_url) {
+    posterHtml = '<img class="poster-img" src="' + esc(item.poster_url) + '" loading="lazy" decoding="async" alt="" onload="this.classList.add(\'loaded\')" onerror="this.style.display=\'none\';var p=this.parentElement.querySelector(\'.poster-placeholder\');if(p)p.style.display=\'flex\'">'
+      + '<div class="poster-placeholder" style="display:none">' + esc(item.title) + '</div>';
+  } else {
+    posterHtml = '<div class="poster-placeholder">' + esc(item.title) + '</div>';
+  }
+
+  // Corner badge (Ended shows get red triangle)
+  var cornerBadge = '';
+  if (item.type === 'show' && item.tmdb_status === 'Ended') {
+    cornerBadge = '<div class="corner-badge ended"></div>';
+  }
+
+  // Progress bar
+  var prog = computeProgress(item);
+  var progressHtml = '<div class="progress-bar"><div class="progress-fill" style="width:' + prog.width + ';background:' + prog.color + '" title="' + esc(prog.tooltip) + '"></div></div>';
+
+  // Meta line
+  var metaParts = [];
+  if (item.type === 'show') {
+    if (item.seasons) metaParts.push(item.seasons + 'S');
+    if (item.episodes) metaParts.push(item.episodes + 'E');
+    if (item.missing_episodes > 0) metaParts.push('<span style="color:var(--red)">' + item.missing_episodes + ' missing</span>');
+  }
+  var metaLine = metaParts.length ? '<div class="card-meta">' + metaParts.join(' &middot; ') + '</div>' : '';
+
+  // Pending badge
   var pendingBadge = '';
   var pnk = normTitle(item.title);
   if (_pending[pnk]) {
     var dir = (_pending[pnk] || {}).direction;
-    pendingBadge = '<span class="badge-pending">' + (dir === 'to-local' ? 'Switching to local' : 'Switching to debrid') + '</span>';
+    pendingBadge = '<span class="badge-pending">' + (dir === 'to-local' ? '\u2192 Local' : '\u2192 Debrid') + '</span>';
   }
-  return '<div class="media-card' + cardClass + '"' + clickAttr + '>'
-    + '<div class="card-title">' + esc(item.title) + '</div>'
-    + '<div class="card-badges">' + buildBadges(item.source) + pendingBadge + '</div>'
+
+  var badges = buildBadges(item.source) + pendingBadge;
+  var yearSpan = item.year ? ' <span class="card-year">(' + item.year + ')</span>' : '';
+
+  return '<div class="poster-card" data-title="' + esc(item.title) + '" data-type="' + esc(item.type) + '"'
+    + (item.year ? ' data-year="' + item.year + '"' : '')
+    + ' onclick="showDetail(' + index + ')" tabindex="0" role="button"'
+    + ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();showDetail(' + index + ')}">'
+    + '<div class="poster-container">' + posterHtml + cornerBadge + '</div>'
+    + progressHtml
+    + '<div class="card-info">'
+    + '<div class="card-title">' + esc(item.title) + yearSpan + '</div>'
+    + '<div class="card-badges">' + badges + '</div>'
     + metaLine
-    + '</div>';
+    + '</div></div>';
 }
 
 function applyFilters() {
@@ -524,7 +603,137 @@ function renderGrid(items) {
     }
     return;
   }
-  area.innerHTML = '<div class="grid">' + items.map(function(item, i) { return buildCard(item, i); }).join('') + '</div>';
+  var gridHtml = '<div class="grid">' + items.map(function(item, i) { return buildCard(item, i); }).join('') + '</div>';
+
+  // Color legend (only when TMDB data is present)
+  var hasTmdb = items.some(function(i) { return !!i.poster_url || !!i.tmdb_status; });
+  if (hasTmdb) {
+    if (_activeTab === 'shows') {
+      gridHtml += '<div class="legend">'
+        + '<span class="legend-item"><span class="legend-swatch" style="background:#5d9cec"></span>Continuing (Complete)</span>'
+        + '<span class="legend-item"><span class="legend-swatch" style="background:#27c24c"></span>Ended (Complete)</span>'
+        + '<span class="legend-item"><span class="legend-swatch" style="background:#f05050"></span>Missing Episodes</span>'
+        + '<span class="legend-item"><span class="legend-swatch" style="background:#7a43b6"></span>Switching Source</span>'
+        + '</div>';
+    } else {
+      gridHtml += '<div class="legend">'
+        + '<span class="legend-item"><span class="legend-swatch" style="background:#27c24c"></span>Available</span>'
+        + '<span class="legend-item"><span class="legend-swatch" style="background:#7a43b6"></span>Switching Source</span>'
+        + '</div>';
+    }
+  }
+
+  area.innerHTML = gridHtml;
+  _observeUncachedCards();
+}
+
+// ---------------------------------------------------------------------------
+// Lazy metadata fetch for uncached poster cards
+// ---------------------------------------------------------------------------
+var _metaObserver = null;
+var _metaCache = {};
+
+function _observeUncachedCards() {
+  if (!window.IntersectionObserver) return;
+  if (!_metaObserver) {
+    _metaObserver = new IntersectionObserver(function(entries) {
+      entries.forEach(function(entry) {
+        if (!entry.isIntersecting) return;
+        var card = entry.target;
+        _metaObserver.unobserve(card);
+        var title = card.getAttribute('data-title');
+        var type = card.getAttribute('data-type');
+        var year = card.getAttribute('data-year') || '';
+        if (!title) return;
+        var nk = normTitle(title);
+        if (_metaCache[nk]) { _applyMeta(card, _metaCache[nk]); return; }
+        var url = '/api/library/metadata?title=' + encodeURIComponent(title) + '&type=' + encodeURIComponent(type);
+        if (year) url += '&year=' + year;
+        fetch(url).then(function(r) { return r.ok ? r.json() : null; }).then(function(meta) {
+          if (!meta) return;
+          _metaCache[nk] = meta;
+          _applyMeta(card, meta);
+        }).catch(function(){});
+      });
+    }, {rootMargin: '200px'});
+  }
+  // Disconnect stale references from previous renders before observing new cards
+  _metaObserver.disconnect();
+  document.querySelectorAll('.poster-card').forEach(function(card) {
+    if (!card.querySelector('.poster-img')) {
+      _metaObserver.observe(card);
+    }
+  });
+}
+
+function _applyMeta(card, meta) {
+  var container = card.querySelector('.poster-container');
+  if (!container) return;
+
+  // Update poster image
+  if (meta.poster_url) {
+    var placeholder = container.querySelector('.poster-placeholder');
+    if (placeholder && !container.querySelector('.poster-img')) {
+      var img = document.createElement('img');
+      img.className = 'poster-img';
+      img.loading = 'lazy';
+      img.decoding = 'async';
+      img.alt = '';
+      img.onload = function() { img.classList.add('loaded'); };
+      img.onerror = function() { img.style.display = 'none'; placeholder.style.display = 'flex'; };
+      img.src = meta.poster_url;
+      placeholder.style.display = 'none';
+      container.insertBefore(img, placeholder);
+    }
+  }
+
+  // Add corner badge for Ended shows
+  var type = card.getAttribute('data-type');
+  if (type === 'show' && meta.status === 'Ended' && !container.querySelector('.corner-badge')) {
+    var badge = document.createElement('div');
+    badge.className = 'corner-badge ended';
+    container.appendChild(badge);
+  }
+
+  // Update progress bar with TMDB total_episodes
+  if (type === 'show' && meta.seasons) {
+    var totalEps = 0;
+    for (var si = 0; si < meta.seasons.length; si++) {
+      totalEps += meta.seasons[si].total_episodes || 0;
+    }
+    if (totalEps > 0) {
+      var title = card.getAttribute('data-title');
+      var nk = normTitle(title || '');
+      // Use data-type to pick the correct list (safe in async callbacks)
+      var items = type === 'show' ? _allShows : _allMovies;
+      var haveEps = 0;
+      for (var i = 0; i < items.length; i++) {
+        if (normTitle(items[i].title) === nk) { haveEps = items[i].episodes || 0; break; }
+      }
+      var pct = Math.min(100, Math.round(haveEps / totalEps * 100));
+      var isPending = !!_pending[nk];
+      var color;
+      if (isPending) color = '#7a43b6';
+      else if (pct >= 100 && meta.status === 'Ended') color = '#27c24c';
+      else if (pct >= 100) color = '#5d9cec';
+      else color = '#f05050';
+      var fill = card.querySelector('.progress-fill');
+      if (fill) {
+        fill.style.width = pct + '%';
+        fill.style.background = color;
+        fill.title = haveEps + ' / ' + totalEps + ' episodes';
+      }
+      // Update meta line with missing count
+      var missing = totalEps - haveEps;
+      if (missing > 0) {
+        var metaEl = card.querySelector('.card-meta');
+        if (metaEl && !metaEl.hasAttribute('data-enriched')) {
+          metaEl.setAttribute('data-enriched', '1');
+          metaEl.innerHTML += ' &middot; <span style="color:var(--red)">' + missing + ' missing</span>';
+        }
+      }
+    }
+  }
 }
 
 function updateBadges(filteredCount) {

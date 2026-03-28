@@ -289,6 +289,70 @@ def _discover_mount():
     return None
 
 
+def _enrich_with_tmdb_cache(movies, shows):
+    """Attach cached TMDB poster/status data to library items for grid cards.
+
+    Performs a single bulk cache lookup (no API calls).  Items without
+    cached data get None fields.  Triggers background population for
+    uncached items.
+    """
+    try:
+        from utils.tmdb import get_cached_posters, background_populate_cache
+    except ImportError:
+        for item in movies:
+            item['poster_url'] = None
+            item['tmdb_status'] = None
+        for item in shows:
+            item['poster_url'] = None
+            item['tmdb_status'] = None
+            item['total_episodes'] = None
+            item['missing_episodes'] = None
+        return
+
+    all_items = [
+        {'title': m['title'], 'year': m.get('year'), 'type': 'movie'}
+        for m in movies
+    ] + [
+        {'title': s['title'], 'year': s.get('year'), 'type': 'show'}
+        for s in shows
+    ]
+
+    cached = get_cached_posters(all_items)
+
+    uncached = []
+
+    for movie in movies:
+        key = _normalize_title(movie['title'])
+        info = cached.get(key)
+        if info:
+            movie['poster_url'] = info['poster_url'] or None
+            movie['tmdb_status'] = info.get('tmdb_status') or None
+        else:
+            movie['poster_url'] = None
+            movie['tmdb_status'] = None
+            uncached.append({'title': movie['title'], 'year': movie.get('year'), 'type': 'movie'})
+
+    for show in shows:
+        key = _normalize_title(show['title'])
+        info = cached.get(key)
+        if info:
+            show['poster_url'] = info['poster_url'] or None
+            show['tmdb_status'] = info.get('tmdb_status') or None
+            total = info.get('total_episodes') or 0
+            show['total_episodes'] = total if total > 0 else None
+            have = show.get('episodes', 0)
+            show['missing_episodes'] = max(0, total - have) if total > 0 else None
+        else:
+            show['poster_url'] = None
+            show['tmdb_status'] = None
+            show['total_episodes'] = None
+            show['missing_episodes'] = None
+            uncached.append({'title': show['title'], 'year': show.get('year'), 'type': 'show'})
+
+    if uncached:
+        background_populate_cache(uncached)
+
+
 def _normalize_title(title):
     t = title.lower()
     t = re.sub(r'\s*\(\d{4}\)\s*$', '', t)
@@ -460,6 +524,7 @@ class LibraryScanner:
                                   force=force_enforce)
         self._clear_resolved_pending(shows, movies)
         self._create_debrid_symlinks(shows, movies, path_index)
+        _enrich_with_tmdb_cache(movies, shows)
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         return {

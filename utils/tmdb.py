@@ -286,3 +286,143 @@ def _format_movie(entry):
         'runtime': entry.get('runtime', 0),
         'release_date': entry.get('release_date', ''),
     }
+
+
+# ---------------------------------------------------------------------------
+# Bulk cache lookup (no API calls)
+# ---------------------------------------------------------------------------
+
+def get_cached_posters(items):
+    """Return cached poster/status data for a list of library items.
+
+    Performs a single cache file read — no TMDB API calls.  Items without
+    a fresh cache entry are silently omitted from the result.
+
+    Args:
+        items: list of dicts with 'title', 'year', 'type' ('show'|'movie')
+
+    Returns:
+        {normalized_title: {poster_url, tmdb_status, total_episodes}} for shows
+        {normalized_title: {poster_url, tmdb_status, runtime}} for movies
+    """
+    if not _get_api_key():
+        return {}
+
+    from utils.library import _normalize_title
+
+    with _cache_lock:
+        cache = _load_cache()
+
+    shows_cache = cache.get('shows', {})
+    movies_cache = cache.get('movies', {})
+    result = {}
+
+    for item in items:
+        key = _normalize_title(item.get('title', ''))
+        if not key:
+            continue
+
+        item_type = item.get('type', '')
+        if item_type == 'show':
+            entry = shows_cache.get(key)
+            if entry and _is_fresh(entry):
+                total_eps = sum(
+                    s.get('total_episodes', 0)
+                    for s in entry.get('seasons', [])
+                )
+                result[key] = {
+                    'poster_url': _poster_url(entry.get('poster_path', '')),
+                    'tmdb_status': entry.get('status', ''),
+                    'total_episodes': total_eps,
+                }
+        elif item_type == 'movie':
+            entry = movies_cache.get(key)
+            if entry and _is_fresh(entry):
+                # Movies don't have a status field in the cache; use
+                # release_date presence to infer "Released" vs empty.
+                rd = entry.get('release_date', '')
+                status = 'Released' if rd else ''
+                result[key] = {
+                    'poster_url': _poster_url(entry.get('poster_path', '')),
+                    'tmdb_status': status,
+                    'runtime': entry.get('runtime', 0),
+                }
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Background cache population
+# ---------------------------------------------------------------------------
+
+_populate_lock = threading.Lock()
+_populate_running = False
+
+
+def background_populate_cache(items):
+    """Fetch TMDB metadata for uncached items in a background thread.
+
+    Rate-limited to ~3 requests/second.  Skips items that get cached by
+    other code paths while the background thread is running.  Only one
+    population thread runs at a time.
+
+    Args:
+        items: list of dicts with 'title', 'year', 'type' ('show'|'movie')
+    """
+    global _populate_running
+
+    if not _get_api_key() or not items:
+        return
+
+    with _populate_lock:
+        if _populate_running:
+            return
+        _populate_running = True
+
+    import time  # noqa: E402 — deferred to avoid unused import when function is a no-op
+
+    def _run():
+        global _populate_running
+        try:
+            from utils.library import _normalize_title
+            cached = 0
+            logger.info(f"[tmdb] Background cache: fetching metadata for {len(items)} items")
+            for item in items:
+                title = item.get('title', '')
+                year = item.get('year')
+                item_type = item.get('type', '')
+                if not title:
+                    continue
+
+                # Skip if already cached by another path
+                key = _normalize_title(title)
+                with _cache_lock:
+                    c = _load_cache()
+                    section = 'shows' if item_type == 'show' else 'movies'
+                    entry = c.get(section, {}).get(key)
+                    if entry and _is_fresh(entry):
+                        continue
+
+                if item_type == 'show':
+                    result = get_show_info(title, year)
+                else:
+                    result = get_movie_info(title, year)
+
+                if result:
+                    cached += 1
+
+                time.sleep(0.3)
+
+            logger.info(f"[tmdb] Background cache: done ({cached}/{len(items)} cached)")
+        except Exception as e:
+            logger.warning(f"[tmdb] Background cache error: {e}")
+        finally:
+            with _populate_lock:
+                _populate_running = False
+
+    try:
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+    except Exception:
+        with _populate_lock:
+            _populate_running = False

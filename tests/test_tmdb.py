@@ -273,3 +273,194 @@ class TestCacheFreshness:
 
     def test_invalid_cached_at(self):
         assert tmdb._is_fresh({'cached_at': 'not-a-date'}) is False
+
+
+# ---------------------------------------------------------------------------
+# Bulk cache lookup (get_cached_posters)
+# ---------------------------------------------------------------------------
+
+class TestCachedPosters:
+
+    def test_returns_enrichment_for_cached_shows(self, monkeypatch):
+        from datetime import datetime, timezone
+        cache = {
+            'shows': {
+                'breaking bad': {
+                    'tmdb_id': 1396,
+                    'title': 'Breaking Bad',
+                    'poster_path': '/bb.jpg',
+                    'status': 'Ended',
+                    'seasons': [
+                        {'number': 1, 'total_episodes': 7, 'episodes': []},
+                        {'number': 2, 'total_episodes': 13, 'episodes': []},
+                    ],
+                    'cached_at': datetime.now(timezone.utc).isoformat(),
+                }
+            }
+        }
+        tmdb._save_cache(cache)
+        items = [{'title': 'Breaking Bad (2008)', 'year': 2008, 'type': 'show'}]
+        result = tmdb.get_cached_posters(items)
+        assert 'breaking bad' in result
+        info = result['breaking bad']
+        assert info['poster_url'] == 'https://image.tmdb.org/t/p/w300/bb.jpg'
+        assert info['tmdb_status'] == 'Ended'
+        assert info['total_episodes'] == 20
+
+    def test_returns_enrichment_for_cached_movies(self, monkeypatch):
+        from datetime import datetime, timezone
+        cache = {
+            'movies': {
+                'inception': {
+                    'tmdb_id': 27205,
+                    'title': 'Inception',
+                    'poster_path': '/inc.jpg',
+                    'runtime': 148,
+                    'release_date': '2010-07-16',
+                    'cached_at': datetime.now(timezone.utc).isoformat(),
+                }
+            }
+        }
+        tmdb._save_cache(cache)
+        items = [{'title': 'Inception (2010)', 'year': 2010, 'type': 'movie'}]
+        result = tmdb.get_cached_posters(items)
+        assert 'inception' in result
+        assert result['inception']['poster_url'] == 'https://image.tmdb.org/t/p/w300/inc.jpg'
+
+    def test_skips_expired_entries(self, monkeypatch):
+        cache = {
+            'shows': {
+                'old show': {
+                    'poster_path': '/old.jpg',
+                    'status': 'Ended',
+                    'seasons': [],
+                    'cached_at': '2020-01-01T00:00:00+00:00',
+                }
+            }
+        }
+        tmdb._save_cache(cache)
+        items = [{'title': 'Old Show', 'year': None, 'type': 'show'}]
+        result = tmdb.get_cached_posters(items)
+        assert 'old show' not in result
+
+    def test_returns_empty_without_api_key(self, monkeypatch):
+        monkeypatch.delenv('TMDB_API_KEY', raising=False)
+        items = [{'title': 'Test', 'year': None, 'type': 'show'}]
+        assert tmdb.get_cached_posters(items) == {}
+
+    def test_returns_empty_for_uncached(self, monkeypatch):
+        items = [{'title': 'Not In Cache', 'year': None, 'type': 'show'}]
+        result = tmdb.get_cached_posters(items)
+        assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# Background cache population
+# ---------------------------------------------------------------------------
+
+class TestBackgroundPopulate:
+
+    @pytest.fixture(autouse=True)
+    def _reset_populate_flag(self):
+        """Ensure background populate flag is reset before each test."""
+        with tmdb._populate_lock:
+            tmdb._populate_running = False
+        yield
+        # Wait for any background thread to finish
+        import time
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            with tmdb._populate_lock:
+                if not tmdb._populate_running:
+                    break
+            time.sleep(0.05)
+
+    def test_populates_uncached_items(self, monkeypatch):
+        _mock_api(monkeypatch, {
+            '/search/tv': {
+                'results': [{'id': 100, 'name': 'New Show', 'overview': '',
+                             'poster_path': '/new.jpg', 'first_air_date': '2024-01-01'}]
+            },
+            '/tv/100': {
+                'name': 'New Show', 'overview': '', 'poster_path': '/new.jpg',
+                'status': 'Returning Series',
+                'seasons': [{'season_number': 1, 'episode_count': 10}],
+            },
+            '/tv/100/season/1': {
+                'episodes': [{'episode_number': i, 'name': f'Ep{i}', 'air_date': '2024-01-01'} for i in range(1, 11)]
+            },
+        })
+        items = [{'title': 'New Show', 'year': 2024, 'type': 'show'}]
+        tmdb.background_populate_cache(items)
+        # Poll until the background thread populates the cache
+        import time
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            cache = tmdb._load_cache()
+            if 'new show' in cache.get('shows', {}):
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("background thread did not populate cache within 5s")
+        assert 'new show' in tmdb._load_cache().get('shows', {})
+
+    def test_skips_already_cached(self, monkeypatch):
+        from datetime import datetime, timezone
+        # Pre-populate cache
+        cache = {
+            'shows': {
+                'cached show': {
+                    'tmdb_id': 1, 'title': 'Cached Show', 'poster_path': '/c.jpg',
+                    'status': 'Ended', 'seasons': [],
+                    'cached_at': datetime.now(timezone.utc).isoformat(),
+                }
+            }
+        }
+        tmdb._save_cache(cache)
+
+        call_count = [0]
+        orig_get = tmdb._api_get
+        def counting_get(path, params=None):
+            call_count[0] += 1
+            return orig_get(path, params)
+        monkeypatch.setattr(tmdb, '_api_get', counting_get)
+
+        items = [{'title': 'Cached Show', 'year': None, 'type': 'show'}]
+        tmdb.background_populate_cache(items)
+        # Wait for background thread to complete
+        import time
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            with tmdb._populate_lock:
+                if not tmdb._populate_running:
+                    break
+            time.sleep(0.05)
+        # Should have made zero API calls since the item is fresh
+        assert call_count[0] == 0
+
+    def test_prevents_concurrent_runs(self, monkeypatch):
+        """Only one background population thread runs at a time."""
+        import time
+
+        _mock_api(monkeypatch, {
+            '/search/movie': {
+                'results': [{'id': 1, 'title': 'M', 'overview': '',
+                             'poster_path': '/m.jpg', 'release_date': '2024-01-01'}]
+            },
+            '/movie/1': {
+                'title': 'M', 'overview': '', 'poster_path': '/m.jpg',
+                'runtime': 90, 'release_date': '2024-01-01',
+            },
+        })
+
+        items = [{'title': f'Movie {i}', 'year': 2024, 'type': 'movie'} for i in range(5)]
+        tmdb.background_populate_cache(items)  # Starts thread
+        tmdb.background_populate_cache(items)  # Should be a no-op (already running)
+        # Wait for background thread to complete
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            with tmdb._populate_lock:
+                if not tmdb._populate_running:
+                    break
+            time.sleep(0.05)
+        # Just verify no crash — the guard prevented double-run

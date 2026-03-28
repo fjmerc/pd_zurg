@@ -515,7 +515,7 @@ class LibraryScanner:
         self._local_path_index = {}
         self._path_lock = threading.Lock()
         self._search_cooldown = {}  # {(norm, sn): timestamp} — suppress re-search for 1 hour
-        self._alias_norms = {}     # {debrid_norm: local_norm, local_norm: debrid_norm}
+        self._alias_norms = {}     # {norm_title: set of alias norm_titles}
 
         if self._mount_path:
             logger.info(f"[library] Mount path: {self._mount_path}")
@@ -528,12 +528,13 @@ class LibraryScanner:
             logger.info(f"[library] Local TV: {self._local_tv_path}")
 
     def _get_pref(self, norm, preferences):
-        """Look up a preference by normalized title, checking alias if needed."""
+        """Look up a preference by normalized title, checking aliases if needed."""
         pref = preferences.get(norm)
         if not pref:
-            alias = self._alias_norms.get(norm)
-            if alias:
+            for alias in self._alias_norms.get(norm, ()):
                 pref = preferences.get(alias)
+                if pref:
+                    break
         return pref
 
     @staticmethod
@@ -547,6 +548,7 @@ class LibraryScanner:
         the title with a year or better capitalization.
         """
         if not aliases:
+            logger.debug("[library] TMDB alias map empty, skipping debrid dedup")
             return items
 
         # Map each norm key to its canonical (first-seen) key via aliases
@@ -582,26 +584,27 @@ class LibraryScanner:
             for item in group[1:]:
                 if item.get('year') and not best.get('year'):
                     best = item
-                elif item['title'][0:1].isupper() and not best['title'][0:1].isupper():
-                    best = item
+                elif not best.get('year'):
+                    if item['title'][0:1].isupper() and not best['title'][0:1].isupper():
+                        best = item
 
             merged = dict(best)
-            # Merge episodes from all items in the group
-            merged_eps = dict(merged.get('_episodes', {}))
-            for item in group:
-                if item is best:
-                    continue
-                for ep_key, ep_info in item.get('_episodes', {}).items():
-                    if ep_key not in merged_eps:
-                        merged_eps[ep_key] = ep_info
-                    elif ep_info.get('_folder_ep_count', 1) > merged_eps[ep_key].get('_folder_ep_count', 1):
-                        merged_eps[ep_key] = ep_info
 
-            merged['_episodes'] = merged_eps
-            merged['seasons'] = len({ek[0] for ek in merged_eps})
-            merged['episodes'] = len(merged_eps)
+            # Merge episodes from all items in the group (shows only)
+            if any(item.get('_episodes') for item in group):
+                merged_eps = dict(merged.get('_episodes', {}))
+                for item in group:
+                    if item is best:
+                        continue
+                    for ep_key, ep_info in item.get('_episodes', {}).items():
+                        if ep_key not in merged_eps:
+                            merged_eps[ep_key] = ep_info
+                        elif ep_info.get('_folder_ep_count', 1) > merged_eps[ep_key].get('_folder_ep_count', 1):
+                            merged_eps[ep_key] = ep_info
+                merged['_episodes'] = merged_eps
+                merged['seasons'] = len({ek[0] for ek in merged_eps})
+                merged['episodes'] = len(merged_eps)
 
-            # Record alias mapping for preference/pending lookups
             merged_key = _normalize_title(merged['title'])
             for item in group:
                 item_key = _normalize_title(item['title'])
@@ -653,16 +656,18 @@ class LibraryScanner:
         local_movie_keys = {_normalize_title(lm['title']) for lm in local_movies}
 
         # Seed alias_norms with all known TMDB aliases so preference
-        # lookups work regardless of which name was used.
-        self._alias_norms = {}
-        for norm_key, alias_set in show_aliases.items():
-            for alias in alias_set:
-                self._alias_norms.setdefault(norm_key, alias)
-                self._alias_norms.setdefault(alias, norm_key)
-        for norm_key, alias_set in movie_aliases.items():
-            for alias in alias_set:
-                self._alias_norms.setdefault(norm_key, alias)
-                self._alias_norms.setdefault(alias, norm_key)
+        # lookups work regardless of which name was used.  Each name maps
+        # to the set of all its aliases (handles 3+ title groups correctly).
+        self._alias_norms = {}  # {norm_title: set of alias norm_titles}
+        for all_aliases in (show_aliases, movie_aliases):
+            seen = set()
+            for norm_key, alias_set in all_aliases.items():
+                if norm_key in seen:
+                    continue
+                group = alias_set | {norm_key}
+                seen.update(group)
+                for name in group:
+                    self._alias_norms[name] = group - {name}
 
         movies = []
         merged_local_movie_keys = set()
@@ -682,8 +687,8 @@ class LibraryScanner:
                     logger.debug(
                         f"[library] TMDB alias match (movie): debrid '{key}' ↔ local '{matched_key}'"
                     )
-                    self._alias_norms[key] = matched_key
-                    self._alias_norms[matched_key] = key
+                    self._alias_norms.setdefault(key, set()).add(matched_key)
+                    self._alias_norms.setdefault(matched_key, set()).add(key)
                 item = dict(item)
                 item['source'] = 'both'
                 merged_local_movie_keys.add(matched_key)
@@ -714,8 +719,8 @@ class LibraryScanner:
                     logger.debug(
                         f"[library] TMDB alias match: debrid '{key}' ↔ local '{local_key}'"
                     )
-                    self._alias_norms[key] = local_key
-                    self._alias_norms[local_key] = key
+                    self._alias_norms.setdefault(key, set()).add(local_key)
+                    self._alias_norms.setdefault(local_key, set()).add(key)
                 merged_local_show_keys.add(local_key)
                 item = dict(item)
                 local_item = local_show_map[local_key]
@@ -848,9 +853,10 @@ class LibraryScanner:
         with self._path_lock:
             result = self._path_index.get((normalized_title, season, episode))
             if not result:
-                alias = self._alias_norms.get(normalized_title)
-                if alias:
+                for alias in self._alias_norms.get(normalized_title, ()):
                     result = self._path_index.get((alias, season, episode))
+                    if result:
+                        break
             return result
 
     def get_local_episode_path(self, normalized_title, season, episode):
@@ -858,9 +864,10 @@ class LibraryScanner:
         with self._path_lock:
             result = self._local_path_index.get((normalized_title, season, episode))
             if not result:
-                alias = self._alias_norms.get(normalized_title)
-                if alias:
+                for alias in self._alias_norms.get(normalized_title, ()):
                     result = self._local_path_index.get((alias, season, episode))
+                    if result:
+                        break
             return result
 
     def _enforce_preferences(self, shows, movies, preferences, path_index, local_path_index,
@@ -1045,7 +1052,13 @@ class LibraryScanner:
                     continue
 
                 # Skip if title has a pending entry in to-debrid direction
-                pending_entry = pending.get(norm) or pending.get(self._alias_norms.get(norm, '')) or {}
+                pending_entry = pending.get(norm)
+                if not pending_entry:
+                    for _pa in self._alias_norms.get(norm, ()):
+                        pending_entry = pending.get(_pa)
+                        if pending_entry:
+                            break
+                pending_entry = pending_entry or {}
                 pending_keys = {
                     (e['season'], e['episode'])
                     for e in pending_entry.get('episodes', [])
@@ -1115,7 +1128,13 @@ class LibraryScanner:
                     continue
                 if movie.get('source') in ('debrid', 'both'):
                     continue  # already on debrid
-                pending_entry = pending.get(norm) or pending.get(self._alias_norms.get(norm, '')) or {}
+                pending_entry = pending.get(norm)
+                if not pending_entry:
+                    for _pa in self._alias_norms.get(norm, ()):
+                        pending_entry = pending.get(_pa)
+                        if pending_entry:
+                            break
+                pending_entry = pending_entry or {}
                 if pending_entry.get('direction') == 'to-debrid':
                     continue  # already searching
                 if (norm, 0) in self._search_cooldown:
@@ -1169,16 +1188,17 @@ class LibraryScanner:
                 for ep in sd.get('episodes', []):
                     ep_sources[(sd['number'], ep['number'])] = ep.get('source', '')
             source_map[norm] = ep_sources
-            alias = self._alias_norms.get(norm)
-            if alias and alias not in source_map:
-                source_map[alias] = ep_sources
+            for alias in self._alias_norms.get(norm, ()):
+                if alias not in source_map:
+                    source_map[alias] = ep_sources
 
         for movie in movies:
             norm = _normalize_title(movie['title'])
-            source_map[norm] = {(0, 0): movie.get('source', '')}
-            alias = self._alias_norms.get(norm)
-            if alias and alias not in source_map:
-                source_map[alias] = {(0, 0): movie.get('source', '')}
+            movie_sources = {(0, 0): movie.get('source', '')}
+            source_map[norm] = movie_sources
+            for alias in self._alias_norms.get(norm, ()):
+                if alias not in source_map:
+                    source_map[alias] = movie_sources
 
         # Snapshot pending; clear_pending re-reads under lock so concurrent writes are safe
         for norm_title, entry in list(pending.items()):

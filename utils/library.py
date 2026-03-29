@@ -1756,11 +1756,10 @@ class LibraryScanner:
 
         # Step 1: List categories (mirrors _scan_mount's category selection)
         entries = propfind(base_dav, depth=1, auth=auth, timeout=min(remaining, 10))
-        # The root directory itself appears in the PROPFIND response — skip it
-        root_href = '/dav/'
+        # Skip the root directory itself — its href may be '/', '/dav/', or empty
         all_cats = []
         for e in entries:
-            if e['is_collection'] and e['name'] and e['href'].rstrip('/') + '/' != root_href:
+            if e['is_collection'] and e['name'] and e['name'] not in ('dav', ''):
                 all_cats.append(e['name'])
 
         non_special = [c for c in all_cats if c not in self._SKIP_CATEGORIES]
@@ -1793,15 +1792,24 @@ class LibraryScanner:
 
             # Group entries by torrent folder.
             # Hrefs are already URL-decoded by webdav.propfind().
-            # Relative path structure:  folder_name / [season_dir /] file
+            # Zurg may return absolute (/dav/movies/...) or relative (folder/file)
+            # hrefs — normalise both to a relative path below the category.
             cat_prefix = f"/dav/{category}/"
+            cat_prefix_short = f"/{category}/"
             folders = {}
 
             for entry in cat_entries:
                 href = entry['href']
-                if not href.startswith(cat_prefix):
+                if href.startswith(cat_prefix):
+                    rel = href[len(cat_prefix):]
+                elif href.startswith(cat_prefix_short):
+                    rel = href[len(cat_prefix_short):]
+                elif not href.startswith('/'):
+                    # Relative href (bare folder/file path)
+                    rel = href
+                else:
                     continue
-                rel = href[len(cat_prefix):].rstrip('/')
+                rel = rel.rstrip('/')
                 if not rel:
                     continue  # category dir itself
 

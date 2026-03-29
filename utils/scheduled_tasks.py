@@ -134,7 +134,11 @@ def verify_symlinks():
     local_tv = os.environ.get('BLACKHOLE_LOCAL_LIBRARY_TV', '').strip()
     local_movies = os.environ.get('BLACKHOLE_LOCAL_LIBRARY_MOVIES', '').strip()
     rclone_mount = os.path.realpath(os.environ.get('BLACKHOLE_RCLONE_MOUNT', '/data'))
-    mount_prefix = rclone_mount + '/'
+    symlink_target = os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', '').strip()
+    # Check symlinks pointing to either the rclone mount or the symlink target base
+    debrid_prefixes = [rclone_mount + '/']
+    if symlink_target:
+        debrid_prefixes.append(os.path.realpath(symlink_target) + '/')
 
     scan_dirs = []
     if os.path.isdir(completed_dir):
@@ -161,8 +165,9 @@ def verify_symlinks():
                 # Resolve relative symlinks to absolute paths
                 if not os.path.isabs(target):
                     target = os.path.realpath(os.path.join(os.path.dirname(fpath), target))
-                # Only check symlinks pointing to the debrid mount
-                if not (target.startswith(mount_prefix) or target == rclone_mount):
+                # Only check symlinks pointing to the debrid mount or symlink target
+                if not any(target.startswith(p) or target.rstrip('/') == p.rstrip('/')
+                           for p in debrid_prefixes):
                     continue
 
                 checked += 1

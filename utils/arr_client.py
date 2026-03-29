@@ -192,16 +192,20 @@ class SonarrClient(_ArrClientBase):
                 self._local_tag_id = tags[0]
                 logger.debug(f"[sonarr] Local torrent client ({impl}) uses tag {self._local_tag_id}")
 
+        # No blackhole client found — no routing to fix
+        if self._blackhole_tag_id is _NOT_FOUND:
+            return
+
         # When a blackhole exists, untagged clients intercept debrid downloads.
         # Tag them with the local tag so debrid routing is exclusive.
-        if self._blackhole_tag_id is not _NOT_FOUND and untagged_clients:
-            local_tag = self._local_tag_id if self._local_tag_id is not _NOT_FOUND else None
+        local_tag = self._local_tag_id if self._local_tag_id is not _NOT_FOUND else None
+        tagged_client_ids = set()
+        if untagged_clients:
             if local_tag is None:
                 local_tag = self._get_or_create_tag('local')
                 if local_tag is not None:
                     self._local_tag_id = local_tag
             if local_tag is not None:
-                tagged_client_ids = set()
                 for c in untagged_clients:
                     c_name = c.get('name', c.get('implementation', '?'))
                     updated = dict(c, tags=[local_tag])
@@ -211,27 +215,41 @@ class SonarrClient(_ArrClientBase):
                         logger.info(f"[sonarr] Tagged untagged client '{c_name}' with local tag {local_tag} to prevent debrid interception")
                     else:
                         logger.warning(f"[sonarr] Failed to tag client '{c_name}'")
-                # Fix indexer routing and clean up stale queue items
-                self._fix_indexer_routing(tagged_client_ids, local_tag)
-                if tagged_client_ids:
-                    tagged_client_names = {
-                        c['name'] for c in untagged_clients
-                        if c['id'] in tagged_client_ids and c.get('name')
-                    }
-                    if tagged_client_names:
-                        self._clear_stale_queue_items(tagged_client_names)
 
-    def _fix_indexer_routing(self, tagged_client_ids, local_tag):
+        # Fix indexer routing: tag usenet indexers with local tag,
+        # and ensure torrent indexers are accessible for debrid-tagged content
+        indexers_fixed = self._fix_indexer_routing(tagged_client_ids, local_tag, self._blackhole_tag_id)
+
+        # If torrent indexer tags were just corrected, re-search debrid-tagged
+        # series that previously failed (0 indexers were visible for them)
+        if indexers_fixed:
+            self._search_debrid_missing()
+
+        # Clean up stale queue items from re-tagged clients
+        if tagged_client_ids:
+            tagged_client_names = {
+                c['name'] for c in untagged_clients
+                if c['id'] in tagged_client_ids and c.get('name')
+            }
+            if tagged_client_names:
+                self._clear_stale_queue_items(tagged_client_names)
+
+    def _fix_indexer_routing(self, tagged_client_ids, local_tag, debrid_tag=None):
         """Fix indexer routing after auto-tagging download clients.
 
         1. Clear downloadClientId overrides pointing to newly-tagged clients
         2. Tag untagged usenet indexers with the local tag so they don't
            provide results for debrid-tagged series (which creates stale
            queue items that can't be delivered)
+        3. Ensure torrent indexers with existing tags also carry the debrid
+           tag so debrid-tagged series can discover them
+
+        Returns True if any torrent indexer tags were fixed (debrid tag added).
         """
+        torrent_indexers_fixed = False
         indexers = self._get('/api/v3/indexer')
         if not indexers:
-            return
+            return False
         for ix in indexers:
             ix_name = ix.get('name', '?')
             changed = False
@@ -243,19 +261,76 @@ class SonarrClient(_ArrClientBase):
                 logger.debug(f"[sonarr] Clearing downloadClientId on indexer '{ix_name}'")
             # Tag untagged usenet indexers so they only serve local-tagged series
             if ix.get('protocol') == 'usenet' and local_tag is not None:
-                existing_tags = ix.get('tags', [])
+                existing_tags = updated.get('tags', [])
                 if not existing_tags:
                     updated['tags'] = [local_tag]
                     changed = True
                     logger.debug(f"[sonarr] Tagging usenet indexer '{ix_name}' with local tag")
                 elif local_tag not in existing_tags:
                     logger.info(f"[sonarr] Usenet indexer '{ix_name}' has existing tags {existing_tags} — verify it excludes debrid series")
+            # Ensure torrent indexers are accessible for debrid-tagged content.
+            # If a torrent indexer has tags but not the debrid tag, debrid-tagged
+            # series/episodes won't find it during search. Only auto-tag indexers
+            # whose sole tag is the local tag (set by our auto-routing); respect
+            # user-configured tags by warning instead of overriding.
+            if ix.get('protocol') == 'torrent' and debrid_tag is not None:
+                existing_tags = updated.get('tags', [])
+                if existing_tags and debrid_tag not in existing_tags:
+                    if local_tag is not None and existing_tags == [local_tag]:
+                        updated['tags'] = [local_tag, debrid_tag]
+                        changed = True
+                        torrent_fix_pending = True
+                        logger.debug(f"[sonarr] Adding debrid tag to torrent indexer '{ix_name}' so debrid-tagged content can use it")
+                    else:
+                        torrent_fix_pending = False
+                        logger.info(f"[sonarr] Torrent indexer '{ix_name}' has tags {existing_tags} but not debrid — verify it should serve debrid content")
+            else:
+                torrent_fix_pending = False
             if changed:
                 result = self._put(f'/api/v3/indexer/{ix["id"]}', updated)
                 if result:
+                    if torrent_fix_pending:
+                        torrent_indexers_fixed = True
                     logger.info(f"[sonarr] Fixed indexer routing for '{ix_name}'")
                 else:
                     logger.warning(f"[sonarr] Failed to fix indexer routing for '{ix_name}'")
+        return torrent_indexers_fixed
+
+    def _search_debrid_missing(self):
+        """Trigger search for debrid-tagged series with missing episodes.
+
+        Called once after torrent indexer tags are fixed so that previously
+        failed searches (0 indexers visible) get retried.
+        """
+        debrid_tag = self._blackhole_tag_id
+        if debrid_tag is None or debrid_tag is _NOT_FOUND:
+            return
+        series_list = self._get('/api/v3/series')
+        if not series_list:
+            return
+        missing_ids = []
+        for s in series_list:
+            if debrid_tag not in s.get('tags', []):
+                continue
+            if not s.get('monitored'):
+                continue
+            stats = s.get('statistics', {})
+            if stats.get('episodeCount', 0) > stats.get('episodeFileCount', 0):
+                missing_ids.append(s['id'])
+        if not missing_ids:
+            return
+        max_batch = 25
+        if len(missing_ids) > max_batch:
+            logger.warning(
+                f"[sonarr] {len(missing_ids)} debrid series with missing episodes — "
+                f"searching first {max_batch} to avoid overloading Sonarr"
+            )
+            missing_ids = missing_ids[:max_batch]
+        logger.info(f"[sonarr] Searching {len(missing_ids)} debrid-tagged series with missing episodes after indexer routing fix")
+        for series_id in missing_ids:
+            result = self._post('/api/v3/command', {'name': 'SeriesSearch', 'seriesId': series_id})
+            if result is None:
+                logger.warning(f"[sonarr] Failed to trigger search for series {series_id}")
 
     def _clear_stale_queue_items(self, client_names):
         """Remove queue items stuck as unavailable for newly-tagged clients."""
@@ -779,16 +854,20 @@ class RadarrClient(_ArrClientBase):
                 self._local_tag_id = tags[0]
                 logger.debug(f"[radarr] Local torrent client ({impl}) uses tag {self._local_tag_id}")
 
+        # No blackhole client found — no routing to fix
+        if self._blackhole_tag_id is _NOT_FOUND:
+            return
+
         # When a blackhole exists, untagged clients intercept debrid downloads.
         # Tag them with the local tag so debrid routing is exclusive.
-        if self._blackhole_tag_id is not _NOT_FOUND and untagged_clients:
-            local_tag = self._local_tag_id if self._local_tag_id is not _NOT_FOUND else None
+        local_tag = self._local_tag_id if self._local_tag_id is not _NOT_FOUND else None
+        tagged_client_ids = set()
+        if untagged_clients:
             if local_tag is None:
                 local_tag = self._get_or_create_tag('local')
                 if local_tag is not None:
                     self._local_tag_id = local_tag
             if local_tag is not None:
-                tagged_client_ids = set()
                 for c in untagged_clients:
                     c_name = c.get('name', c.get('implementation', '?'))
                     updated = dict(c, tags=[local_tag])
@@ -798,25 +877,40 @@ class RadarrClient(_ArrClientBase):
                         logger.info(f"[radarr] Tagged untagged client '{c_name}' with local tag {local_tag} to prevent debrid interception")
                     else:
                         logger.warning(f"[radarr] Failed to tag client '{c_name}'")
-                self._fix_indexer_routing(tagged_client_ids, local_tag)
-                if tagged_client_ids:
-                    tagged_client_names = {
-                        c['name'] for c in untagged_clients
-                        if c['id'] in tagged_client_ids and c.get('name')
-                    }
-                    if tagged_client_names:
-                        self._clear_stale_queue_items(tagged_client_names)
 
-    def _fix_indexer_routing(self, tagged_client_ids, local_tag):
+        # Fix indexer routing: tag usenet indexers with local tag,
+        # and ensure torrent indexers are accessible for debrid-tagged content
+        indexers_fixed = self._fix_indexer_routing(tagged_client_ids, local_tag, self._blackhole_tag_id)
+
+        # If torrent indexer tags were just corrected, re-search debrid-tagged
+        # movies that previously failed (0 indexers were visible for them)
+        if indexers_fixed:
+            self._search_debrid_missing()
+
+        # Clean up stale queue items from re-tagged clients
+        if tagged_client_ids:
+            tagged_client_names = {
+                c['name'] for c in untagged_clients
+                if c['id'] in tagged_client_ids and c.get('name')
+            }
+            if tagged_client_names:
+                self._clear_stale_queue_items(tagged_client_names)
+
+    def _fix_indexer_routing(self, tagged_client_ids, local_tag, debrid_tag=None):
         """Fix indexer routing after auto-tagging download clients.
 
         1. Clear downloadClientId overrides pointing to newly-tagged clients
         2. Tag untagged usenet indexers with the local tag so they don't
-           provide results for debrid-tagged series
+           provide results for debrid-tagged movies
+        3. Ensure torrent indexers with existing tags also carry the debrid
+           tag so debrid-tagged movies can discover them
+
+        Returns True if any torrent indexer tags were fixed (debrid tag added).
         """
+        torrent_indexers_fixed = False
         indexers = self._get('/api/v3/indexer')
         if not indexers:
-            return
+            return False
         for ix in indexers:
             ix_name = ix.get('name', '?')
             changed = False
@@ -826,19 +920,63 @@ class RadarrClient(_ArrClientBase):
                 changed = True
                 logger.debug(f"[radarr] Clearing downloadClientId on indexer '{ix_name}'")
             if ix.get('protocol') == 'usenet' and local_tag is not None:
-                existing_tags = ix.get('tags', [])
+                existing_tags = updated.get('tags', [])
                 if not existing_tags:
                     updated['tags'] = [local_tag]
                     changed = True
                     logger.debug(f"[radarr] Tagging usenet indexer '{ix_name}' with local tag")
                 elif local_tag not in existing_tags:
-                    logger.info(f"[radarr] Usenet indexer '{ix_name}' has existing tags {existing_tags} — verify it excludes debrid series")
+                    logger.info(f"[radarr] Usenet indexer '{ix_name}' has existing tags {existing_tags} — verify it excludes debrid movies")
+            # Ensure torrent indexers are accessible for debrid-tagged content.
+            # If a torrent indexer has tags but not the debrid tag, debrid-tagged
+            # movies won't find it during search. Only auto-tag indexers whose
+            # sole tag is the local tag (set by our auto-routing); respect
+            # user-configured tags by warning instead of overriding.
+            if ix.get('protocol') == 'torrent' and debrid_tag is not None:
+                existing_tags = updated.get('tags', [])
+                if existing_tags and debrid_tag not in existing_tags:
+                    if local_tag is not None and existing_tags == [local_tag]:
+                        updated['tags'] = [local_tag, debrid_tag]
+                        changed = True
+                        torrent_fix_pending = True
+                        logger.debug(f"[radarr] Adding debrid tag to torrent indexer '{ix_name}' so debrid-tagged content can use it")
+                    else:
+                        torrent_fix_pending = False
+                        logger.info(f"[radarr] Torrent indexer '{ix_name}' has tags {existing_tags} but not debrid — verify it should serve debrid content")
+            else:
+                torrent_fix_pending = False
             if changed:
                 result = self._put(f'/api/v3/indexer/{ix["id"]}', updated)
                 if result:
+                    if torrent_fix_pending:
+                        torrent_indexers_fixed = True
                     logger.info(f"[radarr] Fixed indexer routing for '{ix_name}'")
                 else:
                     logger.warning(f"[radarr] Failed to fix indexer routing for '{ix_name}'")
+        return torrent_indexers_fixed
+
+    def _search_debrid_missing(self):
+        """Trigger search for debrid-tagged movies missing files.
+
+        Called once after torrent indexer tags are fixed so that previously
+        failed searches (0 indexers visible) get retried.
+        """
+        debrid_tag = self._blackhole_tag_id
+        if debrid_tag is None or debrid_tag is _NOT_FOUND:
+            return
+        movies = self._get('/api/v3/movie')
+        if not movies:
+            return
+        missing_ids = [
+            m['id'] for m in movies
+            if debrid_tag in m.get('tags', [])
+            and m.get('monitored')
+            and not m.get('hasFile')
+        ]
+        if not missing_ids:
+            return
+        logger.info(f"[radarr] Searching {len(missing_ids)} debrid-tagged missing movie(s) after indexer routing fix")
+        self._post('/api/v3/command', {'name': 'MoviesSearch', 'movieIds': missing_ids})
 
     def _clear_stale_queue_items(self, client_names):
         """Remove queue items stuck as unavailable for newly-tagged clients."""

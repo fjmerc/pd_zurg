@@ -356,6 +356,101 @@ class TestSonarrClient:
         result = sonarr.ensure_and_search('My Show', 123, 1, [1], prefer_debrid=True)
         assert result['status'] == 'sent'
 
+    # --- _fix_indexer_routing: torrent indexer debrid tag ---
+
+    @patch('urllib.request.urlopen')
+    def test_fix_indexer_routing_adds_debrid_tag_to_local_tagged_torrent(self, mock_urlopen, sonarr):
+        """Torrent indexer with only the local tag gets debrid tag added."""
+        indexers = [
+            {'id': 1, 'name': '1337x', 'protocol': 'torrent', 'tags': [5], 'downloadClientId': 0},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_urlopen(indexers),       # GET /indexer
+            _mock_urlopen(indexers[0]),     # PUT /indexer/1
+        ]
+        result = sonarr._fix_indexer_routing(set(), 5, debrid_tag=3)
+        assert result is True
+        put_call = mock_urlopen.call_args_list[1]
+        put_body = json.loads(put_call[0][0].data)
+        assert 3 in put_body['tags']
+        assert 5 in put_body['tags']
+
+    @patch('urllib.request.urlopen')
+    def test_fix_indexer_routing_warns_custom_tagged_torrent(self, mock_urlopen, sonarr):
+        """Torrent indexer with custom tags (not just local) is warned, not modified."""
+        indexers = [
+            {'id': 1, 'name': '1337x', 'protocol': 'torrent', 'tags': [99], 'downloadClientId': 0},
+        ]
+        mock_urlopen.return_value = _mock_urlopen(indexers)
+        result = sonarr._fix_indexer_routing(set(), 5, debrid_tag=3)
+        assert result is False
+        assert mock_urlopen.call_count == 1  # only GET, no PUT
+
+    @patch('urllib.request.urlopen')
+    def test_fix_indexer_routing_skips_untagged_torrent(self, mock_urlopen, sonarr):
+        """Untagged torrent indexer should not be modified (serves all content)."""
+        indexers = [
+            {'id': 1, 'name': 'TPB', 'protocol': 'torrent', 'tags': [], 'downloadClientId': 0},
+        ]
+        mock_urlopen.return_value = _mock_urlopen(indexers)
+        result = sonarr._fix_indexer_routing(set(), None, debrid_tag=3)
+        assert result is False
+        assert mock_urlopen.call_count == 1  # only GET, no PUT
+
+    @patch('urllib.request.urlopen')
+    def test_fix_indexer_routing_skips_torrent_already_tagged(self, mock_urlopen, sonarr):
+        """Torrent indexer already carrying debrid tag should not be re-written."""
+        indexers = [
+            {'id': 1, 'name': 'YTS', 'protocol': 'torrent', 'tags': [5, 3], 'downloadClientId': 0},
+        ]
+        mock_urlopen.return_value = _mock_urlopen(indexers)
+        result = sonarr._fix_indexer_routing(set(), None, debrid_tag=3)
+        assert result is False
+        assert mock_urlopen.call_count == 1  # only GET, no PUT
+
+    @patch('urllib.request.urlopen')
+    def test_fix_indexer_routing_no_debrid_tag_skips_torrent(self, mock_urlopen, sonarr):
+        """When debrid_tag is None, torrent indexers are not touched."""
+        indexers = [
+            {'id': 1, 'name': '1337x', 'protocol': 'torrent', 'tags': [5], 'downloadClientId': 0},
+        ]
+        mock_urlopen.return_value = _mock_urlopen(indexers)
+        result = sonarr._fix_indexer_routing(set(), None, debrid_tag=None)
+        assert result is False
+        assert mock_urlopen.call_count == 1  # only GET, no PUT
+
+    # --- _search_debrid_missing ---
+
+    @patch('urllib.request.urlopen')
+    def test_search_debrid_missing_triggers_search(self, mock_urlopen, sonarr):
+        """After indexer fix, debrid-tagged series with missing episodes get searched."""
+        sonarr._blackhole_tag_id = 3
+        series = [
+            {'id': 10, 'tags': [3], 'monitored': True, 'statistics': {'episodeCount': 10, 'episodeFileCount': 5}},
+            {'id': 20, 'tags': [5], 'monitored': True, 'statistics': {'episodeCount': 8, 'episodeFileCount': 2}},
+            {'id': 30, 'tags': [3], 'monitored': True, 'statistics': {'episodeCount': 6, 'episodeFileCount': 6}},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_urlopen(series),      # GET /series
+            _mock_urlopen({}),          # POST /command (series 10)
+        ]
+        sonarr._search_debrid_missing()
+        assert mock_urlopen.call_count == 2  # GET + 1 POST (only series 10 is debrid+missing)
+        post_body = json.loads(mock_urlopen.call_args_list[1][0][0].data)
+        assert post_body['name'] == 'SeriesSearch'
+        assert post_body['seriesId'] == 10
+
+    @patch('urllib.request.urlopen')
+    def test_search_debrid_missing_noop_when_none_missing(self, mock_urlopen, sonarr):
+        """No search triggered when all debrid series are complete."""
+        sonarr._blackhole_tag_id = 3
+        series = [
+            {'id': 10, 'tags': [3], 'monitored': True, 'statistics': {'episodeCount': 6, 'episodeFileCount': 6}},
+        ]
+        mock_urlopen.return_value = _mock_urlopen(series)
+        sonarr._search_debrid_missing()
+        assert mock_urlopen.call_count == 1  # only GET, no POST
+
 
 # ---------------------------------------------------------------------------
 # Radarr client
@@ -504,6 +599,101 @@ class TestRadarrClient:
         result = radarr.remove_movie('Inception', 27205)
         assert result['status'] == 'error'
         assert 'file ID' in result['message']
+
+    # --- _fix_indexer_routing: torrent indexer debrid tag ---
+
+    @patch('urllib.request.urlopen')
+    def test_fix_indexer_routing_adds_debrid_tag_to_local_tagged_torrent(self, mock_urlopen, radarr):
+        """Torrent indexer with only the local tag gets debrid tag added."""
+        indexers = [
+            {'id': 1, 'name': '1337x', 'protocol': 'torrent', 'tags': [5], 'downloadClientId': 0},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_urlopen(indexers),       # GET /indexer
+            _mock_urlopen(indexers[0]),     # PUT /indexer/1
+        ]
+        result = radarr._fix_indexer_routing(set(), 5, debrid_tag=3)
+        assert result is True
+        put_call = mock_urlopen.call_args_list[1]
+        put_body = json.loads(put_call[0][0].data)
+        assert 3 in put_body['tags']
+        assert 5 in put_body['tags']
+
+    @patch('urllib.request.urlopen')
+    def test_fix_indexer_routing_warns_custom_tagged_torrent(self, mock_urlopen, radarr):
+        """Torrent indexer with custom tags (not just local) is warned, not modified."""
+        indexers = [
+            {'id': 1, 'name': '1337x', 'protocol': 'torrent', 'tags': [99], 'downloadClientId': 0},
+        ]
+        mock_urlopen.return_value = _mock_urlopen(indexers)
+        result = radarr._fix_indexer_routing(set(), 5, debrid_tag=3)
+        assert result is False
+        assert mock_urlopen.call_count == 1  # only GET, no PUT
+
+    @patch('urllib.request.urlopen')
+    def test_fix_indexer_routing_skips_untagged_torrent(self, mock_urlopen, radarr):
+        """Untagged torrent indexer should not be modified (serves all content)."""
+        indexers = [
+            {'id': 1, 'name': 'TPB', 'protocol': 'torrent', 'tags': [], 'downloadClientId': 0},
+        ]
+        mock_urlopen.return_value = _mock_urlopen(indexers)
+        result = radarr._fix_indexer_routing(set(), None, debrid_tag=3)
+        assert result is False
+        assert mock_urlopen.call_count == 1  # only GET, no PUT
+
+    @patch('urllib.request.urlopen')
+    def test_fix_indexer_routing_skips_torrent_already_tagged(self, mock_urlopen, radarr):
+        """Torrent indexer already carrying debrid tag should not be re-written."""
+        indexers = [
+            {'id': 1, 'name': 'YTS', 'protocol': 'torrent', 'tags': [5, 3], 'downloadClientId': 0},
+        ]
+        mock_urlopen.return_value = _mock_urlopen(indexers)
+        result = radarr._fix_indexer_routing(set(), None, debrid_tag=3)
+        assert result is False
+        assert mock_urlopen.call_count == 1  # only GET, no PUT
+
+    @patch('urllib.request.urlopen')
+    def test_fix_indexer_routing_no_debrid_tag_skips_torrent(self, mock_urlopen, radarr):
+        """When debrid_tag is None, torrent indexers are not touched."""
+        indexers = [
+            {'id': 1, 'name': '1337x', 'protocol': 'torrent', 'tags': [5], 'downloadClientId': 0},
+        ]
+        mock_urlopen.return_value = _mock_urlopen(indexers)
+        result = radarr._fix_indexer_routing(set(), None, debrid_tag=None)
+        assert result is False
+        assert mock_urlopen.call_count == 1  # only GET, no PUT
+
+    # --- _search_debrid_missing ---
+
+    @patch('urllib.request.urlopen')
+    def test_search_debrid_missing_triggers_search(self, mock_urlopen, radarr):
+        """After indexer fix, debrid-tagged movies without files get searched."""
+        radarr._blackhole_tag_id = 3
+        movies = [
+            {'id': 10, 'tags': [3], 'monitored': True, 'hasFile': False},
+            {'id': 20, 'tags': [5], 'monitored': True, 'hasFile': False},
+            {'id': 30, 'tags': [3], 'monitored': True, 'hasFile': True},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_urlopen(movies),      # GET /movie
+            _mock_urlopen({}),          # POST /command
+        ]
+        radarr._search_debrid_missing()
+        assert mock_urlopen.call_count == 2  # GET + 1 POST
+        post_body = json.loads(mock_urlopen.call_args_list[1][0][0].data)
+        assert post_body['name'] == 'MoviesSearch'
+        assert post_body['movieIds'] == [10]
+
+    @patch('urllib.request.urlopen')
+    def test_search_debrid_missing_noop_when_none_missing(self, mock_urlopen, radarr):
+        """No search triggered when all debrid movies have files."""
+        radarr._blackhole_tag_id = 3
+        movies = [
+            {'id': 10, 'tags': [3], 'monitored': True, 'hasFile': True},
+        ]
+        mock_urlopen.return_value = _mock_urlopen(movies)
+        radarr._search_debrid_missing()
+        assert mock_urlopen.call_count == 1  # only GET, no POST
 
 
 # ---------------------------------------------------------------------------

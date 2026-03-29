@@ -46,7 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Download routing e2e**: Fixed usenet client skipping, indexer downloadClientId override clearing, and stale unavailable queue item cleanup.
 - **Stale pending entries**: Auto-clear pending entries for titles removed from the library.
 - **TMDB year-filter search failure**: TMDB searches with a year filter now retry without the year when the filtered search returns no results. Fixes shows like "Marvel's Spidey and His Amazing Friends" where the folder year (season air date) doesn't match the show's premiere year, preventing TMDB caching and alias-based dedup.
-- **WebDAV relative href parsing**: WebDAV PROPFIND scanner now handles both absolute (`/dav/movies/...`) and relative (`folder/file`) hrefs from Zurg, fixing empty debrid library when Zurg returns relative paths.
+- **WebDAV scanner Zurg compatibility**: WebDAV PROPFIND scanner now handles both absolute (`/dav/movies/...`) and relative (`folder/file`) hrefs from Zurg. Also detects when Zurg doesn't support recursive depth-infinity PROPFIND (returns folders without files) and falls back to FUSE mount scanning automatically.
 
 ## Version [2.13.0] - 2026-03-26
 

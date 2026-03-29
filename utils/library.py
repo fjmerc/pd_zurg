@@ -1836,6 +1836,20 @@ class LibraryScanner:
                         (parts[2], entry['size'], mount_path)
                     )
 
+            # Zurg may not support true depth-infinity — if every entry is a
+            # collection and no files were found, the PROPFIND only returned
+            # folder names without recursing into them.  Bail out so the
+            # caller falls back to FUSE scanning which handles this correctly.
+            has_files = any(
+                contents['files'] or contents['season_files']
+                for contents in folders.values()
+            )
+            if folders and not has_files:
+                raise RuntimeError(
+                    f"WebDAV depth-infinity returned {len(folders)} folders but 0 files "
+                    f"for {category} — Zurg likely does not support recursive PROPFIND"
+                )
+
             # Step 3: Process folders into show_groups / movie_groups
             for folder_name, contents in folders.items():
                 title, year = _parse_folder_name(folder_name)

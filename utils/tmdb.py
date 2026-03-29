@@ -62,12 +62,22 @@ def _api_get(path, params=None):
 # Search
 # ---------------------------------------------------------------------------
 
-def search_show(title, year=None):
-    """Search TMDB for a TV show. Returns first result dict or None."""
+def search_show(title, year=None, fallback_no_year=False):
+    """Search TMDB for a TV show. Returns first result dict or None.
+
+    When *fallback_no_year* is True and a year-filtered search returns no
+    results, retries without the year.  Useful for poster/cache enrichment
+    where torrent folder names often carry a season air year instead of the
+    show's premiere year.  Callers that need precise disambiguation (e.g.
+    Sonarr/Radarr series matching) should leave this False.
+    """
     params = {'query': title}
-    if year:
+    if year is not None:
         params['first_air_date_year'] = year
     data = _api_get('/search/tv', params)
+    if data and not data.get('results') and year is not None and fallback_no_year:
+        # Year filter too strict — retry without it
+        data = _api_get('/search/tv', {'query': title})
     if not data or not data.get('results'):
         return None
     r = data['results'][0]
@@ -80,12 +90,20 @@ def search_show(title, year=None):
     }
 
 
-def search_movie(title, year=None):
-    """Search TMDB for a movie. Returns first result dict or None."""
+def search_movie(title, year=None, fallback_no_year=False):
+    """Search TMDB for a movie. Returns first result dict or None.
+
+    When *fallback_no_year* is True and a year-filtered search returns no
+    results, retries without the year.  Callers that need precise
+    disambiguation should leave this False.
+    """
     params = {'query': title}
-    if year:
+    if year is not None:
         params['year'] = year
     data = _api_get('/search/movie', params)
+    if data and not data.get('results') and year is not None and fallback_no_year:
+        # Year filter too strict — retry without it
+        data = _api_get('/search/movie', {'query': title})
     if not data or not data.get('results'):
         return None
     r = data['results'][0]
@@ -215,8 +233,9 @@ def get_show_info(title, year=None):
         if entry and _is_fresh(entry):
             return _format_show(entry)
 
-    # Cache miss — fetch from TMDB
-    search = search_show(title, year)
+    # Cache miss — fetch from TMDB (fallback_no_year=True because folder
+    # years are unreliable and this path is only for poster/metadata caching)
+    search = search_show(title, year, fallback_no_year=True)
     if not search:
         return None
 
@@ -248,7 +267,7 @@ def get_movie_info(title, year=None):
         if entry and _is_fresh(entry):
             return _format_movie(entry)
 
-    search = search_movie(title, year)
+    search = search_movie(title, year, fallback_no_year=True)
     if not search:
         return None
 

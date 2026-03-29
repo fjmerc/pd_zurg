@@ -50,6 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Stale debrid symlink cleanup**: `verify_symlinks` now checks symlinks pointing to `BLACKHOLE_SYMLINK_TARGET_BASE` (e.g. `/mnt/debrid/`) in addition to the rclone mount path. Previously only checked the mount path, so symlinks created with a different target base were never cleaned up when torrents expired.
 - **Faster debrid library on startup**: When the rclone mount appears after the initial scan has already started, the scanner now automatically triggers a follow-up scan so debrid content appears within seconds instead of waiting for the next scheduled scan (up to 2 minutes).
 - **Title parsing for mid-string year**: Folder names like `Movie (2000) DC (1080p BluRay...)` now correctly extract the year before quality truncation, preventing mangled titles like `Movie (2000) DC (1080p` and duplicate library entries without posters.
+- **Symlink creation guard for empty local library**: Debrid symlink creation now skips when the local library scan found zero local content, preventing symlink pollution when network mounts (NFS/SMB) aren't propagated into the container.
 
 ## Version [2.13.0] - 2026-03-26
 

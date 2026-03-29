@@ -45,6 +45,15 @@ def _setup_env(monkeypatch, rclone_mount, symlink_base):
     monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', symlink_base)
 
 
+# Sentinel local item — the empty-library guard in _create_debrid_symlinks
+# skips creation when no local content exists (mount may not be ready).
+# Tests that exercise symlink creation need at least one local item.
+_LOCAL_MOVIE = {'title': 'Local Sentinel', 'year': 2020, 'source': 'local'}
+_LOCAL_SHOW = {'title': 'Local Sentinel', 'year': 2020, 'source': 'local',
+               'season_data': [{'number': 1, 'episode_count': 1,
+                                'episodes': [{'number': 1, 'file': 'x.mkv', 'source': 'local'}]}]}
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -76,7 +85,7 @@ class TestCreateDebridSymlinks:
         }]
         path_index = {('show', 1, 1): ep_path}
 
-        scanner._create_debrid_symlinks(shows, [], path_index)
+        scanner._create_debrid_symlinks(shows, [_LOCAL_MOVIE], path_index)
 
         expected = os.path.join(local_tv, 'Show (2025)', 'Season 01', 'Show.S01E01.1080p.mkv')
         assert os.path.islink(expected)
@@ -262,7 +271,7 @@ class TestCreateDebridSymlinks:
         }]
         path_index = {('adolescence', 1, 1): ep_path}
 
-        scanner._create_debrid_symlinks(shows, [], path_index)
+        scanner._create_debrid_symlinks(shows, [_LOCAL_MOVIE], path_index)
 
         expected = os.path.join(local_tv, 'Adolescence', 'Season 01', 'ep.mkv')
         assert os.path.islink(expected)
@@ -310,7 +319,7 @@ class TestCreateDebridSymlinks:
             ('show', 2, 1): ep3,
         }
 
-        scanner._create_debrid_symlinks(shows, [], path_index)
+        scanner._create_debrid_symlinks(shows, [_LOCAL_MOVIE], path_index)
 
         assert os.path.islink(os.path.join(local_tv, 'Show (2024)', 'Season 01', 'ep1.mkv'))
         assert os.path.islink(os.path.join(local_tv, 'Show (2024)', 'Season 01', 'ep2.mkv'))
@@ -433,7 +442,7 @@ class TestCreateDebridSymlinks:
         }]
         path_index = {('show', 3, 5): ep_path}
 
-        scanner._create_debrid_symlinks(shows, [], path_index)
+        scanner._create_debrid_symlinks(shows, [_LOCAL_MOVIE], path_index)
 
         expected = os.path.join(local_tv, 'Show (2025)', 'Season 03', 'ep.mkv')
         assert os.path.islink(expected)
@@ -462,7 +471,7 @@ class TestCreateDebridSymlinks:
         }]
         path_index = {('show', 1, 1): ep_path}
 
-        scanner._create_debrid_symlinks(shows, [], path_index)
+        scanner._create_debrid_symlinks(shows, [_LOCAL_MOVIE], path_index)
 
         symlink = os.path.join(local_tv, 'Show (2025)', 'Season 01', 'ep.mkv')
         target = os.readlink(symlink)
@@ -532,7 +541,7 @@ class TestCreateDebridSymlinksMovies:
             'path': movie_dir,
         }]
 
-        scanner._create_debrid_symlinks([], movies, {})
+        scanner._create_debrid_symlinks([_LOCAL_SHOW], movies, {})
 
         expected = os.path.join(local_movies, 'Inception (2010)', 'Inception.2010.1080p.mkv')
         assert os.path.islink(expected)
@@ -569,7 +578,7 @@ class TestCreateDebridSymlinksMovies:
             'path': movie_dir,
         }]
 
-        scanner._create_debrid_symlinks([], movies, {})
+        scanner._create_debrid_symlinks([_LOCAL_SHOW], movies, {})
 
         expected = os.path.join(local_movies, 'Movie (2025)', 'Movie.2025.1080p.mkv')
         assert os.path.islink(expected)
@@ -645,7 +654,7 @@ class TestCreateDebridSymlinksMovies:
             'path': movie_dir,
         }]
 
-        scanner._create_debrid_symlinks([], movies, {})
+        scanner._create_debrid_symlinks([_LOCAL_SHOW], movies, {})
 
         expected = os.path.join(local_movies, 'SomeMovie', 'movie.mkv')
         assert os.path.islink(expected)

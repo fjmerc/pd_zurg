@@ -1378,6 +1378,17 @@ class LibraryScanner:
         if not self._local_tv_path and not self._local_movies_path:
             return
 
+        # Guard: if the local scan found zero local/both items, the network
+        # mount is probably not ready.  Creating symlinks into an empty local
+        # library would pollute it with debrid-only content and mask the real
+        # local files once the mount recovers.
+        has_local_movies = any(m.get('source') in ('local', 'both') for m in movies)
+        has_local_shows = any(s.get('source') in ('local', 'both') for s in shows)
+        if not has_local_movies and not has_local_shows:
+            logger.info("[library] Skipping debrid symlink creation — local library appears empty "
+                        "(network mount may not be ready)")
+            return
+
         real_mount = os.path.realpath(rclone_mount)
         created = 0
         symlinked_shows = set()   # titles that got new symlinks

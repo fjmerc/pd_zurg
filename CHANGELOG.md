@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Episode dedup regex**: Updated to handle Sonarr-standard naming patterns (S01E01 format).
 - **Download routing e2e**: Fixed usenet client skipping, indexer downloadClientId override clearing, and stale unavailable queue item cleanup.
 - **Stale pending entries**: Auto-clear pending entries for titles removed from the library.
+- **TMDB year-filter search failure**: TMDB searches with a year filter now retry without the year when the filtered search returns no results. Fixes shows like "Marvel's Spidey and His Amazing Friends" where the folder year (season air date) doesn't match the show's premiere year, preventing TMDB caching and alias-based dedup.
 
 ## Version [2.13.0] - 2026-03-26
 

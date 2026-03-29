@@ -93,6 +93,108 @@ class TestSearch:
         _mock_api(monkeypatch, {'/search/movie': {'results': []}})
         assert tmdb.search_movie('Nonexistent') is None
 
+    def test_search_show_retries_without_year(self, monkeypatch):
+        """Year from folder name may be a season air year, not premiere year."""
+        calls = []
+        def _fake_get(path, params=None):
+            calls.append(params)
+            if params and params.get('first_air_date_year'):
+                return {'results': []}  # year filter too strict
+            return {'results': [{
+                'id': 127635, 'name': 'Spidey and His Amazing Friends',
+                'overview': '', 'poster_path': '/spidey.jpg',
+                'first_air_date': '2021-08-06',
+            }]}
+        monkeypatch.setattr(tmdb, '_api_get', _fake_get)
+        result = tmdb.search_show("Marvel's Spidey and His Amazing Friends", 2022,
+                                  fallback_no_year=True)
+        assert result['tmdb_id'] == 127635
+        assert len(calls) == 2  # first with year, then without
+
+    def test_search_movie_retries_without_year(self, monkeypatch):
+        calls = []
+        def _fake_get(path, params=None):
+            calls.append(params)
+            if params and params.get('year'):
+                return {'results': []}
+            return {'results': [{
+                'id': 47211, 'title': 'Faster, Faster',
+                'overview': '', 'poster_path': '/ff.jpg',
+                'release_date': '1981-01-01',
+            }]}
+        monkeypatch.setattr(tmdb, '_api_get', _fake_get)
+        result = tmdb.search_movie('Faster and Faster', 2020, fallback_no_year=True)
+        assert result['tmdb_id'] == 47211
+        assert len(calls) == 2
+
+    def test_search_show_no_fallback_by_default(self, monkeypatch):
+        """Without fallback_no_year, a wrong year returns None (safe for disambiguation)."""
+        calls = []
+        def _fake_get(path, params=None):
+            calls.append(params)
+            if params and params.get('first_air_date_year'):
+                return {'results': []}
+            return {'results': [{'id': 999, 'name': 'Wrong Show',
+                                 'overview': '', 'poster_path': '',
+                                 'first_air_date': ''}]}
+        monkeypatch.setattr(tmdb, '_api_get', _fake_get)
+        assert tmdb.search_show('Ambiguous Title', 2025) is None
+        assert len(calls) == 1  # no retry — fallback disabled
+
+    def test_search_movie_no_fallback_by_default(self, monkeypatch):
+        """Without fallback_no_year, a wrong year returns None."""
+        calls = []
+        def _fake_get(path, params=None):
+            calls.append(params)
+            if params and params.get('year'):
+                return {'results': []}
+            return {'results': [{'id': 999, 'title': 'Wrong Movie',
+                                 'overview': '', 'poster_path': '',
+                                 'release_date': ''}]}
+        monkeypatch.setattr(tmdb, '_api_get', _fake_get)
+        assert tmdb.search_movie('Ambiguous Title', 2025) is None
+        assert len(calls) == 1
+
+    def test_search_show_no_retry_when_year_matches(self, monkeypatch):
+        """No retry needed when the year-filtered search succeeds."""
+        calls = []
+        def _fake_get(path, params=None):
+            calls.append(params)
+            return {'results': [{
+                'id': 1396, 'name': 'Breaking Bad',
+                'overview': '', 'poster_path': '/bb.jpg',
+                'first_air_date': '2008-01-20',
+            }]}
+        monkeypatch.setattr(tmdb, '_api_get', _fake_get)
+        result = tmdb.search_show('Breaking Bad', 2008, fallback_no_year=True)
+        assert result['tmdb_id'] == 1396
+        assert len(calls) == 1  # no retry needed
+
+    def test_search_show_no_retry_without_year(self, monkeypatch):
+        """No retry when no year was provided in the first place."""
+        _mock_api(monkeypatch, {'/search/tv': {'results': []}})
+        assert tmdb.search_show('Nonexistent', fallback_no_year=True) is None
+
+    def test_search_movie_no_retry_when_year_matches(self, monkeypatch):
+        """No retry needed when the year-filtered movie search succeeds."""
+        calls = []
+        def _fake_get(path, params=None):
+            calls.append(params)
+            return {'results': [{
+                'id': 27205, 'title': 'Inception',
+                'overview': '', 'poster_path': '/i.jpg',
+                'release_date': '2010-07-16',
+            }]}
+        monkeypatch.setattr(tmdb, '_api_get', _fake_get)
+        result = tmdb.search_movie('Inception', 2010, fallback_no_year=True)
+        assert result['tmdb_id'] == 27205
+        assert len(calls) == 1
+
+    def test_search_movie_no_retry_without_year(self, monkeypatch):
+        """No retry when no year was provided for movie search."""
+        _mock_api(monkeypatch, {'/search/movie': {'results': []}})
+        assert tmdb.search_movie('Nonexistent', fallback_no_year=True) is None
+
 
 # ---------------------------------------------------------------------------
 # Metadata

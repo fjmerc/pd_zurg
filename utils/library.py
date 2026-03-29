@@ -11,6 +11,7 @@ import threading
 import unicodedata
 import time
 from datetime import datetime, timezone
+from urllib.parse import quote as urllib_quote
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -369,6 +370,35 @@ def _discover_mount():
     return None
 
 
+def _discover_zurg_url(mount_path):
+    """Map a discovered rclone mount path back to the corresponding Zurg URL.
+
+    Zurg stores its port in env vars ZURG_PORT_RealDebrid / ZURG_PORT_AllDebrid.
+    When both providers are configured, mount names get _RD / _AD suffixes.
+    """
+    mount_name = os.path.basename(mount_path) if mount_path else ''
+    rd_port = os.environ.get('ZURG_PORT_RealDebrid', '').strip()
+    ad_port = os.environ.get('ZURG_PORT_AllDebrid', '').strip()
+
+    if mount_name.endswith('_RD') and rd_port:
+        return f'http://localhost:{rd_port}'
+    if mount_name.endswith('_AD') and ad_port:
+        return f'http://localhost:{ad_port}'
+    # Single provider — use whichever port is set
+    if rd_port:
+        return f'http://localhost:{rd_port}'
+    if ad_port:
+        return f'http://localhost:{ad_port}'
+    return None
+
+
+def _get_zurg_auth():
+    """Get Zurg WebDAV auth credentials if configured."""
+    user = os.environ.get('ZURG_USER', '').strip()
+    password = os.environ.get('ZURG_PASS', '').strip()
+    return (user, password) if user and password else None
+
+
 def _enrich_with_tmdb_cache(movies, shows):
     """Attach cached TMDB poster/status data to library items for grid cards.
 
@@ -511,6 +541,7 @@ class LibraryScanner:
         self._ttl = 600
         self._lock = threading.Lock()
         self._scanning = False
+        self._effects_running = False
         self._path_index = {}
         self._local_path_index = {}
         self._path_lock = threading.Lock()
@@ -526,6 +557,10 @@ class LibraryScanner:
             logger.info(f"[library] Local movies: {self._local_movies_path}")
         if self._local_tv_path:
             logger.info(f"[library] Local TV: {self._local_tv_path}")
+
+    def is_scanning(self):
+        with self._lock:
+            return self._scanning
 
     def _get_pref(self, norm, preferences):
         """Look up a preference by normalized title, checking aliases if needed."""
@@ -617,7 +652,12 @@ class LibraryScanner:
 
         return result
 
-    def scan(self, force_enforce=False):
+    def _scan_read(self):
+        """Read-only scan: enumerate mount + local, merge, build indexes.
+
+        Returns the library data dict without running any side effects
+        (no preference enforcement, debrid searches, or symlink creation).
+        """
         start = time.monotonic()
         deadline = start + 30
 
@@ -632,7 +672,13 @@ class LibraryScanner:
         debrid_shows = []
 
         if self._mount_path:
-            debrid_movies, debrid_shows = self._scan_mount(self._mount_path, deadline)
+            # Try WebDAV PROPFIND directly to Zurg (bypasses FUSE/rclone)
+            try:
+                debrid_movies, debrid_shows = self._webdav_scan_mount(deadline)
+                logger.debug("[library] WebDAV scan succeeded")
+            except Exception as e:
+                logger.info(f"[library] WebDAV scan unavailable, using FUSE: {e}")
+                debrid_movies, debrid_shows = self._scan_mount(self._mount_path, deadline)
 
         # TMDB-based alias maps: when different sources (or different
         # torrents) use different names for the same title (e.g. "Star
@@ -789,11 +835,6 @@ class LibraryScanner:
         from utils.library_prefs import get_all_preferences
 
         preferences = get_all_preferences()
-        self._enforce_preferences(shows, movies, preferences, path_index, local_path_index,
-                                  force=force_enforce)
-        self._search_for_debrid_copies(shows, movies, preferences)
-        self._clear_resolved_pending(shows, movies)
-        self._create_debrid_symlinks(shows, movies, path_index)
         _enrich_with_tmdb_cache(movies, shows)
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -805,11 +846,40 @@ class LibraryScanner:
             'scan_duration_ms': elapsed_ms,
         }
 
+    def _scan_effects(self, data, force_enforce=False):
+        """Run side effects: preference enforcement, searches, symlinks.
+
+        These operations involve external API calls (Sonarr, Radarr, TMDB,
+        debrid providers) and can take 30-60 seconds.  Separated from the
+        read phase so refresh() can update the UI cache before running them.
+        """
+        # Defensive copies — data is shared with the cache that UI reads
+        shows = list(data['shows'])
+        movies = list(data['movies'])
+        preferences = data.get('preferences', {})
+        with self._path_lock:
+            path_index = dict(self._path_index)
+            local_path_index = dict(self._local_path_index)
+        self._enforce_preferences(shows, movies, preferences, path_index, local_path_index,
+                                  force=force_enforce)
+        self._search_for_debrid_copies(shows, movies, preferences)
+        self._clear_resolved_pending(shows, movies)
+        self._create_debrid_symlinks(shows, movies, path_index)
+
+    def scan(self, force_enforce=False):
+        data = self._scan_read()
+        self._scan_effects(data, force_enforce)
+        return data
+
     def get_data(self):
         with self._lock:
             now = time.monotonic()
             ttl = self._ttl if self._mount_path else 10
             if self._cache is not None and (now - self._cache_time) < ttl:
+                return self._cache
+            # Background scan already running — return stale cache instead
+            # of triggering a duplicate synchronous scan
+            if self._scanning and self._cache is not None:
                 return self._cache
 
         # Cache expired or empty — scan synchronously so caller always gets data
@@ -826,17 +896,18 @@ class LibraryScanner:
             self._scanning = True
 
         def _run():
+            data = None
             try:
-                data = self.scan()
+                # Read phase — update cache immediately so UI gets data fast
+                data = self._scan_read()
                 with self._lock:
                     self._cache = data
-                    # If mount not found, expire cache in ~10s so we retry quickly
                     if not self._mount_path:
                         self._cache_time = time.monotonic() - self._ttl + 10
                     else:
                         self._cache_time = time.monotonic()
                     logger.debug(
-                        f"[library] Scan complete: {len(data['movies'])} movies, "
+                        f"[library] Read scan complete: {len(data['movies'])} movies, "
                         f"{len(data['shows'])} shows in {data['scan_duration_ms']}ms"
                     )
             except Exception as e:
@@ -844,6 +915,21 @@ class LibraryScanner:
             finally:
                 with self._lock:
                     self._scanning = False
+
+            # Effects phase — runs after _scanning cleared so UI polling
+            # stops promptly.  _effects_running prevents overlapping effects.
+            if data is not None:
+                with self._lock:
+                    if self._effects_running:
+                        return
+                    self._effects_running = True
+                try:
+                    self._scan_effects(data)
+                except Exception as e:
+                    logger.error(f"[library] Scan effects error: {e}")
+                finally:
+                    with self._lock:
+                        self._effects_running = False
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
@@ -1649,6 +1735,217 @@ class LibraryScanner:
             })
 
         return movies, shows
+
+    def _webdav_scan_mount(self, deadline=None):
+        """Scan the debrid mount via WebDAV PROPFIND directly to Zurg.
+
+        Bypasses FUSE/rclone to avoid hundreds of kernel round-trips.
+        Returns (movies, shows) in the same format as _scan_mount().
+
+        Raises Exception on any failure so the caller can fall back to FUSE.
+        """
+        from utils.webdav import propfind
+
+        zurg_url = _discover_zurg_url(self._mount_path)
+        if not zurg_url:
+            raise RuntimeError("Cannot discover Zurg URL for WebDAV scan")
+
+        auth = _get_zurg_auth()
+        base_dav = f"{zurg_url}/dav/"
+        remaining = max(5, int(deadline - time.monotonic())) if deadline else 30
+
+        # Step 1: List categories (mirrors _scan_mount's category selection)
+        entries = propfind(base_dav, depth=1, auth=auth, timeout=min(remaining, 10))
+        # The root directory itself appears in the PROPFIND response — skip it
+        root_href = '/dav/'
+        all_cats = []
+        for e in entries:
+            if e['is_collection'] and e['name'] and e['href'].rstrip('/') + '/' != root_href:
+                all_cats.append(e['name'])
+
+        non_special = [c for c in all_cats if c not in self._SKIP_CATEGORIES]
+        scan_cats = non_special if non_special else [c for c in all_cats if c == '__all__']
+        if not scan_cats:
+            logger.warning("[library] WebDAV: no scannable categories found")
+            return [], []
+
+        logger.debug(f"[library] WebDAV scanning categories: {scan_cats}")
+
+        # Step 2: PROPFIND each category with depth infinity
+        show_groups = {}
+        movie_groups = {}
+
+        for category in scan_cats:
+            if deadline and time.monotonic() > deadline:
+                logger.warning("[library] WebDAV: deadline reached, skipping remaining categories")
+                break
+
+            cat_url = f"{zurg_url}/dav/{urllib_quote(category, safe='')}/"
+            remaining = max(5, int(deadline - time.monotonic())) if deadline else 30
+            cat_is_shows = category.lower() in self._SHOW_CATEGORIES
+
+            try:
+                cat_entries = propfind(cat_url, depth='infinity', auth=auth,
+                                       timeout=min(remaining, 25))
+            except Exception as e:
+                logger.warning(f"[library] WebDAV PROPFIND failed for {category}, skipping: {e}")
+                continue
+
+            # Group entries by torrent folder.
+            # Hrefs are already URL-decoded by webdav.propfind().
+            # Relative path structure:  folder_name / [season_dir /] file
+            cat_prefix = f"/dav/{category}/"
+            folders = {}
+
+            for entry in cat_entries:
+                href = entry['href']
+                if not href.startswith(cat_prefix):
+                    continue
+                rel = href[len(cat_prefix):].rstrip('/')
+                if not rel:
+                    continue  # category dir itself
+
+                parts = rel.split('/')
+                folder_name = parts[0]
+                if folder_name.lower() in _SKIP_FOLDERS:
+                    continue
+
+                if folder_name not in folders:
+                    folders[folder_name] = {'files': [], 'season_files': {}}
+
+                if entry['is_collection']:
+                    continue  # skip directory entries, we only need files
+
+                mount_path = self._mount_path_for(category, rel)
+                if len(parts) == 2:
+                    # File directly in torrent folder: folder/file.mkv
+                    folders[folder_name]['files'].append(
+                        (parts[1], entry['size'], mount_path)
+                    )
+                elif len(parts) == 3:
+                    # File in subfolder: folder/Season 1/S01E01.mkv
+                    folders[folder_name]['season_files'].setdefault(parts[1], []).append(
+                        (parts[2], entry['size'], mount_path)
+                    )
+
+            # Step 3: Process folders into show_groups / movie_groups
+            for folder_name, contents in folders.items():
+                title, year = _parse_folder_name(folder_name)
+                if not title:
+                    continue
+
+                episodes = self._collect_episodes_from_webdav(contents)
+                is_show = len(episodes) > 0 or cat_is_shows
+
+                if is_show:
+                    season_counts = {}
+                    for ep_key in episodes:
+                        season_counts[ep_key[0]] = season_counts.get(ep_key[0], 0) + 1
+                    for ep_key in episodes:
+                        episodes[ep_key]['_folder_ep_count'] = season_counts[ep_key[0]]
+
+                    key = _normalize_title(title)
+                    if key not in show_groups:
+                        show_groups[key] = {
+                            'title': title,
+                            'year': year,
+                            'episodes': dict(episodes),
+                            'path': os.path.join(self._mount_path, category, folder_name),
+                        }
+                    else:
+                        existing = show_groups[key]['episodes']
+                        for ep_key, ep_info in episodes.items():
+                            if ep_key not in existing:
+                                existing[ep_key] = ep_info
+                            elif ep_info.get('_folder_ep_count', 1) > existing[ep_key].get('_folder_ep_count', 1):
+                                existing[ep_key] = ep_info
+                        if year and not show_groups[key]['year']:
+                            show_groups[key]['year'] = year
+                            show_groups[key]['title'] = title
+                        elif title[0:1].isupper() and not show_groups[key]['title'][0:1].isupper():
+                            show_groups[key]['title'] = title
+                else:
+                    key = _normalize_title(title)
+                    if key not in movie_groups:
+                        movie_groups[key] = {
+                            'title': title,
+                            'year': year,
+                            'path': os.path.join(self._mount_path, category, folder_name),
+                        }
+                    elif year and not movie_groups[key]['year']:
+                        movie_groups[key]['year'] = year
+                        movie_groups[key]['title'] = title
+
+        # Convert to output format (same as _scan_mount)
+        movies = []
+        for g in movie_groups.values():
+            movies.append({
+                'title': g['title'],
+                'year': g['year'],
+                'source': 'debrid',
+                'type': 'movie',
+                'seasons': 0,
+                'episodes': 0,
+                'path': g['path'],
+            })
+
+        shows = []
+        for g in show_groups.values():
+            eps = g['episodes']
+            unique_seasons = {s for s, _e in eps} if eps else set()
+            shows.append({
+                'title': g['title'],
+                'year': g['year'],
+                'source': 'debrid',
+                'type': 'show',
+                'seasons': len(unique_seasons),
+                'episodes': len(eps),
+                '_episodes': eps,
+                'path': g['path'],
+            })
+
+        return movies, shows
+
+    def _mount_path_for(self, category, rel_path):
+        """Translate a WebDAV relative path to a FUSE mount path."""
+        return os.path.join(self._mount_path, category, rel_path)
+
+    @staticmethod
+    def _collect_episodes_from_webdav(contents):
+        """Extract episodes from WebDAV folder contents.
+
+        Mirrors _collect_episodes() logic but works on pre-parsed WebDAV data
+        instead of os.scandir.
+        """
+        episodes = {}
+
+        # Check season subdirectories
+        for season_dir, files in contents.get('season_files', {}).items():
+            season_match = _SEASON_DIR_PATTERN.match(season_dir)
+            if not season_match:
+                continue
+            season_num = int(season_match.group(1))
+            for fname, _size, fpath in files:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in MEDIA_EXTENSIONS:
+                    continue
+                ep_match = _EPISODE_ID_PATTERN.search(fname)
+                if ep_match:
+                    key = (int(ep_match.group(1)), int(ep_match.group(2)))
+                else:
+                    key = (season_num, len(episodes) + 1000)
+                episodes[key] = {'file': fname, 'path': fpath}
+
+        # Check flat files in folder root
+        for fname, _size, fpath in contents.get('files', []):
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in MEDIA_EXTENSIONS:
+                ep_match = _EPISODE_ID_PATTERN.search(fname)
+                if ep_match:
+                    key = (int(ep_match.group(1)), int(ep_match.group(2)))
+                    episodes[key] = {'file': fname, 'path': fpath}
+
+        return episodes
 
     def _scan_local_movies(self):
         items = []

@@ -362,6 +362,7 @@ let _lastTransferType = '';
 let _transferClearTimer = null;
 let _pollTimer = null;
 let _pollActive = false;
+let _refreshPollTimer = null;
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -852,6 +853,39 @@ function updateBadges(filteredCount) {
 // ---------------------------------------------------------------------------
 // Data fetching
 // ---------------------------------------------------------------------------
+function _applyLibraryData(data, opts) {
+  opts = opts || {};
+  _allMovies      = Array.isArray(data.movies) ? data.movies : [];
+  _allShows       = Array.isArray(data.shows)  ? data.shows  : [];
+  _preferences    = data.preferences || {};
+  _pending        = data.pending || {};
+  _downloadServices = data.download_services || {show: null, movie: null};
+  _lastScan       = data.last_scan || null;
+  _scanDurationMs = data.scan_duration_ms || null;
+
+  if (!opts.quiet) {
+    applyFilters();
+    updateScanInfo();
+  }
+  _checkSmartPoll();
+
+  if (_inDetailView && _detailItem) {
+    var items = _detailItem.type === 'movie' ? _allMovies : _allShows;
+    var nk = normTitle(_detailItem.title);
+    for (var i = 0; i < items.length; i++) {
+      if (normTitle(items[i].title) === nk) {
+        _detailItem = items[i];
+        _renderDetail();
+        break;
+      }
+    }
+  }
+
+  if (!opts.quiet && _scanDurationMs != null) {
+    document.getElementById('footer').textContent = 'Scan completed in ' + _scanDurationMs + ' ms';
+  }
+}
+
 function fetchLibrary() {
   fetch('/api/library')
     .then(function(r) {
@@ -859,22 +893,7 @@ function fetchLibrary() {
       return r.json();
     })
     .then(function(data) {
-      _allMovies      = Array.isArray(data.movies) ? data.movies : [];
-      _allShows       = Array.isArray(data.shows)  ? data.shows  : [];
-      _preferences    = data.preferences || {};
-      _pending        = data.pending || {};
-      _downloadServices = data.download_services || {show: null, movie: null};
-      _lastScan       = data.last_scan || null;
-      _scanDurationMs = data.scan_duration_ms || null;
-
-      applyFilters();
-      updateScanInfo();
-      _checkSmartPoll();
-
-      if (_scanDurationMs != null) {
-        const footerEl = document.getElementById('footer');
-        footerEl.textContent = 'Scan completed in ' + _scanDurationMs + ' ms';
-      }
+      _applyLibraryData(data);
     })
     .catch(function(err) {
       document.getElementById('content-area').innerHTML =
@@ -884,21 +903,69 @@ function fetchLibrary() {
     });
 }
 
+function _finishRefresh() {
+  if (_refreshPollTimer) {
+    clearTimeout(_refreshPollTimer);
+    _refreshPollTimer = null;
+  }
+  _scanning = false;
+  document.getElementById('btn-refresh').disabled = false;
+  updateScanInfo();
+}
+
 function triggerRefresh() {
   if (_scanning) return;
   _scanning = true;
   document.getElementById('btn-refresh').disabled = true;
   updateScanInfo();
 
+  var attempts = 0;
+  var maxAttempts = 45; // ~90s
+  var sawScanningTrue = false;
+
+  function _pollRefresh() {
+    attempts++;
+    if (attempts > maxAttempts) {
+      // Timeout — fetch whatever data is available and warn
+      fetch('/api/library')
+        .then(function(r) { return r.ok ? r.json() : null; })
+        .then(function(data) { if (data) _applyLibraryData(data); })
+        .catch(function() {})
+        .finally(function() {
+          _finishRefresh();
+          _showMsg('Refresh timed out — data may be incomplete', 'error');
+        });
+      return;
+    }
+    fetch('/api/library')
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(data) {
+        if (!data) { _refreshPollTimer = setTimeout(_pollRefresh, 2000); return; }
+        if (data.scanning) sawScanningTrue = true;
+        if (!data.scanning && sawScanningTrue) {
+          _applyLibraryData(data);
+          _finishRefresh();
+        } else {
+          _refreshPollTimer = setTimeout(_pollRefresh, 2000);
+        }
+      })
+      .catch(function() { _refreshPollTimer = setTimeout(_pollRefresh, 2000); });
+  }
+
+  // Wait for POST acknowledgement before polling
   fetch('/api/library/refresh', {method: 'POST'})
-    .catch(function() {})
-    .finally(function() {
-      setTimeout(function() {
-        fetchLibrary();
-        _scanning = false;
-        document.getElementById('btn-refresh').disabled = false;
-        updateScanInfo();
-      }, 3000);
+    .then(function(r) {
+      if (!r.ok) {
+        _finishRefresh();
+        _showMsg('Refresh failed (HTTP ' + r.status + ')', 'error');
+        return;
+      }
+      sawScanningTrue = true; // POST succeeded — scan was started
+      _refreshPollTimer = setTimeout(_pollRefresh, 1000);
+    })
+    .catch(function() {
+      _finishRefresh();
+      _showMsg('Refresh failed — could not reach server', 'error');
     });
 }
 
@@ -2104,35 +2171,14 @@ function _runSequential(tasks) {
 }
 
 function _refreshDetailData() {
-  // Refresh library data and stay in detail view if still open
+  // Refresh library data quietly — skip grid re-render to avoid poster
+  // flicker.  Detail view is updated if open.  Grid picks up changes on
+  // next user interaction (filter change, tab switch, manual refresh).
   return fetch('/api/library')
     .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(data) {
       if (!data) return;
-      _allMovies = Array.isArray(data.movies) ? data.movies : [];
-      _allShows  = Array.isArray(data.shows)  ? data.shows  : [];
-      _preferences = data.preferences || {};
-      _pending = data.pending || {};
-      _downloadServices = data.download_services || {show: null, movie: null};
-      _lastScan = data.last_scan || null;
-      if (_inDetailView && _detailItem) {
-        // Find updated show/movie by title
-        var items = _detailItem.type === 'movie' ? _allMovies : _allShows;
-        var nk = normTitle(_detailItem.title);
-        for (var i = 0; i < items.length; i++) {
-          if (normTitle(items[i].title) === nk) {
-            _detailItem = items[i];
-            _renderDetail();
-            _checkSmartPoll();
-            return;
-          }
-        }
-      }
-      // In grid view: data is updated but skip full re-render to avoid
-      // flicker from destroying/recreating all poster images.  The grid
-      // will pick up the latest data on next user interaction (filter
-      // change, tab switch, manual refresh, or clicking into a card).
-      _checkSmartPoll();
+      _applyLibraryData(data, {quiet: true});
     })
     .catch(function() {});
 }

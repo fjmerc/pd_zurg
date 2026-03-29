@@ -1264,7 +1264,8 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             else:
                 from utils.arr_client import get_configured_services
                 from utils.library_prefs import get_all_pending, get_all_preferences
-                result = scanner.get_data()
+                result = dict(scanner.get_data())
+                result['scanning'] = scanner.is_scanning()
                 result['download_services'] = get_configured_services()
                 result['pending'] = get_all_pending()
                 result['preferences'] = get_all_preferences()

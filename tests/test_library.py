@@ -521,6 +521,7 @@ class TestLibraryScannerScanDebrid:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._effects_running = False
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
@@ -590,6 +591,7 @@ class TestLibraryScannerScanDebrid:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._effects_running = False
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
@@ -774,6 +776,7 @@ class TestLibraryScannerScanLocal:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._effects_running = False
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
@@ -838,6 +841,7 @@ class TestLibraryScannerScanCrossRef:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._effects_running = False
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
@@ -866,6 +870,7 @@ class TestLibraryScannerScanCrossRef:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._effects_running = False
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
@@ -890,6 +895,7 @@ class TestLibraryScannerScanCrossRef:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._effects_running = False
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
@@ -917,6 +923,7 @@ class TestLibraryScannerScanCrossRef:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._effects_running = False
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
@@ -1093,6 +1100,7 @@ class TestSeasonDataInScanResults:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._effects_running = False
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
@@ -1192,6 +1200,7 @@ class TestEpisodeLevelCrossRef:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._effects_running = False
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
@@ -1403,6 +1412,7 @@ class TestLibraryScannerGetData:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._effects_running = False
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
@@ -1480,6 +1490,7 @@ class TestLibraryScannerRefresh:
         scanner._ttl = 600
         scanner._lock = threading.Lock()
         scanner._scanning = False
+        scanner._effects_running = False
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
@@ -1493,7 +1504,7 @@ class TestLibraryScannerRefresh:
             started.set()
             return {"movies": [], "shows": [], "last_scan": "x", "scan_duration_ms": 0}
 
-        mocker.patch.object(scanner, "scan", side_effect=_fake_scan)
+        mocker.patch.object(scanner, "_scan_read", side_effect=_fake_scan)
         scanner.refresh()
         assert started.wait(timeout=2), "Background scan thread did not start within 2s"
 
@@ -1506,7 +1517,7 @@ class TestLibraryScannerRefresh:
             done.set()
             return payload
 
-        mocker.patch.object(scanner, "scan", side_effect=_fake_scan)
+        mocker.patch.object(scanner, "_scan_read", side_effect=_fake_scan)
         scanner.refresh()
         done.wait(timeout=2)
         time.sleep(0.05)  # give thread time to write cache
@@ -1522,7 +1533,7 @@ class TestLibraryScannerRefresh:
             barrier.wait(timeout=3)
             return {"movies": [], "shows": [], "last_scan": "x", "scan_duration_ms": 0}
 
-        mocker.patch.object(scanner, "scan", side_effect=_slow_scan)
+        mocker.patch.object(scanner, "_scan_read", side_effect=_slow_scan)
         scanner.refresh()
         time.sleep(0.05)  # first thread is running
         scanner.refresh()  # second call must be a no-op
@@ -1540,7 +1551,7 @@ class TestLibraryScannerRefresh:
             done.set()
             return {"movies": [], "shows": [], "last_scan": "x", "scan_duration_ms": 0}
 
-        mocker.patch.object(scanner, "scan", side_effect=_fake_scan)
+        mocker.patch.object(scanner, "_scan_read", side_effect=_fake_scan)
         scanner.refresh()
         done.wait(timeout=2)
         time.sleep(0.05)
@@ -1557,7 +1568,7 @@ class TestLibraryScannerRefresh:
             done.set()
             return {"movies": [], "shows": [], "last_scan": "x", "scan_duration_ms": 0}
 
-        mocker.patch.object(scanner, "scan", side_effect=_fake_scan)
+        mocker.patch.object(scanner, "_scan_read", side_effect=_fake_scan)
         scanner.refresh()
         done.wait(timeout=2)
         time.sleep(0.05)
@@ -1572,7 +1583,7 @@ class TestLibraryScannerRefresh:
         def _error_scan():
             raise RuntimeError("simulated scan failure")
 
-        mocker.patch.object(scanner, "scan", side_effect=_error_scan)
+        mocker.patch.object(scanner, "_scan_read", side_effect=_error_scan)
         scanner.refresh()
         # Allow thread to finish
         deadline = time.monotonic() + 2

@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## Version [2.14.0] - 2026-03-29
+
+### Added
+
+- **Download client routing**: Automatically routes downloads through debrid or local download clients in Sonarr/Radarr based on source preference. Auto-tags untagged download clients, tags usenet indexers with local tag, and manages dual-tag exclusivity to prevent debrid interception of local downloads.
+- **Sonarr-style poster cards**: Library browser now shows poster images with progress bars, replacing the plain list view. Includes TMDB metadata enrichment for poster artwork.
+- **TMDB dedup and alias merge**: Debrid entries sharing a TMDB ID but with different parsed titles (e.g. "Andor" vs "Star Wars Andor") are deduplicated. Cross-source merge now uses TMDB IDs to match debrid and local items even when titles differ. TMDB disambiguation used when adding shows/movies to Sonarr/Radarr.
+- **Alphabetical jump bar**: Library browser includes an A-Z jump bar that scales dynamically with viewport height for quick navigation through large libraries.
+- **Centralized task scheduler**: Background task scheduler with WebUI for periodic maintenance tasks (library scan, symlink verification, duplicate cleanup) with configurable intervals.
+- **Prefer-debrid active search**: Titles with prefer-debrid preference now actively search Sonarr/Radarr for debrid copies of local-only episodes, with search budgets and cooldown to avoid API spam.
+- **Auto-retry alternative releases**: Blackhole automatically retries with alternative releases when a debrid provider rejects a torrent, and detects stale grabs that never completed.
+- **Episode-aware blackhole dedup**: Deduplication now checks at the episode level instead of season level, preventing false positives when only some episodes exist locally.
+- **Fuzzy title matching**: Debrid symlink creation uses fuzzy/normalized title matching for arr folder names, handling punctuation differences like "(500) Days of Summer" vs "500 Days of Summer".
+- **Library UI overhaul**: 13 improvements inspired by Overseerr, Sonarr, and Maintainerr — including preference help text formatting, pending badge state distinction (migrating vs searching), and missing env vars added to Settings UI.
+- **Direct WebDAV scanning**: Library scanner now queries Zurg's WebDAV API directly via PROPFIND, bypassing the FUSE/rclone mount for directory enumeration. Reduces mount scan time from 10-20 seconds to under 1 second. Falls back to FUSE scanning automatically if Zurg is unreachable.
+- **Smart refresh polling**: Library refresh button now polls the backend until the scan completes, replacing the fixed 3-second delay. Shows a scanning indicator and updates the UI automatically when data is ready. Includes error feedback for timeouts and server failures.
+
+### Changed
+
+- **Split scan architecture**: Library scan is now split into a fast read-only phase (mount enumeration, cross-referencing, TMDB enrichment) and a background effects phase (preference enforcement, arr searches, symlink creation). The UI receives fresh library data after the read phase completes (~1-5s) while effects continue running in the background (~30-60s).
+- **Season pack preference**: Scanner now prefers season pack files over individual episode downloads, using per-season episode count to avoid lower-quality mega-packs beating higher-quality season packs.
+- **Fresh preferences**: `/api/library` response always returns preferences fresh from disk instead of using stale scan-time values.
+- **Concurrent scan protection**: Added `_effects_running` guard to prevent overlapping preference enforcement and arr API calls from concurrent refresh requests.
+- **Cache safety**: API responses now use a shallow copy of cached scan data to prevent mutation of the shared cache object across concurrent requests.
+- **Stale cache during scan**: `get_data()` returns stale cached data when a background scan is running instead of triggering a duplicate synchronous scan.
+- **Grid re-render optimization**: Smart poll skips full grid re-render to prevent poster image flicker during background data updates.
+
+### Fixed
+
+- **Indexer routing**: Debrid tag now applied to torrent indexers, and re-search triggered for missing content after routing changes.
+- **Library scanner rescans**: Fixed rescan triggers and improved symlink target path validation to reject paths outside the mount.
+- **False 'both' source**: Debrid symlinks in local library scan no longer cause false 'both' source classification. Expanded `verify_symlinks` to check local library directories.
+- **Title parsing**: Filter non-media folders (plex versions, subs, featurettes), fix empty parentheses in titles, and prevent MAX title corruption from quality pattern over-matching.
+- **RD torrent monitoring**: Fixed monitor polling deleted RD torrents and accept `selectFiles` 202 status responses.
+- **Alt-retry race condition**: Hardened failure paths in automatic alternative release retry logic.
+- **Episode dedup regex**: Updated to handle Sonarr-standard naming patterns (S01E01 format).
+- **Download routing e2e**: Fixed usenet client skipping, indexer downloadClientId override clearing, and stale unavailable queue item cleanup.
+- **Stale pending entries**: Auto-clear pending entries for titles removed from the library.
+
 ## Version [2.13.0] - 2026-03-26
 
 ### Added

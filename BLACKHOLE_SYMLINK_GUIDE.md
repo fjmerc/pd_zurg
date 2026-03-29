@@ -182,14 +182,14 @@ Add these to your `.env` file or set them directly in `docker-compose.yml`:
 
 #### Understanding BLACKHOLE_SYMLINK_TARGET_BASE
 
-This is the most important setting. Symlinks are created inside the pd_zurg container, but they must resolve on the Sonarr/Radarr host where the content is accessed.
+This is the most important setting. Symlinks are created inside the pd_zurg container, but they must resolve on **every host that reads them** — Plex, Sonarr, Radarr, and any other service that accesses your media library.
 
 **Inside pd_zurg**, a file might be at:
 ```
 /data/pd_zurg/shows/Release.Name/episode.mkv
 ```
 
-**On the Sonarr/Radarr host**, the same file is accessible at:
+**On the host**, the same file is accessible at:
 ```
 /mnt/debrid/shows/Release.Name/episode.mkv
 ```
@@ -201,7 +201,11 @@ So you set `BLACKHOLE_SYMLINK_TARGET_BASE=/mnt/debrid` — this replaces the con
 BLACKHOLE_SYMLINK_TARGET_BASE=/mnt/debrid
 ```
 
-**Multi-host example:** Same concept — use the path as it appears on the Sonarr/Radarr host:
+**Multi-host example:** If Plex and Sonarr/Radarr run on different hosts with different mount paths, the `BLACKHOLE_SYMLINK_TARGET_BASE` path must resolve on **all** of them. If the rclone mount has different paths on each host, create a symlink on hosts where the path doesn't match:
+```bash
+# On a host where the mount is at /mnt/remote/realdebrid/pd_zurg but symlinks use /mnt/debrid:
+sudo ln -s /mnt/remote/realdebrid/pd_zurg /mnt/debrid
+```
 ```
 BLACKHOLE_SYMLINK_TARGET_BASE=/mnt/debrid
 ```
@@ -405,9 +409,10 @@ The torrent isn't finishing on the debrid side. Possible causes:
 readlink /opt/completed/Release.Name/episode.mkv
 ```
 
-The target should point to a path that exists on the Sonarr/Radarr host. Common issues:
-- `BLACKHOLE_SYMLINK_TARGET_BASE` doesn't match the actual mount path on the Sonarr/Radarr host
-- The rclone/WebDAV mount is down on the Sonarr/Radarr host
+The target should point to a path that exists on **every host that reads symlinks** (Plex, Sonarr, Radarr). Common issues:
+- `BLACKHOLE_SYMLINK_TARGET_BASE` doesn't match the actual mount path on the host — verify with `ls /mnt/debrid/` (or whatever your base is)
+- Multi-host setup: the path resolves on one host but not another. Create a symlink on the missing host: `sudo ln -s /actual/mount/path /mnt/debrid`
+- The rclone/WebDAV mount is down
 - The debrid content was removed (expired, manually deleted)
 
 ### Sonarr says "Watch Folder is not writable"

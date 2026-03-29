@@ -141,7 +141,7 @@ PD_ENABLED=false                # Not needed — Sonarr/Radarr handle discovery
 BLACKHOLE_ENABLED=true
 BLACKHOLE_SYMLINK_ENABLED=true
 BLACKHOLE_RCLONE_MOUNT=/data/pd_zurg
-BLACKHOLE_SYMLINK_TARGET_BASE=/mnt/debrid   # Path as seen by Sonarr/Radarr
+BLACKHOLE_SYMLINK_TARGET_BASE=/mnt/debrid   # Path as seen by Plex/Sonarr/Radarr host(s)
 
 # Optional: skip content you already have
 BLACKHOLE_DEDUP_ENABLED=true
@@ -346,7 +346,7 @@ All settings are documented in [`.env.example`](.env.example) with inline commen
 | `BLACKHOLE_SYMLINK_ENABLED` | Enable symlink creation after download. See [Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md) | `false` |
 | `BLACKHOLE_COMPLETED_DIR` | Directory for completed symlinks | `/completed` |
 | `BLACKHOLE_RCLONE_MOUNT` | rclone mount path inside container. Append mount name if set (e.g., `/data/pd_zurg`) | `/data` |
-| `BLACKHOLE_SYMLINK_TARGET_BASE` | Mount path as seen by Sonarr/Radarr host. **Required** for symlink mode | |
+| `BLACKHOLE_SYMLINK_TARGET_BASE` | Mount path as seen by Plex/Sonarr/Radarr host(s). Must resolve on every host that reads symlinks. **Required** for symlink mode | |
 | `BLACKHOLE_MOUNT_POLL_TIMEOUT` | Max seconds to wait for content on mount | `300` |
 | `BLACKHOLE_MOUNT_POLL_INTERVAL` | Seconds between mount checks | `10` |
 | `BLACKHOLE_SYMLINK_MAX_AGE` | Hours before old symlinks are cleaned up | `72` |
@@ -457,8 +457,9 @@ Remove the corresponding environment variables when using secrets.
 - Try `PLEX_REFRESH=true` with `PLEX_MOUNT_DIR` set to the mount path as Plex sees it
 
 **Blackhole: symlinks created but broken**
-- `BLACKHOLE_SYMLINK_TARGET_BASE` must match the mount path on the Sonarr/Radarr host, not inside the pd_zurg container
-- Verify the rclone/WebDAV mount is accessible from where Sonarr/Radarr run
+- `BLACKHOLE_SYMLINK_TARGET_BASE` must match the mount path on every host that reads symlinks (Plex, Sonarr, Radarr), not inside the pd_zurg container
+- If services run on different hosts with different mount paths, create a symlink (e.g., `ln -s /actual/mount/path /mnt/debrid`) so the path resolves everywhere
+- Verify the rclone/WebDAV mount is accessible from where Plex/Sonarr/Radarr run
 - See the [Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md#troubleshooting) for detailed diagnostics
 
 **Stuck ffprobe processes**

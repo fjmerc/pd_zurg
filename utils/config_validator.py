@@ -171,6 +171,7 @@ def validate_config():
                 "Set RD_API_KEY, AD_API_KEY, or TORBOX_API_KEY."
             )
 
+    symlink_target_base = os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', '').strip()
     symlink_enabled = os.environ.get('BLACKHOLE_SYMLINK_ENABLED', 'false').lower() == 'true'
     if symlink_enabled:
         if not blackhole_enabled:
@@ -178,10 +179,25 @@ def validate_config():
                 "BLACKHOLE_SYMLINK_ENABLED=true but BLACKHOLE_ENABLED is not true. "
                 "Symlinks require the blackhole watcher to be enabled."
             )
-        if not os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', ''):
+        if not symlink_target_base:
             result.error(
                 "BLACKHOLE_SYMLINK_ENABLED=true but BLACKHOLE_SYMLINK_TARGET_BASE is not set. "
-                "This must be the mount path as seen on the Sonarr/Radarr host (e.g., /mnt/debrid)."
+                "This must be the mount path as seen on Plex/Sonarr/Radarr host(s) (e.g., /mnt/debrid)."
+            )
+    rclone_mount = os.environ.get('BLACKHOLE_RCLONE_MOUNT', '').strip()
+    if symlink_target_base and os.path.isdir(symlink_target_base):
+        if rclone_mount and symlink_target_base.rstrip('/') == rclone_mount.rstrip('/'):
+            result.error(
+                f"BLACKHOLE_SYMLINK_TARGET_BASE='{symlink_target_base}' is the same as "
+                f"BLACKHOLE_RCLONE_MOUNT. This should be the path as seen on "
+                f"Plex/Sonarr/Radarr host(s), not the container-internal mount path."
+            )
+        else:
+            result.warn(
+                f"BLACKHOLE_SYMLINK_TARGET_BASE='{symlink_target_base}' resolves inside "
+                f"this container. This should be the path as seen on Plex/Sonarr/Radarr "
+                f"host(s), not the container-internal path. "
+                f"Verify this is correct for your setup."
             )
 
     # --- Auth Format ---

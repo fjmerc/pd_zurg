@@ -1259,8 +1259,10 @@ class LibraryScanner:
         sonarr_map_norm = {}  # normalized title -> info
         radarr_map = {}
         radarr_map_norm = {}
+        from utils.arr_client import get_download_service
+        sonarr_fetch_failed = False
+        radarr_fetch_failed = False
         try:
-            from utils.arr_client import get_download_service
             client, svc = get_download_service('show')
             if client and svc == 'sonarr':
                 for s in (client.get_all_series() or []):
@@ -1277,6 +1279,10 @@ class LibraryScanner:
                     nk = _norm_for_matching(t)
                     if nk and nk not in sonarr_map_norm:
                         sonarr_map_norm[nk] = info
+        except Exception as e:
+            sonarr_fetch_failed = True
+            logger.warning(f"[library] Could not fetch Sonarr library: {e}")
+        try:
             client, svc = get_download_service('movie')
             if client and svc == 'radarr':
                 for m in (client.get_all_movies() or []):
@@ -1294,7 +1300,8 @@ class LibraryScanner:
                     if nk and nk not in radarr_map_norm:
                         radarr_map_norm[nk] = info
         except Exception as e:
-            logger.warning(f"[library] Could not fetch arr libraries for folder naming: {e}")
+            radarr_fetch_failed = True
+            logger.warning(f"[library] Could not fetch Radarr library: {e}")
 
         # --- Movies ---
         if self._local_movies_path:
@@ -1367,88 +1374,122 @@ class LibraryScanner:
                     )
 
         # --- TV Shows ---
-        if not self._local_tv_path:
-            if created:
-                logger.info(f"[library] Created {created} debrid symlink(s) in local library")
-            return
+        if self._local_tv_path:
+            real_tv_root = os.path.realpath(self._local_tv_path)
 
-        real_tv_root = os.path.realpath(self._local_tv_path)
+            for show in shows:
+                norm = _normalize_title(show['title'])
+                title = show['title']
+                year = show.get('year')
+                arr_info = sonarr_map.get(title.lower()) or sonarr_map_norm.get(_norm_for_matching(title))
+                if arr_info and arr_info['folder']:
+                    show_dir = arr_info['folder']
+                else:
+                    show_dir = f"{title} ({year})" if year else title
 
-        for show in shows:
-            norm = _normalize_title(show['title'])
-            title = show['title']
-            year = show.get('year')
-            arr_info = sonarr_map.get(title.lower()) or sonarr_map_norm.get(_norm_for_matching(title))
-            if arr_info and arr_info['folder']:
-                show_dir = arr_info['folder']
-            else:
-                show_dir = f"{title} ({year})" if year else title
+                for sd in show.get('season_data', []):
+                    snum = sd['number']
+                    season_dir = f"Season {snum:02d}"
+                    for ep in sd.get('episodes', []):
+                        if ep.get('source') != 'debrid':
+                            continue
+                        enum = ep['number']
+                        debrid_path = path_index.get((norm, snum, enum))
+                        if not debrid_path:
+                            continue
 
-            for sd in show.get('season_data', []):
-                snum = sd['number']
-                season_dir = f"Season {snum:02d}"
-                for ep in sd.get('episodes', []):
-                    if ep.get('source') != 'debrid':
-                        continue
-                    enum = ep['number']
-                    debrid_path = path_index.get((norm, snum, enum))
-                    if not debrid_path:
-                        continue
-
-                    filename = os.path.basename(debrid_path)
-                    local_path = os.path.join(
-                        self._local_tv_path, show_dir, season_dir, filename
-                    )
-
-                    # Validate output stays within local library root
-                    real_local_dir = os.path.realpath(
-                        os.path.join(self._local_tv_path, show_dir, season_dir)
-                    )
-                    if not real_local_dir.startswith(real_tv_root + os.sep) and real_local_dir != real_tv_root:
-                        logger.warning("[library] Refusing symlink outside local library: %r", local_path)
-                        continue
-
-                    if os.path.islink(local_path) or os.path.exists(local_path):
-                        continue
-
-                    # Translate mount path to Sonarr/arr namespace
-                    real_debrid = os.path.realpath(debrid_path)
-                    if not real_debrid.startswith(real_mount + os.sep) and real_debrid != real_mount:
-                        continue
-                    symlink_target = symlink_base + real_debrid[len(real_mount):]
-
-                    try:
-                        os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                        os.symlink(symlink_target, local_path)
-                        created += 1
-                        symlinked_shows.add(title)
-                    except FileExistsError:
-                        pass
-                    except OSError as e:
-                        logger.warning(
-                            "[library] Failed to create symlink for %r S%02dE%02d: %s",
-                            title, snum, enum, e
+                        filename = os.path.basename(debrid_path)
+                        local_path = os.path.join(
+                            self._local_tv_path, show_dir, season_dir, filename
                         )
+
+                        # Validate output stays within local library root
+                        real_local_dir = os.path.realpath(
+                            os.path.join(self._local_tv_path, show_dir, season_dir)
+                        )
+                        if not real_local_dir.startswith(real_tv_root + os.sep) and real_local_dir != real_tv_root:
+                            logger.warning("[library] Refusing symlink outside local library: %r", local_path)
+                            continue
+
+                        if os.path.islink(local_path) or os.path.exists(local_path):
+                            continue
+
+                        # Translate mount path to Sonarr/arr namespace
+                        real_debrid = os.path.realpath(debrid_path)
+                        if not real_debrid.startswith(real_mount + os.sep) and real_debrid != real_mount:
+                            continue
+                        symlink_target = symlink_base + real_debrid[len(real_mount):]
+
+                        try:
+                            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                            os.symlink(symlink_target, local_path)
+                            created += 1
+                            symlinked_shows.add(title)
+                        except FileExistsError:
+                            pass
+                        except OSError as e:
+                            logger.warning(
+                                "[library] Failed to create symlink for %r S%02dE%02d: %s",
+                                title, snum, enum, e
+                            )
 
         if created:
             logger.info(f"[library] Created {created} debrid symlink(s) in local library")
-            # Trigger arr rescans using already-fetched library data
+            # Trigger arr rescans so Sonarr/Radarr discover the new files
+            if symlinked_shows and not sonarr_map:
+                if sonarr_fetch_failed:
+                    logger.warning(
+                        "[library] Created show symlinks but could not fetch Sonarr library "
+                        "(API unreachable?) — rescans skipped"
+                    )
+                elif os.environ.get('SONARR_URL'):
+                    logger.warning(
+                        "[library] Created show symlinks but Sonarr library is empty — "
+                        "rescans skipped"
+                    )
+                else:
+                    logger.warning(
+                        "[library] Created show symlinks but SONARR_URL is not configured — "
+                        "Sonarr won't discover new files until its next scheduled disk scan. "
+                        "Set SONARR_URL and SONARR_API_KEY for automatic rescans."
+                    )
             for title in symlinked_shows:
                 info = sonarr_map.get(title.lower()) or sonarr_map_norm.get(_norm_for_matching(title))
                 if info and info.get('id') and info.get('client'):
                     try:
                         info['client'].rescan_series(info['id'])
-                        logger.debug(f"[library] Triggered Sonarr rescan for {title}")
+                        logger.info(f"[library] Triggered Sonarr rescan for {title}")
                     except Exception as e:
-                        logger.debug(f"[library] Sonarr rescan failed for {title}: {e}")
+                        logger.warning(f"[library] Sonarr rescan failed for {title}: {e}")
+                elif sonarr_map:
+                    logger.warning(f"[library] Could not match '{title}' to a Sonarr series — rescan skipped")
+            if symlinked_movies and not radarr_map:
+                if radarr_fetch_failed:
+                    logger.warning(
+                        "[library] Created movie symlinks but could not fetch Radarr library "
+                        "(API unreachable?) — rescans skipped"
+                    )
+                elif os.environ.get('RADARR_URL'):
+                    logger.warning(
+                        "[library] Created movie symlinks but Radarr library is empty — "
+                        "rescans skipped"
+                    )
+                else:
+                    logger.warning(
+                        "[library] Created movie symlinks but RADARR_URL is not configured — "
+                        "Radarr won't discover new files until its next scheduled disk scan. "
+                        "Set RADARR_URL and RADARR_API_KEY for automatic rescans."
+                    )
             for title in symlinked_movies:
                 info = radarr_map.get(title.lower()) or radarr_map_norm.get(_norm_for_matching(title))
                 if info and info.get('id') and info.get('client'):
                     try:
                         info['client'].rescan_movie(info['id'])
-                        logger.debug(f"[library] Triggered Radarr rescan for {title}")
+                        logger.info(f"[library] Triggered Radarr rescan for {title}")
                     except Exception as e:
-                        logger.debug(f"[library] Radarr rescan failed for {title}: {e}")
+                        logger.warning(f"[library] Radarr rescan failed for {title}: {e}")
+                elif radarr_map:
+                    logger.warning(f"[library] Could not match '{title}' to a Radarr movie — rescan skipped")
 
     # Category names that indicate TV/show content
     _SHOW_CATEGORIES = {'shows', 'tv', 'anime', 'series', 'television'}

@@ -441,9 +441,15 @@ class SonarrClient(_ArrClientBase):
     def find_series_in_library(self, tmdb_id=None, title=None):
         """Check if a series is already added to Sonarr.
 
+        When both tmdb_id and title are provided, prefers a match on both
+        criteria before falling back to single-criterion matches.
         Returns the series dict if found, None otherwise.
         """
         all_series = self.get_all_series()
+        if tmdb_id and title:
+            for s in all_series:
+                if s.get('tmdbId') == tmdb_id and s.get('title', '').lower() == title.lower():
+                    return s
         for s in all_series:
             if tmdb_id and s.get('tmdbId') == tmdb_id:
                 return s
@@ -1113,9 +1119,15 @@ class RadarrClient(_ArrClientBase):
     def find_movie_in_library(self, tmdb_id=None, title=None):
         """Check if a movie is already added to Radarr.
 
+        When both tmdb_id and title are provided, prefers a match on both
+        criteria before falling back to single-criterion matches.
         Returns the movie dict if found, None otherwise.
         """
         all_movies = self.get_all_movies()
+        if tmdb_id and title:
+            for m in all_movies:
+                if m.get('tmdbId') == tmdb_id and m.get('title', '').lower() == title.lower():
+                    return m
         for m in all_movies:
             if tmdb_id and m.get('tmdbId') == tmdb_id:
                 return m

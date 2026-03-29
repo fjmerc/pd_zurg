@@ -1020,6 +1020,7 @@ class LibraryScanner:
             return
 
         from utils.library_prefs import get_all_pending, set_pending
+        from utils.tmdb import search_show as tmdb_search_show, search_movie as tmdb_search_movie
 
         # pending is a snapshot; set_pending calls below write new entries
         # that won't be visible in this snapshot — acceptable since each
@@ -1089,11 +1090,22 @@ class LibraryScanner:
                     f"{total} episode(s) across {len(by_season)} season(s)"
                 )
 
+                # Resolve TMDB ID for accurate Sonarr matching (only when
+                # year is available for reliable disambiguation)
+                show_tmdb_id = None
+                if show.get('year'):
+                    try:
+                        tmdb_hit = tmdb_search_show(show['title'], show['year'])
+                        if tmdb_hit:
+                            show_tmdb_id = tmdb_hit['tmdb_id']
+                    except Exception as e:
+                        logger.debug(f"[library] TMDB lookup failed for {show['title']!r}, falling back to title search: {e}")
+
                 new_pending = []
                 for sn, ep_nums in by_season.items():
                     try:
                         result = show_client.ensure_and_search(
-                            show['title'], None, sn, ep_nums, prefer_debrid=True
+                            show['title'], show_tmdb_id, sn, ep_nums, prefer_debrid=True
                         )
                         status = result.get('status', '')
                         if status in ('sent', 'pending'):
@@ -1141,9 +1153,17 @@ class LibraryScanner:
                     continue  # recently attempted
 
                 logger.info(f"[library] Prefer-debrid search for movie: {movie['title']}")
+                movie_tmdb_id = None
+                if movie.get('year'):
+                    try:
+                        tmdb_hit = tmdb_search_movie(movie['title'], movie['year'])
+                        if tmdb_hit:
+                            movie_tmdb_id = tmdb_hit['tmdb_id']
+                    except Exception as e:
+                        logger.debug(f"[library] TMDB lookup failed for {movie['title']!r}, falling back to title search: {e}")
                 try:
                     result = movie_client.ensure_and_search(
-                        movie['title'], None, prefer_debrid=True
+                        movie['title'], movie_tmdb_id, prefer_debrid=True
                     )
                     status = result.get('status', '')
                     if status in ('sent', 'pending'):

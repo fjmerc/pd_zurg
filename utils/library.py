@@ -889,7 +889,7 @@ class LibraryScanner:
             self._cache_time = time.monotonic()
         return data
 
-    def refresh(self):
+    def refresh(self, _rescan_depth=0):
         with self._lock:
             if self._scanning:
                 return
@@ -916,7 +916,7 @@ class LibraryScanner:
                 # Mount appeared mid-scan — the scan started before the mount
                 # was available so debrid content is missing.  Schedule a
                 # follow-up scan so it appears within seconds of startup.
-                if not had_mount_before and has_mount_now:
+                if not had_mount_before and has_mount_now and _rescan_depth < 1:
                     rescan_needed = True
             except Exception as e:
                 logger.error(f"[library] Scan error: {e}")
@@ -943,7 +943,7 @@ class LibraryScanner:
 
             if rescan_needed:
                 logger.info("[library] Mount discovered mid-scan, re-scanning for debrid content")
-                self.refresh()
+                self.refresh(_rescan_depth=_rescan_depth + 1)
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
@@ -1771,9 +1771,10 @@ class LibraryScanner:
         # Step 1: List categories (mirrors _scan_mount's category selection)
         entries = propfind(base_dav, depth=1, auth=auth, timeout=min(remaining, 10))
         # Skip the root directory itself — its href may be '/', '/dav/', or empty
+        _root_hrefs = {'/', '/dav/', '/dav', ''}
         all_cats = []
         for e in entries:
-            if e['is_collection'] and e['name'] and e['name'] not in ('dav', ''):
+            if e['is_collection'] and e['name'] and e['href'].rstrip('/') not in _root_hrefs:
                 all_cats.append(e['name'])
 
         non_special = [c for c in all_cats if c not in self._SKIP_CATEGORIES]
@@ -1839,6 +1840,8 @@ class LibraryScanner:
                     continue  # skip directory entries, we only need files
 
                 mount_path = self._mount_path_for(category, rel)
+                if not mount_path:
+                    continue
                 if len(parts) == 2:
                     # File directly in torrent folder: folder/file.mkv
                     folders[folder_name]['files'].append(
@@ -1944,7 +1947,12 @@ class LibraryScanner:
 
     def _mount_path_for(self, category, rel_path):
         """Translate a WebDAV relative path to a FUSE mount path."""
-        return os.path.join(self._mount_path, category, rel_path)
+        result = os.path.normpath(os.path.join(self._mount_path, category, rel_path))
+        # Guard against path traversal via ".." in crafted hrefs
+        cat_root = os.path.join(self._mount_path, category)
+        if not result.startswith(cat_root + os.sep) and result != cat_root:
+            return None
+        return result
 
     @staticmethod
     def _collect_episodes_from_webdav(contents):

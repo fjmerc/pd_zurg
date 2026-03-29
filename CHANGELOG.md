@@ -48,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **TMDB year-filter search failure**: TMDB searches with a year filter now retry without the year when the filtered search returns no results. Fixes shows like "Marvel's Spidey and His Amazing Friends" where the folder year (season air date) doesn't match the show's premiere year, preventing TMDB caching and alias-based dedup.
 - **WebDAV scanner Zurg compatibility**: WebDAV PROPFIND scanner now handles both absolute (`/dav/movies/...`) and relative (`folder/file`) hrefs from Zurg. Also detects when Zurg doesn't support recursive depth-infinity PROPFIND (returns folders without files) and falls back to FUSE mount scanning automatically.
 - **Stale debrid symlink cleanup**: `verify_symlinks` now checks symlinks pointing to `BLACKHOLE_SYMLINK_TARGET_BASE` (e.g. `/mnt/debrid/`) in addition to the rclone mount path. Previously only checked the mount path, so symlinks created with a different target base were never cleaned up when torrents expired.
+- **Faster debrid library on startup**: When the rclone mount appears after the initial scan has already started, the scanner now automatically triggers a follow-up scan so debrid content appears within seconds instead of waiting for the next scheduled scan (up to 2 minutes).
 
 ## Version [2.13.0] - 2026-03-26
 

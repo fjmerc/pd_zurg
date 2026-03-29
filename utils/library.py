@@ -897,9 +897,12 @@ class LibraryScanner:
 
         def _run():
             data = None
+            rescan_needed = False
             try:
                 # Read phase — update cache immediately so UI gets data fast
+                had_mount_before = self._mount_path is not None
                 data = self._scan_read()
+                has_mount_now = self._mount_path is not None
                 with self._lock:
                     self._cache = data
                     if not self._mount_path:
@@ -910,6 +913,11 @@ class LibraryScanner:
                         f"[library] Read scan complete: {len(data['movies'])} movies, "
                         f"{len(data['shows'])} shows in {data['scan_duration_ms']}ms"
                     )
+                # Mount appeared mid-scan — the scan started before the mount
+                # was available so debrid content is missing.  Schedule a
+                # follow-up scan so it appears within seconds of startup.
+                if not had_mount_before and has_mount_now:
+                    rescan_needed = True
             except Exception as e:
                 logger.error(f"[library] Scan error: {e}")
             finally:
@@ -918,11 +926,13 @@ class LibraryScanner:
 
             # Effects phase — runs after _scanning cleared so UI polling
             # stops promptly.  _effects_running prevents overlapping effects.
+            run_effects = False
             if data is not None:
                 with self._lock:
-                    if self._effects_running:
-                        return
-                    self._effects_running = True
+                    if not self._effects_running:
+                        self._effects_running = True
+                        run_effects = True
+            if run_effects:
                 try:
                     self._scan_effects(data)
                 except Exception as e:
@@ -930,6 +940,10 @@ class LibraryScanner:
                 finally:
                     with self._lock:
                         self._effects_running = False
+
+            if rescan_needed:
+                logger.info("[library] Mount discovered mid-scan, re-scanning for debrid content")
+                self.refresh()
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()

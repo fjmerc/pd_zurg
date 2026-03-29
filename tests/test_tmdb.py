@@ -172,8 +172,13 @@ class TestSearch:
 
     def test_search_show_no_retry_without_year(self, monkeypatch):
         """No retry when no year was provided in the first place."""
-        _mock_api(monkeypatch, {'/search/tv': {'results': []}})
+        calls = []
+        def _fake_get(path, params=None):
+            calls.append(params)
+            return {'results': []}
+        monkeypatch.setattr(tmdb, '_api_get', _fake_get)
         assert tmdb.search_show('Nonexistent', fallback_no_year=True) is None
+        assert len(calls) == 1
 
     def test_search_movie_no_retry_when_year_matches(self, monkeypatch):
         """No retry needed when the year-filtered movie search succeeds."""
@@ -192,8 +197,13 @@ class TestSearch:
 
     def test_search_movie_no_retry_without_year(self, monkeypatch):
         """No retry when no year was provided for movie search."""
-        _mock_api(monkeypatch, {'/search/movie': {'results': []}})
+        calls = []
+        def _fake_get(path, params=None):
+            calls.append(params)
+            return {'results': []}
+        monkeypatch.setattr(tmdb, '_api_get', _fake_get)
         assert tmdb.search_movie('Nonexistent', fallback_no_year=True) is None
+        assert len(calls) == 1
 
 
 # ---------------------------------------------------------------------------

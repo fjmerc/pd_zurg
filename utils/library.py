@@ -206,6 +206,18 @@ def _parse_folder_name(name):
         title = title[:year_match.start()].strip()
         return _clean_title(title, year)
 
+    # Extract mid-string year in parens before quality truncation:
+    # "Almost Famous (2000) DC (1080p BluRay...)" → year=2000, strip at year
+    # This prevents quality patterns from cutting mid-paren and leaving
+    # mangled titles like "Almost Famous (2000) DC (1080p".
+    mid_year_match = _MID_YEAR_PATTERN.search(title)
+    if mid_year_match:
+        candidate = int(mid_year_match.group(1))
+        if 1900 <= candidate <= 2100:
+            year = candidate
+            title = title[:mid_year_match.start()].strip()
+            return _clean_title(title, year)
+
     # Strip S01E01-style markers (TV episodes/seasons)
     season_match = _SEASON_EPISODE_PATTERN.search(title)
     if season_match:

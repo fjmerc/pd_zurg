@@ -460,13 +460,26 @@ class BlackholeWatcher:
             if not os.path.isdir(entry_path):
                 continue
 
-            # Remove broken symlinks within this release dir
+            # Remove broken symlinks within this release dir.
+            # Symlinks point to SYMLINK_TARGET_BASE which only exists in
+            # Sonarr/Radarr's container — translate to the rclone mount
+            # before checking existence.
+            rclone_real = os.path.realpath(self.rclone_mount)
+            target_base_real = ''
+            if self.symlink_target_base:
+                target_base_real = os.path.realpath(self.symlink_target_base) + '/'
             has_valid = False
             for root, _dirs, files in os.walk(entry_path):
                 for f in files:
                     fp = os.path.join(root, f)
                     if os.path.islink(fp):
-                        if not os.path.exists(fp):
+                        target = os.readlink(fp)
+                        if not os.path.isabs(target):
+                            target = os.path.realpath(os.path.join(os.path.dirname(fp), target))
+                        check_target = fp
+                        if target_base_real and target.startswith(target_base_real):
+                            check_target = rclone_real + '/' + target[len(target_base_real):]
+                        if not os.path.exists(check_target):
                             try:
                                 os.unlink(fp)
                                 logger.debug(f"[blackhole] Removed broken symlink: {fp}")

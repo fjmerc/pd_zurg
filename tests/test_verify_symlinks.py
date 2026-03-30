@@ -149,8 +149,31 @@ class TestVerifySymlinks:
         gone, the symlink is removed (content truly expired)."""
         from utils.scheduled_tasks import verify_symlinks
         target_path = os.path.join(symlink_env['target_base'], 'movies', 'Expired', 'ep.mkv')
-        link = _make_symlink(symlink_env['local_movies'], 'ep.mkv', target_path)
+        movie_dir = os.path.join(symlink_env['local_movies'], 'Expired (2024)')
+        os.makedirs(movie_dir, exist_ok=True)
+        link = _make_symlink(movie_dir, 'ep.mkv', target_path)
 
         result = verify_symlinks()
         assert result['items'] == 1
         assert not os.path.islink(link)
+        # Parent dir should be cleaned up too (no media files left)
+        assert not os.path.isdir(movie_dir)
+
+    def test_mass_deletion_blocked_by_threshold(self, symlink_env):
+        """When >50 and >50% of symlinks appear broken, refuse to delete."""
+        from utils.scheduled_tasks import verify_symlinks
+        # Create 60 broken symlinks (all pointing to nonexistent mount paths)
+        for i in range(60):
+            _make_symlink(
+                symlink_env['completed'], f'ep{i}.mkv',
+                os.path.join(symlink_env['mount'], 'shows', f'gone{i}', f'ep{i}.mkv'),
+            )
+
+        result = verify_symlinks()
+        assert result['status'] == 'error'
+        assert 'blocked' in result['message'].lower()
+        assert result['items'] == 0
+        # All symlinks should still exist (not deleted)
+        remaining = [f for f in os.listdir(symlink_env['completed']) if
+                     os.path.islink(os.path.join(symlink_env['completed'], f))]
+        assert len(remaining) == 60

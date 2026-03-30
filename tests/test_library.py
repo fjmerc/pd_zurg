@@ -784,7 +784,9 @@ class TestLibraryScannerScanLocal:
 
     def test_scan_local_movies_source_is_local(self, tmp_dir):
         local_movies = os.path.join(tmp_dir, "local_movies")
-        os.makedirs(os.path.join(local_movies, "Parasite (2019)"))
+        movie_dir = os.path.join(local_movies, "Parasite (2019)")
+        os.makedirs(movie_dir)
+        open(os.path.join(movie_dir, "Parasite.2019.mkv"), "w").close()
 
         scanner = self._make_local_scanner(local_movies=local_movies)
         result = scanner.scan()
@@ -792,6 +794,24 @@ class TestLibraryScannerScanLocal:
         assert len(result["movies"]) == 1
         assert result["movies"][0]["source"] == "local"
         assert result["movies"][0]["title"] == "Parasite"
+
+    def test_scan_local_movies_skips_empty_dirs(self, tmp_dir):
+        """Dirs with only metadata (.nfo/.jpg) but no media files are skipped.
+
+        After symlinks are deleted, leftover Radarr metadata dirs should not
+        be classified as local content (which would block symlink recreation).
+        """
+        local_movies = os.path.join(tmp_dir, "local_movies")
+        empty_dir = os.path.join(local_movies, "F1 (2025)")
+        os.makedirs(empty_dir)
+        # Only metadata, no media file
+        open(os.path.join(empty_dir, "movie.nfo"), "w").close()
+        open(os.path.join(empty_dir, "poster.jpg"), "w").close()
+
+        scanner = self._make_local_scanner(local_movies=local_movies)
+        result = scanner.scan()
+
+        assert len(result["movies"]) == 0
 
     def test_scan_local_tv_source_is_local(self, tmp_dir):
         local_tv = os.path.join(tmp_dir, "local_tv")
@@ -829,7 +849,9 @@ class TestLibraryScannerScanCrossRef:
         mount_movies = os.path.join(tmp_dir, "mount", "movies")
         os.makedirs(os.path.join(mount_movies, "Oppenheimer (2023)"))
         local_movies = os.path.join(tmp_dir, "local_movies")
-        os.makedirs(os.path.join(local_movies, "Oppenheimer (2023)"))
+        local_dir = os.path.join(local_movies, "Oppenheimer (2023)")
+        os.makedirs(local_dir)
+        open(os.path.join(local_dir, "Oppenheimer.2023.mkv"), "w").close()
 
         library._scanner = None
         scanner = LibraryScanner.__new__(LibraryScanner)
@@ -858,7 +880,9 @@ class TestLibraryScannerScanCrossRef:
         mount_movies = os.path.join(tmp_dir, "mount", "movies")
         os.makedirs(mount_movies)  # empty
         local_movies = os.path.join(tmp_dir, "local_movies")
-        os.makedirs(os.path.join(local_movies, "Local Only (2020)"))
+        local_dir = os.path.join(local_movies, "Local Only (2020)")
+        os.makedirs(local_dir)
+        open(os.path.join(local_dir, "Local.Only.2020.mkv"), "w").close()
 
         library._scanner = None
         scanner = LibraryScanner.__new__(LibraryScanner)
@@ -911,7 +935,9 @@ class TestLibraryScannerScanCrossRef:
         mount_movies = os.path.join(tmp_dir, "mount", "movies")
         os.makedirs(os.path.join(mount_movies, "Arrival (2016)"))
         local_movies = os.path.join(tmp_dir, "local_movies")
-        os.makedirs(os.path.join(local_movies, "Arrival (2016)"))
+        local_dir = os.path.join(local_movies, "Arrival (2016)")
+        os.makedirs(local_dir)
+        open(os.path.join(local_dir, "Arrival.2016.mkv"), "w").close()
 
         library._scanner = None
         scanner = LibraryScanner.__new__(LibraryScanner)

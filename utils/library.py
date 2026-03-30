@@ -2033,6 +2033,11 @@ class LibraryScanner:
                     # Skip folders that only contain debrid symlinks
                     if symlink_base and self._is_debrid_symlink_dir(entry.path, symlink_base):
                         continue
+                    # Skip folders with no media files — these are either empty
+                    # Radarr placeholders or dirs whose symlinks were deleted.
+                    # Classifying them as local would block symlink recreation.
+                    if not self._has_media_files(entry.path):
+                        continue
                     title, year = _parse_folder_name(entry.name)
                     if not title:
                         continue
@@ -2075,6 +2080,23 @@ class LibraryScanner:
         except OSError:
             return False
         return has_debrid_symlink  # False for empty dirs
+
+    @staticmethod
+    def _has_media_files(path):
+        """Check if a directory contains at least one media file (real or symlink).
+
+        Used to avoid classifying metadata-only directories (leftover .nfo/.jpg
+        from Radarr after symlinks were deleted) as genuine local content.
+        """
+        try:
+            with os.scandir(path) as it:
+                for f in it:
+                    ext = os.path.splitext(f.name)[1].lower()
+                    if ext in MEDIA_EXTENSIONS and (f.is_file() or f.is_symlink()):
+                        return True
+        except OSError:
+            pass
+        return False
 
     @staticmethod
     def _is_debrid_symlink_only(path, symlink_base):
@@ -2156,6 +2178,10 @@ class LibraryScanner:
                     else:
                         # Fallback for shows without parseable episode patterns
                         seasons, ep_count = _count_show_content(entry.path)
+                        # Skip dirs with no media files — empty placeholders
+                        # or dirs whose symlinks were deleted
+                        if ep_count == 0:
+                            continue
                         items.append({
                             'title': title,
                             'year': year,

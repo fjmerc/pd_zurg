@@ -1422,6 +1422,7 @@ class LibraryScanner:
                         'folder': os.path.basename(p) if p else '',
                         'id': s.get('id'),
                         'tvdb_id': s.get('tvdbId'),
+                        'tmdb_id': s.get('tmdbId'),
                         'client': client,
                     }
                     sonarr_map[t.lower()] = info
@@ -1453,16 +1454,24 @@ class LibraryScanner:
             radarr_fetch_failed = True
             logger.warning(f"[library] Could not fetch Radarr library: {e}")
 
-        # Build TMDB ID → Radarr info map for fallback matching when torrent
-        # titles differ from TMDB titles (e.g. "F1 The Movie" vs "F1")
+        # Build TMDB ID → arr info maps for fallback matching when torrent
+        # titles differ from TMDB titles (e.g. "F1 The Movie" vs "F1",
+        # "Special Ops Lioness" vs "Lioness")
         radarr_by_tmdb = {}
         for info in radarr_map.values():
             tid = info.get('tmdb_id')
             if tid:
                 radarr_by_tmdb[tid] = info
+        sonarr_by_tmdb = {}
+        for info in sonarr_map.values():
+            tid = info.get('tmdb_id')
+            if tid:
+                sonarr_by_tmdb[tid] = info
         # Load cached TMDB IDs so we can translate pd_zurg titles → TMDB IDs
         from utils.tmdb import get_cached_tmdb_ids
-        cached_tmdb = get_cached_tmdb_ids().get('movies', {})
+        cached_tmdb_ids = get_cached_tmdb_ids()
+        cached_tmdb_movies = cached_tmdb_ids.get('movies', {})
+        cached_tmdb_shows = cached_tmdb_ids.get('shows', {})
 
         # --- Movies ---
         if self._local_movies_path:
@@ -1479,7 +1488,7 @@ class LibraryScanner:
                 arr_info = radarr_map.get(title.lower()) or radarr_map_norm.get(_norm_for_matching(title))
                 # Fallback: match via TMDB ID when title differs
                 if not arr_info:
-                    tmdb_id = cached_tmdb.get(_normalize_title(title))
+                    tmdb_id = cached_tmdb_movies.get(_normalize_title(title))
                     if tmdb_id:
                         arr_info = radarr_by_tmdb.get(tmdb_id)
                 if arr_info and arr_info['folder']:
@@ -1548,6 +1557,10 @@ class LibraryScanner:
                 title = show['title']
                 year = show.get('year')
                 arr_info = sonarr_map.get(title.lower()) or sonarr_map_norm.get(_norm_for_matching(title))
+                if not arr_info:
+                    tmdb_id = cached_tmdb_shows.get(norm)
+                    if tmdb_id:
+                        arr_info = sonarr_by_tmdb.get(tmdb_id)
                 if arr_info and arr_info['folder']:
                     show_dir = arr_info['folder']
                 else:
@@ -1621,6 +1634,10 @@ class LibraryScanner:
                     )
             for title in symlinked_shows:
                 info = sonarr_map.get(title.lower()) or sonarr_map_norm.get(_norm_for_matching(title))
+                if not info:
+                    tmdb_id = cached_tmdb_shows.get(_normalize_title(title))
+                    if tmdb_id:
+                        info = sonarr_by_tmdb.get(tmdb_id)
                 if info and info.get('id') and info.get('client'):
                     try:
                         info['client'].rescan_series(info['id'])
@@ -1648,6 +1665,10 @@ class LibraryScanner:
                     )
             for title in symlinked_movies:
                 info = radarr_map.get(title.lower()) or radarr_map_norm.get(_norm_for_matching(title))
+                if not info:
+                    tmdb_id = cached_tmdb_movies.get(_normalize_title(title))
+                    if tmdb_id:
+                        info = radarr_by_tmdb.get(tmdb_id)
                 if info and info.get('id') and info.get('client'):
                     try:
                         info['client'].rescan_movie(info['id'])

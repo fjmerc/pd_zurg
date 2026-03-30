@@ -5,6 +5,7 @@ optional 'message', and optional 'items' count for result tracking.
 """
 
 import os
+import shutil
 import time
 from datetime import datetime, timezone
 from utils.logger import get_logger
@@ -128,6 +129,37 @@ def library_scan():
 # Task: Verify Symlinks (Priority 1)
 # ---------------------------------------------------------------------------
 
+_SYMLINK_DELETE_THRESHOLD = 50
+
+_MEDIA_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m4v', '.webm'}
+
+
+def _cleanup_empty_parents(deleted_path, stop_at):
+    """Remove parent directories that contain no media files, up to *stop_at*.
+
+    After a symlink is deleted, its parent dir (e.g. "Movie Name (2025)/")
+    may still contain Radarr/Sonarr metadata (.nfo, .jpg) but no video files.
+    If left behind, the library scanner misclassifies it as local content and
+    blocks symlink recreation.  Walk upward, removing dirs that lack media
+    files, until we hit the library root.
+    """
+    parent = os.path.dirname(deleted_path)
+    while parent and parent != stop_at and parent.startswith(stop_at + '/'):
+        try:
+            has_media = False
+            for entry in os.scandir(parent):
+                if os.path.splitext(entry.name)[1].lower() in _MEDIA_EXTENSIONS:
+                    has_media = True
+                    break
+            if has_media:
+                break
+            shutil.rmtree(parent, ignore_errors=True)
+            logger.debug(f"[scheduler] Cleaned up empty dir: {parent}")
+            parent = os.path.dirname(parent)
+        except OSError:
+            break
+
+
 def verify_symlinks():
     """Walk completed dir and local library for debrid-pointing symlinks, remove broken ones."""
     completed_dir = os.environ.get('BLACKHOLE_COMPLETED_DIR', '/completed')
@@ -153,7 +185,18 @@ def verify_symlinks():
     if not scan_dirs:
         return {'status': 'success', 'message': 'No directories to check'}
 
-    broken = 0
+    # Guard: verify the rclone mount is responsive before scanning.
+    # A stalled FUSE mount makes os.path.exists return False for everything,
+    # which would cause mass deletion of all symlinks.
+    if os.path.isdir(rclone_mount):
+        try:
+            os.listdir(rclone_mount)
+        except OSError as e:
+            logger.error(f"[scheduler] Mount {rclone_mount} unresponsive — aborting symlink verify to prevent mass deletion: {e}")
+            return {'status': 'error', 'message': f'Mount unresponsive, aborted: {e}'}
+
+    # Phase 1: Identify broken symlinks (don't delete yet)
+    to_delete = []
     checked = 0
 
     for scan_dir in scan_dirs:
@@ -182,17 +225,39 @@ def verify_symlinks():
                 if symlink_target_real and target.startswith(symlink_target_real):
                     check_target = rclone_mount + '/' + target[len(symlink_target_real):]
                 if not os.path.exists(check_target):
-                    # Target is gone (expired debrid content)
-                    broken += 1
-                    try:
-                        os.remove(fpath)
-                        logger.info(f"[scheduler] Removed broken symlink: {fpath} -> {target}")
-                    except OSError as e:
-                        logger.warning(f"[scheduler] Failed to remove broken symlink {fpath}: {e}")
+                    to_delete.append((fpath, target, scan_dir))
+
+    # Phase 2: Safety threshold — refuse mass deletion
+    broken = len(to_delete)
+    if broken > _SYMLINK_DELETE_THRESHOLD and checked > 0 and broken / checked > 0.5:
+        logger.error(
+            f"[scheduler] Refusing to delete {broken}/{checked} symlinks — "
+            f"threshold exceeded (>{_SYMLINK_DELETE_THRESHOLD} and >50%). "
+            f"Check mount health or debrid subscription."
+        )
+        return {
+            'status': 'error',
+            'message': f'Mass deletion blocked: {broken}/{checked} symlinks appear broken',
+            'items': 0,
+        }
+
+    # Phase 3: Delete confirmed broken symlinks and clean up empty dirs
+    deleted = 0
+    for fpath, target, scan_dir in to_delete:
+        try:
+            os.remove(fpath)
+            deleted += 1
+            logger.info(f"[scheduler] Removed broken symlink: {fpath} -> {target}")
+            # Clean up empty parent dirs in local library paths (up to the
+            # library root) so the scanner doesn't classify them as local
+            if scan_dir in (local_tv, local_movies) and scan_dir:
+                _cleanup_empty_parents(fpath, scan_dir)
+        except OSError as e:
+            logger.warning(f"[scheduler] Failed to remove broken symlink {fpath}: {e}")
 
     msg = f'Checked {checked} symlinks'
-    if broken:
-        msg += f', removed {broken} broken'
+    if deleted:
+        msg += f', removed {deleted} broken'
     return {'status': 'success', 'message': msg, 'items': broken}
 
 
@@ -416,8 +481,6 @@ def detect_stale_grabs():
 
 def config_backup():
     """Backup .env and settings files to a timestamped directory."""
-    import shutil
-
     backup_root = os.environ.get('CONFIG_BACKUP_DIR', '/config/backups')
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     backup_dir = os.path.join(backup_root, timestamp)

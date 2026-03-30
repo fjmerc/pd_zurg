@@ -62,6 +62,37 @@ def _api_get(path, params=None):
 # Search
 # ---------------------------------------------------------------------------
 
+def _pick_best_result(results, year, date_key):
+    """Pick the result whose year best matches *year*.
+
+    TMDB's year parameter is a soft hint — popular older titles can outrank
+    the correct year match.  When the top result's year is far from the
+    requested year (>2 years), scan the first few results for a year match.
+    If the top result is already close (within ±2 years), trust TMDB's
+    relevance ranking — the folder year may just be a season air year or
+    minor date discrepancy.
+    """
+    if year is None:
+        return results[0]
+
+    year_int = int(year)
+    first_date = (results[0].get(date_key, '') or '')[:4]
+    if first_date:
+        try:
+            if abs(int(first_date) - year_int) <= 2:
+                return results[0]
+        except ValueError:
+            pass
+
+    # Exact match only — ±2 tolerance already consumed above for the top result
+    year_str = str(year_int)
+    for r in results[:5]:
+        rd = (r.get(date_key, '') or '')[:4]
+        if rd == year_str:
+            return r
+    return results[0]
+
+
 def search_show(title, year=None, fallback_no_year=False):
     """Search TMDB for a TV show. Returns first result dict or None.
 
@@ -75,12 +106,15 @@ def search_show(title, year=None, fallback_no_year=False):
     if year is not None:
         params['first_air_date_year'] = year
     data = _api_get('/search/tv', params)
+    effective_year = year
     if data and not data.get('results') and year is not None and fallback_no_year:
-        # Year filter too strict — retry without it
+        # Year filter too strict — retry without it; don't apply year
+        # preference on retry results since the year is proven unreliable
         data = _api_get('/search/tv', {'query': title})
+        effective_year = None
     if not data or not data.get('results'):
         return None
-    r = data['results'][0]
+    r = _pick_best_result(data['results'], effective_year, 'first_air_date')
     return {
         'tmdb_id': r['id'],
         'title': r.get('name', ''),
@@ -101,12 +135,14 @@ def search_movie(title, year=None, fallback_no_year=False):
     if year is not None:
         params['year'] = year
     data = _api_get('/search/movie', params)
+    effective_year = year
     if data and not data.get('results') and year is not None and fallback_no_year:
         # Year filter too strict — retry without it
         data = _api_get('/search/movie', {'query': title})
+        effective_year = None
     if not data or not data.get('results'):
         return None
-    r = data['results'][0]
+    r = _pick_best_result(data['results'], effective_year, 'release_date')
     return {
         'tmdb_id': r['id'],
         'title': r.get('title', ''),

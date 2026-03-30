@@ -205,6 +205,151 @@ class TestSearch:
         assert tmdb.search_movie('Nonexistent', fallback_no_year=True) is None
         assert len(calls) == 1
 
+    def test_search_movie_prefers_year_match_when_far_off(self, monkeypatch):
+        """When TMDB returns a popular movie from a very different year first,
+        prefer the year match (e.g. Cover Up 1983 vs 2025)."""
+        _mock_api(monkeypatch, {
+            '/search/movie': {
+                'results': [
+                    {'id': 111, 'title': 'Cover Up', 'overview': 'Old movie.',
+                     'poster_path': '/old.jpg', 'release_date': '1983-08-24'},
+                    {'id': 222, 'title': 'Cover-Up', 'overview': 'New movie.',
+                     'poster_path': '/new.jpg', 'release_date': '2025-12-19'},
+                ]
+            }
+        })
+        result = tmdb.search_movie('Cover Up', 2025)
+        assert result['tmdb_id'] == 222
+        assert result['release_date'] == '2025-12-19'
+
+    def test_search_show_prefers_year_match_when_far_off(self, monkeypatch):
+        """When TMDB returns an old show first and the year difference is large,
+        prefer the year match (e.g. Flash 1990 vs 2014)."""
+        _mock_api(monkeypatch, {
+            '/search/tv': {
+                'results': [
+                    {'id': 333, 'name': 'Flash', 'overview': 'Old show.',
+                     'poster_path': '/old.jpg', 'first_air_date': '1990-09-20'},
+                    {'id': 444, 'name': 'The Flash', 'overview': 'New show.',
+                     'poster_path': '/new.jpg', 'first_air_date': '2014-10-07'},
+                ]
+            }
+        })
+        result = tmdb.search_show('Flash', 2014)
+        assert result['tmdb_id'] == 444
+        assert result['first_air_date'] == '2014-10-07'
+
+    def test_search_show_trusts_relevance_when_year_close(self, monkeypatch):
+        """When the top result's year is within ±2 of the folder year, trust
+        TMDB's relevance ranking — the folder year is likely a season air year."""
+        _mock_api(monkeypatch, {
+            '/search/tv': {
+                'results': [
+                    {'id': 100, 'name': 'The Flash', 'overview': 'CW show.',
+                     'poster_path': '/flash.jpg', 'first_air_date': '2014-10-07'},
+                    {'id': 999, 'name': 'Flash Documentary', 'overview': 'Doc.',
+                     'poster_path': '/doc.jpg', 'first_air_date': '2016-05-01'},
+                ]
+            }
+        })
+        # Folder says 2016 (season air year) but the real show is 2014
+        result = tmdb.search_show('The Flash', 2016)
+        assert result['tmdb_id'] == 100  # trust relevance, not year
+
+    def test_search_movie_trusts_relevance_when_year_close(self, monkeypatch):
+        """When the top result is within ±2 years, trust TMDB's ranking."""
+        _mock_api(monkeypatch, {
+            '/search/movie': {
+                'results': [
+                    {'id': 100, 'title': 'The Movie', 'overview': 'Good one.',
+                     'poster_path': '/a.jpg', 'release_date': '2024-12-25'},
+                    {'id': 999, 'title': 'The Movie (Remake)', 'overview': '',
+                     'poster_path': '/b.jpg', 'release_date': '2025-03-01'},
+                ]
+            }
+        })
+        # Folder says 2025 but TMDB's top result is 2024 (within ±2)
+        result = tmdb.search_movie('The Movie', 2025)
+        assert result['tmdb_id'] == 100  # trust relevance
+
+    def test_search_show_fallback_no_year_skips_year_preference(self, monkeypatch):
+        """When year-filtered search returns empty and we retry without year,
+        don't apply year preference — the year is proven unreliable."""
+        calls = []
+        def _fake_get(path, params=None):
+            calls.append(params)
+            if params and params.get('first_air_date_year'):
+                return {'results': []}  # year filter too strict
+            return {'results': [
+                {'id': 100, 'name': 'Spidey', 'overview': '',
+                 'poster_path': '/s.jpg', 'first_air_date': '2021-08-06'},
+                {'id': 999, 'name': 'Spidey Short', 'overview': '',
+                 'poster_path': '/x.jpg', 'first_air_date': '2022-01-01'},
+            ]}
+        monkeypatch.setattr(tmdb, '_api_get', _fake_get)
+        result = tmdb.search_show('Spidey', 2022, fallback_no_year=True)
+        # Should take results[0] from the retry, NOT prefer the 2022 match
+        assert result['tmdb_id'] == 100
+
+    def test_search_movie_fallback_no_year_skips_year_preference(self, monkeypatch):
+        """Movie fallback retry also skips year preference."""
+        calls = []
+        def _fake_get(path, params=None):
+            calls.append(params)
+            if params and params.get('year'):
+                return {'results': []}
+            return {'results': [
+                {'id': 100, 'title': 'Faster', 'overview': '',
+                 'poster_path': '/f.jpg', 'release_date': '1981-01-01'},
+                {'id': 999, 'title': 'Faster Again', 'overview': '',
+                 'poster_path': '/x.jpg', 'release_date': '2020-06-01'},
+            ]}
+        monkeypatch.setattr(tmdb, '_api_get', _fake_get)
+        result = tmdb.search_movie('Faster', 2020, fallback_no_year=True)
+        assert result['tmdb_id'] == 100
+
+    def test_search_movie_year_preference_limited_to_top_results(self, monkeypatch):
+        """Year match buried deep in results is ignored — likely coincidence."""
+        results = [{'id': 1, 'title': 'Popular', 'overview': '',
+                    'poster_path': '/a.jpg', 'release_date': '1950-01-01'}]
+        # Pad with 5 more results, then put the year match at position 6+
+        for i in range(5):
+            results.append({'id': 10 + i, 'title': f'Filler {i}', 'overview': '',
+                           'poster_path': '', 'release_date': f'{1960 + i}-01-01'})
+        results.append({'id': 999, 'title': 'Deep Match', 'overview': '',
+                       'poster_path': '/deep.jpg', 'release_date': '2025-01-01'})
+        _mock_api(monkeypatch, {'/search/movie': {'results': results}})
+        result = tmdb.search_movie('Popular', 2025)
+        assert result['tmdb_id'] == 1  # falls back to first, ignores deep match
+
+    def test_search_movie_falls_back_to_first_without_year_match(self, monkeypatch):
+        """When no result matches the year, fall back to first result."""
+        _mock_api(monkeypatch, {
+            '/search/movie': {
+                'results': [
+                    {'id': 111, 'title': 'Some Movie', 'overview': '',
+                     'poster_path': '/a.jpg', 'release_date': '2020-01-01'},
+                ]
+            }
+        })
+        result = tmdb.search_movie('Some Movie', 2025)
+        assert result['tmdb_id'] == 111
+
+    def test_search_movie_no_year_takes_first(self, monkeypatch):
+        """Without a year, just take the first result as before."""
+        _mock_api(monkeypatch, {
+            '/search/movie': {
+                'results': [
+                    {'id': 111, 'title': 'Movie A', 'overview': '',
+                     'poster_path': '/a.jpg', 'release_date': '1983-01-01'},
+                    {'id': 222, 'title': 'Movie B', 'overview': '',
+                     'poster_path': '/b.jpg', 'release_date': '2025-01-01'},
+                ]
+            }
+        })
+        result = tmdb.search_movie('Movie')
+        assert result['tmdb_id'] == 111
+
 
 # ---------------------------------------------------------------------------
 # Metadata

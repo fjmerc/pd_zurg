@@ -1496,6 +1496,15 @@ class LibraryScanner:
                 else:
                     movie_dir = f"{title} ({year})" if year else title
 
+                # For source='both', only create a symlink if Radarr's folder
+                # has no media files.  This handles wrong-dir symlinks (the
+                # movie lives in a differently-named dir) without creating
+                # duplicates alongside real local files.
+                if movie.get('source') == 'both':
+                    target_dir = os.path.join(self._local_movies_path, movie_dir)
+                    if os.path.isdir(target_dir) and self._has_media_files(target_dir):
+                        continue
+
                 # Find the largest media file in the torrent folder
                 media_file = None
                 media_size = -1

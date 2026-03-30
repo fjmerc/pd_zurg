@@ -630,6 +630,38 @@ class TestCreateDebridSymlinksMovies:
         expected = os.path.join(local_movies, 'Movie B (2025)', 'movie.mkv')
         assert os.path.islink(expected)
 
+    def test_both_source_skips_when_target_has_real_file(self, tmp_dir, monkeypatch):
+        """source='both' movies are skipped if the target dir already has media.
+
+        Prevents creating a debrid symlink alongside a real local file that
+        Radarr already manages.
+        """
+        mount = os.path.join(tmp_dir, 'mount')
+        local_movies = os.path.join(tmp_dir, 'movies')
+
+        movie_dir = os.path.join(mount, 'movies', 'Movie.2025')
+        _touch(os.path.join(movie_dir, 'movie.mkv'))
+
+        # Pre-create Radarr's folder with a real file
+        radarr_dir = os.path.join(local_movies, 'Movie C (2025)')
+        os.makedirs(radarr_dir, exist_ok=True)
+        with open(os.path.join(radarr_dir, 'Movie C (2025).mkv'), 'w') as f:
+            f.write('real local file')
+
+        _setup_env(monkeypatch, mount, '/mnt/debrid')
+        scanner = _make_scanner(mount, None, monkeypatch, local_movies_path=local_movies)
+
+        movies = [
+            {'title': 'Movie C', 'year': 2025, 'source': 'both', 'type': 'movie', 'path': movie_dir},
+        ]
+
+        scanner._create_debrid_symlinks([], movies, {})
+
+        # Should NOT create a symlink — real file already exists
+        contents = os.listdir(radarr_dir)
+        assert len(contents) == 1  # only the original real file
+        assert not any(os.path.islink(os.path.join(radarr_dir, f)) for f in contents)
+
     def test_skips_existing_movie_symlink(self, tmp_dir, monkeypatch):
         """Doesn't overwrite existing movie symlinks."""
         mount = os.path.join(tmp_dir, 'mount')

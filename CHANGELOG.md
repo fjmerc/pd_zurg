@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Usenet-preferred local routing**: "Prefer Local" now routes downloads exclusively through usenet clients (NZBget/SABnzbd) when available, using a dedicated `usenet` tag. Falls back to any local client if no usenet client is configured. Usenet indexers are tagged with both `local` and `usenet` tags to support both routing modes.
 - **Download client routing**: Automatically routes downloads through debrid or local download clients in Sonarr/Radarr based on source preference. Auto-tags untagged download clients, tags usenet indexers with local tag, and manages dual-tag exclusivity to prevent debrid interception of local downloads.
 - **Sonarr-style poster cards**: Library browser now shows poster images with progress bars, replacing the plain list view. Includes TMDB metadata enrichment for poster artwork.
 - **TMDB dedup and alias merge**: Debrid entries sharing a TMDB ID but with different parsed titles (e.g. "Andor" vs "Star Wars Andor") are deduplicated. Cross-source merge now uses TMDB IDs to match debrid and local items even when titles differ. TMDB disambiguation used when adding shows/movies to Sonarr/Radarr.

@@ -118,6 +118,7 @@ class SonarrClient(_ArrClientBase):
         super().__init__(url, api_key, 'sonarr')
         self._blackhole_tag_id = None  # None=not looked up, _NOT_FOUND=not found
         self._local_tag_id = None
+        self._usenet_tag_id = None
 
     def _add_auth(self, req):
         req.add_header('X-Api-Key', self._api_key)
@@ -150,10 +151,14 @@ class SonarrClient(_ArrClientBase):
     def _discover_routing_tags(self):
         """Discover tags used by download clients for routing.
 
-        Identifies the blackhole tag and local tag from existing clients.
-        When a blackhole client exists, ensures all other enabled clients
-        are tagged so they don't act as universal catch-alls that intercept
-        downloads meant for the blackhole (debrid).
+        Identifies the blackhole tag, local tag, and usenet tag from existing
+        clients. When a blackhole client exists, ensures all other enabled
+        clients are tagged so they don't act as universal catch-alls that
+        intercept downloads meant for the blackhole (debrid).
+
+        Usenet clients get an additional 'usenet' tag so prefer-local routing
+        can target usenet exclusively while keeping them available for
+        untagged/local-tagged content.
         """
         if self._blackhole_tag_id is not None:
             return
@@ -162,7 +167,9 @@ class SonarrClient(_ArrClientBase):
             return  # API error — leave uncached so next call retries
         self._blackhole_tag_id = _NOT_FOUND
         self._local_tag_id = _NOT_FOUND
+        self._usenet_tag_id = _NOT_FOUND
         untagged_clients = []
+        usenet_clients = []
         for c in clients_raw:
             if not c.get('enable'):
                 continue
@@ -185,6 +192,8 @@ class SonarrClient(_ArrClientBase):
                     else:
                         logger.warning(f"[sonarr] TorrentBlackhole client '{c.get('name', '?')}' has no tags — download routing will not work")
                 continue
+            if impl_lower in self._USENET_IMPLEMENTATIONS:
+                usenet_clients.append(c)
             if not tags:
                 untagged_clients.append(c)
                 continue
@@ -216,9 +225,36 @@ class SonarrClient(_ArrClientBase):
                     else:
                         logger.warning(f"[sonarr] Failed to tag client '{c_name}'")
 
-        # Fix indexer routing: tag usenet indexers with local tag,
+        # Ensure usenet clients carry a dedicated 'usenet' tag so
+        # prefer-local routing can target usenet exclusively.
+        usenet_tag = None
+        if usenet_clients:
+            usenet_tag = self._get_or_create_tag('usenet')
+            if usenet_tag is not None:
+                self._usenet_tag_id = usenet_tag
+                # Refresh local_tag in case it was just created above
+                if local_tag is None:
+                    local_tag = self._local_tag_id if self._local_tag_id is not _NOT_FOUND else None
+                for c in usenet_clients:
+                    c_tags = list(c.get('tags', []))
+                    needed = []
+                    if local_tag is not None and local_tag not in c_tags:
+                        needed.append(local_tag)
+                    if usenet_tag not in c_tags:
+                        needed.append(usenet_tag)
+                    if not needed:
+                        continue
+                    new_tags = c_tags + needed
+                    c_name = c.get('name', c.get('implementation', '?'))
+                    updated = dict(c, tags=new_tags)
+                    if self._put(f'/api/v3/downloadclient/{c["id"]}', updated):
+                        logger.info(f"[sonarr] Ensured usenet client '{c_name}' has usenet tag {usenet_tag}")
+                    else:
+                        logger.warning(f"[sonarr] Failed to update tags on usenet client '{c_name}'")
+
+        # Fix indexer routing: tag usenet indexers with local+usenet tags,
         # and ensure torrent indexers are accessible for debrid-tagged content
-        indexers_fixed = self._fix_indexer_routing(tagged_client_ids, local_tag, self._blackhole_tag_id)
+        indexers_fixed = self._fix_indexer_routing(tagged_client_ids, local_tag, self._blackhole_tag_id, usenet_tag)
 
         # If torrent indexer tags were just corrected, re-search debrid-tagged
         # series that previously failed (0 indexers were visible for them)
@@ -234,7 +270,7 @@ class SonarrClient(_ArrClientBase):
             if tagged_client_names:
                 self._clear_stale_queue_items(tagged_client_names)
 
-    def _fix_indexer_routing(self, tagged_client_ids, local_tag, debrid_tag=None):
+    def _fix_indexer_routing(self, tagged_client_ids, local_tag, debrid_tag=None, usenet_tag=None):
         """Fix indexer routing after auto-tagging download clients.
 
         1. Clear downloadClientId overrides pointing to newly-tagged clients
@@ -253,21 +289,32 @@ class SonarrClient(_ArrClientBase):
         for ix in indexers:
             ix_name = ix.get('name', '?')
             changed = False
+            torrent_fix_pending = False
             updated = dict(ix)
             # Clear hardcoded downloadClientId pointing to re-tagged clients
             if updated.get('downloadClientId', 0) in tagged_client_ids:
                 updated['downloadClientId'] = 0
                 changed = True
                 logger.debug(f"[sonarr] Clearing downloadClientId on indexer '{ix_name}'")
-            # Tag untagged usenet indexers so they only serve local-tagged series
+            # Tag usenet indexers with local tag (and usenet tag if available)
+            # so they only serve local/usenet-tagged series, not debrid ones.
             if ix.get('protocol') == 'usenet' and local_tag is not None:
-                existing_tags = updated.get('tags', [])
+                existing_tags = list(updated.get('tags', []))
+                desired = [local_tag]
+                if usenet_tag is not None:
+                    desired.append(usenet_tag)
                 if not existing_tags:
-                    updated['tags'] = [local_tag]
+                    updated['tags'] = desired
                     changed = True
-                    logger.debug(f"[sonarr] Tagging usenet indexer '{ix_name}' with local tag")
-                elif local_tag not in existing_tags:
-                    logger.info(f"[sonarr] Usenet indexer '{ix_name}' has existing tags {existing_tags} — verify it excludes debrid series")
+                    logger.debug(f"[sonarr] Tagging usenet indexer '{ix_name}' with tags {desired}")
+                else:
+                    missing = [t for t in desired if t not in existing_tags]
+                    if missing:
+                        updated['tags'] = existing_tags + missing
+                        changed = True
+                        logger.debug(f"[sonarr] Adding tags {missing} to usenet indexer '{ix_name}'")
+                    elif local_tag not in existing_tags:
+                        logger.info(f"[sonarr] Usenet indexer '{ix_name}' has existing tags {existing_tags} — verify it excludes debrid series")
             # Ensure torrent indexers are accessible for debrid-tagged content.
             # If a torrent indexer has tags but not the debrid tag, debrid-tagged
             # series/episodes won't find it during search. Only auto-tag indexers
@@ -276,8 +323,8 @@ class SonarrClient(_ArrClientBase):
             if ix.get('protocol') == 'torrent' and debrid_tag is not None:
                 existing_tags = updated.get('tags', [])
                 if existing_tags and debrid_tag not in existing_tags:
-                    if local_tag is not None and existing_tags == [local_tag]:
-                        updated['tags'] = [local_tag, debrid_tag]
+                    if local_tag is not None and set(existing_tags) <= {t for t in (local_tag, usenet_tag) if t is not None}:
+                        updated['tags'] = list(set(existing_tags) | {debrid_tag})
                         changed = True
                         torrent_fix_pending = True
                         logger.debug(f"[sonarr] Adding debrid tag to torrent indexer '{ix_name}' so debrid-tagged content can use it")
@@ -360,10 +407,16 @@ class SonarrClient(_ArrClientBase):
         self._discover_routing_tags()
         return None if self._local_tag_id is _NOT_FOUND else self._local_tag_id
 
+    def _get_usenet_tag_id(self):
+        """Find the tag ID used exclusively by usenet download clients."""
+        self._discover_routing_tags()
+        return None if self._usenet_tag_id is _NOT_FOUND else self._usenet_tag_id
+
     def _ensure_debrid_routing(self, series):
-        """Add debrid tag and remove local tag so downloads route through blackhole."""
+        """Add debrid tag and remove local/usenet tags so downloads route through blackhole."""
         debrid_tag = self._get_blackhole_tag_id()
         local_tag = self._get_local_tag_id()
+        usenet_tag = self._get_usenet_tag_id()
         if debrid_tag is None:
             logger.warning(f"[sonarr] No blackhole tag configured — cannot route to debrid: {series.get('title')}")
             return series
@@ -374,6 +427,9 @@ class SonarrClient(_ArrClientBase):
             changed = True
         if local_tag is not None and local_tag in tags:
             tags.remove(local_tag)
+            changed = True
+        if usenet_tag is not None and usenet_tag in tags:
+            tags.remove(usenet_tag)
             changed = True
         if not changed:
             return series
@@ -386,29 +442,41 @@ class SonarrClient(_ArrClientBase):
         return series
 
     def _ensure_local_routing(self, series):
-        """Add local tag and remove debrid tag so downloads route to local clients."""
+        """Route downloads to usenet (preferred) or any local client.
+
+        When a usenet tag exists, applies usenet tag so only usenet clients
+        and indexers handle the download.  Falls back to the local tag when
+        no usenet client is configured.
+        """
         debrid_tag = self._get_blackhole_tag_id()
         local_tag = self._get_local_tag_id()
-        if local_tag is None and debrid_tag is None:
+        usenet_tag = self._get_usenet_tag_id()
+        # Determine which tag to apply: usenet if available, else local
+        target_tag = usenet_tag if usenet_tag is not None else local_tag
+        if target_tag is None and debrid_tag is None:
             return series
-        if local_tag is None:
-            # Can't add local tag — only safe to remove debrid if local tag exists
-            logger.warning(f"[sonarr] No local torrent client tag configured — cannot route to local: {series.get('title')}")
+        if target_tag is None:
+            logger.warning(f"[sonarr] No local/usenet client tag configured — cannot route to local: {series.get('title')}")
             return series
         tags = list(series.get('tags', []))
         changed = False
         if debrid_tag is not None and debrid_tag in tags:
             tags.remove(debrid_tag)
             changed = True
-        if local_tag not in tags:
-            tags.append(local_tag)
+        # When using usenet tag, remove stale local tag to keep routing clean
+        if usenet_tag is not None and local_tag is not None and local_tag in tags:
+            tags.remove(local_tag)
+            changed = True
+        if target_tag not in tags:
+            tags.append(target_tag)
             changed = True
         if not changed:
             return series
         series_copy = dict(series, tags=tags)
         result = self._put(f'/api/v3/series/{series["id"]}', series_copy)
         if result:
-            logger.info(f"[sonarr] Routed to local: {series.get('title')}")
+            label = 'usenet' if usenet_tag is not None else 'local'
+            logger.info(f"[sonarr] Routed to {label}: {series.get('title')}")
             return result
         logger.warning(f"[sonarr] Failed to update routing tags for: {series.get('title')}")
         return series
@@ -583,7 +651,8 @@ class SonarrClient(_ArrClientBase):
                 if tag_id is not None:
                     add_tags.append(tag_id)
             elif prefer_debrid is False:
-                tag_id = self._get_local_tag_id()
+                usenet_id = self._get_usenet_tag_id()
+                tag_id = usenet_id if usenet_id is not None else self._get_local_tag_id()
                 if tag_id is not None:
                     add_tags.append(tag_id)
             else:
@@ -739,6 +808,7 @@ class SonarrClient(_ArrClientBase):
         """
         self._blackhole_tag_id = None
         self._local_tag_id = None
+        self._usenet_tag_id = None
         self._discover_routing_tags()
 
     def clean_all_stale_queue_items(self, max_age_seconds=120):
@@ -791,6 +861,7 @@ class RadarrClient(_ArrClientBase):
         super().__init__(url, api_key, 'radarr')
         self._blackhole_tag_id = None  # None=not looked up, _NOT_FOUND=not found
         self._local_tag_id = None
+        self._usenet_tag_id = None
 
     def _add_auth(self, req):
         req.add_header('X-Api-Key', self._api_key)
@@ -818,10 +889,14 @@ class RadarrClient(_ArrClientBase):
     def _discover_routing_tags(self):
         """Discover tags used by download clients for routing.
 
-        Identifies the blackhole tag and local tag from existing clients.
-        When a blackhole client exists, ensures all other enabled clients
-        are tagged so they don't act as universal catch-alls that intercept
-        downloads meant for the blackhole (debrid).
+        Identifies the blackhole tag, local tag, and usenet tag from existing
+        clients. When a blackhole client exists, ensures all other enabled
+        clients are tagged so they don't act as universal catch-alls that
+        intercept downloads meant for the blackhole (debrid).
+
+        Usenet clients get an additional 'usenet' tag so prefer-local routing
+        can target usenet exclusively while keeping them available for
+        untagged/local-tagged content.
         """
         if self._blackhole_tag_id is not None:
             return
@@ -830,7 +905,9 @@ class RadarrClient(_ArrClientBase):
             return  # API error — leave uncached so next call retries
         self._blackhole_tag_id = _NOT_FOUND
         self._local_tag_id = _NOT_FOUND
+        self._usenet_tag_id = _NOT_FOUND
         untagged_clients = []
+        usenet_clients = []
         for c in clients_raw:
             if not c.get('enable'):
                 continue
@@ -853,6 +930,8 @@ class RadarrClient(_ArrClientBase):
                     else:
                         logger.warning(f"[radarr] TorrentBlackhole client '{c.get('name', '?')}' has no tags — download routing will not work")
                 continue
+            if impl_lower in self._USENET_IMPLEMENTATIONS:
+                usenet_clients.append(c)
             if not tags:
                 untagged_clients.append(c)
                 continue
@@ -884,9 +963,36 @@ class RadarrClient(_ArrClientBase):
                     else:
                         logger.warning(f"[radarr] Failed to tag client '{c_name}'")
 
-        # Fix indexer routing: tag usenet indexers with local tag,
+        # Ensure usenet clients carry a dedicated 'usenet' tag so
+        # prefer-local routing can target usenet exclusively.
+        usenet_tag = None
+        if usenet_clients:
+            usenet_tag = self._get_or_create_tag('usenet')
+            if usenet_tag is not None:
+                self._usenet_tag_id = usenet_tag
+                # Refresh local_tag in case it was just created above
+                if local_tag is None:
+                    local_tag = self._local_tag_id if self._local_tag_id is not _NOT_FOUND else None
+                for c in usenet_clients:
+                    c_tags = list(c.get('tags', []))
+                    needed = []
+                    if local_tag is not None and local_tag not in c_tags:
+                        needed.append(local_tag)
+                    if usenet_tag not in c_tags:
+                        needed.append(usenet_tag)
+                    if not needed:
+                        continue
+                    new_tags = c_tags + needed
+                    c_name = c.get('name', c.get('implementation', '?'))
+                    updated = dict(c, tags=new_tags)
+                    if self._put(f'/api/v3/downloadclient/{c["id"]}', updated):
+                        logger.info(f"[radarr] Ensured usenet client '{c_name}' has usenet tag {usenet_tag}")
+                    else:
+                        logger.warning(f"[radarr] Failed to update tags on usenet client '{c_name}'")
+
+        # Fix indexer routing: tag usenet indexers with local+usenet tags,
         # and ensure torrent indexers are accessible for debrid-tagged content
-        indexers_fixed = self._fix_indexer_routing(tagged_client_ids, local_tag, self._blackhole_tag_id)
+        indexers_fixed = self._fix_indexer_routing(tagged_client_ids, local_tag, self._blackhole_tag_id, usenet_tag)
 
         # If torrent indexer tags were just corrected, re-search debrid-tagged
         # movies that previously failed (0 indexers were visible for them)
@@ -902,7 +1008,7 @@ class RadarrClient(_ArrClientBase):
             if tagged_client_names:
                 self._clear_stale_queue_items(tagged_client_names)
 
-    def _fix_indexer_routing(self, tagged_client_ids, local_tag, debrid_tag=None):
+    def _fix_indexer_routing(self, tagged_client_ids, local_tag, debrid_tag=None, usenet_tag=None):
         """Fix indexer routing after auto-tagging download clients.
 
         1. Clear downloadClientId overrides pointing to newly-tagged clients
@@ -920,19 +1026,31 @@ class RadarrClient(_ArrClientBase):
         for ix in indexers:
             ix_name = ix.get('name', '?')
             changed = False
+            torrent_fix_pending = False
             updated = dict(ix)
             if updated.get('downloadClientId', 0) in tagged_client_ids:
                 updated['downloadClientId'] = 0
                 changed = True
                 logger.debug(f"[radarr] Clearing downloadClientId on indexer '{ix_name}'")
+            # Tag usenet indexers with local tag (and usenet tag if available)
+            # so they only serve local/usenet-tagged movies, not debrid ones.
             if ix.get('protocol') == 'usenet' and local_tag is not None:
-                existing_tags = updated.get('tags', [])
+                existing_tags = list(updated.get('tags', []))
+                desired = [local_tag]
+                if usenet_tag is not None:
+                    desired.append(usenet_tag)
                 if not existing_tags:
-                    updated['tags'] = [local_tag]
+                    updated['tags'] = desired
                     changed = True
-                    logger.debug(f"[radarr] Tagging usenet indexer '{ix_name}' with local tag")
-                elif local_tag not in existing_tags:
-                    logger.info(f"[radarr] Usenet indexer '{ix_name}' has existing tags {existing_tags} — verify it excludes debrid movies")
+                    logger.debug(f"[radarr] Tagging usenet indexer '{ix_name}' with tags {desired}")
+                else:
+                    missing = [t for t in desired if t not in existing_tags]
+                    if missing:
+                        updated['tags'] = existing_tags + missing
+                        changed = True
+                        logger.debug(f"[radarr] Adding tags {missing} to usenet indexer '{ix_name}'")
+                    elif local_tag not in existing_tags:
+                        logger.info(f"[radarr] Usenet indexer '{ix_name}' has existing tags {existing_tags} — verify it excludes debrid movies")
             # Ensure torrent indexers are accessible for debrid-tagged content.
             # If a torrent indexer has tags but not the debrid tag, debrid-tagged
             # movies won't find it during search. Only auto-tag indexers whose
@@ -941,8 +1059,8 @@ class RadarrClient(_ArrClientBase):
             if ix.get('protocol') == 'torrent' and debrid_tag is not None:
                 existing_tags = updated.get('tags', [])
                 if existing_tags and debrid_tag not in existing_tags:
-                    if local_tag is not None and existing_tags == [local_tag]:
-                        updated['tags'] = [local_tag, debrid_tag]
+                    if local_tag is not None and set(existing_tags) <= {t for t in (local_tag, usenet_tag) if t is not None}:
+                        updated['tags'] = list(set(existing_tags) | {debrid_tag})
                         changed = True
                         torrent_fix_pending = True
                         logger.debug(f"[radarr] Adding debrid tag to torrent indexer '{ix_name}' so debrid-tagged content can use it")
@@ -1043,10 +1161,16 @@ class RadarrClient(_ArrClientBase):
         self._discover_routing_tags()
         return None if self._local_tag_id is _NOT_FOUND else self._local_tag_id
 
+    def _get_usenet_tag_id(self):
+        """Find the tag ID used exclusively by usenet download clients."""
+        self._discover_routing_tags()
+        return None if self._usenet_tag_id is _NOT_FOUND else self._usenet_tag_id
+
     def _ensure_debrid_routing(self, movie):
-        """Add debrid tag and remove local tag so downloads route through blackhole."""
+        """Add debrid tag and remove local/usenet tags so downloads route through blackhole."""
         debrid_tag = self._get_blackhole_tag_id()
         local_tag = self._get_local_tag_id()
+        usenet_tag = self._get_usenet_tag_id()
         if debrid_tag is None:
             logger.warning(f"[radarr] No blackhole tag configured — cannot route to debrid: {movie.get('title')}")
             return movie
@@ -1057,6 +1181,9 @@ class RadarrClient(_ArrClientBase):
             changed = True
         if local_tag is not None and local_tag in tags:
             tags.remove(local_tag)
+            changed = True
+        if usenet_tag is not None and usenet_tag in tags:
+            tags.remove(usenet_tag)
             changed = True
         if not changed:
             return movie
@@ -1069,28 +1196,39 @@ class RadarrClient(_ArrClientBase):
         return movie
 
     def _ensure_local_routing(self, movie):
-        """Add local tag and remove debrid tag so downloads route to local clients."""
+        """Route downloads to usenet (preferred) or any local client.
+
+        When a usenet tag exists, applies usenet tag so only usenet clients
+        and indexers handle the download.  Falls back to the local tag when
+        no usenet client is configured.
+        """
         debrid_tag = self._get_blackhole_tag_id()
         local_tag = self._get_local_tag_id()
-        if local_tag is None and debrid_tag is None:
+        usenet_tag = self._get_usenet_tag_id()
+        target_tag = usenet_tag if usenet_tag is not None else local_tag
+        if target_tag is None and debrid_tag is None:
             return movie
-        if local_tag is None:
-            logger.warning(f"[radarr] No local torrent client tag configured — cannot route to local: {movie.get('title')}")
+        if target_tag is None:
+            logger.warning(f"[radarr] No local/usenet client tag configured — cannot route to local: {movie.get('title')}")
             return movie
         tags = list(movie.get('tags', []))
         changed = False
         if debrid_tag is not None and debrid_tag in tags:
             tags.remove(debrid_tag)
             changed = True
-        if local_tag not in tags:
-            tags.append(local_tag)
+        if usenet_tag is not None and local_tag is not None and local_tag in tags:
+            tags.remove(local_tag)
+            changed = True
+        if target_tag not in tags:
+            tags.append(target_tag)
             changed = True
         if not changed:
             return movie
         movie_copy = dict(movie, tags=tags)
         result = self._put(f'/api/v3/movie/{movie["id"]}', movie_copy)
         if result:
-            logger.info(f"[radarr] Routed to local: {movie.get('title')}")
+            label = 'usenet' if usenet_tag is not None else 'local'
+            logger.info(f"[radarr] Routed to {label}: {movie.get('title')}")
             return result
         logger.warning(f"[radarr] Failed to update routing tags for: {movie.get('title')}")
         return movie
@@ -1263,7 +1401,8 @@ class RadarrClient(_ArrClientBase):
             if tag_id is not None:
                 add_tags.append(tag_id)
         elif prefer_debrid is False:
-            tag_id = self._get_local_tag_id()
+            usenet_id = self._get_usenet_tag_id()
+            tag_id = usenet_id if usenet_id is not None else self._get_local_tag_id()
             if tag_id is not None:
                 add_tags.append(tag_id)
         else:
@@ -1330,6 +1469,7 @@ class RadarrClient(_ArrClientBase):
         """
         self._blackhole_tag_id = None
         self._local_tag_id = None
+        self._usenet_tag_id = None
         self._discover_routing_tags()
 
     def clean_all_stale_queue_items(self, max_age_seconds=120):

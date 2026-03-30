@@ -451,6 +451,117 @@ class TestSonarrClient:
         sonarr._search_debrid_missing()
         assert mock_urlopen.call_count == 1  # only GET, no POST
 
+    # --- Usenet tag routing ---
+
+    @patch('urllib.request.urlopen')
+    def test_get_usenet_tag_id_found(self, mock_urlopen, sonarr):
+        """Usenet client + blackhole → usenet tag is created and cached."""
+        mock_urlopen.side_effect = [
+            # GET /downloadclient
+            _mock_urlopen([
+                {'implementation': 'Nzbget', 'enable': True, 'tags': [8], 'id': 1, 'name': 'NZBget'},
+                {'implementation': 'TorrentBlackhole', 'enable': True, 'tags': [7], 'id': 2},
+                {'implementation': 'QBittorrent', 'enable': True, 'tags': [8], 'id': 3, 'name': 'qBit'},
+            ]),
+            # GET /tag (usenet tag doesn't exist yet)
+            _mock_urlopen([{'label': 'debrid', 'id': 7}, {'label': 'standard', 'id': 8}]),
+            # POST /tag (create usenet)
+            _mock_urlopen({'label': 'usenet', 'id': 9}),
+            # PUT /downloadclient/1 (add usenet tag to NZBget)
+            _mock_urlopen({'id': 1, 'tags': [8, 9]}),
+            # GET /indexer
+            _mock_urlopen([]),
+        ]
+        assert sonarr._get_usenet_tag_id() == 9
+
+    @patch('urllib.request.urlopen')
+    def test_get_usenet_tag_id_no_usenet_client(self, mock_urlopen, sonarr):
+        """No usenet client → usenet tag is None."""
+        mock_urlopen.return_value = _mock_urlopen([
+            {'implementation': 'QBittorrent', 'enable': True, 'tags': [8], 'id': 1, 'name': 'qBit'},
+            {'implementation': 'TorrentBlackhole', 'enable': True, 'tags': [7], 'id': 2},
+        ])
+        assert sonarr._get_usenet_tag_id() is None
+
+    @patch('urllib.request.urlopen')
+    def test_ensure_local_routing_prefers_usenet(self, mock_urlopen, sonarr):
+        """When usenet tag exists, _ensure_local_routing applies usenet tag, not local."""
+        sonarr._blackhole_tag_id = 7
+        sonarr._local_tag_id = 8
+        sonarr._usenet_tag_id = 9
+        series = {'id': 5, 'title': 'My Show', 'tags': [7]}
+        mock_urlopen.return_value = _mock_urlopen(dict(series, tags=[9]))
+        result = sonarr._ensure_local_routing(series)
+        assert 9 in result['tags']
+        assert 7 not in result['tags']
+        assert 8 not in result['tags']
+
+    @patch('urllib.request.urlopen')
+    def test_ensure_local_routing_falls_back_to_local(self, mock_urlopen, sonarr):
+        """When no usenet tag exists, _ensure_local_routing uses local tag."""
+        sonarr._blackhole_tag_id = 7
+        sonarr._local_tag_id = 8
+        sonarr._usenet_tag_id = _NOT_FOUND
+        series = {'id': 5, 'title': 'My Show', 'tags': [7]}
+        mock_urlopen.return_value = _mock_urlopen(dict(series, tags=[8]))
+        result = sonarr._ensure_local_routing(series)
+        assert 8 in result['tags']
+        assert 7 not in result['tags']
+
+    @patch('urllib.request.urlopen')
+    def test_ensure_local_routing_removes_stale_local_tag(self, mock_urlopen, sonarr):
+        """When switching to usenet, stale local tag is removed from series."""
+        sonarr._blackhole_tag_id = 7
+        sonarr._local_tag_id = 8
+        sonarr._usenet_tag_id = 9
+        series = {'id': 5, 'title': 'My Show', 'tags': [8]}
+        mock_urlopen.return_value = _mock_urlopen(dict(series, tags=[9]))
+        result = sonarr._ensure_local_routing(series)
+        assert 9 in result['tags']
+        assert 8 not in result['tags']
+
+    @patch('urllib.request.urlopen')
+    def test_ensure_debrid_routing_removes_usenet_tag(self, mock_urlopen, sonarr):
+        """Switching to debrid strips usenet tag alongside local tag."""
+        sonarr._blackhole_tag_id = 7
+        sonarr._local_tag_id = 8
+        sonarr._usenet_tag_id = 9
+        series = {'id': 5, 'title': 'My Show', 'tags': [9]}
+        mock_urlopen.return_value = _mock_urlopen(dict(series, tags=[7]))
+        result = sonarr._ensure_debrid_routing(series)
+        assert 7 in result['tags']
+        assert 9 not in result['tags']
+
+    @patch('urllib.request.urlopen')
+    def test_fix_indexer_routing_usenet_indexer_gets_both_tags(self, mock_urlopen, sonarr):
+        """Usenet indexer gets both local and usenet tags."""
+        indexers = [
+            {'id': 1, 'name': 'NZBgeek', 'protocol': 'usenet', 'tags': [], 'downloadClientId': 0},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_urlopen(indexers),       # GET /indexer
+            _mock_urlopen(indexers[0]),     # PUT /indexer/1
+        ]
+        sonarr._fix_indexer_routing(set(), 8, debrid_tag=7, usenet_tag=9)
+        put_body = json.loads(mock_urlopen.call_args_list[1][0][0].data)
+        assert 8 in put_body['tags']
+        assert 9 in put_body['tags']
+
+    @patch('urllib.request.urlopen')
+    def test_fix_indexer_routing_usenet_indexer_adds_missing_usenet_tag(self, mock_urlopen, sonarr):
+        """Usenet indexer with only local tag gets usenet tag added."""
+        indexers = [
+            {'id': 1, 'name': 'NZBgeek', 'protocol': 'usenet', 'tags': [8], 'downloadClientId': 0},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_urlopen(indexers),
+            _mock_urlopen(indexers[0]),
+        ]
+        sonarr._fix_indexer_routing(set(), 8, debrid_tag=7, usenet_tag=9)
+        put_body = json.loads(mock_urlopen.call_args_list[1][0][0].data)
+        assert 8 in put_body['tags']
+        assert 9 in put_body['tags']
+
 
 # ---------------------------------------------------------------------------
 # Radarr client
@@ -694,6 +805,106 @@ class TestRadarrClient:
         mock_urlopen.return_value = _mock_urlopen(movies)
         radarr._search_debrid_missing()
         assert mock_urlopen.call_count == 1  # only GET, no POST
+
+    # --- Usenet tag routing ---
+
+    @patch('urllib.request.urlopen')
+    def test_get_usenet_tag_id_found(self, mock_urlopen, radarr):
+        """Usenet client + blackhole → usenet tag is created and cached."""
+        mock_urlopen.side_effect = [
+            _mock_urlopen([
+                {'implementation': 'Nzbget', 'enable': True, 'tags': [5], 'id': 1, 'name': 'NZBget'},
+                {'implementation': 'TorrentBlackhole', 'enable': True, 'tags': [3], 'id': 2},
+                {'implementation': 'QBittorrent', 'enable': True, 'tags': [5], 'id': 3, 'name': 'qBit'},
+            ]),
+            _mock_urlopen([{'label': 'debrid', 'id': 3}, {'label': 'standard', 'id': 5}]),
+            _mock_urlopen({'label': 'usenet', 'id': 6}),
+            _mock_urlopen({'id': 1, 'tags': [5, 6]}),
+            _mock_urlopen([]),
+        ]
+        assert radarr._get_usenet_tag_id() == 6
+
+    @patch('urllib.request.urlopen')
+    def test_get_usenet_tag_id_no_usenet_client(self, mock_urlopen, radarr):
+        """No usenet client → usenet tag is None."""
+        mock_urlopen.return_value = _mock_urlopen([
+            {'implementation': 'QBittorrent', 'enable': True, 'tags': [5], 'id': 1, 'name': 'qBit'},
+            {'implementation': 'TorrentBlackhole', 'enable': True, 'tags': [3], 'id': 2},
+        ])
+        assert radarr._get_usenet_tag_id() is None
+
+    @patch('urllib.request.urlopen')
+    def test_ensure_local_routing_prefers_usenet(self, mock_urlopen, radarr):
+        """When usenet tag exists, _ensure_local_routing applies usenet tag."""
+        radarr._blackhole_tag_id = 3
+        radarr._local_tag_id = 5
+        radarr._usenet_tag_id = 6
+        movie = {'id': 1, 'title': 'Inception', 'tags': [3]}
+        mock_urlopen.return_value = _mock_urlopen(dict(movie, tags=[6]))
+        result = radarr._ensure_local_routing(movie)
+        assert 6 in result['tags']
+        assert 3 not in result['tags']
+        assert 5 not in result['tags']
+
+    @patch('urllib.request.urlopen')
+    def test_ensure_local_routing_falls_back_to_local(self, mock_urlopen, radarr):
+        """When no usenet tag exists, _ensure_local_routing uses local tag."""
+        radarr._blackhole_tag_id = 3
+        radarr._local_tag_id = 5
+        radarr._usenet_tag_id = _NOT_FOUND
+        movie = {'id': 1, 'title': 'Inception', 'tags': [3]}
+        mock_urlopen.return_value = _mock_urlopen(dict(movie, tags=[5]))
+        result = radarr._ensure_local_routing(movie)
+        assert 5 in result['tags']
+        assert 3 not in result['tags']
+
+    def test_ensure_local_routing_noop_when_no_local_tag(self, radarr):
+        """When no local tag exists, don't remove debrid tag (would leave movie unroutable)."""
+        radarr._blackhole_tag_id = 3
+        radarr._local_tag_id = _NOT_FOUND
+        radarr._usenet_tag_id = _NOT_FOUND
+        movie = {'id': 1, 'title': 'Inception', 'tags': [3]}
+        result = radarr._ensure_local_routing(movie)
+        assert result is movie  # unchanged, no PUT
+
+    @patch('urllib.request.urlopen')
+    def test_ensure_local_routing_removes_stale_local_tag(self, mock_urlopen, radarr):
+        """When switching to usenet, stale local tag is removed from movie."""
+        radarr._blackhole_tag_id = 3
+        radarr._local_tag_id = 5
+        radarr._usenet_tag_id = 6
+        movie = {'id': 1, 'title': 'Inception', 'tags': [5]}
+        mock_urlopen.return_value = _mock_urlopen(dict(movie, tags=[6]))
+        result = radarr._ensure_local_routing(movie)
+        assert 6 in result['tags']
+        assert 5 not in result['tags']
+
+    @patch('urllib.request.urlopen')
+    def test_ensure_debrid_routing_removes_usenet_tag(self, mock_urlopen, radarr):
+        """Switching to debrid strips usenet tag."""
+        radarr._blackhole_tag_id = 3
+        radarr._local_tag_id = 5
+        radarr._usenet_tag_id = 6
+        movie = {'id': 1, 'title': 'Inception', 'tags': [6]}
+        mock_urlopen.return_value = _mock_urlopen(dict(movie, tags=[3]))
+        result = radarr._ensure_debrid_routing(movie)
+        assert 3 in result['tags']
+        assert 6 not in result['tags']
+
+    @patch('urllib.request.urlopen')
+    def test_fix_indexer_routing_usenet_indexer_gets_both_tags(self, mock_urlopen, radarr):
+        """Usenet indexer gets both local and usenet tags."""
+        indexers = [
+            {'id': 1, 'name': 'NZBgeek', 'protocol': 'usenet', 'tags': [], 'downloadClientId': 0},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_urlopen(indexers),
+            _mock_urlopen(indexers[0]),
+        ]
+        radarr._fix_indexer_routing(set(), 5, debrid_tag=3, usenet_tag=6)
+        put_body = json.loads(mock_urlopen.call_args_list[1][0][0].data)
+        assert 5 in put_body['tags']
+        assert 6 in put_body['tags']
 
 
 # ---------------------------------------------------------------------------

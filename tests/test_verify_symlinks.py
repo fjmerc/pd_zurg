@@ -123,3 +123,34 @@ class TestVerifySymlinks:
         result = verify_symlinks()
         assert result['items'] == 1
         assert not os.path.exists(link)
+
+    def test_keeps_symlink_when_target_base_differs_from_mount(self, symlink_env):
+        """Symlinks pointing to SYMLINK_TARGET_BASE are checked against the
+        rclone mount, not the target base path itself.  This handles the
+        common case where target_base (e.g. /mnt/debrid) is only mounted in
+        Radarr/Sonarr's container but not in pd_zurg's."""
+        from utils.scheduled_tasks import verify_symlinks
+        # Create real file on the rclone mount
+        mount_file = os.path.join(symlink_env['mount'], 'movies', 'F1', 'f1.mkv')
+        os.makedirs(os.path.dirname(mount_file), exist_ok=True)
+        with open(mount_file, 'w') as f:
+            f.write('data')
+
+        # Symlink points to target_base path (not directly resolvable here)
+        target_path = os.path.join(symlink_env['target_base'], 'movies', 'F1', 'f1.mkv')
+        link = _make_symlink(symlink_env['local_movies'], 'f1.mkv', target_path)
+
+        result = verify_symlinks()
+        assert result['items'] == 0
+        assert os.path.islink(link)  # kept — file exists on mount
+
+    def test_removes_symlink_when_mount_file_also_gone(self, symlink_env):
+        """When both the target_base path and the translated mount path are
+        gone, the symlink is removed (content truly expired)."""
+        from utils.scheduled_tasks import verify_symlinks
+        target_path = os.path.join(symlink_env['target_base'], 'movies', 'Expired', 'ep.mkv')
+        link = _make_symlink(symlink_env['local_movies'], 'ep.mkv', target_path)
+
+        result = verify_symlinks()
+        assert result['items'] == 1
+        assert not os.path.islink(link)

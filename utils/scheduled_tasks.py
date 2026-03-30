@@ -137,8 +137,10 @@ def verify_symlinks():
     symlink_target = os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', '').strip()
     # Check symlinks pointing to either the rclone mount or the symlink target base
     debrid_prefixes = [rclone_mount + '/']
+    symlink_target_real = ''
     if symlink_target:
-        debrid_prefixes.append(os.path.realpath(symlink_target) + '/')
+        symlink_target_real = os.path.realpath(symlink_target) + '/'
+        debrid_prefixes.append(symlink_target_real)
 
     scan_dirs = []
     if os.path.isdir(completed_dir):
@@ -171,7 +173,15 @@ def verify_symlinks():
                     continue
 
                 checked += 1
-                if not os.path.exists(fpath):
+                # When BLACKHOLE_SYMLINK_TARGET_BASE differs from the rclone
+                # mount, symlinks intentionally point to a path that only
+                # exists inside Radarr/Sonarr's container (e.g. /mnt/debrid).
+                # Translate the target to the local rclone mount path before
+                # checking existence.
+                check_target = target
+                if symlink_target_real and target.startswith(symlink_target_real):
+                    check_target = rclone_mount + '/' + target[len(symlink_target_real):]
+                if not os.path.exists(check_target):
                     # Target is gone (expired debrid content)
                     broken += 1
                     try:

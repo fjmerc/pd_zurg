@@ -53,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Title parsing for mid-string year**: Folder names like `Movie (2000) DC (1080p BluRay...)` now correctly extract the year before quality truncation, preventing mangled titles like `Movie (2000) DC (1080p` and duplicate library entries without posters.
 - **Symlink creation guard for empty local library**: Debrid symlink creation now skips when the local library scan found zero local content, preventing symlink pollution when network mounts (NFS/SMB) aren't propagated into the container.
 - **TMDB year-preference matching**: TMDB search now prefers results whose release year matches the folder year instead of blindly taking the first (most popular) result. Only activates when the top result is >2 years off (avoiding false corrections from season air years), limits scan to top 5 results, and skips year preference entirely on fallback-no-year retries. Fixes movies like "Cover Up (2025)" incorrectly showing the poster and metadata for the 1983 French film "La Crime".
+- **Verify symlinks deleting valid debrid symlinks**: `verify_symlinks` was checking symlink targets against `BLACKHOLE_SYMLINK_TARGET_BASE` (e.g. `/mnt/debrid`) which only exists inside Radarr/Sonarr's container, not pd_zurg's. Every debrid symlink appeared broken and was removed. Now translates target paths to the rclone mount before checking existence.
 
 ## Version [2.13.0] - 2026-03-26
 

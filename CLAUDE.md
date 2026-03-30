@@ -1,85 +1,53 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Project Overview
 
-pd_zurg is a Docker container that orchestrates three services into a unified media streaming solution:
-- **Zurg** — debrid WebDAV server (Real-Debrid, AllDebrid, TorBox)
-- **rclone** — FUSE mount for the WebDAV endpoint
-- **plex_debrid** — watchlist automation for Plex/Jellyfin
+pd_zurg is a Docker container orchestrating Zurg (debrid WebDAV), rclone (FUSE mount), and plex_debrid (watchlist automation) into a unified media streaming solution — no local storage needed.
 
-It enables streaming debrid libraries through media servers without local storage. Two workflow modes: watchlist automation (plex_debrid monitors Plex/Trakt/Overseerr) and blackhole mode (Sonarr/Radarr drop .torrent/.magnet files → debrid → symlinks).
+Two workflow modes: **watchlist** (plex_debrid monitors Plex/Trakt/Overseerr) and **blackhole** (Sonarr/Radarr drop .torrent/.magnet files → debrid → symlinks).
 
-## Build & Run
+## Commands
 
 ```bash
-# Build the Docker image
-docker build -t pd_zurg .
+docker build -t pd_zurg .                  # Build image
+docker-compose up -d                       # Run (configure .env from .env.example first)
 
-# Run with docker-compose (configure .env first from .env.example)
-docker-compose up -d
+.venv/bin/pytest                           # Run all tests (MUST use .venv — system Python lacks deps)
+.venv/bin/pytest tests/test_blackhole.py   # Single file
+.venv/bin/pytest tests/test_blackhole.py::test_name -v  # Single test
+.venv/bin/pytest --cov=utils --cov=base --cov-report=term-missing  # Coverage
+.venv/bin/pip install -r requirements-dev.txt  # Test deps (pytest, pytest-cov, pytest-mock)
 ```
 
-The Dockerfile is a multi-stage Alpine build: copies rclone binary from `rclone:1.73.2`, installs Python 3.11 with venv, and runs `main.py` as entrypoint. Targets amd64, arm64, arm/v7.
-
-## Testing
-
-A local `.venv` virtualenv has all dependencies installed. Always use `.venv/bin/pytest` (or `.venv/bin/python`) — the system Python does not have the project's packages.
-
-```bash
-# Run all tests
-.venv/bin/pytest
-
-# Run a single test file
-.venv/bin/pytest tests/test_blackhole.py
-
-# Run with coverage
-.venv/bin/pytest --cov=utils --cov=base --cov-report=term-missing
-
-# Run a specific test
-.venv/bin/pytest tests/test_blackhole.py::test_function_name -v
-```
-
-Test dependencies: `.venv/bin/pip install -r requirements-dev.txt` (pytest, pytest-cov, pytest-mock).
-
-Tests use three shared fixtures from `tests/conftest.py`: `tmp_dir` (temp directory), `env_vars` (set env vars via monkeypatch), `clean_env` (remove all pd_zurg env vars).
+Test fixtures in `tests/conftest.py`: `tmp_dir`, `env_vars` (monkeypatch), `clean_env` (strips all pd_zurg env vars).
 
 ## Architecture
 
-**Entry point:** `main.py` — signal handling (SIGTERM/SIGINT/SIGHUP/SIGCHLD), config validation, sequential service startup, blocking `signal.pause()` loop. Version is defined as a string literal in `main()`.
+- **Entry point:** `main.py` — signals (SIGTERM/SIGINT/SIGHUP/SIGCHLD), config validation, sequential service startup, blocking `signal.pause()` loop. Version is a string literal in `main()`.
+- **Config:** `base/__init__.py` — `Config` class loads env vars with Docker secrets fallback (`/run/secrets/`). Exports module-level globals used everywhere via `from base import *`. SIGHUP reload via `refresh_globals()`.
+- **Processes:** `utils/processes.py` — global registry with auto-restart (exponential backoff 5s→300s, max 5 retries, 1hr stability reset). LIFO shutdown with per-service timeouts.
+- **Services:** `zurg/`, `rclone/`, `plex_debrid_/` each have setup, update, and download modules.
+- **HTTP dashboard:** `utils/status_server.py` + `settings_api.py` + `settings_page.py` — raw `http.server.HTTPServer`, no framework.
+- **Library scanner:** `utils/library.py` — `LibraryScanner` with split `_scan_read()` (read-only enumeration) and `_scan_effects()` (preference enforcement, arr searches, symlinks). `refresh()` updates the cache after the read phase so the UI gets data in seconds, then runs effects in the background. Tries WebDAV PROPFIND to Zurg directly (`utils/webdav.py`) before falling back to FUSE mount scanning.
 
-**Configuration:** `base/__init__.py` — `Config` class loads env vars with Docker secrets fallback (`/run/secrets/`). Exports ~61 module-level variables used throughout via `from base import *`. Supports SIGHUP reload via `refresh_globals()`.
+## Gotchas and Key Patterns
 
-**Process lifecycle:** `utils/processes.py` — Global process registry with auto-restart (exponential backoff: 5s→300s, max 5 retries, 1hr stability reset). Ordered shutdown (LIFO) with per-service timeouts.
+- **Boolean configs are strings.** Always compare with `str(VAR).lower() == 'true'`, never use truthiness.
+- **`plex_debrid/` vs `plex_debrid_/`:** The former is a git submodule (upstream code). The latter (with trailing underscore) contains this project's wrappers. Don't confuse them.
+- **NEVER use raw `subprocess.Popen`.** Always use `utils/processes.py` wrappers so processes are registered for coordinated shutdown.
+- **ALWAYS use `utils/file_utils.py` atomic write** for file writes to prevent corruption.
+- **Sonarr and Radarr are parallel systems.** Any feature, fix, or API integration for one MUST have an equivalent for the other. This applies to arr client code, symlink creation, library scanning, pending state, download/remove endpoints, and rescan triggers. Always implement both in the same change.
+- **`arr_client.py` and `webdav.py` use urllib only** — no requests/httpx dependency. Keep it that way.
+- **Two separate symlink systems exist.** Blackhole completed-dir symlinks (`blackhole.py:_create_symlinks`) use original torrent folder names for arr import. Library debrid symlinks (`library.py:_create_debrid_symlinks`) use the arr's canonical folder name from API. Changes to symlink target construction, path translation, or verification must be checked against BOTH systems.
+- **Title matching uses a 3-level cascade: exact → `_norm_for_matching` → TMDB ID fallback.** Most real titles require the TMDB ID fallback (e.g., torrent "F1 The Movie" → Radarr "F1"). This cascade appears in 4 places that must stay symmetric: movie dir selection, show dir selection, movie rescan trigger, show rescan trigger. Never add or change a level in one without updating all four.
+- **`_normalize_title` ≠ `_norm_for_matching`.** `_normalize_title` is the TMDB cache key (lowercase + strip trailing year). `_norm_for_matching` is the arr fuzzy-match key (transliterate + strip punctuation + hyphens→spaces). They are NOT interchangeable. Changing either affects all downstream consumers.
+- **Symlink targets use `BLACKHOLE_SYMLINK_TARGET_BASE`** (exists in arr/Plex containers, NOT in pd_zurg). Verification code in `verify_symlinks` and `_cleanup_symlinks` must translate targets back to `BLACKHOLE_RCLONE_MOUNT` before checking existence. These are inverse operations — if creation logic changes, verification must change identically.
+- **`MEDIA_EXTENSIONS` is defined in three files** (`library.py`, `blackhole.py`, `scheduled_tasks.py`). These sets MUST be identical. A mismatch causes files visible to creation but invisible to verification or vice versa.
 
-**Service modules:**
-- `zurg/setup.py` + `zurg/update.py` — Zurg config patching (token, port, creds in YAML) and GitHub release auto-update
-- `rclone/rclone.py` — Generates rclone WebDAV config, manages FUSE mounts, supports dual-provider (RD + AD)
-- `plex_debrid_/setup.py` + `plex_debrid_/update.py` — plex_debrid settings.json initialization and auto-update
+## Commit Checklist
 
-**Key utilities (in `utils/`):**
-- `blackhole.py` (largest module) — Watches `/watch` folder, submits to debrid API, polls status, creates symlinks in `/completed` when content appears on rclone mount. Includes release name parsing and local library dedup.
-- `library.py` — Library scanner: walks debrid mount + local library, cross-references by title, builds season/episode data. Auto-creates symlinks for debrid-only content and triggers Sonarr/Radarr rescans. Clears resolved pending state.
-- `library_page.py` — HTML/JS template for the library browser UI. Sonarr-inspired episode list with season progress pills, expand/collapse, and formatted air dates.
-- `library_prefs.py` — Source preferences (prefer-local/prefer-debrid), pending transition tracking, and symlink replacement (local file → debrid symlink).
-- `arr_client.py` — Sonarr and Radarr API clients (urllib-based). Series/movie lookup, episode search, download triggers, rescan commands. Uses `SONARR_URL`/`RADARR_URL` + API keys.
-- `status_server.py` + `settings_api.py` + `settings_page.py` — Built-in HTTP dashboard (no framework) with process health, mount status, system metrics, and a browser-based settings editor with OAuth flows
-- `config_validator.py` — Startup validation of API keys, URLs, feature conflicts
-- `config_reload.py` — SIGHUP live reload handler
-- `ffprobe_monitor.py` — Detects and kills stuck ffprobe processes on debrid mounts
-- `notifications.py` — Apprise wrapper for 90+ notification services
-- `file_utils.py` — Atomic write (write-to-temp-then-rename)
-
-## Key Patterns
-
-- Config values are accessed as module-level globals imported from `base` (e.g., `from base import RDAPIKEY, ZURG`). Boolean configs are stored as strings and compared with `str(VAR).lower() == 'true'`.
-- Subprocess management uses `utils/processes.py` wrappers, not raw `subprocess.Popen`. All processes are registered for coordinated shutdown.
-- File writes use `utils/file_utils.py` atomic write to prevent corruption.
-- The status server is a raw `http.server.HTTPServer` — no Flask/Django.
-- `plex_debrid/` is a git submodule (upstream code); `plex_debrid_/` contains the project's setup/update wrappers.
-- **Sonarr and Radarr are parallel systems.** Any feature, fix, or API integration that applies to Sonarr (TV shows) almost certainly needs an equivalent for Radarr (movies). Always consider both when working on arr client code, symlink creation, library scanning, pending state, download/remove endpoints, and rescan triggers. If you implement something for one, implement it for the other in the same change.
+- **ALWAYS update `CHANGELOG.md`** before committing. Add entries under the current unreleased version for any user-visible additions, changes, or fixes. Use the existing format: `- **Bold title**: Description`.
 
 ## CI/CD
 
-GitHub Actions (`.github/workflows/docker-image.yml`): triggers on push to master, daily cron, and manual dispatch. Builds multi-platform Docker images, pushes to Docker Hub + GHCR, creates GitHub releases from CHANGELOG.md, and posts Discord announcements.
+GitHub Actions (`.github/workflows/docker-image.yml`): push to master, daily cron, manual dispatch. Multi-platform Docker images → Docker Hub + GHCR, GitHub releases from CHANGELOG.md, Discord announcements.

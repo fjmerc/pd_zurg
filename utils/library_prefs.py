@@ -253,7 +253,7 @@ def replace_local_with_symlinks(episodes, local_tv_path, rclone_mount, symlink_t
 def _cleanup_empty_dirs(deleted_file_path, stop_at):
     """Remove empty parent directories up to stop_at after file deletion."""
     parent = os.path.dirname(deleted_file_path)
-    while parent and parent != stop_at and parent.startswith(stop_at):
+    while parent and parent != stop_at and parent.startswith(stop_at + os.sep):
         try:
             if not os.listdir(parent):
                 os.rmdir(parent)

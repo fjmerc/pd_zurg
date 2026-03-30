@@ -1494,6 +1494,80 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
             return
 
+        if self.path == '/api/library/download-local-fallback':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 100_000:
+                    self._send_json_response(400, json.dumps({'error': 'Request body too large'}))
+                    return
+                body = self.rfile.read(content_length)
+                values = json.loads(body.decode('utf-8'))
+                if not isinstance(values, dict):
+                    self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
+                    return
+                title = values.get('title', '').strip()
+                media_type = values.get('type', 'show').strip()
+                tmdb_id = values.get('tmdb_id')
+                if tmdb_id is not None:
+                    try:
+                        tmdb_id = int(tmdb_id)
+                    except (ValueError, TypeError):
+                        tmdb_id = None
+
+                if not title:
+                    self._send_json_response(400, json.dumps({'error': 'title required'}))
+                    return
+                if media_type not in ('show', 'movie'):
+                    self._send_json_response(400, json.dumps({'error': 'type must be "show" or "movie"'}))
+                    return
+
+                from utils.arr_client import get_download_service
+                client, service_name = get_download_service(media_type)
+                if client is None:
+                    self._send_json_response(400, json.dumps({
+                        'error': 'No download service configured.'
+                    }))
+                    return
+
+                from utils.library import normalize_title
+                from utils.library_prefs import set_pending
+                norm = normalize_title(title)
+
+                if service_name == 'sonarr':
+                    season = values.get('season')
+                    episodes = values.get('episodes', [])
+                    if not isinstance(episodes, list):
+                        self._send_json_response(400, json.dumps({'error': 'episodes must be a list'}))
+                        return
+                    if season is None or not episodes:
+                        self._send_json_response(400, json.dumps({'error': 'season and episodes required'}))
+                        return
+                    try:
+                        season = int(season)
+                        episodes = [int(e) for e in episodes]
+                    except (ValueError, TypeError):
+                        self._send_json_response(400, json.dumps({'error': 'season and episodes must be integers'}))
+                        return
+                    result = client.ensure_and_search(title, tmdb_id, season, episodes, prefer_debrid=False)
+                    if result.get('status') in ('sent', 'pending'):
+                        pending_eps = [{'season': season, 'episode': e} for e in episodes]
+                        set_pending(norm, pending_eps, 'to-local-fallback')
+                elif service_name == 'radarr':
+                    result = client.ensure_and_search(title, tmdb_id, prefer_debrid=False)
+                    if result.get('status') in ('sent', 'pending'):
+                        set_pending(norm, [{'season': 0, 'episode': 0}], 'to-local-fallback')
+                else:
+                    result = {'status': 'error', 'message': f'Local fallback requires Sonarr/Radarr, got {service_name}'}
+
+                status_code = 200 if result.get('status') != 'error' else 400
+                self._send_json_response(status_code, json.dumps(result))
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception:
+                logger.exception("[download-local-fallback] Unexpected error")
+                self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
+            return
+
         if self.path == '/api/library/remove-local':
             try:
                 content_length = int(self.headers.get('Content-Length', 0))

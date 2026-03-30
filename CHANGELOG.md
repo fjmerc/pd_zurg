@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## Version [2.15.0] - 2026-03-30
+
+### Added
+
+- **Debrid search escalation**: Episodes stuck searching on debrid are automatically marked "debrid unavailable" after a configurable threshold (`DEBRID_UNAVAILABLE_THRESHOLD_DAYS`, default 3 days). UI shows a "Debrid N/A" badge and stops retrying.
+- **Local fallback download**: "Download Locally" button appears for debrid-unavailable episodes and movies. Routes downloads through local/usenet indexers while preserving the series prefer-debrid setting. Automatically re-routes the series back to debrid after the local download completes.
+
+### Fixed
+
+- **Pending state cleanup**: `set_pending` now writes a `created` timestamp, fixing a bug where housekeeping could never clean up stale pending entries (they accumulated forever).
+- **Pending state path traversal**: Fixed `_cleanup_empty_dirs` boundary check in `library_prefs.py` that could match sibling directories.
+
 ## Version [2.14.0] - 2026-03-29
 
 ### Added

@@ -585,8 +585,8 @@ class TestCreateDebridSymlinksMovies:
         # sample.mkv should NOT have a symlink
         assert not os.path.exists(os.path.join(local_movies, 'Movie (2025)', 'sample.mkv'))
 
-    def test_skips_non_debrid_movies(self, tmp_dir, monkeypatch):
-        """Movies with source='local' or 'both' are skipped."""
+    def test_skips_local_only_movies(self, tmp_dir, monkeypatch):
+        """Movies with source='local' are skipped."""
         mount = os.path.join(tmp_dir, 'mount')
         local_movies = os.path.join(tmp_dir, 'movies')
         os.makedirs(local_movies)
@@ -599,12 +599,36 @@ class TestCreateDebridSymlinksMovies:
 
         movies = [
             {'title': 'Movie A', 'year': 2025, 'source': 'local', 'type': 'movie', 'path': movie_dir},
-            {'title': 'Movie B', 'year': 2025, 'source': 'both', 'type': 'movie', 'path': movie_dir},
         ]
 
         scanner._create_debrid_symlinks([], movies, {})
 
         assert os.listdir(local_movies) == []
+
+    def test_both_source_creates_symlink_when_target_dir_empty(self, tmp_dir, monkeypatch):
+        """source='both' movies get a symlink if the target dir is empty.
+
+        Handles the case where the movie has a symlink in a wrong-named dir
+        (e.g. "F1 The Movie (2025)") but Radarr's dir ("F1 (2025)") is empty.
+        """
+        mount = os.path.join(tmp_dir, 'mount')
+        local_movies = os.path.join(tmp_dir, 'movies')
+        os.makedirs(local_movies)
+
+        movie_dir = os.path.join(mount, 'movies', 'Movie.2025')
+        _touch(os.path.join(movie_dir, 'movie.mkv'))
+
+        _setup_env(monkeypatch, mount, '/mnt/debrid')
+        scanner = _make_scanner(mount, None, monkeypatch, local_movies_path=local_movies)
+
+        movies = [
+            {'title': 'Movie B', 'year': 2025, 'source': 'both', 'type': 'movie', 'path': movie_dir},
+        ]
+
+        scanner._create_debrid_symlinks([], movies, {})
+
+        expected = os.path.join(local_movies, 'Movie B (2025)', 'movie.mkv')
+        assert os.path.islink(expected)
 
     def test_skips_existing_movie_symlink(self, tmp_dir, monkeypatch):
         """Doesn't overwrite existing movie symlinks."""

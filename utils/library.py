@@ -494,6 +494,8 @@ def _norm_for_matching(title):
     t = title.lower()
     # Transliterate unicode to ASCII (é → e, ñ → n, etc.)
     t = unicodedata.normalize('NFKD', t).encode('ascii', 'ignore').decode('ascii')
+    # Normalize common symbols to words before stripping
+    t = t.replace('&', ' and ')
     # Replace word-separating punctuation with spaces before stripping
     t = t.replace('-', ' ').replace('_', ' ')
     # Strip remaining punctuation but keep alphanumeric and spaces
@@ -1466,7 +1468,7 @@ class LibraryScanner:
         if self._local_movies_path:
             real_movies_root = os.path.realpath(self._local_movies_path)
             for movie in movies:
-                if movie.get('source') != 'debrid':
+                if movie.get('source') not in ('debrid', 'both'):
                     continue
                 mount_dir = movie.get('path')
                 if not mount_dir:

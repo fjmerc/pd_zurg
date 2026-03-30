@@ -485,15 +485,18 @@ def _normalize_title(title):
 def _norm_for_matching(title):
     """Normalize title for fuzzy matching across systems.
 
-    Transliterates unicode to ASCII (e.g., Amélie → Amelie), strips
-    punctuation but keeps digits (including years) for disambiguation.
+    Transliterates unicode to ASCII (e.g., Amélie → Amelie), replaces
+    hyphens/underscores with spaces (so "Cover-Up" matches "Cover Up"),
+    strips remaining punctuation but keeps digits for disambiguation.
     Titles like "(500) Days of Summer" and "500 Days of Summer" match,
     while "Flash (2014)" and "Flash (2023)" remain distinct.
     """
     t = title.lower()
     # Transliterate unicode to ASCII (é → e, ñ → n, etc.)
     t = unicodedata.normalize('NFKD', t).encode('ascii', 'ignore').decode('ascii')
-    # Strip punctuation but keep alphanumeric and spaces
+    # Replace word-separating punctuation with spaces before stripping
+    t = t.replace('-', ' ').replace('_', ' ')
+    # Strip remaining punctuation but keep alphanumeric and spaces
     t = re.sub(r'[^a-z0-9\s]', '', t)
     t = re.sub(r'\s+', ' ', t).strip()
     return t
@@ -1416,6 +1419,7 @@ class LibraryScanner:
                     info = {
                         'folder': os.path.basename(p) if p else '',
                         'id': s.get('id'),
+                        'tvdb_id': s.get('tvdbId'),
                         'client': client,
                     }
                     sonarr_map[t.lower()] = info
@@ -1436,6 +1440,7 @@ class LibraryScanner:
                     info = {
                         'folder': os.path.basename(p) if p else '',
                         'id': m.get('id'),
+                        'tmdb_id': m.get('tmdbId'),
                         'client': client,
                     }
                     radarr_map[t.lower()] = info
@@ -1445,6 +1450,17 @@ class LibraryScanner:
         except Exception as e:
             radarr_fetch_failed = True
             logger.warning(f"[library] Could not fetch Radarr library: {e}")
+
+        # Build TMDB ID → Radarr info map for fallback matching when torrent
+        # titles differ from TMDB titles (e.g. "F1 The Movie" vs "F1")
+        radarr_by_tmdb = {}
+        for info in radarr_map.values():
+            tid = info.get('tmdb_id')
+            if tid:
+                radarr_by_tmdb[tid] = info
+        # Load cached TMDB IDs so we can translate pd_zurg titles → TMDB IDs
+        from utils.tmdb import get_cached_tmdb_ids
+        cached_tmdb = get_cached_tmdb_ids().get('movies', {})
 
         # --- Movies ---
         if self._local_movies_path:
@@ -1459,6 +1475,11 @@ class LibraryScanner:
                 title = movie['title']
                 year = movie.get('year')
                 arr_info = radarr_map.get(title.lower()) or radarr_map_norm.get(_norm_for_matching(title))
+                # Fallback: match via TMDB ID when title differs
+                if not arr_info:
+                    tmdb_id = cached_tmdb.get(_normalize_title(title))
+                    if tmdb_id:
+                        arr_info = radarr_by_tmdb.get(tmdb_id)
                 if arr_info and arr_info['folder']:
                     movie_dir = arr_info['folder']
                 else:

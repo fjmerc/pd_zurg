@@ -564,6 +564,10 @@ class LibraryScanner:
         self._path_lock = threading.Lock()
         self._search_cooldown = {}  # {(norm, sn): timestamp} — suppress re-search for 1 hour
         self._alias_norms = {}     # {norm_title: set of alias norm_titles}
+        try:
+            self._debrid_unavailable_days = int(os.environ.get('DEBRID_UNAVAILABLE_THRESHOLD_DAYS', '3'))
+        except (ValueError, TypeError):
+            self._debrid_unavailable_days = 3
 
         if self._mount_path:
             logger.info(f"[library] Mount path: {self._mount_path}")
@@ -880,7 +884,9 @@ class LibraryScanner:
         self._enforce_preferences(shows, movies, preferences, path_index, local_path_index,
                                   force=force_enforce)
         self._search_for_debrid_copies(shows, movies, preferences)
+        self._recover_local_fallback_routing(shows, movies)
         self._clear_resolved_pending(shows, movies)
+        self._escalate_stuck_pending()
         self._create_debrid_symlinks(shows, movies, path_index)
 
     def scan(self, force_enforce=False):
@@ -1010,10 +1016,13 @@ class LibraryScanner:
         if not preferences:
             return
 
-        from utils.library_prefs import replace_local_with_symlinks, clear_pending
+        from utils.library_prefs import replace_local_with_symlinks, clear_pending, get_all_pending
 
         # Track titles processed this scan to avoid redundant operations
         enforced_this_scan = set()
+
+        # Load pending state to guard local-fallback episodes from symlink replacement
+        all_pending = get_all_pending()
 
         # Enforce prefer-debrid: replace local files with symlinks for source=both episodes
         if rclone_mount and symlink_base and self._local_tv_path:
@@ -1023,12 +1032,27 @@ class LibraryScanner:
                 if pref != 'prefer-debrid':
                     continue
 
+                # Guard: don't replace local files for episodes downloaded via local-fallback
+                fallback_guard = set()
+                fb_entry = all_pending.get(norm, {})
+                if not fb_entry:
+                    for alias in self._alias_norms.get(norm, ()):
+                        fb_entry = all_pending.get(alias, {})
+                        if fb_entry:
+                            break
+                if fb_entry.get('direction') == 'to-local-fallback':
+                    fallback_guard = {
+                        (e['season'], e['episode']) for e in fb_entry.get('episodes', [])
+                    }
+
                 to_switch = []
                 for sd in show.get('season_data', []):
                     for ep in sd.get('episodes', []):
                         if ep.get('source') != 'both':
                             continue
                         sn, en = sd['number'], ep['number']
+                        if (sn, en) in fallback_guard:
+                            continue  # local-fallback episode — don't replace
                         local_p = local_path_index.get((norm, sn, en))
                         debrid_p = path_index.get((norm, sn, en))
                         if local_p and debrid_p and not os.path.islink(local_p):
@@ -1169,7 +1193,7 @@ class LibraryScanner:
                 if self._get_pref(norm, preferences) != 'prefer-debrid':
                     continue
 
-                # Skip if title has a pending entry in to-debrid direction
+                # Skip if title has a pending entry in to-debrid or debrid-unavailable direction
                 pending_entry = pending.get(norm)
                 if not pending_entry:
                     for _pa in self._alias_norms.get(norm, ()):
@@ -1177,10 +1201,13 @@ class LibraryScanner:
                         if pending_entry:
                             break
                 pending_entry = pending_entry or {}
+                pe_dir = pending_entry.get('direction', '')
+                if pe_dir == 'debrid-unavailable':
+                    continue  # escalated — stop retrying
                 pending_keys = {
                     (e['season'], e['episode'])
                     for e in pending_entry.get('episodes', [])
-                } if pending_entry.get('direction') == 'to-debrid' else set()
+                } if pe_dir == 'to-debrid' else set()
 
                 # Find local-only episodes not already pending or on cooldown
                 by_season = {}
@@ -1264,7 +1291,10 @@ class LibraryScanner:
                         if pending_entry:
                             break
                 pending_entry = pending_entry or {}
-                if pending_entry.get('direction') == 'to-debrid':
+                pe_dir = pending_entry.get('direction', '')
+                if pe_dir == 'debrid-unavailable':
+                    continue  # escalated — stop retrying
+                if pe_dir == 'to-debrid':
                     continue  # already searching
                 if (norm, 0) in self._search_cooldown:
                     continue  # recently attempted
@@ -1350,7 +1380,9 @@ class LibraryScanner:
                 src = sources.get(key, '')
                 if direction == 'to-debrid' and src in ('debrid', 'both'):
                     resolved.append(ep)
-                elif direction == 'to-local' and src in ('local', 'both'):
+                elif direction == 'debrid-unavailable' and src in ('debrid', 'both'):
+                    resolved.append(ep)  # content appeared on debrid after all
+                elif direction in ('to-local', 'to-local-fallback') and src in ('local', 'both'):
                     resolved.append(ep)
                 elif not src and not title_exists:
                     # Title gone from library entirely — stale
@@ -1359,6 +1391,148 @@ class LibraryScanner:
                 logger.debug(f"[library] Clearing {len(resolved)} pending episode(s) for "
                              f"{norm_title!r} (direction={direction!r})")
                 clear_pending(norm_title, resolved)
+
+    def _escalate_stuck_pending(self):
+        """Mark to-debrid entries as debrid-unavailable after threshold days.
+
+        When debrid simply doesn't have the content, stop retrying and let
+        the user decide to download locally.
+        """
+        from utils.library_prefs import get_all_pending, mark_debrid_unavailable
+
+        pending = get_all_pending()
+        if not pending:
+            return
+
+        now = datetime.now(timezone.utc)
+        threshold_days = self._debrid_unavailable_days
+
+        for norm_title, entry in list(pending.items()):
+            if entry.get('direction') != 'to-debrid':
+                continue
+            created = entry.get('created')
+            if not created:
+                continue
+            try:
+                created_dt = datetime.fromisoformat(created)
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                age_days = (now - created_dt).days
+                if age_days >= threshold_days:
+                    mark_debrid_unavailable(norm_title)
+                    logger.info(
+                        f"[library] Marked {norm_title!r} as debrid-unavailable "
+                        f"after {age_days} days"
+                    )
+            except (ValueError, TypeError):
+                pass
+
+    def _recover_local_fallback_routing(self, shows, movies):
+        """Re-route series/movies back to debrid after local-fallback downloads complete.
+
+        When a local-fallback download completes (episode has source 'local'
+        or 'both'), clear the pending entry.  If ALL local-fallback episodes
+        for a title are resolved, re-route the series back to debrid.
+        """
+        from utils.library_prefs import get_all_pending, clear_pending
+
+        pending = get_all_pending()
+        if not pending:
+            return
+
+        # Build source map
+        source_map = {}
+        for show in shows:
+            norm = _normalize_title(show['title'])
+            ep_sources = {}
+            for sd in show.get('season_data', []):
+                for ep in sd.get('episodes', []):
+                    ep_sources[(sd['number'], ep['number'])] = ep.get('source', '')
+            source_map[norm] = ep_sources
+            for alias in self._alias_norms.get(norm, ()):
+                if alias not in source_map:
+                    source_map[alias] = ep_sources
+
+        for movie in movies:
+            norm = _normalize_title(movie['title'])
+            source_map[norm] = {(0, 0): movie.get('source', '')}
+            for alias in self._alias_norms.get(norm, ()):
+                if alias not in source_map:
+                    source_map[alias] = {(0, 0): movie.get('source', '')}
+
+        titles_to_reroute = []
+
+        for norm_title, entry in list(pending.items()):
+            if entry.get('direction') != 'to-local-fallback':
+                continue
+
+            sources = source_map.get(norm_title, {})
+            episodes = entry.get('episodes', [])
+            resolved = []
+
+            for ep in episodes:
+                key = (ep.get('season', 0), ep.get('episode', 0))
+                src = sources.get(key, '')
+                if src in ('local', 'both'):
+                    resolved.append(ep)
+
+            if resolved:
+                clear_pending(norm_title, resolved)
+                logger.info(
+                    f"[library] Local-fallback resolved for {norm_title!r}: "
+                    f"{len(resolved)} episode(s)"
+                )
+
+            # All episodes resolved → re-route back to debrid
+            if len(resolved) >= len(episodes):
+                titles_to_reroute.append(norm_title)
+
+        if not titles_to_reroute:
+            return
+
+        # Re-route resolved titles back to debrid
+        from utils.arr_client import get_download_service
+
+        try:
+            show_client, show_svc = get_download_service('show')
+        except Exception:
+            show_client, show_svc = None, None
+        try:
+            movie_client, movie_svc = get_download_service('movie')
+        except Exception:
+            movie_client, movie_svc = None, None
+
+        show_norms = {_normalize_title(s['title']): s for s in shows}
+        movie_norms = {_normalize_title(m['title']): m for m in movies}
+
+        for norm_title in titles_to_reroute:
+            # Try as show
+            show = show_norms.get(norm_title)
+            if show and show_client and show_svc == 'sonarr':
+                try:
+                    series = show_client.find_series_in_library(title=show['title'])
+                    if series:
+                        show_client._ensure_debrid_routing(series)
+                        logger.info(
+                            f"[library] Re-routed {show['title']!r} back to debrid "
+                            f"after local-fallback completed"
+                        )
+                except Exception as e:
+                    logger.warning(f"[library] Failed to re-route {norm_title!r}: {e}")
+
+            # Try as movie
+            movie = movie_norms.get(norm_title)
+            if movie and movie_client and movie_svc == 'radarr':
+                try:
+                    radarr_movie = movie_client.find_movie_in_library(title=movie['title'])
+                    if radarr_movie:
+                        movie_client._ensure_debrid_routing(radarr_movie)
+                        logger.info(
+                            f"[library] Re-routed {movie['title']!r} back to debrid "
+                            f"after local-fallback completed"
+                        )
+                except Exception as e:
+                    logger.warning(f"[library] Failed to re-route movie {norm_title!r}: {e}")
 
     def _create_debrid_symlinks(self, shows, movies, path_index):
         """Create local library symlinks for debrid-only content.

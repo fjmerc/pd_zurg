@@ -296,23 +296,27 @@ def housekeeping():
     """Clean stale state: pending badges, old retry metadata, empty dirs."""
     cleaned = 0
 
-    # 1. Clean stale pending state (older than 7 days)
+    # 1. Clean stale pending state
+    # Normal entries (to-debrid, to-local, to-local-fallback): 7 days
+    # debrid-unavailable entries: 30 days (persist until user acts or expires)
     try:
         from utils.library_prefs import get_all_pending, clear_pending
         pending = get_all_pending()
         stale_titles = []
         for title, data in pending.items():
             created = data.get('created')
-            if created:
-                try:
-                    created_dt = datetime.fromisoformat(created)
-                    age_days = (datetime.now(timezone.utc) - created_dt.replace(
-                        tzinfo=timezone.utc if created_dt.tzinfo is None else created_dt.tzinfo
-                    )).days
-                    if age_days > 7:
-                        stale_titles.append(title)
-                except (ValueError, TypeError):
-                    pass
+            if not created:
+                continue
+            try:
+                created_dt = datetime.fromisoformat(created)
+                age_days = (datetime.now(timezone.utc) - created_dt.replace(
+                    tzinfo=timezone.utc if created_dt.tzinfo is None else created_dt.tzinfo
+                )).days
+                max_age = 30 if data.get('direction') == 'debrid-unavailable' else 7
+                if age_days > max_age:
+                    stale_titles.append(title)
+            except (ValueError, TypeError):
+                pass
         for title in stale_titles:
             clear_pending(title)
             cleaned += 1

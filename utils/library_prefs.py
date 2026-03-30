@@ -8,6 +8,7 @@ with path-traversal protection.
 import json
 import os
 import threading
+from datetime import datetime, timezone
 
 from utils.file_utils import atomic_write
 from utils.logger import get_logger
@@ -88,7 +89,7 @@ def _save_pending(pending):
         json.dump(pending, f, indent=2)
 
 
-_VALID_DIRECTIONS = {'to-debrid', 'to-local'}
+_VALID_DIRECTIONS = {'to-debrid', 'to-local', 'to-local-fallback'}
 
 
 def set_pending(normalized_title, episodes, direction='to-debrid'):
@@ -97,21 +98,32 @@ def set_pending(normalized_title, episodes, direction='to-debrid'):
     Args:
         normalized_title: Normalized show/movie title
         episodes: list of {season, episode} dicts
-        direction: 'to-debrid' or 'to-local'
+        direction: 'to-debrid', 'to-local', 'to-local-fallback', or 'debrid-unavailable'
     """
     if direction not in _VALID_DIRECTIONS:
         raise ValueError(f"Invalid direction: {direction!r}")
     with _pending_lock:
         pending = _load_pending()
         entry = pending.get(normalized_title, {})
-        entry['direction'] = direction
-        existing = entry.get('episodes', [])
-        existing_keys = {(e['season'], e['episode']) for e in existing}
-        for ep in episodes:
-            key = (ep['season'], ep['episode'])
-            if key not in existing_keys:
-                existing.append(ep)
-        entry['episodes'] = existing
+        if entry.get('direction') != direction:
+            # Direction change: start fresh to avoid merging episodes
+            # from incompatible states
+            entry = {
+                'direction': direction,
+                'created': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+                'episodes': list(episodes),
+            }
+        else:
+            # Same direction: merge new episodes into existing list
+            if 'created' not in entry:
+                entry['created'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
+            existing = entry.get('episodes', [])
+            existing_keys = {(e['season'], e['episode']) for e in existing}
+            for ep in episodes:
+                key = (ep['season'], ep['episode'])
+                if key not in existing_keys:
+                    existing.append(ep)
+            entry['episodes'] = existing
         pending[normalized_title] = entry
         _save_pending(pending)
 
@@ -143,6 +155,24 @@ def get_all_pending():
     """Return all pending transitions."""
     with _pending_lock:
         return _load_pending()
+
+
+def mark_debrid_unavailable(normalized_title):
+    """Mark a to-debrid entry as debrid-unavailable. Thread-safe.
+
+    Stops automatic search retries.  Preserves episode list and created
+    timestamp so the UI can show how long it was searching.
+    Only acts on entries with direction 'to-debrid'.
+    """
+    with _pending_lock:
+        pending = _load_pending()
+        entry = pending.get(normalized_title)
+        if not entry or entry.get('direction') != 'to-debrid':
+            return
+        entry['direction'] = 'debrid-unavailable'
+        entry['marked_unavailable'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
+        pending[normalized_title] = entry
+        _save_pending(pending)
 
 
 # ---------------------------------------------------------------------------

@@ -112,11 +112,11 @@ a:hover{text-decoration:underline}
 /* Source badges */
 .badge-local{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#3fb9500f;color:var(--green);border:1px solid #3fb95033}
 .badge-debrid{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#58a6ff0f;color:var(--blue);border:1px solid #58a6ff33}
-.badge-local .badge-full,.badge-debrid .badge-full,.badge-missing .badge-full,.badge-pending .badge-full,.badge-migrating .badge-full{display:inline}
-.badge-local .badge-mini,.badge-debrid .badge-mini,.badge-missing .badge-mini,.badge-pending .badge-mini,.badge-migrating .badge-mini{display:none}
+.badge-local .badge-full,.badge-debrid .badge-full,.badge-missing .badge-full,.badge-pending .badge-full,.badge-migrating .badge-full,.badge-unavailable .badge-full,.badge-fallback .badge-full{display:inline}
+.badge-local .badge-mini,.badge-debrid .badge-mini,.badge-missing .badge-mini,.badge-pending .badge-mini,.badge-migrating .badge-mini,.badge-unavailable .badge-mini,.badge-fallback .badge-mini{display:none}
 @media(max-width:640px){
-  .badge-local .badge-full,.badge-debrid .badge-full,.badge-missing .badge-full,.badge-pending .badge-full,.badge-migrating .badge-full{display:none}
-  .badge-local .badge-mini,.badge-debrid .badge-mini,.badge-missing .badge-mini,.badge-pending .badge-mini,.badge-migrating .badge-mini{display:inline}
+  .badge-local .badge-full,.badge-debrid .badge-full,.badge-missing .badge-full,.badge-pending .badge-full,.badge-migrating .badge-full,.badge-unavailable .badge-full,.badge-fallback .badge-full{display:none}
+  .badge-local .badge-mini,.badge-debrid .badge-mini,.badge-missing .badge-mini,.badge-pending .badge-mini,.badge-migrating .badge-mini,.badge-unavailable .badge-mini,.badge-fallback .badge-mini{display:inline}
   .ep-actions .btn-action{font-size:.68em;padding:2px 5px}
 }
 [data-theme="light"] .badge-local{background:#1a7f371a;border-color:#1a7f3740}
@@ -225,6 +225,10 @@ a:hover{text-decoration:underline}
 [data-theme="light"] .badge-pending::before{background:#bc4c00}
 .badge-migrating{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:var(--text3);border:1px solid var(--border2);margin-left:4px}
 [data-theme="light"] .badge-migrating{color:var(--text3);border-color:var(--border2)}
+.badge-unavailable{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:var(--red);border:1px solid #f8514933;background:#f851490f}
+[data-theme="light"] .badge-unavailable{background:#cf222e1a;border-color:#cf222e40;color:#cf222e}
+.badge-fallback{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:var(--orange);border:1px solid #db6d2833;background:#db6d280f}
+[data-theme="light"] .badge-fallback{background:#bc4c001a;border-color:#bc4c0040;color:#bc4c00}
 
 /* Season progress pill (Sonarr-style) */
 .season-progress-pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;margin-left:8px}
@@ -549,6 +553,11 @@ function buildCard(item, index) {
   if (_pending[pnk]) {
     var pe = _pending[pnk];
     var dir = pe.direction || '';
+    if (dir === 'debrid-unavailable') {
+      pendingBadge = '<span class="badge-unavailable">Debrid N/A</span>';
+    } else if (dir === 'to-local-fallback') {
+      pendingBadge = '<span class="badge-fallback">Downloading Locally</span>';
+    } else {
     var hasMissingPending = false;
     if (item.type === 'movie') {
       // Movie: searching if current source doesn't include the target
@@ -571,6 +580,7 @@ function buildCard(item, index) {
       var upDir = dir === 'to-local' ? 'Local' : 'Debrid';
       pendingBadge = '<span class="badge-migrating">Migrating to ' + upDir + '</span>';
     }
+    } // end else (not debrid-unavailable/local-fallback)
   }
 
   var badges = buildBadges(item.source) + pendingBadge;
@@ -1041,7 +1051,16 @@ function _renderMovieDetail(movie, meta) {
   html += '<h2>' + esc(movie.title);
   if (movie.year) html += ' <span class="card-year">(' + esc(String(movie.year)) + ')</span>';
   html += '</h2>';
-  html += '<div class="card-badges">' + buildBadges(movie.source) + '</div>';
+  var moviePnk = normTitle(movie.title);
+  var moviePe = _pending[moviePnk];
+  var moviePeDir = moviePe ? (moviePe.direction || '') : '';
+  if (moviePeDir === 'debrid-unavailable') {
+    html += '<div class="card-badges">' + buildBadges(movie.source) + ' <span class="badge-unavailable">Debrid N/A</span></div>';
+  } else if (moviePeDir === 'to-local-fallback') {
+    html += '<div class="card-badges">' + buildBadges(movie.source) + ' <span class="badge-fallback">Downloading Locally</span></div>';
+  } else {
+    html += '<div class="card-badges">' + buildBadges(movie.source) + '</div>';
+  }
   if (meta) {
     var runtimeParts = [];
     if (meta.runtime) runtimeParts.push(esc(String(meta.runtime)) + ' min');
@@ -1066,7 +1085,11 @@ function _renderMovieDetail(movie, meta) {
     html += '</div>';
     html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px;line-height:1.5"><strong style="color:var(--text2)">Prefer Local</strong> &mdash; switches the movie to a local copy.<br><strong style="color:var(--text2)">Prefer Debrid</strong> &mdash; removes the local copy and streams from debrid.</div>';
     html += '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">';
-    if (movie.source === 'debrid') {
+    if (moviePeDir === 'debrid-unavailable') {
+      html += '<button class="btn-action" onclick="_confirmBtn(this,function(){downloadMovieLocalFallback()})">Download Locally</button>';
+    } else if (moviePeDir === 'to-local-fallback') {
+      html += '<button class="btn-action" disabled>Downloading\u2026</button>';
+    } else if (movie.source === 'debrid') {
       var movieDlLabel = _downloadServices.movie === 'overseerr' ? 'Request in Overseerr' : 'Switch to Local';
       var movieDebridPref = _downloadServices.movie === 'overseerr' ? undefined : false;
       html += '<button class="btn-action" onclick="_confirmBtn(this,function(){downloadMovie(' + (movieDebridPref === undefined ? '' : movieDebridPref) + ')})">' + movieDlLabel + '</button>';
@@ -1189,20 +1212,29 @@ function _renderSeasonEpisodes(season, si) {
     html += '</td>';
     html += '<td class="ep-source">';
     var isPending = false;
+    var isUnavailable = false;
+    var isLocalFallback = false;
     if (_detailItem) {
       var pnk = normTitle(_detailItem.title);
       var pendingEntry = _pending[pnk];
       if (pendingEntry && pendingEntry.episodes) {
+        var peDir = pendingEntry.direction || '';
         for (var pei = 0; pei < pendingEntry.episodes.length; pei++) {
           if (pendingEntry.episodes[pei].season === season.number && pendingEntry.episodes[pei].episode === ep.number) {
-            isPending = true;
+            if (peDir === 'debrid-unavailable') { isUnavailable = true; }
+            else if (peDir === 'to-local-fallback') { isLocalFallback = true; }
+            else { isPending = true; }
             break;
           }
         }
       }
     }
     var isMigrating = isPending && !isMissing && !!ep.source;
-    if (isMigrating) {
+    if (isUnavailable) {
+      html += '<span class="badge-unavailable"><span class="badge-full">Debrid N/A</span><span class="badge-mini">\u2715</span></span>';
+    } else if (isLocalFallback) {
+      html += '<span class="badge-fallback"><span class="badge-full">Local Fallback</span><span class="badge-mini">\u21B3</span></span>';
+    } else if (isMigrating) {
       // Episode is available — show source badge + subtle upgrade indicator
       html += buildBadges(ep.source);
       html += '<span class="badge-migrating"><span class="badge-full">Migrating</span><span class="badge-mini">\u2197</span></span>';
@@ -1225,7 +1257,11 @@ function _renderSeasonEpisodes(season, si) {
     }
     html += '</td>';
     html += '<td class="ep-actions">';
-    if (isPending) {
+    if (isUnavailable) {
+      html += '<button class="btn-action" aria-label="Download ' + epLabel + ' locally" onclick="_confirmBtn(this,function(){downloadLocalFallback(' + season.number + ',' + ep.number + ')})">Download Locally</button>';
+    } else if (isLocalFallback) {
+      html += '<button class="btn-action" disabled>Downloading\u2026</button>';
+    } else if (isPending) {
       // Searching: disabled placeholder; Migrating: no button (already in-flight)
       if (!isMigrating) html += '<button class="btn-action" disabled>\u2026</button>';
     } else if (_downloadServices.show && _downloadServices.show !== 'overseerr') {
@@ -1752,6 +1788,73 @@ function downloadEp(season, episode, preferDebrid) {
       _setPending(itemTitle, [{season: season, episode: episode}], dir);
       _scheduleRefresh(1000);
     }
+  });
+}
+
+function downloadLocalFallback(season, episode) {
+  if (!_detailItem) return;
+  var itemTitle = _detailItem.title;
+  var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
+  var payload = {
+    title: itemTitle, type: _detailItem.type, tmdb_id: tmdbId,
+    season: season, episodes: [episode]
+  };
+  if (_actionInFlight) return;
+  _actionInFlight = true;
+  _setActionsDisabled(true);
+  _showMsgHtml('<span class="scanning-dot"></span>Sending local fallback search...');
+  fetch('/api/library/download-local-fallback', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  }).then(function(r) {
+    return r.json().then(function(d) { return {ok: r.ok, d: d}; });
+  }).then(function(res) {
+    var d = res.d;
+    var errMsg = (!res.ok || d.status === 'error') ? (d.error || d.message || 'Unknown error') : null;
+    if (errMsg) { _showMsg('Error: ' + errMsg, 'error'); }
+    else {
+      _showMsg(d.message || 'Local search triggered.', 'success');
+      _setPending(itemTitle, [{season: season, episode: episode}], 'to-local-fallback');
+      _scheduleRefresh(1000);
+    }
+  }).catch(function(e) {
+    _showMsg('Network error: ' + e, 'error');
+  }).finally(function() {
+    _actionInFlight = false;
+    _setActionsDisabled(false);
+  });
+}
+
+function downloadMovieLocalFallback() {
+  if (!_detailItem || _detailItem.type !== 'movie') return;
+  var itemTitle = _detailItem.title;
+  var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
+  var payload = { title: itemTitle, type: 'movie', tmdb_id: tmdbId };
+  if (_actionInFlight) return;
+  _actionInFlight = true;
+  _setActionsDisabled(true);
+  _showMsgHtml('<span class="scanning-dot"></span>Sending local fallback search...');
+  fetch('/api/library/download-local-fallback', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  }).then(function(r) {
+    return r.json().then(function(d) { return {ok: r.ok, d: d}; });
+  }).then(function(res) {
+    var d = res.d;
+    var errMsg = (!res.ok || d.status === 'error') ? (d.error || d.message || 'Unknown error') : null;
+    if (errMsg) { _showMsg('Error: ' + errMsg, 'error'); }
+    else {
+      _showMsg(d.message || 'Local search triggered.', 'success');
+      _setPending(itemTitle, [{season: 0, episode: 0}], 'to-local-fallback');
+      _scheduleRefresh(1000);
+    }
+  }).catch(function(e) {
+    _showMsg('Network error: ' + e, 'error');
+  }).finally(function() {
+    _actionInFlight = false;
+    _setActionsDisabled(false);
   });
 }
 

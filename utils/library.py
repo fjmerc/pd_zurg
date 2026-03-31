@@ -13,6 +13,7 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import quote as urllib_quote
 from utils.logger import get_logger
+from utils.quality_parser import parse_quality
 
 logger = get_logger()
 
@@ -275,7 +276,11 @@ def _collect_episodes(folder_path):
                                 else:
                                     # File in Season dir but no S##E## in name — assign sequential
                                     key = (season_num, len(episodes) + 1000)
-                                episodes[key] = {'file': f.name, 'path': f.path}
+                                try:
+                                    sz = f.stat(follow_symlinks=False).st_size
+                                except OSError:
+                                    sz = 0
+                                episodes[key] = {'file': f.name, 'path': f.path, 'size_bytes': sz}
                     except (PermissionError, OSError):
                         pass
                 elif entry.is_file(follow_symlinks=False):
@@ -284,7 +289,11 @@ def _collect_episodes(folder_path):
                         ep_match = _EPISODE_ID_PATTERN.search(entry.name)
                         if ep_match:
                             key = (int(ep_match.group(1)), int(ep_match.group(2)))
-                            episodes[key] = {'file': entry.name, 'path': entry.path}
+                            try:
+                                sz = entry.stat(follow_symlinks=False).st_size
+                            except OSError:
+                                sz = 0
+                            episodes[key] = {'file': entry.name, 'path': entry.path, 'size_bytes': sz}
     except (PermissionError, OSError, FileNotFoundError):
         pass
     return episodes
@@ -303,11 +312,14 @@ def _build_season_data(episodes_dict, default_source='debrid'):
     for (season_num, ep_num), info in episodes_dict.items():
         if season_num not in by_season:
             by_season[season_num] = []
-        by_season[season_num].append({
+        ep = {
             'number': ep_num,
             'file': info['file'],
             'source': info.get('source', default_source),
-        })
+        }
+        ep['quality'] = parse_quality(info['file'])
+        ep['size_bytes'] = info.get('size_bytes', 0)
+        by_season[season_num].append(ep)
 
     result = []
     for snum in sorted(by_season.keys()):
@@ -318,6 +330,63 @@ def _build_season_data(episodes_dict, default_source='debrid'):
             'episodes': eps,
         })
     return result
+
+
+def _get_movie_quality_from_folder(folder_path):
+    """Find the primary media file in a movie folder and parse its quality + size.
+
+    Returns (quality_dict, size_bytes) for the largest media file found.
+    """
+    best_file = None
+    best_size = 0
+    try:
+        with os.scandir(folder_path) as it:
+            for entry in it:
+                if not entry.is_file(follow_symlinks=True):
+                    continue
+                ext = os.path.splitext(entry.name)[1].lower()
+                if ext not in MEDIA_EXTENSIONS:
+                    continue
+                try:
+                    sz = entry.stat(follow_symlinks=True).st_size
+                except OSError:
+                    sz = 0
+                if sz > best_size or best_file is None:
+                    best_file = entry.name
+                    best_size = sz
+    except (PermissionError, OSError):
+        pass
+    if best_file:
+        return parse_quality(best_file), best_size
+    return {'resolution': None, 'source': None, 'codec': None, 'hdr': None, 'label': None}, 0
+
+
+def _get_movie_quality_from_webdav(contents):
+    """Find the primary media file from WebDAV folder contents and parse its quality + size.
+
+    Returns (quality_dict, size_bytes) for the largest media file found.
+    Also checks subdirectories since some movie torrents nest the file.
+    """
+    best_file = None
+    best_size = 0
+    for fname, fsize, _fpath in contents.get('files', []):
+        ext = os.path.splitext(fname)[1].lower()
+        if ext not in MEDIA_EXTENSIONS:
+            continue
+        if fsize > best_size or best_file is None:
+            best_file = fname
+            best_size = fsize
+    for _subdir, files in contents.get('season_files', {}).items():
+        for fname, fsize, _fpath in files:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in MEDIA_EXTENSIONS:
+                continue
+            if fsize > best_size or best_file is None:
+                best_file = fname
+                best_size = fsize
+    if best_file:
+        return parse_quality(best_file), best_size
+    return {'resolution': None, 'source': None, 'codec': None, 'hdr': None, 'label': None}, 0
 
 
 def _count_show_content(show_path):
@@ -1973,6 +2042,7 @@ class LibraryScanner:
         # Convert aggregated groups to item lists
         movies = []
         for g in movie_groups.values():
+            mq, msz = _get_movie_quality_from_folder(g['path'])
             movies.append({
                 'title': g['title'],
                 'year': g['year'],
@@ -1981,6 +2051,8 @@ class LibraryScanner:
                 'seasons': 0,
                 'episodes': 0,
                 'path': g['path'],
+                'quality': mq,
+                'size_bytes': msz,
             })
 
         shows = []
@@ -2160,6 +2232,7 @@ class LibraryScanner:
                             'title': title,
                             'year': year,
                             'path': os.path.join(self._mount_path, category, folder_name),
+                            '_contents': contents,
                         }
                     elif year and not movie_groups[key]['year']:
                         movie_groups[key]['year'] = year
@@ -2168,6 +2241,7 @@ class LibraryScanner:
         # Convert to output format (same as _scan_mount)
         movies = []
         for g in movie_groups.values():
+            mq, msz = _get_movie_quality_from_webdav(g.get('_contents', {}))
             movies.append({
                 'title': g['title'],
                 'year': g['year'],
@@ -2176,6 +2250,8 @@ class LibraryScanner:
                 'seasons': 0,
                 'episodes': 0,
                 'path': g['path'],
+                'quality': mq,
+                'size_bytes': msz,
             })
 
         shows = []
@@ -2219,7 +2295,7 @@ class LibraryScanner:
             if not season_match:
                 continue
             season_num = int(season_match.group(1))
-            for fname, _size, fpath in files:
+            for fname, fsize, fpath in files:
                 ext = os.path.splitext(fname)[1].lower()
                 if ext not in MEDIA_EXTENSIONS:
                     continue
@@ -2228,16 +2304,16 @@ class LibraryScanner:
                     key = (int(ep_match.group(1)), int(ep_match.group(2)))
                 else:
                     key = (season_num, len(episodes) + 1000)
-                episodes[key] = {'file': fname, 'path': fpath}
+                episodes[key] = {'file': fname, 'path': fpath, 'size_bytes': fsize}
 
         # Check flat files in folder root
-        for fname, _size, fpath in contents.get('files', []):
+        for fname, fsize, fpath in contents.get('files', []):
             ext = os.path.splitext(fname)[1].lower()
             if ext in MEDIA_EXTENSIONS:
                 ep_match = _EPISODE_ID_PATTERN.search(fname)
                 if ep_match:
                     key = (int(ep_match.group(1)), int(ep_match.group(2)))
-                    episodes[key] = {'file': fname, 'path': fpath}
+                    episodes[key] = {'file': fname, 'path': fpath, 'size_bytes': fsize}
 
         return episodes
 
@@ -2268,6 +2344,7 @@ class LibraryScanner:
                     title, year = _parse_folder_name(entry.name)
                     if not title:
                         continue
+                    mq, msz = _get_movie_quality_from_folder(entry.path)
                     items.append({
                         'title': title,
                         'year': year,
@@ -2276,6 +2353,8 @@ class LibraryScanner:
                         'seasons': 0,
                         'episodes': 0,
                         'path': entry.path,
+                        'quality': mq,
+                        'size_bytes': msz,
                     })
         except (PermissionError, OSError) as e:
             logger.warning(f"[library] Cannot scan local movies: {e}")

@@ -134,6 +134,26 @@ a:hover{text-decoration:underline}
 [data-theme="light"] .badge-local{background:#1a7f371a;border-color:#1a7f3740}
 [data-theme="light"] .badge-debrid{background:#0969da1a;border-color:#0969da40}
 
+/* Quality badges */
+.badge-quality{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600}
+.badge-quality-2160p{background:#a855f70f;color:#a855f7;border:1px solid #a855f733}
+.badge-quality-1080p{background:#58a6ff0f;color:var(--blue);border:1px solid #58a6ff33}
+.badge-quality-720p{background:#db6d280f;color:var(--orange);border:1px solid #db6d2833}
+.badge-quality-480p,.badge-quality-unknown{background:var(--border);color:var(--text3);border:1px solid var(--border2)}
+[data-theme="light"] .badge-quality-2160p{background:#a855f71a;border-color:#a855f740}
+[data-theme="light"] .badge-quality-1080p{background:#0969da1a;border-color:#0969da40}
+[data-theme="light"] .badge-quality-720p{background:#bc4c001a;border-color:#bc4c0040}
+.ep-quality{display:flex;align-items:center;gap:6px;flex-wrap:nowrap}
+.ep-size{font-size:.78em;color:var(--text3);white-space:nowrap}
+.quality-corner{position:absolute;top:6px;left:6px;padding:2px 6px;border-radius:4px;font-size:.62em;font-weight:700;letter-spacing:.3px;z-index:2;line-height:1.2}
+.quality-corner-2160p{background:rgba(168,85,247,.85);color:#fff}
+.quality-corner-1080p{background:rgba(88,166,255,.85);color:#fff}
+.quality-corner-720p{background:rgba(219,109,40,.85);color:#fff}
+.quality-corner-480p{background:rgba(99,110,123,.7);color:#fff}
+[data-theme="light"] .quality-corner-2160p{background:rgba(147,51,234,.8)}
+[data-theme="light"] .quality-corner-1080p{background:rgba(9,105,218,.8)}
+[data-theme="light"] .quality-corner-720p{background:rgba(188,76,0,.8)}
+
 /* Spinner */
 .spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -825,6 +845,46 @@ function buildBadges(source) {
   return '<span class="badge-debrid"><span class="badge-full">' + esc(source) + '</span><span class="badge-mini">?</span></span>';
 }
 
+function _qualityBadge(quality) {
+  if (!quality || !quality.label) return '<span class="badge-quality badge-quality-unknown">Unknown</span>';
+  var res = quality.resolution || '';
+  var cls = 'badge-quality-unknown';
+  if (res === '2160p') cls = 'badge-quality-2160p';
+  else if (res === '1080p') cls = 'badge-quality-1080p';
+  else if (res === '720p') cls = 'badge-quality-720p';
+  else if (res === '480p') cls = 'badge-quality-480p';
+  return '<span class="badge-quality ' + cls + '">' + esc(quality.label) + '</span>';
+}
+
+function _formatBytes(bytes) {
+  if (!bytes || bytes <= 0) return '';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+  return (bytes / 1073741824).toFixed(1) + ' GB';
+}
+
+var _RES_ORDER = {'2160p': 4, '1080p': 3, '720p': 2, '480p': 1};
+function _bestQuality(item) {
+  var best = null;
+  var bestRank = 0;
+  if (item.type === 'movie') {
+    return item.quality || null;
+  }
+  if (!item.season_data) return null;
+  for (var si = 0; si < item.season_data.length; si++) {
+    var eps = item.season_data[si].episodes || [];
+    for (var ei = 0; ei < eps.length; ei++) {
+      var q = eps[ei].quality;
+      if (q && q.resolution) {
+        var rank = _RES_ORDER[q.resolution] || 0;
+        if (rank > bestRank) { bestRank = rank; best = q; }
+      }
+    }
+  }
+  return best;
+}
+
 function computeProgress(item) {
   var nk = normTitle(item.title);
   var isPending = !!_pending[nk];
@@ -860,6 +920,15 @@ function buildCard(item, index) {
   var cornerBadge = '';
   if (item.type === 'show' && item.tmdb_status === 'Ended') {
     cornerBadge = '<div class="corner-badge ended"></div>';
+  }
+
+  // Quality corner badge (top-left)
+  var qualityCorner = '';
+  var bestQ = _bestQuality(item);
+  if (bestQ && bestQ.resolution) {
+    var qLabel = bestQ.resolution === '2160p' ? '4K' : bestQ.resolution;
+    var qCls = 'quality-corner-' + (bestQ.resolution === '2160p' ? '2160p' : bestQ.resolution);
+    qualityCorner = '<div class="quality-corner ' + qCls + '">' + esc(qLabel) + '</div>';
   }
 
   // Progress bar
@@ -917,7 +986,7 @@ function buildCard(item, index) {
     + ' data-index="' + index + '"'
     + ' onclick="onCardClick(' + index + ',event)" tabindex="0" role="button"'
     + ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();onCardClick(' + index + ',event)}">'
-    + '<div class="poster-container">' + checkboxHtml + posterHtml + cornerBadge + '</div>'
+    + '<div class="poster-container">' + checkboxHtml + qualityCorner + posterHtml + cornerBadge + '</div>'
     + progressHtml
     + '<div class="card-info">'
     + '<div class="card-title">' + esc(item.title) + '</div>'
@@ -1395,6 +1464,12 @@ function _renderMovieDetail(movie, meta) {
   } else {
     html += '<div class="card-badges">' + buildBadges(movie.source) + '</div>';
   }
+  if (movie.quality && movie.quality.label) {
+    html += '<div style="margin-top:4px">' + _qualityBadge(movie.quality);
+    var movieSzStr = _formatBytes(movie.size_bytes);
+    if (movieSzStr) html += ' <span class="ep-size">' + esc(movieSzStr) + '</span>';
+    html += '</div>';
+  }
   if (meta) {
     var runtimeParts = [];
     if (meta.runtime) runtimeParts.push(esc(String(meta.runtime)) + ' min');
@@ -1457,7 +1532,7 @@ function _mergeShowMeta(show, meta) {
     tmdbS.episodes.forEach(function(te) {
       var fe = fileEps[te.number];
       if (fe) {
-        episodes.push({number: te.number, title: te.title, air_date: te.air_date, file: fe.file, source: fe.source});
+        episodes.push({number: te.number, title: te.title, air_date: te.air_date, file: fe.file, source: fe.source, quality: fe.quality, size_bytes: fe.size_bytes});
         delete fileEps[te.number];
       } else {
         episodes.push({number: te.number, title: te.title, air_date: te.air_date, file: null, source: 'missing'});
@@ -1588,6 +1663,13 @@ function _renderSeasonEpisodes(season, si) {
       }
     } else {
       html += buildBadges(ep.source);
+    }
+    html += '</td>';
+    html += '<td class="ep-quality">';
+    if (!isMissing && ep.file) {
+      if (ep.quality && ep.quality.label) html += _qualityBadge(ep.quality);
+      var szStr = _formatBytes(ep.size_bytes);
+      if (szStr) html += ' <span class="ep-size">' + esc(szStr) + '</span>';
     }
     html += '</td>';
     html += '<td class="ep-actions">';

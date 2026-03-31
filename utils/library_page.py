@@ -175,6 +175,21 @@ a:hover{text-decoration:underline}
 .detail-header h2{font-size:1.3em;font-weight:600;margin-bottom:6px}
 .detail-header .card-badges{margin-top:4px}
 
+/* Show history (collapsible) */
+.history-section{margin-top:16px;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.history-toggle{display:flex;align-items:center;gap:6px;width:100%;background:var(--card);border:none;padding:10px 14px;cursor:pointer;font-size:.85em;font-weight:500;color:var(--text2);text-align:left}
+.history-toggle:hover{background:var(--border2)}
+.history-toggle .chevron{font-size:.7em;transition:transform .15s;width:14px;text-align:center}
+.history-toggle.open .chevron{transform:rotate(90deg)}
+.history-list{padding:0 14px 10px;display:none}
+.history-toggle.open+.history-list{display:block}
+.history-evt{display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border2);font-size:.8em;align-items:baseline}
+.history-evt:last-child{border-bottom:none}
+.history-time{color:var(--text3);min-width:70px;white-space:nowrap;font-family:monospace;font-size:.85em}
+.history-type{padding:1px 6px;border-radius:3px;font-size:.8em;font-weight:500;white-space:nowrap}
+.ht-grabbed{background:#58a6ff1a;color:var(--blue)}.ht-cached{background:#3fb9501a;color:var(--green)}.ht-symlink_created{background:#bc8cff1a;color:#bc8cff}.ht-failed{background:#f851491a;color:var(--red)}.ht-cleanup{background:#d299221a;color:var(--yellow)}.ht-switched_source{background:#db6d281a;color:var(--orange)}.ht-search_triggered{background:#58a6ff1a;color:var(--blue)}.ht-rescan_triggered{background:#3fb9501a;color:var(--green)}.ht-task_completed{background:var(--border);color:var(--text2)}
+.history-detail{color:var(--text2);flex:1}
+
 /* Season accordion */
 .season-section{border:1px solid var(--border);border-radius:8px;margin-bottom:8px;overflow:hidden}
 .season-header{padding:10px 14px;cursor:pointer;font-size:.9em;font-weight:500;color:var(--text);background:var(--card);display:flex;align-items:center;gap:8px;user-select:none;transition:background-color .15s}
@@ -936,7 +951,7 @@ function computeProgress(item) {
   var pct = Math.min(100, Math.round((item.episodes || 0) / item.total_episodes * 100));
   var color;
   if (isPending) color = '#7a43b6';
-  else if (pct >= 100 && item.tmdb_status === 'Ended') color = '#27c24c';
+  else if (pct >= 100 && (item.tmdb_status === 'Ended' || item.tmdb_status === 'Canceled')) color = '#27c24c';
   else if (pct >= 100) color = '#5d9cec';
   else color = '#f05050';
   return {width: pct + '%', color: color,
@@ -953,9 +968,9 @@ function buildCard(item, index) {
     posterHtml = '<div class="poster-placeholder">' + esc(item.title) + '</div>';
   }
 
-  // Corner badge (Ended shows get red triangle)
+  // Corner badge (Ended/Canceled shows get red triangle)
   var cornerBadge = '';
-  if (item.type === 'show' && item.tmdb_status === 'Ended') {
+  if (item.type === 'show' && (item.tmdb_status === 'Ended' || item.tmdb_status === 'Canceled')) {
     cornerBadge = '<div class="corner-badge ended"></div>';
   }
 
@@ -1065,7 +1080,9 @@ function applyFilters() {
 
   if (status && _activeTab === 'shows') {
     filtered = filtered.filter(function(item) {
-      return item.tmdb_status === status;
+      if (status === 'Continuing') return item.tmdb_status === 'Returning Series' || item.tmdb_status === 'In Production' || item.tmdb_status === 'Planned' || item.tmdb_status === 'Pilot';
+      if (status === 'Ended') return item.tmdb_status === 'Ended' || item.tmdb_status === 'Canceled';
+      return false;
     });
   }
 
@@ -1281,9 +1298,9 @@ function _applyMeta(card, meta) {
     }
   }
 
-  // Add corner badge for Ended shows
+  // Add corner badge for Ended/Canceled shows
   var type = card.getAttribute('data-type');
-  if (type === 'show' && meta.status === 'Ended' && !container.querySelector('.corner-badge')) {
+  if (type === 'show' && (meta.status === 'Ended' || meta.status === 'Canceled') && !container.querySelector('.corner-badge')) {
     var badge = document.createElement('div');
     badge.className = 'corner-badge ended';
     container.appendChild(badge);
@@ -1313,7 +1330,7 @@ function _applyMeta(card, meta) {
       var isPending = !!_pending[nk];
       var color;
       if (isPending) color = '#7a43b6';
-      else if (pct >= 100 && meta.status === 'Ended') color = '#27c24c';
+      else if (pct >= 100 && (meta.status === 'Ended' || meta.status === 'Canceled')) color = '#27c24c';
       else if (pct >= 100) color = '#5d9cec';
       else color = '#f05050';
       var fill = card.querySelector('.progress-fill');
@@ -1843,6 +1860,7 @@ function _renderMovieDetail(movie, meta) {
     html += '<div style="margin-top:10px;font-size:.82em;color:var(--text3)">To switch to local, configure <a href="/settings">Radarr or Overseerr</a> in Settings.</div>';
   }
   html += '</div></div>';
+  html += '<div class="history-section"><button class="history-toggle" onclick="toggleShowHistory(this)"><span class="chevron">&#9654;</span> History</button><div class="history-list" class="history-list-content"><div style="color:var(--text3);font-size:.8em;padding:4px 0">Loading...</div></div></div>';
   html += '<div id="transfer-msg" aria-live="polite"></div>';
   html += '</div>';
   area.innerHTML = html;
@@ -2241,6 +2259,7 @@ function _renderShowDetail(show, meta) {
     html += '</div></div>';
   }
 
+  html += '<div class="history-section"><button class="history-toggle" onclick="toggleShowHistory(this)"><span class="chevron">&#9654;</span> History</button><div class="history-list" class="history-list-content"><div style="color:var(--text3);font-size:.8em;padding:4px 0">Loading...</div></div></div>';
   html += '<div id="transfer-msg" aria-live="polite"></div>';
   html += '</div>';
   area.innerHTML = html;
@@ -2268,6 +2287,41 @@ function hideDetail() {
     _updateBulkBar();
   }
   document.getElementById('search-input').focus();
+}
+
+function toggleShowHistory(btn) {
+  var isOpen = btn.classList.toggle('open');
+  var list = btn.nextElementSibling;
+  list.style.display = isOpen ? 'block' : 'none';
+  if (isOpen && !list.getAttribute('data-loaded') && _detailItem) {
+    list.setAttribute('data-loaded', '1');
+    var title = encodeURIComponent(_detailItem.title);
+    fetch('/api/history/show/' + title + '?limit=20').then(function(r) { return r.json(); }).then(function(events) {
+      if (!events || !events.length) {
+        list.innerHTML = '<div style="color:var(--text3);font-size:.8em;padding:4px 0">No history for this title</div>';
+        return;
+      }
+      var h = '';
+      for (var i = 0; i < events.length; i++) {
+        var e = events[i];
+        var ts = e.ts ? _timeAgoHistory(e.ts) : '';
+        h += '<div class="history-evt"><span class="history-time">' + esc(ts) + '</span>';
+        h += '<span class="history-type ht-' + esc(e.type) + '">' + esc(e.type.replace(/_/g, ' ')) + '</span>';
+        h += '<span class="history-detail">' + esc(e.detail || '') + (e.episode ? ' <span style="color:var(--text3)">' + esc(e.episode) + '</span>' : '') + '</span></div>';
+      }
+      list.innerHTML = h;
+    }).catch(function() {
+      list.innerHTML = '<div style="color:var(--red);font-size:.8em;padding:4px 0">Failed to load history</div>';
+    });
+  }
+}
+
+function _timeAgoHistory(ts) {
+  var sec = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
+  if (sec < 60) return sec + 's ago';
+  if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
+  if (sec < 86400) return Math.floor(sec / 3600) + 'h ago';
+  return Math.floor(sec / 86400) + 'd ago';
 }
 
 function toggleSeason(headerEl) {

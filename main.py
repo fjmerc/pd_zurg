@@ -7,6 +7,7 @@ from utils import duplicate_cleanup
 from utils import auto_update
 from utils.processes import shutdown_all_processes, start_process_monitor
 from utils import notifications
+from utils import history
 from utils import blackhole
 from utils import ffprobe_monitor
 from utils import status_server
@@ -68,6 +69,7 @@ def main():
     status_server.setup()
     status_server.status_data.add_event('main', f'pd_zurg v{version} starting')
 
+    history.init()
     notifications.init()
     notifications.notify('startup', 'pd_zurg Started', f'Version {version}')
 

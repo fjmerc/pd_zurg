@@ -25,6 +25,11 @@ from utils.logger import get_logger
 
 logger = get_logger()
 
+try:
+    from utils import history as _history
+except ImportError:
+    _history = None
+
 _TIMEOUT = 15  # seconds — Arr APIs can be slow on large libraries
 _NOT_FOUND = object()  # sentinel for "looked up, not found" in tag cache
 _tag_creation_lock = threading.Lock()  # prevents duplicate tags from concurrent requests
@@ -611,17 +616,25 @@ class SonarrClient(_ArrClientBase):
         """
         if not episode_ids:
             return None
-        return self._post('/api/v3/command', {
+        result = self._post('/api/v3/command', {
             'name': 'EpisodeSearch',
             'episodeIds': episode_ids,
         })
+        if result and _history:
+            _history.log_event('search_triggered', f'Sonarr episodes {episode_ids}',
+                               source='arr', detail=f'EpisodeSearch for {len(episode_ids)} episode(s)')
+        return result
 
     def rescan_series(self, series_id):
         """Trigger a disk rescan for a series so Sonarr picks up new files."""
-        return self._post('/api/v3/command', {
+        result = self._post('/api/v3/command', {
             'name': 'RescanSeries',
             'seriesId': series_id,
         })
+        if result and _history:
+            _history.log_event('rescan_triggered', f'Sonarr series {series_id}',
+                               source='arr', detail='RescanSeries')
+        return result
 
     def ensure_and_search(self, title, tmdb_id, season_number, episode_numbers, prefer_debrid=None):
         """High-level: ensure series exists in Sonarr, then search for episodes.
@@ -1334,17 +1347,25 @@ class RadarrClient(_ArrClientBase):
 
         Returns the command dict or None.
         """
-        return self._post('/api/v3/command', {
+        result = self._post('/api/v3/command', {
             'name': 'MoviesSearch',
             'movieIds': [movie_id],
         })
+        if result and _history:
+            _history.log_event('search_triggered', f'Radarr movie {movie_id}',
+                               source='arr', detail='MoviesSearch')
+        return result
 
     def rescan_movie(self, movie_id):
         """Trigger a disk rescan for a movie so Radarr picks up new files."""
-        return self._post('/api/v3/command', {
+        result = self._post('/api/v3/command', {
             'name': 'RescanMovie',
             'movieId': movie_id,
         })
+        if result and _history:
+            _history.log_event('rescan_triggered', f'Radarr movie {movie_id}',
+                               source='arr', detail='RescanMovie')
+        return result
 
     def ensure_and_search(self, title, tmdb_id, prefer_debrid=None):
         """High-level: ensure movie exists in Radarr, then trigger search.

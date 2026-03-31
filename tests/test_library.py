@@ -13,6 +13,7 @@ from utils.library import (
     _build_season_data,
     _discover_mount,
     _norm_for_matching,
+    get_wanted_counts,
     LibraryScanner,
     setup,
     get_scanner,
@@ -1669,3 +1670,103 @@ class TestSetupAndGetScanner:
         second = get_scanner()
         # Each setup() creates a fresh instance
         assert second is not first
+
+
+# ---------------------------------------------------------------------------
+# Wanted counts (Feature 4)
+# ---------------------------------------------------------------------------
+
+class TestGetWantedCounts:
+    """Tests for get_wanted_counts() — counts items needing attention."""
+
+    def test_no_data_returns_zeros(self):
+        counts = get_wanted_counts({})
+        assert counts == {'missing': 0, 'unavailable': 0, 'pending': 0, 'fallback': 0}
+
+    def test_show_with_aired_missing_episode(self):
+        data = {'shows': [{
+            'title': 'Test Show',
+            'season_data': [{'number': 1, 'episodes': [
+                {'number': 1, 'source': 'debrid', 'air_date': '2025-01-01'},
+                {'number': 2, 'source': 'missing', 'air_date': '2025-06-01'},
+            ]}],
+        }], 'movies': []}
+        counts = get_wanted_counts(data)
+        assert counts['missing'] == 1
+
+    def test_show_with_future_missing_episode_not_counted(self):
+        data = {'shows': [{
+            'title': 'Future Show',
+            'season_data': [{'number': 1, 'episodes': [
+                {'number': 1, 'source': 'missing', 'air_date': '2099-12-31'},
+            ]}],
+        }], 'movies': []}
+        counts = get_wanted_counts(data)
+        assert counts['missing'] == 0
+
+    def test_show_with_no_air_date_missing_not_counted(self):
+        data = {'shows': [{
+            'title': 'TBA Show',
+            'season_data': [{'number': 1, 'episodes': [
+                {'number': 1, 'source': 'missing', 'air_date': None},
+            ]}],
+        }], 'movies': []}
+        counts = get_wanted_counts(data)
+        assert counts['missing'] == 0
+
+    def test_movie_with_missing_episodes(self):
+        data = {'shows': [], 'movies': [
+            {'title': 'Missing Movie', 'missing_episodes': 1},
+            {'title': 'Available Movie', 'missing_episodes': 0},
+        ]}
+        counts = get_wanted_counts(data)
+        assert counts['missing'] == 1
+
+    def test_pending_directions(self):
+        data = {'shows': [
+            {'title': 'Show A', 'season_data': []},
+            {'title': 'Show B', 'season_data': []},
+            {'title': 'Show C', 'season_data': []},
+        ], 'movies': []}
+        pending = {
+            'show a': {'direction': 'debrid-unavailable'},
+            'show b': {'direction': 'to-debrid'},
+            'show c': {'direction': 'to-local-fallback'},
+        }
+        counts = get_wanted_counts(data, pending)
+        assert counts['unavailable'] == 1
+        assert counts['pending'] == 2  # to-debrid + to-local-fallback
+        assert counts['fallback'] == 1
+
+    def test_multiple_shows_with_missing(self):
+        data = {'shows': [
+            {'title': 'Show 1', 'season_data': [{'number': 1, 'episodes': [
+                {'number': 1, 'source': 'missing', 'air_date': '2025-01-01'},
+            ]}]},
+            {'title': 'Show 2', 'season_data': [{'number': 1, 'episodes': [
+                {'number': 1, 'source': 'debrid', 'air_date': '2025-01-01'},
+            ]}]},
+            {'title': 'Show 3', 'season_data': [{'number': 1, 'episodes': [
+                {'number': 1, 'source': 'missing', 'air_date': '2025-03-01'},
+            ]}]},
+        ], 'movies': []}
+        counts = get_wanted_counts(data)
+        assert counts['missing'] == 2
+
+    def test_movie_with_none_missing_episodes_not_counted(self):
+        data = {'shows': [], 'movies': [
+            {'title': 'Unenriched Movie', 'missing_episodes': None},
+        ]}
+        counts = get_wanted_counts(data)
+        assert counts['missing'] == 0
+
+    def test_movie_pending_directions(self):
+        data = {'shows': [], 'movies': [
+            {'title': 'Movie A', 'missing_episodes': 0},
+        ]}
+        pending = {
+            'movie a': {'direction': 'to-local-fallback'},
+        }
+        counts = get_wanted_counts(data, pending)
+        assert counts['fallback'] == 1
+        assert counts['pending'] == 1

@@ -593,12 +593,13 @@ dialog .dlg-actions{display:flex;gap:8px;justify-content:flex-end}
 dialog .dlg-btn{padding:8px 18px;border-radius:6px;font-size:.85em;cursor:pointer;border:none;font-weight:500}
 dialog .dlg-cancel{background:var(--border);color:var(--text)}
 dialog .dlg-confirm{background:var(--blue);color:#fff}
+.nav-badge{display:inline-block;background:var(--red);color:#fff;border-radius:8px;font-size:.72em;font-weight:700;padding:1px 6px;margin-left:4px;min-width:16px;text-align:center;vertical-align:middle;line-height:1.4}
 @media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
 </style>
 <script>(function(){try{var t=localStorage.getItem('pd_zurg_theme');if(t){document.documentElement.setAttribute('data-theme',t);document.querySelector('meta[name="color-scheme"]').content=t==='light'?'light':'dark';}}catch(e){}})()</script>
 </head>
 <body>
-<div class="header"><h1>pd_zurg</h1><span class="meta" id="header-meta"></span><div style="margin-left:auto;display:flex;gap:12px;align-items:center;font-size:.85em"><a href="/library">Library</a><a href="/settings">Settings</a><button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme" id="theme-btn">☀️</button></div></div>
+<div class="header"><h1>pd_zurg</h1><span class="meta" id="header-meta"></span><div style="margin-left:auto;display:flex;gap:12px;align-items:center;font-size:.85em"><a href="/library">Library</a><a href="/library?filter=missing" id="nav-wanted-link" style="display:none">Wanted<span class="nav-badge" id="nav-wanted-count">0</span></a><a href="/settings">Settings</a><button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme" id="theme-btn">☀️</button></div></div>
 <div class="meta">Uptime: <span id="uptime"></span></div>
 <div class="meta" id="error-line" style="display:none;color:var(--red)">Errors: <span id="errors">0</span></div>
 <div class="banner" id="banner"></div>
@@ -1111,6 +1112,32 @@ function setRefreshInterval(sec){
 update();updateLogs();updateTasks();
 setRefreshInterval(10);
 setTimeout(updateMountHistory,1000);
+// Wanted count badge
+(function tryWanted(attempt){
+  fetch('/api/library').then(function(r){
+    if(r.status===503&&attempt<5){setTimeout(function(){tryWanted(attempt+1)},3000);return null}
+    return r.ok?r.json():null;
+  }).then(function(data){
+    if(!data)return;
+    var today=new Date().toISOString().slice(0,10);
+    var count=0;
+    (data.shows||[]).forEach(function(s){
+      if(!s.season_data)return;
+      var hasMissing=false;
+      for(var si=0;si<s.season_data.length&&!hasMissing;si++){
+        var eps=s.season_data[si].episodes||[];
+        for(var ei=0;ei<eps.length;ei++){
+          if(eps[ei].source==='missing'&&eps[ei].air_date&&eps[ei].air_date<=today){hasMissing=true;break}
+        }
+      }
+      if(hasMissing)count++;
+    });
+    (data.movies||[]).forEach(function(m){if(m.missing_episodes>0)count++});
+    var link=document.getElementById('nav-wanted-link');
+    var badge=document.getElementById('nav-wanted-count');
+    if(link&&badge&&count>0){link.style.display='';badge.textContent=count}
+  }).catch(function(){});
+})(0);
 </script>
 </body>
 </html>'''

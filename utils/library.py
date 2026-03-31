@@ -10,7 +10,7 @@ import re
 import threading
 import unicodedata
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from urllib.parse import quote as urllib_quote
 from utils.logger import get_logger
 from utils.quality_parser import parse_quality
@@ -2547,3 +2547,55 @@ def setup():
 
 def get_scanner():
     return _scanner
+
+
+def get_wanted_counts(data, pending=None):
+    """Count items needing attention from library data.
+
+    Returns dict with keys: missing, unavailable, pending, fallback.
+    Each value is the number of items (shows/movies) matching that filter.
+    """
+    today = date.today().isoformat()
+    pending = pending or {}
+    counts = {'missing': 0, 'unavailable': 0, 'pending': 0, 'fallback': 0}
+
+    for show in data.get('shows', []):
+        # Missing: has aired episodes with no file
+        has_aired_missing = False
+        for season in show.get('season_data', []):
+            for ep in season.get('episodes', []):
+                if ep.get('source') == 'missing' and ep.get('air_date') and ep['air_date'] <= today:
+                    has_aired_missing = True
+                    break
+            if has_aired_missing:
+                break
+        if has_aired_missing:
+            counts['missing'] += 1
+
+        # Pending directions
+        norm = _normalize_title(show.get('title', ''))
+        pe = pending.get(norm, {})
+        direction = pe.get('direction', '')
+        if direction == 'debrid-unavailable':
+            counts['unavailable'] += 1
+        if direction in ('to-local', 'to-debrid', 'to-local-fallback'):
+            counts['pending'] += 1
+        if direction == 'to-local-fallback':
+            counts['fallback'] += 1
+
+    for movie in data.get('movies', []):
+        me = movie.get('missing_episodes')
+        if me is not None and me > 0:
+            counts['missing'] += 1
+
+        norm = _normalize_title(movie.get('title', ''))
+        pe = pending.get(norm, {})
+        direction = pe.get('direction', '')
+        if direction == 'debrid-unavailable':
+            counts['unavailable'] += 1
+        if direction in ('to-local', 'to-debrid', 'to-local-fallback'):
+            counts['pending'] += 1
+        if direction == 'to-local-fallback':
+            counts['fallback'] += 1
+
+    return counts

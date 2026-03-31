@@ -12,6 +12,11 @@ from utils.logger import get_logger
 
 logger = get_logger()
 
+try:
+    from utils import history as _history
+except ImportError:
+    _history = None
+
 
 # ---------------------------------------------------------------------------
 # Default intervals (seconds)
@@ -117,6 +122,10 @@ def library_scan():
     movies = len(data.get('movies', []))
     shows = len(data.get('shows', []))
     duration_ms = data.get('scan_duration_ms', 0)
+
+    if _history:
+        _history.log_event('task_completed', 'Library Scan', source='scheduler',
+                           detail=f'{movies} movies, {shows} shows ({duration_ms}ms)')
 
     return {
         'status': 'success',
@@ -258,6 +267,10 @@ def verify_symlinks():
     msg = f'Checked {checked} symlinks'
     if deleted:
         msg += f', removed {deleted} broken'
+        if _history:
+            _history.log_event('cleanup', 'Symlink Verify', source='scheduler',
+                               detail=f'Removed {deleted} broken symlink(s) of {checked} checked')
+
     return {'status': 'success', 'message': msg, 'items': broken}
 
 
@@ -360,6 +373,17 @@ def housekeeping():
                     pass
     except Exception as e:
         logger.error(f"[scheduler] Error cleaning metadata: {e}")
+
+    # 4. Rotate history log
+    try:
+        if _history:
+            _history.rotate()
+    except Exception as e:
+        logger.error(f"[scheduler] Error rotating history: {e}")
+
+    if cleaned and _history:
+        _history.log_event('task_completed', 'Housekeeping', source='scheduler',
+                           detail=f'Cleaned {cleaned} item(s)')
 
     return {'status': 'success', 'message': f'Cleaned {cleaned} items', 'items': cleaned}
 
@@ -476,6 +500,9 @@ def detect_stale_grabs():
     msg = f'Found {stale_found} stale grabs'
     if searches_triggered:
         msg += f', re-triggered {searches_triggered} searches'
+        if _history:
+            _history.log_event('task_completed', 'Stale Grab Detection', source='scheduler',
+                               detail=msg)
     return {'status': 'success', 'message': msg, 'items': stale_found}
 
 

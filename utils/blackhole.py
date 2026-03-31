@@ -25,6 +25,11 @@ try:
 except ImportError:
     _notify = None
 
+try:
+    from utils import history as _history
+except ImportError:
+    _history = None
+
 _watcher = None
 
 # Retry configuration for failed torrent submissions
@@ -614,10 +619,18 @@ class BlackholeWatcher:
             if self._is_torrent_ready(status):
                 release_name = self._extract_release_name(info)
                 logger.info(f"[blackhole] Torrent ready: {filename} (release: {release_name})")
+                if _history:
+                    _history.log_event('cached', filename, source='blackhole',
+                                       detail=f'Ready on {self.debrid_service}',
+                                       meta={'provider': self.debrid_service, 'torrent_id': torrent_id})
                 break
 
             if self._is_terminal_error(status):
                 logger.error(f"[blackhole] Torrent {torrent_id} hit terminal error: {status}")
+                if _history:
+                    _history.log_event('failed', filename, source='blackhole',
+                                       detail=f'Terminal error: {status}',
+                                       meta={'provider': self.debrid_service, 'torrent_id': torrent_id})
                 try:
                     from utils.metrics import metrics
                     metrics.inc('blackhole_symlink_failed')
@@ -680,6 +693,10 @@ class BlackholeWatcher:
             count = self._create_symlinks(matched_name, category, mount_path)
             if count > 0:
                 logger.info(f"[blackhole] Created {count} symlink(s) for {release_name}")
+                if _history:
+                    _history.log_event('symlink_created', filename, source='blackhole',
+                                       detail=f'{count} symlink(s) for {release_name}',
+                                       meta={'provider': self.debrid_service, 'count': count})
                 try:
                     from utils.metrics import metrics
                     metrics.inc('blackhole_symlink_created')
@@ -1017,6 +1034,10 @@ class BlackholeWatcher:
             success, result = handler(file_path)
             if success:
                 logger.info(f"[blackhole] Added to {self.debrid_service}: {filename}")
+                if _history:
+                    _history.log_event('grabbed', filename, source='blackhole',
+                                       detail=f'Submitted to {self.debrid_service}',
+                                       meta={'provider': self.debrid_service})
                 try:
                     os.remove(file_path)
                 except OSError as e:

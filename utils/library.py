@@ -17,6 +17,11 @@ from utils.quality_parser import parse_quality
 
 logger = get_logger()
 
+try:
+    from utils import history as _history
+except ImportError:
+    _history = None
+
 MEDIA_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m4v', '.webm'}
 
 # Folders to skip during library scans (non-media content)
@@ -1163,6 +1168,9 @@ class LibraryScanner:
                             f"[library] Auto-enforced prefer-debrid for {show['title']}: "
                             f"switched {result['switched']} episode(s) to symlinks"
                         )
+                        if _history:
+                            _history.log_event('switched_source', show['title'], source='library',
+                                               detail=f"Switched {result['switched']} episode(s) to debrid")
                         # Only clear pending for episodes that were actually switched
                         # (those whose local_path is now a symlink)
                         cleared = [
@@ -1225,6 +1233,9 @@ class LibraryScanner:
                                     f"[library] Auto-enforced prefer-local for {item['title']}: "
                                     f"deleted {deleted} debrid torrent(s)"
                                 )
+                                if _history:
+                                    _history.log_event('switched_source', item['title'], source='library',
+                                                       detail=f"Removed {deleted} debrid torrent(s) — prefer-local")
                                 clear_pending(norm)
                                 enforced_this_scan.add(norm)
                                 try:
@@ -1888,6 +1899,13 @@ class LibraryScanner:
 
         if created:
             logger.info(f"[library] Created {created} debrid symlink(s) in local library")
+            if _history:
+                for t in symlinked_shows:
+                    _history.log_event('symlink_created', t, source='library',
+                                       detail=f'Debrid symlink(s) created in local library')
+                for t in symlinked_movies:
+                    _history.log_event('symlink_created', t, source='library',
+                                       detail=f'Debrid symlink(s) created in local library')
             # Trigger arr rescans so Sonarr/Radarr discover the new files
             if symlinked_shows and not sonarr_map:
                 if sonarr_fetch_failed:

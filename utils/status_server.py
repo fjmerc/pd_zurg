@@ -16,7 +16,7 @@ import re
 import threading
 import time
 from datetime import datetime, timezone
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote as url_unquote
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -177,7 +177,7 @@ _CONFIG_PREFIXES = (
     'TZ', 'SONARR_', 'RADARR_', 'TMDB_',
     'ROUTING_AUDIT', 'QUEUE_CLEANUP', 'LIBRARY_SCAN',
     'SYMLINK_VERIFY', 'PREFERENCE_ENFORCE', 'HOUSEKEEPING',
-    'CONFIG_BACKUP', 'MOUNT_LIVENESS',
+    'CONFIG_BACKUP', 'MOUNT_LIVENESS', 'HISTORY_',
 )
 
 
@@ -594,6 +594,8 @@ dialog .dlg-btn{padding:8px 18px;border-radius:6px;font-size:.85em;cursor:pointe
 dialog .dlg-cancel{background:var(--border);color:var(--text)}
 dialog .dlg-confirm{background:var(--blue);color:#fff}
 .nav-badge{display:inline-block;background:var(--red);color:#fff;border-radius:8px;font-size:.72em;font-weight:700;padding:1px 6px;margin-left:4px;min-width:16px;text-align:center;vertical-align:middle;line-height:1.4}
+.type-badge{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-size:.75em;font-weight:500;white-space:nowrap}
+.type-grabbed{background:#58a6ff1a;color:var(--blue)}.type-cached{background:#3fb9501a;color:var(--green)}.type-symlink_created{background:#bc8cff1a;color:#bc8cff}.type-failed{background:#f851491a;color:var(--red)}.type-cleanup{background:#d299221a;color:var(--yellow)}.type-switched_source{background:#db6d281a;color:var(--orange)}.type-search_triggered{background:#58a6ff1a;color:var(--blue)}.type-rescan_triggered{background:#3fb9501a;color:var(--green)}.type-task_completed{background:var(--border);color:var(--text2)}
 @media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
 </style>
 <script>(function(){try{var t=localStorage.getItem('pd_zurg_theme');if(t){document.documentElement.setAttribute('data-theme',t);document.querySelector('meta[name="color-scheme"]').content=t==='light'?'light':'dark';}}catch(e){}})()</script>
@@ -640,6 +642,30 @@ dialog .dlg-confirm{background:var(--blue);color:#fff}
     <h2>Scheduled Tasks</h2>
     <table><thead><tr><th>Task</th><th>Interval</th><th>Last Run</th><th>Duration</th><th>Result</th><th>Next Run</th><th id="task-actions-hdr"></th></tr></thead>
     <tbody id="tasks"></tbody></table>
+  </div>
+</div>
+<div class="grid full">
+  <div class="card">
+    <h2>Activity</h2>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+      <select id="activity-type" onchange="loadActivity()" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:.8em">
+        <option value="">All Types</option>
+        <option value="grabbed">Grabbed</option>
+        <option value="cached">Cached</option>
+        <option value="symlink_created">Symlink</option>
+        <option value="failed">Failed</option>
+        <option value="cleanup">Cleanup</option>
+        <option value="switched_source">Source Switch</option>
+        <option value="search_triggered">Search</option>
+        <option value="rescan_triggered">Rescan</option>
+        <option value="task_completed">Task</option>
+      </select>
+      <input type="text" id="activity-search" placeholder="Search titles..." oninput="loadActivity()" style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:.8em;color:var(--text);outline:none;min-width:120px">
+      <button class="btn-run" onclick="clearHistory()" id="activity-clear-btn" style="display:none">Clear</button>
+    </div>
+    <table><thead><tr><th style="width:80px">Time</th><th style="width:90px">Type</th><th>Title</th><th>Detail</th><th style="width:60px">Source</th></tr></thead>
+    <tbody id="activity-body"></tbody></table>
+    <div style="display:flex;justify-content:center;margin-top:8px;gap:8px" id="activity-pager"></div>
   </div>
 </div>
 <div class="grid full">
@@ -1102,11 +1128,13 @@ function setRefreshInterval(sec){
   if(_logTimer)clearInterval(_logTimer);
   if(_mtTimer)clearInterval(_mtTimer);
   if(_taskTimer)clearInterval(_taskTimer);
+  if(typeof _actTimer!=='undefined'&&_actTimer)clearInterval(_actTimer);
   if(_refreshSec>0){
     _statusTimer=setInterval(update,_refreshSec*1000);
     _logTimer=setInterval(updateLogs,_refreshSec*1000);
     _mtTimer=setInterval(updateMountHistory,Math.max(_refreshSec*3,30)*1000);
     _taskTimer=setInterval(updateTasks,Math.max(_refreshSec*2,15)*1000);
+    _actTimer=setInterval(loadActivity,Math.max(_refreshSec,10)*1000);
   }
 }
 update();updateLogs();updateTasks();
@@ -1127,6 +1155,48 @@ setTimeout(updateMountHistory,1000);
     if(link&&badge&&count>0){link.style.display='';badge.textContent=count}
   }).catch(function(){});
 })(0);
+
+// Activity tab
+var _actPage=1;
+var _actIcons={grabbed:'\u2B07',cached:'\u2705',symlink_created:'\U0001F517',failed:'\u274C',cleanup:'\U0001F5D1',switched_source:'\u21C4',search_triggered:'\U0001F50D',rescan_triggered:'\U0001F504',task_completed:'\u2699'};
+function loadActivity(page){
+  if(page)_actPage=page; else _actPage=1;
+  var t=document.getElementById('activity-type').value;
+  var q=document.getElementById('activity-search').value.trim();
+  var url='/api/history?page='+_actPage+'&limit=50';
+  if(t)url+='&type='+encodeURIComponent(t);
+  if(q)url+='&title='+encodeURIComponent(q);
+  fetch(url).then(function(r){return r.json()}).then(function(d){
+    var el=document.getElementById('activity-body');
+    if(!d.events||!d.events.length){el.innerHTML='<tr><td colspan="5" style="color:var(--text3);text-align:center;padding:16px">No activity recorded yet</td></tr>';document.getElementById('activity-pager').innerHTML='';return}
+    var h='';
+    d.events.forEach(function(e){
+      var icon=_actIcons[e.type]||'\u2022';
+      h+='<tr><td style="font-size:.8em;color:var(--text3);white-space:nowrap">'+timeAgo(e.ts)+'</td>';
+      h+='<td><span class="type-badge type-'+esc(e.type)+'">'+icon+' '+esc(e.type.replace(/_/g,' '))+'</span></td>';
+      h+='<td style="font-size:.85em">'+esc(e.title)+(e.episode?' <span style="color:var(--text2)">'+esc(e.episode)+'</span>':'')+'</td>';
+      h+='<td style="font-size:.8em;color:var(--text2)">'+esc(e.detail||'')+'</td>';
+      h+='<td style="font-size:.75em;color:var(--text3)">'+esc(e.source||'')+'</td></tr>';
+    });
+    el.innerHTML=h;
+    // Pager
+    var pg='';
+    if(d.pages>1){
+      for(var i=1;i<=d.pages;i++){
+        if(i===d.page)pg+='<span style="color:var(--blue);font-weight:600;font-size:.85em">'+i+'</span>';
+        else pg+='<a href="#" onclick="loadActivity('+i+');return false" style="font-size:.85em">'+i+'</a>';
+      }
+    }
+    document.getElementById('activity-pager').innerHTML=pg;
+    // Show clear button if auth
+    if(window._hasAuth)document.getElementById('activity-clear-btn').style.display='';
+  }).catch(function(){});
+}
+function clearHistory(){
+  if(!confirm('Clear all activity history?'))return;
+  fetch('/api/history',{method:'DELETE'}).then(function(){loadActivity()}).catch(function(){});
+}
+loadActivity();
 </script>
 </body>
 </html>'''
@@ -1308,6 +1378,42 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     self._send_json_response(200, json.dumps(None))
                 else:
                     self._send_json_response(200, json.dumps(result))
+        elif self.path.startswith('/api/history/show/'):
+            # Strip query string before extracting title
+            parsed = urlparse(self.path)
+            title = url_unquote(parsed.path[len('/api/history/show/'):])
+            if not title:
+                self._send_json_response(400, json.dumps({'error': 'title required'}))
+            else:
+                from utils import history as history_mod
+                params = parse_qs(parsed.query)
+                try:
+                    limit = max(1, min(int(params.get('limit', ['20'])[0]), 200))
+                except (ValueError, TypeError):
+                    limit = 20
+                events = history_mod.query_by_show(title, limit=limit)
+                self._send_json_response(200, json.dumps(events))
+        elif self.path.startswith('/api/history'):
+            from utils import history as history_mod
+            parsed = urlparse(self.path)
+            params = parse_qs(parsed.query)
+            try:
+                page = max(1, int(params.get('page', ['1'])[0]))
+            except (ValueError, TypeError):
+                page = 1
+            try:
+                limit = max(1, min(int(params.get('limit', ['50'])[0]), 200))
+            except (ValueError, TypeError):
+                limit = 50
+            result = history_mod.query(
+                type=params.get('type', [None])[0],
+                title=params.get('title', [None])[0],
+                start=params.get('start', [None])[0],
+                end=params.get('end', [None])[0],
+                page=page,
+                limit=limit,
+            )
+            self._send_json_response(200, json.dumps(result))
         elif self.path in ('/', '/status'):
             html = _DASHBOARD_HTML.encode()
             self.send_response(200)
@@ -2132,6 +2238,22 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 )
             except Exception as e:
                 self._send_json_response(500, json.dumps({'error': str(e)}))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_DELETE(self):
+        if not self.auth_credentials:
+            self._send_json_response(403, json.dumps({
+                'error': 'This endpoint requires STATUS_UI_AUTH to be configured'
+            }))
+            return
+        if not self._check_auth():
+            return
+        if self.path == '/api/history':
+            from utils import history as history_mod
+            history_mod.clear()
+            self._send_json_response(200, json.dumps({'status': 'cleared'}))
         else:
             self.send_response(404)
             self.end_headers()

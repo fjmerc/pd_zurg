@@ -182,6 +182,7 @@ ENV_SCHEMA = [
         'description': 'General container settings',
         'fields': [
             ('TZ', 'Timezone', 'string', False, 'Container timezone (e.g., America/New_York, Europe/London)'),
+            ('HISTORY_RETENTION_DAYS', 'History Retention (days)', 'number:1-365', False, 'Number of days to keep activity history events (default: 30)'),
         ],
     },
     {

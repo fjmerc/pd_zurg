@@ -1366,17 +1366,11 @@ function updateBadges(filteredCount) {
 // Wanted preset filters
 // ---------------------------------------------------------------------------
 function _countAiredMissing(item) {
-  if (item.type === 'movie') return item.missing_episodes > 0 ? 1 : 0;
-  if (!item.season_data) return 0;
-  var today = new Date().toISOString().slice(0, 10);
-  var count = 0;
-  for (var si = 0; si < item.season_data.length; si++) {
-    var eps = item.season_data[si].episodes || [];
-    for (var ei = 0; ei < eps.length; ei++) {
-      if (eps[ei].source === 'missing' && eps[ei].air_date && eps[ei].air_date <= today) count++;
-    }
-  }
-  return count;
+  // missing_episodes is computed by TMDB cache enrichment (total - have).
+  // season_data from the API only contains episodes WITH files, so we
+  // cannot iterate it for source==='missing' — those entries only exist
+  // after detail-view TMDB metadata merge.
+  return (item.missing_episodes || 0) > 0 ? 1 : 0;
 }
 
 function _getPendingDirection(item) {
@@ -1477,116 +1471,118 @@ function toggleWantedPreset(preset) {
   _updateWantedUI();
 }
 
-function wantedSearchAll() {
+function _resolveMissingTasks(items, callback) {
+  // Build tasks from displayed items.  For shows, we need to fetch TMDB
+  // metadata to discover which specific episodes are missing (season_data
+  // from the main API only contains episodes that HAVE files).
+  var movieTasks = [];
+  var showsToResolve = [];
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i];
+    if (item.type === 'movie' && item.missing_episodes > 0) {
+      movieTasks.push({item: item, season: null, episodes: []});
+    } else if (item.type === 'show' && item.missing_episodes > 0) {
+      showsToResolve.push(item);
+    }
+  }
+  if (!showsToResolve.length) { callback(movieTasks); return; }
+
+  var resolved = 0;
+  var showTasks = [];
+  var today = new Date().toISOString().slice(0, 10);
+  for (var si = 0; si < showsToResolve.length; si++) {
+    (function(show) {
+      var params = 'title=' + encodeURIComponent(show.title) + '&type=show';
+      if (show.year) params += '&year=' + encodeURIComponent(String(show.year));
+      fetch('/api/library/metadata?' + params)
+        .then(function(r) { return r.ok ? r.json() : null; })
+        .then(function(meta) {
+          if (meta) {
+            var merged = _mergeShowMeta(show, meta);
+            for (var mi = 0; mi < merged.length; mi++) {
+              var season = merged[mi];
+              var missingEps = [];
+              for (var ei = 0; ei < (season.episodes || []).length; ei++) {
+                var ep = season.episodes[ei];
+                if (ep.source === 'missing' && ep.air_date && ep.air_date <= today) {
+                  missingEps.push(ep.number);
+                }
+              }
+              if (missingEps.length) {
+                showTasks.push({item: show, season: season.number, episodes: missingEps});
+              }
+            }
+          }
+        })
+        .catch(function() {})
+        .finally(function() {
+          resolved++;
+          _showWantedProgress('Resolving ' + resolved + '/' + showsToResolve.length + ' shows...');
+          if (resolved >= showsToResolve.length) {
+            callback(movieTasks.concat(showTasks));
+          }
+        });
+    })(showsToResolve[si]);
+  }
+}
+
+function _runWantedBulk(endpoint, btnId, actionLabel, progressLabel) {
   if (_wantedInFlight) return;
   var items = _displayedItems;
   if (!items.length) return;
-  var tasks = [];
-  for (var i = 0; i < items.length; i++) {
-    var item = items[i];
-    if (item.type === 'show' && item.season_data) {
-      var today = new Date().toISOString().slice(0, 10);
-      for (var si = 0; si < item.season_data.length; si++) {
-        var season = item.season_data[si];
-        var missingEps = [];
-        for (var ei = 0; ei < (season.episodes || []).length; ei++) {
-          var ep = season.episodes[ei];
-          if (ep.source === 'missing' && ep.air_date && ep.air_date <= today) {
-            missingEps.push(ep.number);
-          }
-        }
-        if (missingEps.length) {
-          tasks.push({item: item, season: season.number, episodes: missingEps});
-        }
-      }
-    } else if (item.type === 'movie' && item.missing_episodes > 0) {
-      tasks.push({item: item, season: null, episodes: []});
-    }
-  }
-  if (!tasks.length) { _showWantedProgress('No missing items to search.'); return; }
-  if (!confirm('Search for missing content across ' + items.length + ' item(s) (' + tasks.length + ' request(s))?')) return;
   _wantedInFlight = true;
-  document.getElementById('wanted-search-btn').disabled = true;
-  var done = 0, total = tasks.length, succeeded = 0;
-  function _next() {
-    if (done >= total) {
-      var msg = 'Searched ' + succeeded + '/' + total + ' request(s).';
-      if (total - succeeded > 0) msg += ' ' + (total - succeeded) + ' failed.';
-      _showWantedProgress(msg);
-      setTimeout(function() {
-        _wantedInFlight = false;
-        document.getElementById('wanted-search-btn').disabled = false;
-        _showWantedProgress('');
-        fetchLibrary();
-      }, 2000);
+  document.getElementById(btnId).disabled = true;
+  _showWantedProgress('Resolving missing episodes...');
+
+  _resolveMissingTasks(items, function(tasks) {
+    if (!tasks.length) {
+      _wantedInFlight = false;
+      document.getElementById(btnId).disabled = false;
+      _showWantedProgress('No missing items found.');
+      setTimeout(function() { _showWantedProgress(''); }, 2000);
       return;
     }
-    var t = tasks[done];
-    _showWantedProgress('Searching ' + (done + 1) + '/' + total + '...');
-    var payload = {title: t.item.title, type: t.item.type};
-    if (t.season !== null) { payload.season = t.season; payload.episodes = t.episodes; }
-    fetch('/api/library/download', {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
-    }).then(function(r) { if (r.ok) succeeded++; }).catch(function() {}).finally(function() {
-      done++; setTimeout(_next, 500);
-    });
-  }
-  _next();
+    var totalShows = new Set(tasks.map(function(t) { return normTitle(t.item.title); })).size;
+    if (!confirm(actionLabel + ' across ' + totalShows + ' item(s) (' + tasks.length + ' request(s))?')) {
+      _wantedInFlight = false;
+      document.getElementById(btnId).disabled = false;
+      _showWantedProgress('');
+      return;
+    }
+    var done = 0, total = tasks.length, succeeded = 0;
+    function _next() {
+      if (done >= total) {
+        var msg = progressLabel + ' ' + succeeded + '/' + total + ' request(s).';
+        if (total - succeeded > 0) msg += ' ' + (total - succeeded) + ' failed.';
+        _showWantedProgress(msg);
+        setTimeout(function() {
+          _wantedInFlight = false;
+          document.getElementById(btnId).disabled = false;
+          _showWantedProgress('');
+          fetchLibrary();
+        }, 2000);
+        return;
+      }
+      var t = tasks[done];
+      _showWantedProgress(progressLabel + ' ' + (done + 1) + '/' + total + '...');
+      var payload = {title: t.item.title, type: t.item.type};
+      if (t.season !== null) { payload.season = t.season; payload.episodes = t.episodes; }
+      fetch(endpoint, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+      }).then(function(r) { if (r.ok) succeeded++; }).catch(function() {}).finally(function() {
+        done++; setTimeout(_next, 500);
+      });
+    }
+    _next();
+  });
+}
+
+function wantedSearchAll() {
+  _runWantedBulk('/api/library/download', 'wanted-search-btn', 'Search for missing content', 'Searched');
 }
 
 function wantedDownloadAll() {
-  if (_wantedInFlight) return;
-  var items = _displayedItems;
-  if (!items.length) return;
-  var tasks = [];
-  for (var i = 0; i < items.length; i++) {
-    var item = items[i];
-    var today = new Date().toISOString().slice(0, 10);
-    if (item.type === 'show' && item.season_data) {
-      for (var si = 0; si < item.season_data.length; si++) {
-        var season = item.season_data[si];
-        var missingEps = [];
-        for (var ei = 0; ei < (season.episodes || []).length; ei++) {
-          var ep = season.episodes[ei];
-          if (ep.source === 'missing' && ep.air_date && ep.air_date <= today) missingEps.push(ep.number);
-        }
-        if (missingEps.length) {
-          tasks.push({item: item, season: season.number, episodes: missingEps});
-        }
-      }
-    } else if (item.type === 'movie' && item.missing_episodes > 0) {
-      tasks.push({item: item, season: null, episodes: []});
-    }
-  }
-  if (!tasks.length) { _showWantedProgress('No items to download.'); return; }
-  if (!confirm('Trigger local download for ' + items.length + ' item(s) (' + tasks.length + ' request(s))?')) return;
-  _wantedInFlight = true;
-  document.getElementById('wanted-download-btn').disabled = true;
-  var done = 0, total = tasks.length, succeeded = 0;
-  function _next() {
-    if (done >= total) {
-      var msg = 'Downloaded ' + succeeded + '/' + total + ' request(s).';
-      if (total - succeeded > 0) msg += ' ' + (total - succeeded) + ' failed.';
-      _showWantedProgress(msg);
-      setTimeout(function() {
-        _wantedInFlight = false;
-        document.getElementById('wanted-download-btn').disabled = false;
-        _showWantedProgress('');
-        fetchLibrary();
-      }, 2000);
-      return;
-    }
-    var t = tasks[done];
-    _showWantedProgress('Downloading ' + (done + 1) + '/' + total + '...');
-    var payload = {title: t.item.title, type: t.item.type};
-    if (t.season !== null) { payload.season = t.season; payload.episodes = t.episodes; }
-    fetch('/api/library/download-local-fallback', {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
-    }).then(function(r) { if (r.ok) succeeded++; }).catch(function() {}).finally(function() {
-      done++; setTimeout(_next, 500);
-    });
-  }
-  _next();
+  _runWantedBulk('/api/library/download-local-fallback', 'wanted-download-btn', 'Trigger local download', 'Downloaded');
 }
 
 function _showWantedProgress(msg) {

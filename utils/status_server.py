@@ -1119,19 +1119,8 @@ setTimeout(updateMountHistory,1000);
     return r.ok?r.json():null;
   }).then(function(data){
     if(!data)return;
-    var today=new Date().toISOString().slice(0,10);
     var count=0;
-    (data.shows||[]).forEach(function(s){
-      if(!s.season_data)return;
-      var hasMissing=false;
-      for(var si=0;si<s.season_data.length&&!hasMissing;si++){
-        var eps=s.season_data[si].episodes||[];
-        for(var ei=0;ei<eps.length;ei++){
-          if(eps[ei].source==='missing'&&eps[ei].air_date&&eps[ei].air_date<=today){hasMissing=true;break}
-        }
-      }
-      if(hasMissing)count++;
-    });
+    (data.shows||[]).forEach(function(s){if(s.missing_episodes>0)count++});
     (data.movies||[]).forEach(function(m){if(m.missing_episodes>0)count++});
     var link=document.getElementById('nav-wanted-link');
     var badge=document.getElementById('nav-wanted-count');

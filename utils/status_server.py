@@ -595,7 +595,7 @@ dialog .dlg-cancel{background:var(--border);color:var(--text)}
 dialog .dlg-confirm{background:var(--blue);color:#fff}
 .nav-badge{display:inline-block;background:var(--red);color:#fff;border-radius:8px;font-size:.72em;font-weight:700;padding:1px 6px;margin-left:4px;min-width:16px;text-align:center;vertical-align:middle;line-height:1.4}
 .type-badge{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-size:.75em;font-weight:500;white-space:nowrap}
-.type-grabbed{background:#58a6ff1a;color:var(--blue)}.type-cached{background:#3fb9501a;color:var(--green)}.type-symlink_created{background:#bc8cff1a;color:#bc8cff}.type-failed{background:#f851491a;color:var(--red)}.type-cleanup{background:#d299221a;color:var(--yellow)}.type-switched_source{background:#db6d281a;color:var(--orange)}.type-search_triggered{background:#58a6ff1a;color:var(--blue)}.type-rescan_triggered{background:#3fb9501a;color:var(--green)}.type-task_completed{background:var(--border);color:var(--text2)}
+.type-grabbed{background:#58a6ff1a;color:var(--blue)}.type-cached{background:#3fb9501a;color:var(--green)}.type-symlink_created{background:#bc8cff1a;color:#bc8cff}.type-failed{background:#f851491a;color:var(--red)}.type-cleanup{background:#d299221a;color:var(--yellow)}.type-switched_source{background:#db6d281a;color:var(--orange)}.type-search_triggered{background:#58a6ff1a;color:var(--blue)}.type-rescan_triggered{background:#3fb9501a;color:var(--green)}.type-task_completed{background:var(--border);color:var(--text2)}.type-blocklisted{background:#f851491a;color:var(--red)}.type-blocklist_added{background:#db6d281a;color:var(--orange)}
 @media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
 </style>
 <script>(function(){try{var t=localStorage.getItem('pd_zurg_theme');if(t){document.documentElement.setAttribute('data-theme',t);document.querySelector('meta[name="color-scheme"]').content=t==='light'?'light':'dark';}}catch(e){}})()</script>
@@ -659,6 +659,8 @@ dialog .dlg-confirm{background:var(--blue);color:#fff}
         <option value="search_triggered">Search</option>
         <option value="rescan_triggered">Rescan</option>
         <option value="task_completed">Task</option>
+        <option value="blocklisted">Blocklisted</option>
+        <option value="blocklist_added">Auto-Blocked</option>
       </select>
       <input type="text" id="activity-search" placeholder="Search titles..." oninput="loadActivity()" style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:.8em;color:var(--text);outline:none;min-width:120px">
       <button class="btn-run" onclick="clearHistory()" id="activity-clear-btn" style="display:none">Clear</button>
@@ -666,6 +668,16 @@ dialog .dlg-confirm{background:var(--blue);color:#fff}
     <table><thead><tr><th style="width:80px">Time</th><th style="width:90px">Type</th><th>Title</th><th>Detail</th><th style="width:60px">Source</th></tr></thead>
     <tbody id="activity-body"></tbody></table>
     <div style="display:flex;justify-content:center;margin-top:8px;gap:8px" id="activity-pager"></div>
+  </div>
+</div>
+<div class="grid full">
+  <div class="card">
+    <h2>Blocklist <span id="blocklist-count" style="font-size:.7em;color:var(--text3)"></span></h2>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+      <button class="btn-run" onclick="clearBlocklist()" id="blocklist-clear-btn" style="display:none">Clear All</button>
+    </div>
+    <table><thead><tr><th>Title</th><th style="width:120px">Hash</th><th>Reason</th><th style="width:80px">Date</th><th style="width:60px">Source</th><th style="width:50px" id="bl-actions-hdr"></th></tr></thead>
+    <tbody id="blocklist-body"></tbody></table>
   </div>
 </div>
 <div class="grid full">
@@ -1158,7 +1170,7 @@ setTimeout(updateMountHistory,1000);
 
 // Activity tab
 var _actPage=1;
-var _actIcons={grabbed:'\u2B07',cached:'\u2705',symlink_created:'\U0001F517',failed:'\u274C',cleanup:'\U0001F5D1',switched_source:'\u21C4',search_triggered:'\U0001F50D',rescan_triggered:'\U0001F504',task_completed:'\u2699'};
+var _actIcons={grabbed:'\u2B07',cached:'\u2705',symlink_created:'\U0001F517',failed:'\u274C',cleanup:'\U0001F5D1',switched_source:'\u21C4',search_triggered:'\U0001F50D',rescan_triggered:'\U0001F504',task_completed:'\u2699',blocklisted:'\U0001F6AB',blocklist_added:'\u26D4'};
 function loadActivity(page){
   if(page)_actPage=page; else _actPage=1;
   var t=document.getElementById('activity-type').value;
@@ -1197,6 +1209,50 @@ function clearHistory(){
   fetch('/api/history',{method:'DELETE'}).then(function(){loadActivity()}).catch(function(){});
 }
 loadActivity();
+
+// Blocklist
+function loadBlocklist(){
+  fetch('/api/blocklist').then(function(r){return r.json()}).then(function(entries){
+    var el=document.getElementById('blocklist-body');
+    var cnt=document.getElementById('blocklist-count');
+    if(!entries||!entries.length){
+      el.innerHTML='<tr><td colspan="6" style="color:var(--text3);text-align:center;padding:16px">No blocklisted torrents</td></tr>';
+      cnt.textContent='';
+      return;
+    }
+    cnt.textContent='('+entries.length+')';
+    var h='';
+    entries.forEach(function(e){
+      var shortHash=e.info_hash?(e.info_hash.substring(0,12)+'\u2026'):'';
+      var srcBadge=e.source==='auto'?'<span style="color:var(--orange);font-size:.75em">\u2699 auto</span>':'<span style="font-size:.75em">manual</span>';
+      h+='<tr>';
+      h+='<td style="font-size:.85em">'+esc(e.title||'')+'</td>';
+      h+='<td class="bl-hash" style="font-size:.75em;font-family:monospace;color:var(--text2);cursor:pointer" title="Click to copy" data-hash="'+esc(e.info_hash||'')+'">'+esc(shortHash)+'</td>';
+      h+='<td style="font-size:.8em;color:var(--text2)">'+esc(e.reason||'')+'</td>';
+      h+='<td style="font-size:.8em;color:var(--text3);white-space:nowrap">'+timeAgo(e.date)+'</td>';
+      h+='<td>'+srcBadge+'</td>';
+      h+='<td>';
+      if(window._hasAuth)h+='<button class="btn-run bl-remove" style="font-size:.7em;padding:2px 6px" data-id="'+esc(e.id)+'">Remove</button>';
+      h+='</td></tr>';
+    });
+    el.innerHTML=h;
+    // Event delegation for copy and remove actions (avoids inline JS injection)
+    el.querySelectorAll('.bl-hash').forEach(function(td){td.addEventListener('click',function(){navigator.clipboard.writeText(this.dataset.hash||'')})});
+    el.querySelectorAll('.bl-remove').forEach(function(btn){btn.addEventListener('click',function(){removeBlocklistEntry(this.dataset.id)})});
+    if(window._hasAuth)document.getElementById('blocklist-clear-btn').style.display='';
+    if(window._hasAuth)document.getElementById('bl-actions-hdr').textContent='Actions';
+  }).catch(function(){});
+}
+function removeBlocklistEntry(id){
+  fetch('/api/blocklist/'+encodeURIComponent(id),{method:'DELETE'}).then(function(r){
+    if(r.ok)loadBlocklist();
+  }).catch(function(){});
+}
+function clearBlocklist(){
+  if(!confirm('Remove all blocklisted torrents? They may be re-downloaded.'))return;
+  fetch('/api/blocklist',{method:'DELETE',headers:{'X-Confirm-Clear':'true'}}).then(function(){loadBlocklist()}).catch(function(){});
+}
+loadBlocklist();
 </script>
 </body>
 </html>'''
@@ -1414,6 +1470,9 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 limit=limit,
             )
             self._send_json_response(200, json.dumps(result))
+        elif self.path == '/api/blocklist':
+            from utils import blocklist as blocklist_mod
+            self._send_json_response(200, json.dumps(blocklist_mod.get_all()))
         elif self.path in ('/', '/status'):
             html = _DASHBOARD_HTML.encode()
             self.send_response(200)
@@ -2238,6 +2297,34 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 )
             except Exception as e:
                 self._send_json_response(500, json.dumps({'error': str(e)}))
+        elif self.path == '/api/blocklist':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 100_000:
+                    self._send_json_response(400, json.dumps({'error': 'Request body too large'}))
+                    return
+                body = self.rfile.read(content_length)
+                values = json.loads(body.decode('utf-8'))
+            except (json.JSONDecodeError, ValueError):
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+                return
+            info_hash = (values.get('info_hash') or '').strip()
+            title = (values.get('title') or '').strip()
+            reason = (values.get('reason') or '').strip()
+            if not info_hash and not title:
+                self._send_json_response(400, json.dumps({'error': 'info_hash or title required'}))
+                return
+            # If no info_hash provided, use a prefixed hash of the title as a synthetic key.
+            # The TITLE: prefix prevents collision with real BitTorrent SHA1 info hashes.
+            if not info_hash:
+                import hashlib
+                info_hash = 'TITLE:' + hashlib.sha1(title.encode('utf-8')).hexdigest().upper()
+            from utils import blocklist as blocklist_mod
+            entry_id = blocklist_mod.add(info_hash, title, reason=reason, source='manual')
+            if entry_id:
+                self._send_json_response(200, json.dumps({'status': 'added', 'id': entry_id}))
+            else:
+                self._send_json_response(500, json.dumps({'error': 'Failed to add entry'}))
         else:
             self.send_response(404)
             self.end_headers()
@@ -2254,6 +2341,26 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             from utils import history as history_mod
             history_mod.clear()
             self._send_json_response(200, json.dumps({'status': 'cleared'}))
+        elif self.path == '/api/blocklist':
+            confirm = self.headers.get('X-Confirm-Clear', '')
+            if confirm != 'true':
+                self._send_json_response(400, json.dumps({
+                    'error': 'Set X-Confirm-Clear: true header to confirm'
+                }))
+                return
+            from utils import blocklist as blocklist_mod
+            blocklist_mod.clear()
+            self._send_json_response(200, json.dumps({'status': 'cleared'}))
+        elif self.path.startswith('/api/blocklist/'):
+            entry_id = self.path[len('/api/blocklist/'):]
+            if not entry_id:
+                self._send_json_response(400, json.dumps({'error': 'Entry ID required'}))
+                return
+            from utils import blocklist as blocklist_mod
+            if blocklist_mod.remove(entry_id):
+                self._send_json_response(200, json.dumps({'status': 'removed'}))
+            else:
+                self._send_json_response(404, json.dumps({'error': 'Entry not found'}))
         else:
             self.send_response(404)
             self.end_headers()

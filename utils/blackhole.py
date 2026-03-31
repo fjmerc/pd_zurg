@@ -9,6 +9,7 @@ appears on the rclone mount, then creates symlinks in a completed
 directory for Sonarr/Radarr to import.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -30,6 +31,11 @@ try:
 except ImportError:
     _history = None
 
+try:
+    from utils import blocklist as _blocklist
+except ImportError:
+    _blocklist = None
+
 _watcher = None
 
 # Retry configuration for failed torrent submissions
@@ -46,6 +52,42 @@ MOUNT_CATEGORIES = ['shows', 'movies', 'anime']
 RD_TERMINAL_ERRORS = {'magnet_error', 'error', 'virus', 'dead'}
 AD_TERMINAL_ERRORS = {'Error'}
 TB_TERMINAL_ERRORS = {'error', 'failed'}
+
+
+def _bencode_end(data, start):
+    """Find the end offset of a bencoded value starting at `start`.
+
+    Supports dicts (d...e), lists (l...e), integers (iNe), and byte strings (N:...).
+    Returns the offset ONE PAST the last byte, or None on parse error.
+    """
+    if start >= len(data):
+        return None
+    ch = data[start:start + 1]
+    if ch == b'd' or ch == b'l':
+        pos = start + 1
+        while pos < len(data) and data[pos:pos + 1] != b'e':
+            pos = _bencode_end(data, pos)
+            if pos is None:
+                return None
+            # Dicts have key-value pairs; after key we need the value
+            if ch == b'd':
+                pos = _bencode_end(data, pos)
+                if pos is None:
+                    return None
+        return pos + 1 if pos < len(data) else None
+    elif ch == b'i':
+        end = data.find(b'e', start + 1)
+        return end + 1 if end != -1 else None
+    elif ch and ch[0:1].isdigit():
+        colon = data.find(b':', start)
+        if colon == -1:
+            return None
+        try:
+            length = int(data[start:colon])
+        except ValueError:
+            return None
+        return colon + 1 + length
+    return None
 
 
 def _parse_episodes(filename):
@@ -375,6 +417,19 @@ class BlackholeWatcher:
             pass
         return ''
 
+    def _extract_hash_from_info(self, info):
+        """Extract the info hash from a debrid torrent info response."""
+        try:
+            if self.debrid_service == 'realdebrid':
+                return (info.get('hash') or '').upper()
+            elif self.debrid_service == 'alldebrid':
+                return (info['data']['magnets'].get('hash') or '').upper()
+            elif self.debrid_service == 'torbox':
+                return (info['data'].get('hash') or '').upper()
+        except (KeyError, TypeError):
+            pass
+        return ''
+
     # ── Mount scanning ───────────────────────────────────────────────
 
     def _find_on_mount(self, release_name):
@@ -631,6 +686,15 @@ class BlackholeWatcher:
                     _history.log_event('failed', filename, source='blackhole',
                                        detail=f'Terminal error: {status}',
                                        meta={'provider': self.debrid_service, 'torrent_id': torrent_id})
+                # Auto-blocklist on terminal failure
+                if _blocklist and str(os.environ.get('BLOCKLIST_AUTO_ADD', 'true')).lower() == 'true':
+                    bl_hash = self._extract_hash_from_info(info)
+                    if bl_hash:
+                        _blocklist.add(bl_hash, filename, reason=f'Terminal error: {status}', source='auto')
+                        if _history:
+                            _history.log_event('blocklist_added', filename, source='blackhole',
+                                               detail=f'Auto-blocklisted: {status}',
+                                               meta={'info_hash': bl_hash})
                 try:
                     from utils.metrics import metrics
                     metrics.inc('blackhole_symlink_failed')
@@ -943,6 +1007,11 @@ class BlackholeWatcher:
             if orig_hash and info_hash == orig_hash.upper():
                 continue
 
+            # Skip blocklisted hashes
+            if _blocklist and _blocklist.is_blocked(info_hash):
+                logger.debug(f"[blackhole] Skipping blocklisted alternative: {info_hash[:16]}...")
+                continue
+
             tried += 1
             alt_title = r.get('title', 'unknown')
             logger.info(f"[blackhole] Trying alternative release: {alt_title[:60]} (hash {info_hash})")
@@ -985,7 +1054,12 @@ class BlackholeWatcher:
 
     @staticmethod
     def _extract_info_hash_from_file(file_path):
-        """Extract info hash from a .magnet file or .torrent filename."""
+        """Extract info hash from a .magnet or .torrent file.
+
+        For .magnet: parses the btih: URI parameter.
+        For .torrent: locates the bencoded 'info' dict and SHA1 hashes
+        its raw bytes (the standard BitTorrent info hash computation).
+        """
         ext = os.path.splitext(file_path)[1].lower()
         if ext == '.magnet':
             try:
@@ -995,6 +1069,25 @@ class BlackholeWatcher:
                 if m:
                     return m.group(1).upper()
             except OSError:
+                pass
+        elif ext == '.torrent':
+            try:
+                with open(file_path, 'rb') as f:
+                    data = f.read()
+                # Find the raw bytes of the 'info' value in the bencoded torrent.
+                # Bencode format: ...4:info<value>... where <value> starts with 'd'
+                # We find the start of the info value and extract to its matching end.
+                marker = b'4:infod'
+                idx = data.find(marker)
+                if idx == -1:
+                    return None
+                info_start = idx + len(b'4:info')  # start of the dict value ('d...')
+                # Walk the bencoded structure to find the matching 'e'
+                info_end = _bencode_end(data, info_start)
+                if info_end is not None:
+                    info_bytes = data[info_start:info_end]
+                    return hashlib.sha1(info_bytes).hexdigest().upper()
+            except (OSError, ValueError):
                 pass
         return None
 
@@ -1018,6 +1111,21 @@ class BlackholeWatcher:
             except Exception:
                 pass
             return
+
+        # Check blocklist before submitting to debrid
+        if _blocklist:
+            info_hash = self._extract_info_hash_from_file(file_path)
+            if info_hash and _blocklist.is_blocked(info_hash):
+                logger.info(f"[blackhole] Skipping blocklisted torrent: {filename} ({info_hash[:16]}...)")
+                if _history:
+                    _history.log_event('blocklisted', filename, source='blackhole',
+                                       detail=f'Skipped — info hash is blocklisted',
+                                       meta={'info_hash': info_hash})
+                try:
+                    os.remove(file_path)
+                except OSError as e:
+                    logger.warning(f"[blackhole] Could not remove blocklisted file {filename}: {e}")
+                return
 
         dispatch = {
             'realdebrid': self._add_to_realdebrid,

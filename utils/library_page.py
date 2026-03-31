@@ -1851,6 +1851,7 @@ function _renderMovieDetail(movie, meta) {
       var movieDlLabel = _downloadServices.movie === 'overseerr' ? 'Request in Overseerr' : 'Switch to Local';
       var movieDebridPref = _downloadServices.movie === 'overseerr' ? undefined : false;
       html += '<button class="btn-action" onclick="_confirmBtn(this,function(){downloadMovie(' + (movieDebridPref === undefined ? '' : movieDebridPref) + ')})">' + movieDlLabel + '</button>';
+      html += '<button class="btn-action danger" onclick="event.stopPropagation();blockMovie()">Block</button>';
     }
     if ((movie.source === 'local' || movie.source === 'both') && _downloadServices.movie === 'radarr') {
       html += '<button class="btn-action danger" onclick="_confirmBtn(this,function(){removeMovie()})">Switch to Debrid</button>';
@@ -2033,6 +2034,7 @@ function _renderSeasonEpisodes(season, si) {
     } else if (_downloadServices.show && _downloadServices.show !== 'overseerr') {
       if (ep.source === 'debrid') {
         html += '<button class="btn-action" aria-label="Switch ' + epLabel + ' to Local" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ',false)})">Switch to Local</button>';
+        html += '<button class="btn-action danger" aria-label="Block ' + epLabel + '" onclick="event.stopPropagation();blockEpisode(' + season.number + ',' + ep.number + ')">Block</button>';
       } else if (ep.source === 'local') {
         html += '<button class="btn-action danger" aria-label="Switch ' + epLabel + ' to Debrid" onclick="_confirmBtn(this,function(){removeEp(' + season.number + ',' + ep.number + ')})">Switch to Debrid</button>';
       } else if (ep.source === 'both') {
@@ -2675,6 +2677,52 @@ function removeEp(season, episode) {
     title: _detailItem.title, type: _detailItem.type, tmdb_id: tmdbId,
     season: season, episodes: [episode]
   });
+}
+
+function blockEpisode(season, episode) {
+  if (!_detailItem) return;
+  var reasons = ['Wrong content', 'Corrupt file', 'Wrong language', 'Low quality', 'Other'];
+  var reason = prompt('Reason for blocking this torrent?\\n\\n1. Wrong content\\n2. Corrupt file\\n3. Wrong language\\n4. Low quality\\n5. Other\\n\\nEnter number or custom reason:');
+  if (reason === null) return;
+  reason = reason.trim();
+  var idx = parseInt(reason, 10);
+  if (idx >= 1 && idx <= reasons.length) reason = reasons[idx - 1];
+  if (!reason) reason = 'Blocked from library';
+  var title = _detailItem.title;
+  fetch('/api/blocklist', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({title: title, reason: reason})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.status === 'added') {
+      _showMsg('Blocklisted: ' + title, 'success');
+    } else {
+      _showMsg('Failed to blocklist: ' + (d.error || ''), 'error');
+    }
+  }).catch(function() { _showMsg('Failed to blocklist', 'error'); });
+}
+
+function blockMovie() {
+  if (!_detailItem) return;
+  var reasons = ['Wrong content', 'Corrupt file', 'Wrong language', 'Low quality', 'Other'];
+  var reason = prompt('Reason for blocking this torrent?\\n\\n1. Wrong content\\n2. Corrupt file\\n3. Wrong language\\n4. Low quality\\n5. Other\\n\\nEnter number or custom reason:');
+  if (reason === null) return;
+  reason = reason.trim();
+  var idx = parseInt(reason, 10);
+  if (idx >= 1 && idx <= reasons.length) reason = reasons[idx - 1];
+  if (!reason) reason = 'Blocked from library';
+  var title = _detailItem.title;
+  fetch('/api/blocklist', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({title: title, reason: reason})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.status === 'added') {
+      _showMsg('Blocklisted: ' + title, 'success');
+    } else {
+      _showMsg('Failed to blocklist: ' + (d.error || ''), 'error');
+    }
+  }).catch(function() { _showMsg('Failed to blocklist', 'error'); });
 }
 
 function dlSeason(seasonIdx) {

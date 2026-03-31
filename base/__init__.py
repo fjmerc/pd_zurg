@@ -66,6 +66,8 @@ __all__ = [
     'CONFIG_BACKUP_INTERVAL', 'MOUNT_LIVENESS_INTERVAL',
     # History
     'HISTORY_RETENTION_DAYS',
+    # Blocklist
+    'BLOCKLIST_AUTO_ADD',
 ]
 
 load_dotenv(find_dotenv('./config/.env'))
@@ -193,6 +195,8 @@ class Config:
         self.MOUNT_LIVENESS_INTERVAL = os.getenv('MOUNT_LIVENESS_INTERVAL')
         # History
         self.HISTORY_RETENTION_DAYS = os.getenv('HISTORY_RETENTION_DAYS')
+        # Blocklist
+        self.BLOCKLIST_AUTO_ADD = os.getenv('BLOCKLIST_AUTO_ADD', 'true')
 
 
 # Default singleton instance — used by existing code via module-level globals
@@ -263,3 +267,4 @@ HOUSEKEEPING_INTERVAL = config.HOUSEKEEPING_INTERVAL
 CONFIG_BACKUP_INTERVAL = config.CONFIG_BACKUP_INTERVAL
 MOUNT_LIVENESS_INTERVAL = config.MOUNT_LIVENESS_INTERVAL
 HISTORY_RETENTION_DAYS = config.HISTORY_RETENTION_DAYS
+BLOCKLIST_AUTO_ADD = config.BLOCKLIST_AUTO_ADD

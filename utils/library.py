@@ -22,6 +22,11 @@ try:
 except ImportError:
     _history = None
 
+try:
+    from utils import blocklist as _blocklist
+except ImportError:
+    _blocklist = None
+
 MEDIA_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m4v', '.webm'}
 
 # Folders to skip during library scans (non-media content)
@@ -1761,6 +1766,13 @@ class LibraryScanner:
 
                 title = movie['title']
                 year = movie.get('year')
+
+                # Skip blocklisted items (check by mount folder name and parsed title)
+                if _blocklist:
+                    mount_folder = os.path.basename(mount_dir)
+                    if _blocklist.is_blocked_title(mount_folder) or _blocklist.is_blocked_title(title):
+                        continue
+
                 arr_info = radarr_map.get(title.lower()) or radarr_map_norm.get(_norm_for_matching(title))
                 # Fallback: match via TMDB ID when title differs
                 if not arr_info:
@@ -1861,6 +1873,12 @@ class LibraryScanner:
                         debrid_path = path_index.get((norm, snum, enum))
                         if not debrid_path:
                             continue
+
+                        # Skip blocklisted items (check by release folder name and show title)
+                        if _blocklist:
+                            release_folder = os.path.basename(os.path.dirname(debrid_path))
+                            if _blocklist.is_blocked_title(release_folder) or _blocklist.is_blocked_title(title):
+                                continue
 
                         filename = os.path.basename(debrid_path)
                         local_path = os.path.join(

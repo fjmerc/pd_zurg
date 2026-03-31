@@ -10,7 +10,7 @@ import re
 import threading
 import unicodedata
 import time
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from urllib.parse import quote as urllib_quote
 from utils.logger import get_logger
 from utils.quality_parser import parse_quality
@@ -2555,21 +2555,15 @@ def get_wanted_counts(data, pending=None):
     Returns dict with keys: missing, unavailable, pending, fallback.
     Each value is the number of items (shows/movies) matching that filter.
     """
-    today = date.today().isoformat()
     pending = pending or {}
     counts = {'missing': 0, 'unavailable': 0, 'pending': 0, 'fallback': 0}
 
     for show in data.get('shows', []):
-        # Missing: has aired episodes with no file
-        has_aired_missing = False
-        for season in show.get('season_data', []):
-            for ep in season.get('episodes', []):
-                if ep.get('source') == 'missing' and ep.get('air_date') and ep['air_date'] <= today:
-                    has_aired_missing = True
-                    break
-            if has_aired_missing:
-                break
-        if has_aired_missing:
+        # Missing: TMDB enrichment sets missing_episodes = total - have.
+        # season_data from the scan only contains episodes WITH files,
+        # so we use the pre-computed count instead of iterating episodes.
+        me = show.get('missing_episodes')
+        if me is not None and me > 0:
             counts['missing'] += 1
 
         # Pending directions

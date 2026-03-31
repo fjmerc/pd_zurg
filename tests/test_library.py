@@ -1683,33 +1683,29 @@ class TestGetWantedCounts:
         counts = get_wanted_counts({})
         assert counts == {'missing': 0, 'unavailable': 0, 'pending': 0, 'fallback': 0}
 
-    def test_show_with_aired_missing_episode(self):
+    def test_show_with_missing_episodes_counted(self):
         data = {'shows': [{
             'title': 'Test Show',
-            'season_data': [{'number': 1, 'episodes': [
-                {'number': 1, 'source': 'debrid', 'air_date': '2025-01-01'},
-                {'number': 2, 'source': 'missing', 'air_date': '2025-06-01'},
-            ]}],
+            'missing_episodes': 3,
+            'season_data': [],
         }], 'movies': []}
         counts = get_wanted_counts(data)
         assert counts['missing'] == 1
 
-    def test_show_with_future_missing_episode_not_counted(self):
+    def test_show_with_zero_missing_not_counted(self):
         data = {'shows': [{
-            'title': 'Future Show',
-            'season_data': [{'number': 1, 'episodes': [
-                {'number': 1, 'source': 'missing', 'air_date': '2099-12-31'},
-            ]}],
+            'title': 'Complete Show',
+            'missing_episodes': 0,
+            'season_data': [],
         }], 'movies': []}
         counts = get_wanted_counts(data)
         assert counts['missing'] == 0
 
-    def test_show_with_no_air_date_missing_not_counted(self):
+    def test_show_with_none_missing_not_counted(self):
         data = {'shows': [{
-            'title': 'TBA Show',
-            'season_data': [{'number': 1, 'episodes': [
-                {'number': 1, 'source': 'missing', 'air_date': None},
-            ]}],
+            'title': 'Unenriched Show',
+            'missing_episodes': None,
+            'season_data': [],
         }], 'movies': []}
         counts = get_wanted_counts(data)
         assert counts['missing'] == 0
@@ -1740,15 +1736,9 @@ class TestGetWantedCounts:
 
     def test_multiple_shows_with_missing(self):
         data = {'shows': [
-            {'title': 'Show 1', 'season_data': [{'number': 1, 'episodes': [
-                {'number': 1, 'source': 'missing', 'air_date': '2025-01-01'},
-            ]}]},
-            {'title': 'Show 2', 'season_data': [{'number': 1, 'episodes': [
-                {'number': 1, 'source': 'debrid', 'air_date': '2025-01-01'},
-            ]}]},
-            {'title': 'Show 3', 'season_data': [{'number': 1, 'episodes': [
-                {'number': 1, 'source': 'missing', 'air_date': '2025-03-01'},
-            ]}]},
+            {'title': 'Show 1', 'missing_episodes': 5, 'season_data': []},
+            {'title': 'Show 2', 'missing_episodes': 0, 'season_data': []},
+            {'title': 'Show 3', 'missing_episodes': 2, 'season_data': []},
         ], 'movies': []}
         counts = get_wanted_counts(data)
         assert counts['missing'] == 2

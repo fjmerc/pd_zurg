@@ -145,14 +145,6 @@ a:hover{text-decoration:underline}
 [data-theme="light"] .badge-quality-720p{background:#bc4c001a;border-color:#bc4c0040}
 .ep-quality{display:flex;align-items:center;gap:6px;flex-wrap:nowrap}
 .ep-size{font-size:.78em;color:var(--text3);white-space:nowrap}
-.quality-corner{position:absolute;top:6px;left:6px;padding:2px 6px;border-radius:4px;font-size:.62em;font-weight:700;letter-spacing:.3px;z-index:2;line-height:1.2}
-.quality-corner-2160p{background:rgba(168,85,247,.85);color:#fff}
-.quality-corner-1080p{background:rgba(88,166,255,.85);color:#fff}
-.quality-corner-720p{background:rgba(219,109,40,.85);color:#fff}
-.quality-corner-480p{background:rgba(99,110,123,.7);color:#fff}
-[data-theme="light"] .quality-corner-2160p{background:rgba(147,51,234,.8)}
-[data-theme="light"] .quality-corner-1080p{background:rgba(9,105,218,.8)}
-[data-theme="light"] .quality-corner-720p{background:rgba(188,76,0,.8)}
 
 /* Spinner */
 .spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle}
@@ -355,6 +347,26 @@ body.has-bulk-bar{padding-bottom:60px}
     <option value="">All Sources</option>
     <option value="local">Local Only</option>
     <option value="debrid">Debrid Only</option>
+  </select>
+  <select class="filter-select" id="status-filter" onchange="applyFilters()" aria-label="Filter by status" style="display:none">
+    <option value="">All Status</option>
+    <option value="Continuing">Continuing</option>
+    <option value="Ended">Ended</option>
+  </select>
+  <select class="filter-select" id="year-filter" onchange="applyFilters()" aria-label="Filter by year">
+    <option value="">All Years</option>
+    <option value="2020s">2020s</option>
+    <option value="2010s">2010s</option>
+    <option value="2000s">2000s</option>
+    <option value="older">Older</option>
+  </select>
+  <select class="filter-select" id="sort-select" onchange="applyFilters()" aria-label="Sort by">
+    <option value="az">Sort: A-Z</option>
+    <option value="za">Sort: Z-A</option>
+    <option value="added">Sort: Newest Added</option>
+    <option value="year">Sort: Year</option>
+    <option value="episodes">Sort: Episodes</option>
+    <option value="size">Sort: Size</option>
   </select>
   <button class="btn-select" id="btn-select" onclick="toggleSelectMode()" aria-pressed="false">Select</button>
   <button class="btn-refresh" id="btn-refresh" onclick="triggerRefresh()">Refresh</button>
@@ -864,26 +876,6 @@ function _formatBytes(bytes) {
   return (bytes / 1073741824).toFixed(1) + ' GB';
 }
 
-var _RES_ORDER = {'2160p': 4, '1080p': 3, '720p': 2, '480p': 1};
-function _bestQuality(item) {
-  var best = null;
-  var bestRank = 0;
-  if (item.type === 'movie') {
-    return item.quality || null;
-  }
-  if (!item.season_data) return null;
-  for (var si = 0; si < item.season_data.length; si++) {
-    var eps = item.season_data[si].episodes || [];
-    for (var ei = 0; ei < eps.length; ei++) {
-      var q = eps[ei].quality;
-      if (q && q.resolution) {
-        var rank = _RES_ORDER[q.resolution] || 0;
-        if (rank > bestRank) { bestRank = rank; best = q; }
-      }
-    }
-  }
-  return best;
-}
 
 function computeProgress(item) {
   var nk = normTitle(item.title);
@@ -920,15 +912,6 @@ function buildCard(item, index) {
   var cornerBadge = '';
   if (item.type === 'show' && item.tmdb_status === 'Ended') {
     cornerBadge = '<div class="corner-badge ended"></div>';
-  }
-
-  // Quality corner badge (top-left)
-  var qualityCorner = '';
-  var bestQ = _bestQuality(item);
-  if (bestQ && bestQ.resolution) {
-    var qLabel = bestQ.resolution === '2160p' ? '4K' : bestQ.resolution;
-    var qCls = 'quality-corner-' + (bestQ.resolution === '2160p' ? '2160p' : bestQ.resolution);
-    qualityCorner = '<div class="quality-corner ' + qCls + '">' + esc(qLabel) + '</div>';
   }
 
   // Progress bar
@@ -986,7 +969,7 @@ function buildCard(item, index) {
     + ' data-index="' + index + '"'
     + ' onclick="onCardClick(' + index + ',event)" tabindex="0" role="button"'
     + ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();onCardClick(' + index + ',event)}">'
-    + '<div class="poster-container">' + checkboxHtml + qualityCorner + posterHtml + cornerBadge + '</div>'
+    + '<div class="poster-container">' + checkboxHtml + posterHtml + cornerBadge + '</div>'
     + progressHtml
     + '<div class="card-info">'
     + '<div class="card-title">' + esc(item.title) + '</div>'
@@ -995,11 +978,35 @@ function buildCard(item, index) {
     + '</div></div>';
 }
 
+function _getItemTotalSize(item) {
+  if (item.type === 'movie') return item.size_bytes || 0;
+  var total = 0;
+  if (item.season_data) {
+    for (var si = 0; si < item.season_data.length; si++) {
+      var eps = item.season_data[si].episodes || [];
+      for (var ei = 0; ei < eps.length; ei++) { total += eps[ei].size_bytes || 0; }
+    }
+  }
+  return total;
+}
+
 function applyFilters() {
   _lastCheckedIndex = -1;
   const query  = document.getElementById('search-input').value.trim().toLowerCase();
   const source = document.getElementById('source-filter').value;
+  const status = document.getElementById('status-filter').value;
+  const yearRange = document.getElementById('year-filter').value;
+  let sortBy = document.getElementById('sort-select').value;
   const dataset = _activeTab === 'movies' ? _allMovies : _allShows;
+
+  // Show/hide status filter and episodes sort (shows only)
+  document.getElementById('status-filter').style.display = _activeTab === 'shows' ? '' : 'none';
+  var epOpt = document.querySelector('#sort-select option[value="episodes"]');
+  if (epOpt) epOpt.style.display = _activeTab === 'shows' ? '' : 'none';
+  if (_activeTab !== 'shows' && sortBy === 'episodes') {
+    document.getElementById('sort-select').value = 'az';
+    sortBy = 'az';
+  }
 
   let filtered = dataset;
 
@@ -1011,16 +1018,50 @@ function applyFilters() {
     });
   }
 
+  if (status && _activeTab === 'shows') {
+    filtered = filtered.filter(function(item) {
+      return item.tmdb_status === status;
+    });
+  }
+
+  if (yearRange) {
+    filtered = filtered.filter(function(item) {
+      var y = item.year;
+      if (!y) return yearRange === 'older';
+      if (yearRange === '2020s') return y >= 2020 && y <= 2029;
+      if (yearRange === '2010s') return y >= 2010 && y <= 2019;
+      if (yearRange === '2000s') return y >= 2000 && y <= 2009;
+      if (yearRange === 'older') return y < 2000;
+      return true;
+    });
+  }
+
   if (query) {
     filtered = filtered.filter(function(item) {
       return item.title.toLowerCase().indexOf(query) !== -1;
     });
   }
 
-  // Alphabetical sort
+  // Sort
   filtered = filtered.slice().sort(function(a, b) {
-    return a.title.localeCompare(b.title);
+    if (sortBy === 'za') return b.title.localeCompare(a.title);
+    if (sortBy === 'added') return (b.date_added || 0) - (a.date_added || 0);
+    if (sortBy === 'year') {
+      var dy = (b.year || 0) - (a.year || 0);
+      return dy !== 0 ? dy : a.title.localeCompare(b.title);
+    }
+    if (sortBy === 'episodes') return (b.episodes || 0) - (a.episodes || 0);
+    if (sortBy === 'size') return _getItemTotalSize(b) - _getItemTotalSize(a);
+    return a.title.localeCompare(b.title); // default A-Z
   });
+
+  // Persist preferences
+  try {
+    localStorage.setItem('pd_library_sort', sortBy);
+    localStorage.setItem('pd_library_source', source);
+    localStorage.setItem('pd_library_status', status);
+    localStorage.setItem('pd_library_year', yearRange);
+  } catch(e) {}
 
   renderGrid(filtered);
   updateBadges(filtered.length);
@@ -1032,7 +1073,9 @@ function renderGrid(items) {
   if (!items.length) {
     _updateJumpBar([]);
     const isFiltered = document.getElementById('search-input').value.trim()
-      || document.getElementById('source-filter').value;
+      || document.getElementById('source-filter').value
+      || document.getElementById('status-filter').value
+      || document.getElementById('year-filter').value;
     if (isFiltered) {
       area.innerHTML = '<div class="state-panel"><div>No results match your filters.</div></div>';
     } else {
@@ -1084,6 +1127,9 @@ function _updateJumpBar(items) {
   var bar = document.getElementById('jump-bar');
   if (!bar) return;
   if (!items || !items.length) { bar.style.display = 'none'; return; }
+  // Hide jump bar when sort is not alphabetical
+  var sortBy = document.getElementById('sort-select').value;
+  if (sortBy !== 'az' && sortBy !== 'za') { bar.style.display = 'none'; return; }
 
   // Build set of letters that have items
   var activeLetters = {};
@@ -1248,7 +1294,9 @@ function _applyMeta(card, meta) {
 function updateBadges(filteredCount) {
   const query  = document.getElementById('search-input').value.trim();
   const source = document.getElementById('source-filter').value;
-  const isFiltered = query || source;
+  const status = document.getElementById('status-filter').value;
+  const yearRange = document.getElementById('year-filter').value;
+  const isFiltered = query || source || status || yearRange;
 
   if (isFiltered) {
     document.getElementById('badge-movies').textContent =
@@ -2721,6 +2769,17 @@ function startTsRefresh() {
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
+// Restore persisted filter/sort preferences
+try {
+  var _savedSort = localStorage.getItem('pd_library_sort');
+  var _savedSource = localStorage.getItem('pd_library_source');
+  var _savedStatus = localStorage.getItem('pd_library_status');
+  var _savedYear = localStorage.getItem('pd_library_year');
+  if (_savedSort) document.getElementById('sort-select').value = _savedSort;
+  if (_savedSource) document.getElementById('source-filter').value = _savedSource;
+  if (_savedStatus) document.getElementById('status-filter').value = _savedStatus;
+  if (_savedYear) document.getElementById('year-filter').value = _savedYear;
+} catch(e) {}
 fetchLibrary();
 startTsRefresh();
 </script>

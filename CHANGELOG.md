@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Mass Editor**: Library browser now supports bulk selection mode — click "Select" to toggle checkboxes on poster cards, shift-click for range selection, then apply preferences or trigger missing-episode searches across multiple shows/movies at once via a fixed action bar. Selections persist across tab switches.
 - **File Quality Badges**: Library browser now displays parsed quality information (resolution, source, codec, HDR) extracted from media filenames. Episode rows show color-coded badges (e.g., "WEB-DL 1080p") with file sizes. Poster cards display a resolution corner badge (4K/1080p/720p) for at-a-glance quality visibility.
+- **Library Sorting & Filtering**: Library browser now supports sorting by A-Z, Z-A, Newest Added, Year, Episode Count, and Size. New filter dropdowns for show status (Continuing/Ended) and year range (2020s, 2010s, 2000s, Older). The jump bar automatically hides for non-alphabetical sorts. All sort and filter preferences persist across page loads via localStorage.
 
 ## Version [2.15.0] - 2026-03-30
 

@@ -246,6 +246,15 @@ _EPISODE_ID_PATTERN = re.compile(r'S(\d{1,2})E(\d{1,2})', re.IGNORECASE)
 _SEASON_DIR_PATTERN = re.compile(r'^Season\s+(\d+)$', re.IGNORECASE)
 
 
+def _get_folder_mtime(path):
+    """Return folder mtime as Unix timestamp, or 0 on failure."""
+    try:
+        return int(os.path.getmtime(path))
+    except OSError as e:
+        logger.debug(f"[library] Cannot stat {path}: {e}")
+        return 0
+
+
 def _collect_episodes(folder_path):
     """Collect episode details from a torrent folder.
 
@@ -715,6 +724,11 @@ class LibraryScanner:
 
             merged = dict(best)
 
+            # Use earliest date_added from the group (skip 0 = stat failure)
+            dates = [item.get('date_added', 0) for item in group if item.get('date_added', 0) > 0]
+            if dates:
+                merged['date_added'] = min(dates)
+
             # Merge episodes from all items in the group (shows only)
             if any(item.get('_episodes') for item in group):
                 merged_eps = dict(merged.get('_episodes', {}))
@@ -790,6 +804,7 @@ class LibraryScanner:
         debrid_show_keys = {_normalize_title(s['title']): s for s in debrid_shows}
 
         local_movie_keys = {_normalize_title(lm['title']) for lm in local_movies}
+        local_movie_map = {_normalize_title(lm['title']): lm for lm in local_movies}
 
         # Seed alias_norms with all known TMDB aliases so preference
         # lookups work regardless of which name was used.  Each name maps
@@ -827,6 +842,10 @@ class LibraryScanner:
                     self._alias_norms.setdefault(matched_key, set()).add(key)
                 item = dict(item)
                 item['source'] = 'both'
+                # Use earliest date_added from either source
+                local_movie = local_movie_map.get(matched_key)
+                if local_movie and local_movie.get('date_added'):
+                    item['date_added'] = min(item.get('date_added', 0), local_movie['date_added'])
                 merged_local_movie_keys.add(matched_key)
             movies.append(item)
 
@@ -889,6 +908,9 @@ class LibraryScanner:
                 # Update counts from merged episodes
                 item['seasons'] = len({ek[0] for ek in merged})
                 item['episodes'] = len(merged)
+                # Use earliest date_added from either source
+                if local_item.get('date_added'):
+                    item['date_added'] = min(item.get('date_added', 0), local_item['date_added'])
             shows.append(item)
 
         for ls in local_shows:
@@ -2053,6 +2075,7 @@ class LibraryScanner:
                 'path': g['path'],
                 'quality': mq,
                 'size_bytes': msz,
+                'date_added': _get_folder_mtime(g['path']),
             })
 
         shows = []
@@ -2068,6 +2091,7 @@ class LibraryScanner:
                 'episodes': len(eps),
                 '_episodes': eps,
                 'path': g['path'],
+                'date_added': _get_folder_mtime(g['path']),
             })
 
         return movies, shows
@@ -2239,6 +2263,10 @@ class LibraryScanner:
                         movie_groups[key]['title'] = title
 
         # Convert to output format (same as _scan_mount)
+        # Note: date_added is 0 for WebDAV-scanned items because calling
+        # _get_folder_mtime() would issue FUSE stat calls, defeating the
+        # purpose of the WebDAV bypass.  FUSE-based scans populate real
+        # mtimes; WebDAV items fall back to sort-bottom for "Newest Added".
         movies = []
         for g in movie_groups.values():
             mq, msz = _get_movie_quality_from_webdav(g.get('_contents', {}))
@@ -2252,6 +2280,7 @@ class LibraryScanner:
                 'path': g['path'],
                 'quality': mq,
                 'size_bytes': msz,
+                'date_added': 0,
             })
 
         shows = []
@@ -2267,6 +2296,7 @@ class LibraryScanner:
                 'episodes': len(eps),
                 '_episodes': eps,
                 'path': g['path'],
+                'date_added': 0,
             })
 
         return movies, shows
@@ -2355,6 +2385,7 @@ class LibraryScanner:
                         'path': entry.path,
                         'quality': mq,
                         'size_bytes': msz,
+                        'date_added': _get_folder_mtime(entry.path),
                     })
         except (PermissionError, OSError) as e:
             logger.warning(f"[library] Cannot scan local movies: {e}")
@@ -2480,6 +2511,7 @@ class LibraryScanner:
                             'episodes': len(eps),
                             '_episodes': eps,
                             'path': entry.path,
+                            'date_added': _get_folder_mtime(entry.path),
                         })
                     else:
                         # Fallback for shows without parseable episode patterns
@@ -2497,6 +2529,7 @@ class LibraryScanner:
                             'episodes': ep_count,
                             '_episodes': {},
                             'path': entry.path,
+                            'date_added': _get_folder_mtime(entry.path),
                         })
         except (PermissionError, OSError) as e:
             logger.warning(f"[library] Cannot scan local TV: {e}")

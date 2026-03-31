@@ -292,6 +292,30 @@ a:hover{text-decoration:underline}
 body.has-bulk-bar{padding-bottom:60px}
 [data-theme="light"] .bulk-bar{box-shadow:0 -4px 12px rgba(0,0,0,.08)}
 
+/* Wanted preset pills */
+.wanted-presets{display:flex;gap:6px;align-items:center;padding:0 0 8px;flex-wrap:wrap}
+.wanted-pill{display:inline-flex;align-items:center;gap:4px;padding:4px 12px;border-radius:14px;font-size:.78em;font-weight:600;cursor:pointer;border:1px solid var(--border);background:none;color:var(--text2);transition:all .15s;user-select:none;font-family:inherit}
+.wanted-pill:hover{border-color:var(--text3);color:var(--text)}
+.wanted-pill .pill-count{font-weight:700;opacity:.7}
+.wanted-pill--missing.active{background:#f851491a;border-color:#f8514966;color:var(--red)}
+.wanted-pill--unavailable.active{background:#db6d281a;border-color:#db6d2866;color:var(--orange)}
+.wanted-pill--pending.active{background:#d299221a;border-color:#d2992266;color:var(--yellow)}
+.wanted-pill--fallback.active{background:#58a6ff1a;border-color:#58a6ff66;color:var(--blue)}
+[data-theme="light"] .wanted-pill--missing.active{background:#cf222e1a;border-color:#cf222e66;color:#cf222e}
+[data-theme="light"] .wanted-pill--unavailable.active{background:#bc4c001a;border-color:#bc4c0066;color:#bc4c00}
+[data-theme="light"] .wanted-pill--pending.active{background:#9a67001a;border-color:#9a670066;color:#9a6700}
+[data-theme="light"] .wanted-pill--fallback.active{background:#0969da1a;border-color:#0969da66;color:#0969da}
+
+/* Wanted bulk actions bar */
+.wanted-actions{display:flex;gap:8px;align-items:center;padding:8px 0;flex-wrap:wrap}
+.wanted-actions .btn-action{padding:6px 14px;font-size:.82em;background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;cursor:pointer;white-space:nowrap;transition:border-color .15s,color .15s;font-family:inherit}
+.wanted-actions .btn-action:hover:not(:disabled){border-color:var(--blue);color:var(--blue)}
+.wanted-actions .btn-action:disabled{opacity:.5;cursor:not-allowed}
+.wanted-actions .wanted-progress{font-size:.82em;color:var(--yellow);white-space:nowrap}
+
+/* Nav wanted badge */
+.nav-badge{display:inline-block;background:var(--red);color:#fff;border-radius:8px;font-size:.72em;font-weight:700;padding:1px 6px;margin-left:4px;min-width:16px;text-align:center;vertical-align:middle;line-height:1.4}
+
 /* Footer */
 .footer{color:var(--text3);font-size:.78em;text-align:right;margin-top:16px}
 
@@ -310,6 +334,7 @@ body.has-bulk-bar{padding-bottom:60px}
   .legend{gap:6px 12px;font-size:.72em}
   body.has-bulk-bar{padding-bottom:120px}
   .bulk-bar{padding:8px 12px;gap:6px}
+  .wanted-pill{padding:3px 8px;font-size:.72em}
 }
 :focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 @media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
@@ -322,6 +347,7 @@ body.has-bulk-bar{padding-bottom:60px}
   <div class="nav">
     <a href="/status">Dashboard</a>
     <span class="current">Library</span>
+    <a href="/library?filter=missing" id="nav-wanted-link" style="display:none">Wanted<span class="nav-badge" id="nav-wanted-count">0</span></a>
     <a href="/settings">Settings</a>
     <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme" id="theme-btn">&#x2600;&#xFE0F;</button>
   </div>
@@ -371,6 +397,18 @@ body.has-bulk-bar{padding-bottom:60px}
   <button class="btn-select" id="btn-select" onclick="toggleSelectMode()" aria-pressed="false">Select</button>
   <button class="btn-refresh" id="btn-refresh" onclick="triggerRefresh()">Refresh</button>
   <span class="scan-info" id="scan-info"></span>
+</div>
+
+<div class="wanted-presets" id="wanted-presets">
+  <button class="wanted-pill wanted-pill--missing" data-preset="missing" onclick="toggleWantedPreset('missing')">Missing <span class="pill-count" id="pill-count-missing"></span></button>
+  <button class="wanted-pill wanted-pill--unavailable" data-preset="unavailable" onclick="toggleWantedPreset('unavailable')">Unavailable <span class="pill-count" id="pill-count-unavailable"></span></button>
+  <button class="wanted-pill wanted-pill--pending" data-preset="pending" onclick="toggleWantedPreset('pending')">Pending <span class="pill-count" id="pill-count-pending"></span></button>
+  <button class="wanted-pill wanted-pill--fallback" data-preset="fallback" onclick="toggleWantedPreset('fallback')">Fallback <span class="pill-count" id="pill-count-fallback"></span></button>
+</div>
+<div class="wanted-actions" id="wanted-actions" style="display:none">
+  <button class="btn-action" id="wanted-search-btn" onclick="wantedSearchAll()" style="display:none">Search All on Debrid</button>
+  <button class="btn-action" id="wanted-download-btn" onclick="wantedDownloadAll()" style="display:none">Download All Locally</button>
+  <span class="wanted-progress" id="wanted-progress"></span>
 </div>
 
 <div id="content-area">
@@ -432,6 +470,8 @@ let _detailSeasons = [];
 let _downloadServices = {show: null, movie: null};
 let _searchTimer = null;
 let _refreshTimer = null;
+let _activeWantedPreset = null;
+let _wantedInFlight = false;
 let _lastTransferText = '';
 let _lastTransferType = '';
 let _transferClearTimer = null;
@@ -837,12 +877,17 @@ function bulkSearchMissing() {
 function switchTab(name) {
   _activeTab = name;
   _lastCheckedIndex = -1;
+  _activeWantedPreset = null;
+  var url = new URL(window.location);
+  url.searchParams.delete('filter');
+  history.replaceState(null, '', url);
   document.querySelectorAll('.tab').forEach(function(t) {
     const active = t.getAttribute('aria-controls') === 'tab-' + name;
     t.classList.toggle('active', active);
     t.setAttribute('aria-selected', active ? 'true' : 'false');
   });
   applyFilters();
+  _updateWantedUI();
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,6 +1087,13 @@ function applyFilters() {
     });
   }
 
+  // Wanted preset filter
+  if (_activeWantedPreset) {
+    filtered = filtered.filter(function(item) {
+      return _matchesWantedPreset(item, _activeWantedPreset);
+    });
+  }
+
   // Sort
   filtered = filtered.slice().sort(function(a, b) {
     if (sortBy === 'za') return b.title.localeCompare(a.title);
@@ -1075,7 +1127,8 @@ function renderGrid(items) {
     const isFiltered = document.getElementById('search-input').value.trim()
       || document.getElementById('source-filter').value
       || document.getElementById('status-filter').value
-      || document.getElementById('year-filter').value;
+      || document.getElementById('year-filter').value
+      || _activeWantedPreset;
     if (isFiltered) {
       area.innerHTML = '<div class="state-panel"><div>No results match your filters.</div></div>';
     } else {
@@ -1296,7 +1349,7 @@ function updateBadges(filteredCount) {
   const source = document.getElementById('source-filter').value;
   const status = document.getElementById('status-filter').value;
   const yearRange = document.getElementById('year-filter').value;
-  const isFiltered = query || source || status || yearRange;
+  const isFiltered = query || source || status || yearRange || _activeWantedPreset;
 
   if (isFiltered) {
     document.getElementById('badge-movies').textContent =
@@ -1307,6 +1360,238 @@ function updateBadges(filteredCount) {
     document.getElementById('badge-movies').textContent = String(_allMovies.length);
     document.getElementById('badge-shows').textContent  = String(_allShows.length);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Wanted preset filters
+// ---------------------------------------------------------------------------
+function _countAiredMissing(item) {
+  if (item.type === 'movie') return item.missing_episodes > 0 ? 1 : 0;
+  if (!item.season_data) return 0;
+  var today = new Date().toISOString().slice(0, 10);
+  var count = 0;
+  for (var si = 0; si < item.season_data.length; si++) {
+    var eps = item.season_data[si].episodes || [];
+    for (var ei = 0; ei < eps.length; ei++) {
+      if (eps[ei].source === 'missing' && eps[ei].air_date && eps[ei].air_date <= today) count++;
+    }
+  }
+  return count;
+}
+
+function _getPendingDirection(item) {
+  var nk = normTitle(item.title);
+  var pe = _pending[nk];
+  if (!pe) return '';
+  return pe.direction || '';
+}
+
+function _matchesWantedPreset(item, preset) {
+  if (preset === 'missing') return _countAiredMissing(item) > 0;
+  if (preset === 'unavailable') return _getPendingDirection(item) === 'debrid-unavailable';
+  if (preset === 'pending') {
+    var dir = _getPendingDirection(item);
+    return dir === 'to-local' || dir === 'to-debrid' || dir === 'to-local-fallback';
+  }
+  if (preset === 'fallback') return _getPendingDirection(item) === 'to-local-fallback';
+  return true;
+}
+
+function _computeWantedCounts() {
+  var dataset = _activeTab === 'movies' ? _allMovies : _allShows;
+  var counts = {missing: 0, unavailable: 0, pending: 0, fallback: 0};
+  for (var i = 0; i < dataset.length; i++) {
+    if (_countAiredMissing(dataset[i]) > 0) counts.missing++;
+    var dir = _getPendingDirection(dataset[i]);
+    if (dir === 'debrid-unavailable') counts.unavailable++;
+    if (dir === 'to-local' || dir === 'to-debrid' || dir === 'to-local-fallback') counts.pending++;
+    if (dir === 'to-local-fallback') counts.fallback++;
+  }
+  return counts;
+}
+
+function _updateWantedUI() {
+  var counts = _computeWantedCounts();
+  var ids = ['missing', 'unavailable', 'pending', 'fallback'];
+  for (var i = 0; i < ids.length; i++) {
+    var el = document.getElementById('pill-count-' + ids[i]);
+    if (el) el.textContent = counts[ids[i]] > 0 ? '(' + counts[ids[i]] + ')' : '';
+  }
+  // Update pills active state
+  var pills = document.querySelectorAll('.wanted-pill');
+  for (var j = 0; j < pills.length; j++) {
+    if (pills[j].getAttribute('data-preset') === _activeWantedPreset) {
+      pills[j].classList.add('active');
+    } else {
+      pills[j].classList.remove('active');
+    }
+  }
+  // Update wanted actions bar
+  var actionsBar = document.getElementById('wanted-actions');
+  var searchBtn = document.getElementById('wanted-search-btn');
+  var downloadBtn = document.getElementById('wanted-download-btn');
+  if (_activeWantedPreset && !_wantedInFlight) {
+    actionsBar.style.display = '';
+    searchBtn.style.display = _activeWantedPreset === 'missing' ? '' : 'none';
+    downloadBtn.style.display = _activeWantedPreset === 'unavailable' ? '' : 'none';
+  } else if (_activeWantedPreset && _wantedInFlight) {
+    actionsBar.style.display = '';  // keep visible during bulk operation
+  } else {
+    actionsBar.style.display = 'none';
+  }
+  // Nav wanted badge — count across both movies and shows
+  var totalMissing = 0;
+  for (var mi = 0; mi < _allMovies.length; mi++) {
+    if (_countAiredMissing(_allMovies[mi]) > 0) totalMissing++;
+  }
+  for (var si = 0; si < _allShows.length; si++) {
+    if (_countAiredMissing(_allShows[si]) > 0) totalMissing++;
+  }
+  var navLink = document.getElementById('nav-wanted-link');
+  var navCount = document.getElementById('nav-wanted-count');
+  if (navLink && navCount) {
+    if (totalMissing > 0) {
+      navLink.style.display = '';
+      navCount.textContent = totalMissing;
+    } else {
+      navLink.style.display = 'none';
+    }
+  }
+}
+
+function toggleWantedPreset(preset) {
+  if (_activeWantedPreset === preset) {
+    _activeWantedPreset = null;
+  } else {
+    _activeWantedPreset = preset;
+  }
+  // Update URL without reload
+  var url = new URL(window.location);
+  if (_activeWantedPreset) {
+    url.searchParams.set('filter', _activeWantedPreset);
+  } else {
+    url.searchParams.delete('filter');
+  }
+  history.replaceState(null, '', url);
+  applyFilters();
+  _updateWantedUI();
+}
+
+function wantedSearchAll() {
+  if (_wantedInFlight) return;
+  var items = _displayedItems;
+  if (!items.length) return;
+  var tasks = [];
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i];
+    if (item.type === 'show' && item.season_data) {
+      var today = new Date().toISOString().slice(0, 10);
+      for (var si = 0; si < item.season_data.length; si++) {
+        var season = item.season_data[si];
+        var missingEps = [];
+        for (var ei = 0; ei < (season.episodes || []).length; ei++) {
+          var ep = season.episodes[ei];
+          if (ep.source === 'missing' && ep.air_date && ep.air_date <= today) {
+            missingEps.push(ep.number);
+          }
+        }
+        if (missingEps.length) {
+          tasks.push({item: item, season: season.number, episodes: missingEps});
+        }
+      }
+    } else if (item.type === 'movie' && item.missing_episodes > 0) {
+      tasks.push({item: item, season: null, episodes: []});
+    }
+  }
+  if (!tasks.length) { _showWantedProgress('No missing items to search.'); return; }
+  if (!confirm('Search for missing content across ' + items.length + ' item(s) (' + tasks.length + ' request(s))?')) return;
+  _wantedInFlight = true;
+  document.getElementById('wanted-search-btn').disabled = true;
+  var done = 0, total = tasks.length, succeeded = 0;
+  function _next() {
+    if (done >= total) {
+      var msg = 'Searched ' + succeeded + '/' + total + ' request(s).';
+      if (total - succeeded > 0) msg += ' ' + (total - succeeded) + ' failed.';
+      _showWantedProgress(msg);
+      setTimeout(function() {
+        _wantedInFlight = false;
+        document.getElementById('wanted-search-btn').disabled = false;
+        _showWantedProgress('');
+        fetchLibrary();
+      }, 2000);
+      return;
+    }
+    var t = tasks[done];
+    _showWantedProgress('Searching ' + (done + 1) + '/' + total + '...');
+    var payload = {title: t.item.title, type: t.item.type};
+    if (t.season !== null) { payload.season = t.season; payload.episodes = t.episodes; }
+    fetch('/api/library/download', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    }).then(function(r) { if (r.ok) succeeded++; }).catch(function() {}).finally(function() {
+      done++; setTimeout(_next, 500);
+    });
+  }
+  _next();
+}
+
+function wantedDownloadAll() {
+  if (_wantedInFlight) return;
+  var items = _displayedItems;
+  if (!items.length) return;
+  var tasks = [];
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i];
+    var today = new Date().toISOString().slice(0, 10);
+    if (item.type === 'show' && item.season_data) {
+      for (var si = 0; si < item.season_data.length; si++) {
+        var season = item.season_data[si];
+        var missingEps = [];
+        for (var ei = 0; ei < (season.episodes || []).length; ei++) {
+          var ep = season.episodes[ei];
+          if (ep.source === 'missing' && ep.air_date && ep.air_date <= today) missingEps.push(ep.number);
+        }
+        if (missingEps.length) {
+          tasks.push({item: item, season: season.number, episodes: missingEps});
+        }
+      }
+    } else if (item.type === 'movie' && item.missing_episodes > 0) {
+      tasks.push({item: item, season: null, episodes: []});
+    }
+  }
+  if (!tasks.length) { _showWantedProgress('No items to download.'); return; }
+  if (!confirm('Trigger local download for ' + items.length + ' item(s) (' + tasks.length + ' request(s))?')) return;
+  _wantedInFlight = true;
+  document.getElementById('wanted-download-btn').disabled = true;
+  var done = 0, total = tasks.length, succeeded = 0;
+  function _next() {
+    if (done >= total) {
+      var msg = 'Downloaded ' + succeeded + '/' + total + ' request(s).';
+      if (total - succeeded > 0) msg += ' ' + (total - succeeded) + ' failed.';
+      _showWantedProgress(msg);
+      setTimeout(function() {
+        _wantedInFlight = false;
+        document.getElementById('wanted-download-btn').disabled = false;
+        _showWantedProgress('');
+        fetchLibrary();
+      }, 2000);
+      return;
+    }
+    var t = tasks[done];
+    _showWantedProgress('Downloading ' + (done + 1) + '/' + total + '...');
+    var payload = {title: t.item.title, type: t.item.type};
+    if (t.season !== null) { payload.season = t.season; payload.episodes = t.episodes; }
+    fetch('/api/library/download-local-fallback', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    }).then(function(r) { if (r.ok) succeeded++; }).catch(function() {}).finally(function() {
+      done++; setTimeout(_next, 500);
+    });
+  }
+  _next();
+}
+
+function _showWantedProgress(msg) {
+  var el = document.getElementById('wanted-progress');
+  if (el) el.textContent = msg;
 }
 
 // ---------------------------------------------------------------------------
@@ -1325,6 +1610,7 @@ function _applyLibraryData(data, opts) {
   if (!opts.quiet) {
     applyFilters();
     updateScanInfo();
+    _updateWantedUI();
   }
   _checkSmartPoll();
 
@@ -1452,6 +1738,8 @@ function showDetail(index) {
 
   document.querySelector('.tabs').style.display = 'none';
   document.querySelector('.controls').style.display = 'none';
+  document.getElementById('wanted-presets').style.display = 'none';
+  document.getElementById('wanted-actions').style.display = 'none';
   document.getElementById('footer').style.display = 'none';
   document.getElementById('jump-bar').style.display = 'none';
   document.getElementById('bulk-bar').style.display = 'none';
@@ -1973,8 +2261,10 @@ function hideDetail() {
   document.title = 'pd_zurg Library';
   document.querySelector('.tabs').style.display = '';
   document.querySelector('.controls').style.display = '';
+  document.getElementById('wanted-presets').style.display = '';
   document.getElementById('footer').style.display = '';
   applyFilters();
+  _updateWantedUI();
   // Restore select mode UI after grid re-render
   if (_selectMode) {
     var area = document.getElementById('content-area');
@@ -2779,6 +3069,14 @@ try {
   if (_savedSource) document.getElementById('source-filter').value = _savedSource;
   if (_savedStatus) document.getElementById('status-filter').value = _savedStatus;
   if (_savedYear) document.getElementById('year-filter').value = _savedYear;
+} catch(e) {}
+// Apply URL query param filter preset (e.g. ?filter=missing)
+try {
+  var _urlParams = new URLSearchParams(window.location.search);
+  var _urlFilter = _urlParams.get('filter');
+  if (_urlFilter && ['missing', 'unavailable', 'pending', 'fallback'].indexOf(_urlFilter) !== -1) {
+    _activeWantedPreset = _urlFilter;
+  }
 } catch(e) {}
 fetchLibrary();
 startTsRefresh();

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## Version [2.16.0] - 2026-03-31
+
+### Added
+
+- **Mass Editor**: Library browser now supports bulk selection mode — click "Select" to toggle checkboxes on poster cards, shift-click for range selection, then apply preferences or trigger missing-episode searches across multiple shows/movies at once via a fixed action bar. Selections persist across tab switches.
+
 ## Version [2.15.0] - 2026-03-30
 
 ### Added

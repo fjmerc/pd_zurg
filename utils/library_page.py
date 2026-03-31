@@ -52,11 +52,23 @@ a:hover{text-decoration:underline}
 .btn-refresh{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;padding:8px 14px;font-size:.85em;cursor:pointer;white-space:nowrap;transition:border-color .15s,color .15s}
 .btn-refresh:hover:not(:disabled){border-color:var(--blue);color:var(--blue)}
 .btn-refresh:disabled{opacity:.5;cursor:not-allowed}
+.btn-select{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;padding:8px 14px;font-size:.85em;cursor:pointer;white-space:nowrap;transition:border-color .15s,color .15s,background .15s}
+.btn-select:hover{border-color:var(--blue);color:var(--blue)}
+.btn-select.active{background:var(--blue);color:#fff;border-color:var(--blue)}
+.btn-select .select-count{display:inline-block;background:rgba(255,255,255,.25);border-radius:10px;font-size:.82em;font-weight:600;padding:1px 7px;margin-left:5px;min-width:18px;text-align:center}
 .scan-info{font-size:.78em;color:var(--text3);white-space:nowrap}
 
 /* Scanning indicator */
 .scanning-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--yellow);margin-right:5px;animation:pulse-dot 1s ease-in-out infinite}
 @keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:.3}}
+
+/* Card checkbox (select mode) */
+.card-checkbox{position:absolute;top:8px;left:8px;width:22px;height:22px;border-radius:50%;border:2px solid rgba(255,255,255,.6);background:rgba(0,0,0,.4);z-index:3;display:none;align-items:center;justify-content:center;cursor:pointer;transition:background .15s,border-color .15s,transform .15s}
+.select-mode .card-checkbox{display:flex}
+.card-checkbox.checked{background:var(--blue);border-color:var(--blue);transform:scale(1.1)}
+.card-checkbox.checked::after{content:'\2713';color:#fff;font-size:13px;font-weight:700;line-height:1}
+.poster-card.selected .poster-container::after{content:'';position:absolute;inset:0;background:rgba(88,166,255,.15);z-index:2;pointer-events:none}
+[data-theme="light"] .card-checkbox{border-color:rgba(0,0,0,.4);background:rgba(255,255,255,.7)}
 
 /* Card grid */
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:16px;margin-top:4px}
@@ -258,6 +270,16 @@ a:hover{text-decoration:underline}
 .season-collapse-footer{text-align:center;padding:4px 0;background:var(--border2);cursor:pointer;border-top:1px solid var(--border);transition:background .15s;font-size:.75em;color:var(--text3)}
 .season-collapse-footer:hover{background:var(--border);color:var(--text2)}
 
+/* Bulk action bar */
+.bulk-bar{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--border);padding:10px 20px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;z-index:20;box-shadow:0 -4px 12px rgba(0,0,0,.2);justify-content:center}
+.bulk-bar .bulk-count{font-size:.85em;font-weight:600;color:var(--text);white-space:nowrap}
+.bulk-bar .btn-apply{padding:6px 14px;font-size:.82em}
+.bulk-bar .btn-action{padding:6px 14px;font-size:.82em}
+.bulk-bar .filter-select{font-size:.82em;padding:6px 10px}
+.bulk-progress{font-size:.82em;color:var(--yellow);white-space:nowrap}
+body.has-bulk-bar{padding-bottom:60px}
+[data-theme="light"] .bulk-bar{box-shadow:0 -4px 12px rgba(0,0,0,.08)}
+
 /* Footer */
 .footer{color:var(--text3);font-size:.78em;text-align:right;margin-top:16px}
 
@@ -274,6 +296,8 @@ a:hover{text-decoration:underline}
   .card-info .card-title{font-size:.78em}
   .card-info .card-badges{gap:3px}
   .legend{gap:6px 12px;font-size:.72em}
+  body.has-bulk-bar{padding-bottom:120px}
+  .bulk-bar{padding:8px 12px;gap:6px}
 }
 :focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 @media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
@@ -312,6 +336,7 @@ a:hover{text-decoration:underline}
     <option value="local">Local Only</option>
     <option value="debrid">Debrid Only</option>
   </select>
+  <button class="btn-select" id="btn-select" onclick="toggleSelectMode()" aria-pressed="false">Select</button>
   <button class="btn-refresh" id="btn-refresh" onclick="triggerRefresh()">Refresh</button>
   <span class="scan-info" id="scan-info"></span>
 </div>
@@ -325,6 +350,20 @@ a:hover{text-decoration:underline}
 </script>
 
 <div class="footer" id="footer"></div>
+
+<div class="bulk-bar" id="bulk-bar" role="toolbar" aria-label="Bulk actions" style="display:none">
+  <span class="bulk-count" id="bulk-count">0 selected</span>
+  <select class="filter-select" id="bulk-pref-select" aria-label="Set bulk source preference">
+    <option value="">Set Preference...</option>
+    <option value="prefer-debrid">Prefer Debrid</option>
+    <option value="prefer-local">Prefer Local</option>
+    <option value="none">Clear Preference</option>
+  </select>
+  <button class="btn-apply" id="bulk-pref-apply" onclick="bulkApplyPreference()">Apply</button>
+  <button class="btn-action" id="bulk-search" onclick="bulkSearchMissing()">Search Missing</button>
+  <button class="btn-action" id="bulk-deselect" onclick="deselectAll()">Deselect All</button>
+  <span class="bulk-progress" id="bulk-progress" aria-live="polite"></span>
+</div>
 
 <script>
 // ---------------------------------------------------------------------------
@@ -367,6 +406,13 @@ let _transferClearTimer = null;
 let _pollTimer = null;
 let _pollActive = false;
 let _refreshPollTimer = null;
+
+// ---------------------------------------------------------------------------
+// Select mode state
+// ---------------------------------------------------------------------------
+let _selectMode = false;
+let _selectedItems = {};  // key: normTitle, value: {title, tab}
+let _lastCheckedIndex = -1;
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -476,10 +522,289 @@ function _clearConfirmState() {
 }
 
 // ---------------------------------------------------------------------------
+// Select mode
+// ---------------------------------------------------------------------------
+function toggleSelectMode() {
+  _selectMode = !_selectMode;
+  var btn = document.getElementById('btn-select');
+  var area = document.getElementById('content-area');
+  if (_selectMode) {
+    btn.classList.add('active');
+    btn.setAttribute('aria-pressed', 'true');
+    btn.innerHTML = 'Cancel';
+    if (area) area.classList.add('select-mode');
+  } else {
+    btn.classList.remove('active');
+    btn.setAttribute('aria-pressed', 'false');
+    btn.innerHTML = 'Select';
+    _selectedItems = {};
+    _lastCheckedIndex = -1;
+    if (area) area.classList.remove('select-mode');
+    document.querySelectorAll('.poster-card.selected').forEach(function(c) { c.classList.remove('selected'); });
+    document.querySelectorAll('.card-checkbox.checked').forEach(function(c) { c.classList.remove('checked'); });
+  }
+  _updateBulkBar();
+}
+
+function onCardClick(index, event) {
+  if (_selectMode) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.shiftKey && _lastCheckedIndex >= 0) {
+      // Range select
+      var lo = Math.min(_lastCheckedIndex, index);
+      var hi = Math.max(_lastCheckedIndex, index);
+      for (var i = lo; i <= hi; i++) {
+        if (_displayedItems[i]) _setItemSelected(i, true);
+      }
+    } else {
+      _toggleItemSelected(index);
+    }
+    _lastCheckedIndex = index;
+    _updateBulkBar();
+    return;
+  }
+  showDetail(index);
+}
+
+function _toggleItemSelected(index) {
+  var item = _displayedItems[index];
+  if (!item) return;
+  var nk = normTitle(item.title);
+  if (_selectedItems[nk]) {
+    delete _selectedItems[nk];
+    _setCardVisual(index, false);
+  } else {
+    _selectedItems[nk] = {title: item.title, tab: _activeTab};
+    _setCardVisual(index, true);
+  }
+}
+
+function _setItemSelected(index, selected) {
+  var item = _displayedItems[index];
+  if (!item) return;
+  var nk = normTitle(item.title);
+  if (selected) {
+    _selectedItems[nk] = {title: item.title, tab: _activeTab};
+  } else {
+    delete _selectedItems[nk];
+  }
+  _setCardVisual(index, selected);
+}
+
+function _setCardVisual(index, selected) {
+  var cards = document.querySelectorAll('.poster-card[data-index="' + index + '"]');
+  cards.forEach(function(card) {
+    var cb = card.querySelector('.card-checkbox');
+    if (selected) {
+      card.classList.add('selected');
+      if (cb) { cb.classList.add('checked'); cb.setAttribute('aria-checked', 'true'); }
+    } else {
+      card.classList.remove('selected');
+      if (cb) { cb.classList.remove('checked'); cb.setAttribute('aria-checked', 'false'); }
+    }
+  });
+}
+
+function _updateBulkBar() {
+  var bar = document.getElementById('bulk-bar');
+  if (!bar) return;
+  var count = Object.keys(_selectedItems).length;
+  if (_selectMode && count > 0) {
+    bar.style.display = '';
+    document.body.classList.add('has-bulk-bar');
+    document.getElementById('bulk-count').textContent = count + ' item' + (count !== 1 ? 's' : '') + ' selected';
+  } else {
+    bar.style.display = 'none';
+    document.body.classList.remove('has-bulk-bar');
+  }
+  // Update select button badge
+  var btn = document.getElementById('btn-select');
+  if (_selectMode && count > 0) {
+    btn.innerHTML = 'Cancel <span class="select-count">' + count + '</span>';
+  } else if (_selectMode) {
+    btn.innerHTML = 'Cancel';
+  }
+}
+
+function deselectAll() {
+  _selectedItems = {};
+  _lastCheckedIndex = -1;
+  document.querySelectorAll('.poster-card.selected').forEach(function(c) { c.classList.remove('selected'); });
+  document.querySelectorAll('.card-checkbox.checked').forEach(function(c) { c.classList.remove('checked'); });
+  _updateBulkBar();
+}
+
+function _getSelectedItemsList() {
+  // Returns array of {nk, title, tab} for all selected items
+  var list = [];
+  var keys = Object.keys(_selectedItems);
+  for (var i = 0; i < keys.length; i++) {
+    list.push({nk: keys[i], title: _selectedItems[keys[i]].title, tab: _selectedItems[keys[i]].tab});
+  }
+  return list;
+}
+
+function _findItemByNk(nk, tab) {
+  var dataset = tab === 'movies' ? _allMovies : _allShows;
+  for (var i = 0; i < dataset.length; i++) {
+    if (normTitle(dataset[i].title) === nk) return dataset[i];
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Bulk actions
+// ---------------------------------------------------------------------------
+var _bulkInFlight = false;
+
+function _setBulkActionsDisabled(disabled) {
+  ['bulk-pref-apply', 'bulk-search', 'bulk-deselect'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.disabled = disabled;
+  });
+  var sel = document.getElementById('bulk-pref-select');
+  if (sel) sel.disabled = disabled;
+}
+
+function _showBulkProgress(text) {
+  var el = document.getElementById('bulk-progress');
+  if (el) el.textContent = text;
+}
+
+function bulkApplyPreference() {
+  if (_bulkInFlight) return;
+  var sel = document.getElementById('bulk-pref-select');
+  if (!sel || !sel.value) return;
+  var pref = sel.value;
+  var items = _getSelectedItemsList();
+  if (!items.length) return;
+  var prefLabel = pref === 'prefer-debrid' ? 'Prefer Debrid' : pref === 'prefer-local' ? 'Prefer Local' : 'No Preference';
+  if (!confirm('Set preference to "' + prefLabel + '" for ' + items.length + ' item(s)?')) return;
+  _bulkInFlight = true;
+  _setBulkActionsDisabled(true);
+  var done = 0;
+  var failed = 0;
+  var total = items.length;
+  function _next() {
+    if (done >= total) {
+      _bulkInFlight = false;
+      var msg = 'Applied preference to ' + (total - failed) + '/' + total + ' item(s).';
+      if (failed > 0) msg += ' ' + failed + ' failed.';
+      _showBulkProgress(msg);
+      _setBulkActionsDisabled(false);
+      sel.value = '';
+      setTimeout(function() {
+        _showBulkProgress('');
+        toggleSelectMode();
+        fetchLibrary();
+      }, 1500);
+      return;
+    }
+    var it = items[done];
+    _showBulkProgress('Applying ' + (done + 1) + '/' + total + '...');
+    fetch('/api/library/preference', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({title: it.nk, preference: pref})
+    }).then(function(r) {
+      if (!r.ok) { failed++; return; }
+      return r.json();
+    }).then(function(d) {
+      if (d) {
+        if (pref === 'none') { delete _preferences[it.nk]; }
+        else { _preferences[it.nk] = pref; }
+      }
+    }).catch(function() { failed++; }).finally(function() {
+      done++;
+      setTimeout(_next, 100);
+    });
+  }
+  _next();
+}
+
+function bulkSearchMissing() {
+  if (_bulkInFlight) return;
+  var items = _getSelectedItemsList();
+  if (!items.length) return;
+  // Build search tasks: per-season download requests for items with missing episodes
+  var tasks = [];
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i];
+    var item = _findItemByNk(it.nk, it.tab);
+    if (!item) continue;
+    if (item.type === 'show' && item.season_data) {
+      for (var si = 0; si < item.season_data.length; si++) {
+        var season = item.season_data[si];
+        var missingEps = [];
+        for (var ei = 0; ei < (season.episodes || []).length; ei++) {
+          if (season.episodes[ei].source === 'missing') {
+            missingEps.push(season.episodes[ei].number);
+          }
+        }
+        if (missingEps.length) {
+          (function(capturedItem, capturedSeason, capturedEps) {
+            tasks.push({item: capturedItem, season: capturedSeason, episodes: capturedEps});
+          })(item, season.number, missingEps);
+        }
+      }
+    } else if (item.type === 'movie' && item.missing_episodes > 0) {
+      tasks.push({item: item, season: null, episodes: []});
+    }
+  }
+  if (!tasks.length) {
+    alert('No missing episodes found in selected items.');
+    return;
+  }
+  var totalShows = new Set(tasks.map(function(t) { return normTitle(t.item.title); })).size;
+  if (!confirm('Search for missing content across ' + totalShows + ' item(s) (' + tasks.length + ' request(s))?')) return;
+  _bulkInFlight = true;
+  _setBulkActionsDisabled(true);
+  var done = 0;
+  var total = tasks.length;
+  var succeeded = 0;
+  function _nextSearch() {
+    if (done >= total) {
+      _bulkInFlight = false;
+      var failed = total - succeeded;
+      var msg = 'Triggered search for ' + succeeded + '/' + total + ' request(s).';
+      if (failed > 0) msg += ' ' + failed + ' failed.';
+      _showBulkProgress(msg);
+      _setBulkActionsDisabled(false);
+      setTimeout(function() {
+        _showBulkProgress('');
+        toggleSelectMode();
+        fetchLibrary();
+      }, 2000);
+      return;
+    }
+    var t = tasks[done];
+    _showBulkProgress('Searching ' + (done + 1) + '/' + total + '...');
+    var payload = {title: t.item.title, type: t.item.type};
+    if (t.season !== null) {
+      payload.season = t.season;
+      payload.episodes = t.episodes;
+    }
+    fetch('/api/library/download', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    }).then(function(r) {
+      if (r.ok) succeeded++;
+    }).catch(function() {}).finally(function() {
+      done++;
+      setTimeout(_nextSearch, 500);
+    });
+  }
+  _nextSearch();
+}
+
+// ---------------------------------------------------------------------------
 // Tab switching
 // ---------------------------------------------------------------------------
 function switchTab(name) {
   _activeTab = name;
+  _lastCheckedIndex = -1;
   document.querySelectorAll('.tab').forEach(function(t) {
     const active = t.getAttribute('aria-controls') === 'tab-' + name;
     t.classList.toggle('active', active);
@@ -584,11 +909,15 @@ function buildCard(item, index) {
   }
 
   var badges = buildBadges(item.source) + pendingBadge;
-  return '<div class="poster-card" data-title="' + esc(item.title) + '" data-type="' + esc(item.type) + '"'
-    + (item.year ? ' data-year="' + item.year + '"' : '')
-    + ' onclick="showDetail(' + index + ')" tabindex="0" role="button"'
-    + ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();showDetail(' + index + ')}">'
-    + '<div class="poster-container">' + posterHtml + cornerBadge + '</div>'
+  var nk = normTitle(item.title);
+  var isSelected = !!_selectedItems[nk];
+  var checkboxHtml = '<div class="card-checkbox' + (isSelected ? ' checked' : '') + '" role="checkbox" aria-checked="' + (isSelected ? 'true' : 'false') + '"></div>';
+  return '<div class="poster-card' + (isSelected ? ' selected' : '') + '" data-title="' + esc(item.title) + '" data-type="' + esc(item.type) + '"'
+    + (item.year ? ' data-year="' + esc(String(item.year)) + '"' : '')
+    + ' data-index="' + index + '"'
+    + ' onclick="onCardClick(' + index + ',event)" tabindex="0" role="button"'
+    + ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();onCardClick(' + index + ',event)}">'
+    + '<div class="poster-container">' + checkboxHtml + posterHtml + cornerBadge + '</div>'
     + progressHtml
     + '<div class="card-info">'
     + '<div class="card-title">' + esc(item.title) + '</div>'
@@ -598,6 +927,7 @@ function buildCard(item, index) {
 }
 
 function applyFilters() {
+  _lastCheckedIndex = -1;
   const query  = document.getElementById('search-input').value.trim().toLowerCase();
   const source = document.getElementById('source-filter').value;
   const dataset = _activeTab === 'movies' ? _allMovies : _allShows;
@@ -665,6 +995,8 @@ function renderGrid(items) {
   }
 
   area.innerHTML = gridHtml;
+  if (_selectMode) area.classList.add('select-mode');
+  else area.classList.remove('select-mode');
   _observeUncachedCards();
   _updateJumpBar(items);
 }
@@ -1005,6 +1337,8 @@ function showDetail(index) {
   document.querySelector('.controls').style.display = 'none';
   document.getElementById('footer').style.display = 'none';
   document.getElementById('jump-bar').style.display = 'none';
+  document.getElementById('bulk-bar').style.display = 'none';
+  document.body.classList.remove('has-bulk-bar');
 
   _renderDetail();
   var backBtn = document.querySelector('.detail-back');
@@ -1511,6 +1845,12 @@ function hideDetail() {
   document.querySelector('.controls').style.display = '';
   document.getElementById('footer').style.display = '';
   applyFilters();
+  // Restore select mode UI after grid re-render
+  if (_selectMode) {
+    var area = document.getElementById('content-area');
+    if (area) area.classList.add('select-mode');
+    _updateBulkBar();
+  }
   document.getElementById('search-input').focus();
 }
 

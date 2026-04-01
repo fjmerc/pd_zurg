@@ -512,9 +512,11 @@ def _enrich_with_tmdb_cache(movies, shows):
         for item in movies:
             item['poster_url'] = None
             item['tmdb_status'] = None
+            item['imdb_id'] = None
         for item in shows:
             item['poster_url'] = None
             item['tmdb_status'] = None
+            item['imdb_id'] = None
             item['total_episodes'] = None
             item['missing_episodes'] = None
         return
@@ -537,9 +539,11 @@ def _enrich_with_tmdb_cache(movies, shows):
         if info:
             movie['poster_url'] = info['poster_url'] or None
             movie['tmdb_status'] = info.get('tmdb_status') or None
+            movie['imdb_id'] = info.get('imdb_id') or None
         else:
             movie['poster_url'] = None
             movie['tmdb_status'] = None
+            movie['imdb_id'] = None
             uncached.append({'title': movie['title'], 'year': movie.get('year'), 'type': 'movie'})
 
     for show in shows:
@@ -548,6 +552,7 @@ def _enrich_with_tmdb_cache(movies, shows):
         if info:
             show['poster_url'] = info['poster_url'] or None
             show['tmdb_status'] = info.get('tmdb_status') or None
+            show['imdb_id'] = info.get('imdb_id') or None
             total = info.get('total_episodes') or 0
             show['total_episodes'] = total if total > 0 else None
             have = show.get('episodes', 0)
@@ -555,6 +560,7 @@ def _enrich_with_tmdb_cache(movies, shows):
         else:
             show['poster_url'] = None
             show['tmdb_status'] = None
+            show['imdb_id'] = None
             show['total_episodes'] = None
             show['missing_episodes'] = None
             uncached.append({'title': show['title'], 'year': show.get('year'), 'type': 'show'})

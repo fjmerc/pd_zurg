@@ -353,6 +353,45 @@ body.has-bulk-bar{padding-bottom:60px}
 }
 :focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 @media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
+.search-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.65);display:flex;align-items:flex-start;justify-content:center;z-index:1000;padding:40px 16px;overflow-y:auto;backdrop-filter:blur(2px)}
+.search-dialog{background:var(--card);border:1px solid var(--border);border-radius:10px;width:100%;max-width:780px;animation:modal-in .15s ease-out}
+@keyframes modal-in{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
+.search-dialog-hdr{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border)}
+.search-dialog-hdr h3{margin:0;font-size:.95em;font-weight:600}
+.search-dialog-close{background:none;border:none;color:var(--text3);font-size:1.3em;cursor:pointer;padding:0 4px}
+.search-dialog-close:hover{color:var(--text)}
+.search-dialog-body{padding:14px 18px;min-height:120px}
+.search-filter-row{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+.search-filter-row label{font-size:.78em;color:var(--text2);display:flex;align-items:center;gap:4px;cursor:pointer}
+.search-filter-row select{font-size:.78em;padding:2px 6px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px}
+.search-results-tbl{width:100%;border-collapse:collapse;font-size:.82em}
+.search-results-tbl th{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);color:var(--text3);font-weight:500;font-size:.85em;cursor:pointer;user-select:none;white-space:nowrap}
+.search-results-tbl th:hover{color:var(--text)}
+.search-results-tbl th .sort-arrow{font-size:.7em;margin-left:2px}
+.search-results-tbl td{padding:6px 8px;border-bottom:1px solid var(--border);vertical-align:middle}
+.search-results-tbl tr:last-child td{border-bottom:none}
+.search-results-tbl tr.added-row td{opacity:.5}
+.sr-title{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sr-title:hover{white-space:normal;word-break:break-word}
+.badge-quality{display:inline-block;padding:1px 6px;border-radius:4px;font-size:.78em;font-weight:600}
+.badge-quality.q-2160p{background:#ff6b0014;color:#ff8c3a;border:1px solid #ff6b0030}
+.badge-quality.q-1080p{background:#58a6ff14;color:var(--blue);border:1px solid #58a6ff30}
+.badge-quality.q-720p{background:#3fb95014;color:var(--green);border:1px solid #3fb95030}
+.badge-quality.q-480p,.badge-quality.q-Unknown{background:var(--border);color:var(--text3);border:1px solid var(--border)}
+.badge-cached{display:inline-flex;align-items:center;gap:2px;font-size:.78em;font-weight:600}
+.badge-cached.is-cached{color:var(--green)}
+.badge-cached.not-cached{color:var(--text3)}
+.btn-search{background:none;border:1px solid var(--border);color:var(--text2);border-radius:4px;padding:2px 8px;font-size:.75em;cursor:pointer;white-space:nowrap;transition:border-color .15s,color .15s}
+.btn-search:hover{border-color:var(--blue);color:var(--blue)}
+.btn-search:disabled{opacity:.5;cursor:not-allowed}
+.btn-add-debrid{background:none;border:1px solid var(--green);color:var(--green);border-radius:4px;padding:2px 8px;font-size:.78em;cursor:pointer;transition:all .15s}
+.btn-add-debrid:hover:not(:disabled){background:#3fb95018;border-color:var(--green)}
+.btn-add-debrid.not-cached{border-color:var(--blue);color:var(--blue)}
+.btn-add-debrid.not-cached:hover:not(:disabled){background:#58a6ff18}
+.btn-add-debrid:disabled{opacity:.5;cursor:not-allowed}
+.btn-add-debrid.added{border-color:var(--green);color:var(--green);cursor:default}
+.search-empty{text-align:center;color:var(--text3);padding:24px 0;font-size:.88em}
+.search-count{font-size:.75em;color:var(--text3);margin-left:auto}
 </style>
 <script>(function(){try{var t=localStorage.getItem('pd_zurg_theme');if(t){document.documentElement.setAttribute('data-theme',t);document.querySelector('meta[name="color-scheme"]').content=t==='light'?'light':'dark';}}catch(e){}})()</script>
 </head>
@@ -483,6 +522,7 @@ let _preferences = {};
 let _pending = {};
 let _detailSeasons = [];
 let _downloadServices = {show: null, movie: null};
+let _searchEnabled = false;
 let _searchTimer = null;
 let _refreshTimer = null;
 let _activeWantedPreset = null;
@@ -1617,6 +1657,7 @@ function _applyLibraryData(data, opts) {
   _preferences    = data.preferences || {};
   _pending        = data.pending || {};
   _downloadServices = data.download_services || {show: null, movie: null};
+  _searchEnabled  = !!data.search_enabled;
   _lastScan       = data.last_scan || null;
   _scanDurationMs = data.scan_duration_ms || null;
 
@@ -1860,6 +1901,9 @@ function _renderMovieDetail(movie, meta) {
   } else if (movie.source === 'debrid') {
     html += '<div style="margin-top:10px;font-size:.82em;color:var(--text3)">To switch to local, configure <a href="/settings">Radarr or Overseerr</a> in Settings.</div>';
   }
+  if (_searchEnabled && movie.imdb_id) {
+    html += '<div style="margin-top:8px"><button class="btn-search" data-imdb="' + esc(movie.imdb_id) + '" data-mtype="movie" data-label="' + esc(movie.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button></div>';
+  }
   html += '</div></div>';
   html += '<div class="history-section"><button class="history-toggle" onclick="toggleShowHistory(this)"><span class="chevron">&#9654;</span> History</button><div class="history-list" class="history-list-content"><div style="color:var(--text3);font-size:.8em;padding:4px 0">Loading...</div></div></div>';
   html += '<div id="transfer-msg" aria-live="polite"></div>';
@@ -2042,6 +2086,9 @@ function _renderSeasonEpisodes(season, si) {
       } else if (isMissing && (!ep.air_date || new Date(ep.air_date + 'T00:00:00').getTime() <= Date.now())) {
         html += '<button class="btn-action" aria-label="Search ' + epLabel + '" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ',true)})">Search</button>';
       }
+    }
+    if (_searchEnabled && _detailItem && _detailItem.imdb_id) {
+      html += ' <button class="btn-search" title="Search torrents for ' + epLabel + '" data-imdb="' + esc(_detailItem.imdb_id) + '" data-mtype="series" data-season="' + season.number + '" data-episode="' + ep.number + '" data-label="' + esc(_detailItem.title + ' ' + epLabel) + '" onclick="event.stopPropagation();openSearchFromBtn(this)">&#128269;</button>';
     }
     html += '</td>';
     html += '</tr>';
@@ -3152,6 +3199,237 @@ function startTsRefresh() {
   _tsRefreshTimer = setInterval(function() {
     if (!_scanning) updateScanInfo();
   }, 30000);
+}
+
+// ---------------------------------------------------------------------------
+// Debrid Search Modal (F9)
+// ---------------------------------------------------------------------------
+var _searchResults = [];
+var _searchSortCol = 'cached';
+var _searchSortAsc = false;
+var _searchCachedOnly = false;
+var _searchMinQuality = 0;
+
+function openSearchFromBtn(btn) {
+  var imdbId = btn.getAttribute('data-imdb');
+  var mediaType = btn.getAttribute('data-mtype') || 'movie';
+  var season = btn.getAttribute('data-season');
+  var episode = btn.getAttribute('data-episode');
+  var label = btn.getAttribute('data-label') || '';
+  openSearchModal(imdbId, mediaType, season ? parseInt(season, 10) : null, episode ? parseInt(episode, 10) : null, label);
+}
+
+function openSearchModal(imdbId, mediaType, season, episode, displayTitle) {
+  var overlay = document.createElement('div');
+  overlay.className = 'search-overlay';
+  overlay.id = 'search-overlay';
+  overlay.onclick = function(e) { if (e.target === overlay) closeSearchModal(); };
+
+  var seasonStr = season !== null && season !== undefined ? String(season) : '';
+  var episodeStr = episode !== null && episode !== undefined ? String(episode) : '';
+  var headerTitle = displayTitle || 'Search';
+
+  var html = '<div class="search-dialog">';
+  html += '<div class="search-dialog-hdr"><h3>Search: ' + esc(headerTitle) + '</h3>';
+  html += '<button class="search-dialog-close" onclick="closeSearchModal()" title="Close">&times;</button></div>';
+  html += '<div class="search-dialog-body" id="search-body">';
+  html += '<div style="text-align:center;padding:24px 0;color:var(--text3)"><span class="spinner" style="display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle;margin-right:8px"></span>Searching Torrentio\u2026</div>';
+  html += '</div></div>';
+  overlay.innerHTML = html;
+  document.body.appendChild(overlay);
+  document.body.style.overflow = 'hidden';
+
+  // Reset state
+  _searchResults = [];
+  _searchSortCol = 'cached';
+  _searchSortAsc = false;
+  _searchCachedOnly = false;
+  _searchMinQuality = 0;
+
+  var payload = {imdb_id: imdbId, type: mediaType};
+  if (seasonStr) payload.season = parseInt(seasonStr, 10);
+  if (episodeStr) payload.episode = parseInt(episodeStr, 10);
+
+  fetch('/api/search', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    _searchResults = data.results || [];
+    _renderSearchResults();
+  })
+  .catch(function(err) {
+    var body = document.getElementById('search-body');
+    if (body) body.innerHTML = '<div class="search-empty">Search failed: ' + esc(String(err)) + '</div>';
+  });
+}
+
+function closeSearchModal() {
+  var overlay = document.getElementById('search-overlay');
+  if (overlay) overlay.remove();
+  document.body.style.overflow = '';
+}
+
+function _renderSearchResults() {
+  var body = document.getElementById('search-body');
+  if (!body) return;
+
+  var filtered = _searchResults.filter(function(r) {
+    if (_searchCachedOnly && !r.cached) return false;
+    if (r.quality.score < _searchMinQuality) return false;
+    return true;
+  });
+
+  // Sort
+  filtered.sort(function(a, b) {
+    var va, vb;
+    if (_searchSortCol === 'cached') { va = a.cached ? 1 : 0; vb = b.cached ? 1 : 0; }
+    else if (_searchSortCol === 'quality') { va = a.quality.score; vb = b.quality.score; }
+    else if (_searchSortCol === 'size') { va = a.size_bytes; vb = b.size_bytes; }
+    else if (_searchSortCol === 'seeds') { va = a.seeds; vb = b.seeds; }
+    else { va = a.cached ? 1 : 0; vb = b.cached ? 1 : 0; }
+    if (va === vb) {
+      // Tiebreak: cached > quality > seeds
+      if (a.cached !== b.cached) return b.cached ? 1 : -1;
+      if (a.quality.score !== b.quality.score) return b.quality.score - a.quality.score;
+      return b.seeds - a.seeds;
+    }
+    return _searchSortAsc ? (va - vb) : (vb - va);
+  });
+
+  var html = '<div class="search-filter-row">';
+  html += '<label><input type="checkbox" id="search-cached-toggle"' + (_searchCachedOnly ? ' checked' : '') + ' onchange="_searchCachedOnly=this.checked;_renderSearchResults()"> Cached only</label>';
+  html += '<label>Min quality: <select id="search-quality-filter" onchange="_searchMinQuality=parseInt(this.value,10);_renderSearchResults()">';
+  html += '<option value="0"' + (_searchMinQuality === 0 ? ' selected' : '') + '>Any</option>';
+  html += '<option value="1"' + (_searchMinQuality === 1 ? ' selected' : '') + '>480p+</option>';
+  html += '<option value="2"' + (_searchMinQuality === 2 ? ' selected' : '') + '>720p+</option>';
+  html += '<option value="3"' + (_searchMinQuality === 3 ? ' selected' : '') + '>1080p+</option>';
+  html += '<option value="4"' + (_searchMinQuality === 4 ? ' selected' : '') + '>2160p</option>';
+  html += '</select></label>';
+  html += '<span class="search-count">' + filtered.length + ' of ' + _searchResults.length + ' results</span>';
+  html += '</div>';
+
+  if (filtered.length === 0) {
+    html += '<div class="search-empty">' + (_searchResults.length === 0 ? 'No results found' : 'No results match filters') + '</div>';
+    body.innerHTML = html;
+    return;
+  }
+
+  html += '<table class="search-results-tbl"><thead><tr>';
+  var cols = [
+    {key: 'title', label: 'Release'},
+    {key: 'quality', label: 'Quality'},
+    {key: 'size', label: 'Size'},
+    {key: 'seeds', label: 'Seeds'},
+    {key: 'cached', label: 'Cached'},
+    {key: 'action', label: ''},
+  ];
+  for (var ci = 0; ci < cols.length; ci++) {
+    var col = cols[ci];
+    if (col.key === 'action' || col.key === 'title') {
+      html += '<th>' + col.label + '</th>';
+    } else {
+      var arrow = _searchSortCol === col.key ? (_searchSortAsc ? ' &#9650;' : ' &#9660;') : '';
+      html += '<th onclick="sortSearchResults(\'' + col.key + '\')">' + col.label + '<span class="sort-arrow">' + arrow + '</span></th>';
+    }
+  }
+  html += '</tr></thead><tbody>';
+
+  for (var ri = 0; ri < filtered.length; ri++) {
+    var r = filtered[ri];
+    var addedClass = r._added ? ' added-row' : '';
+    html += '<tr class="' + addedClass + '">';
+    html += '<td class="sr-title" title="' + esc(r.title) + '">' + esc(r.title);
+    if (r.source_name) html += ' <span style="color:var(--text3);font-size:.85em">' + esc(r.source_name) + '</span>';
+    html += '</td>';
+    var qCls = 'q-' + r.quality.label.replace(/\s/g, '');
+    html += '<td><span class="badge-quality ' + qCls + '">' + esc(r.quality.label) + '</span></td>';
+    html += '<td>' + _formatBytes(r.size_bytes) + '</td>';
+    html += '<td>' + (r.seeds || 0) + '</td>';
+    html += '<td><span class="badge-cached ' + (r.cached ? 'is-cached' : 'not-cached') + '">' + (r.cached ? '&#10003; Cached' : '&mdash;') + '</span></td>';
+    html += '<td>';
+    if (r._added) {
+      html += '<span style="color:var(--green);font-size:.82em">&#10003; Added</span>';
+    } else {
+      html += '<button class="btn-add-debrid ' + (r.cached ? '' : 'not-cached') + '" data-hash="' + esc(r.info_hash) + '" onclick="addSearchResult(this)">Add</button>';
+    }
+    html += '</td></tr>';
+  }
+
+  html += '</tbody></table>';
+  body.innerHTML = html;
+}
+
+function sortSearchResults(col) {
+  if (_searchSortCol === col) {
+    _searchSortAsc = !_searchSortAsc;
+  } else {
+    _searchSortCol = col;
+    _searchSortAsc = false;
+  }
+  _renderSearchResults();
+}
+
+function addSearchResult(btn) {
+  var hash = btn.getAttribute('data-hash');
+  if (!hash) return;
+  var r = null;
+  for (var i = 0; i < _searchResults.length; i++) {
+    if (_searchResults[i].info_hash === hash) { r = _searchResults[i]; break; }
+  }
+  if (!r) return;
+
+  btn.disabled = true;
+  btn.textContent = '\u2026';
+
+  fetch('/api/search/add', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({info_hash: r.info_hash, title: r.title})
+  })
+  .then(function(resp) { return resp.json(); })
+  .then(function(data) {
+    if (data.success) {
+      // Mark in the source data
+      for (var i = 0; i < _searchResults.length; i++) {
+        if (_searchResults[i].info_hash === r.info_hash) {
+          _searchResults[i]._added = true;
+          break;
+        }
+      }
+      _renderSearchResults();
+      // Show success message
+      var msg = r.cached
+        ? 'Added! Library will update on next scan.'
+        : 'Added \u2014 downloading on ' + (data.service || 'debrid') + '\u2026';
+      _showSearchMsg(msg, 'success');
+    } else {
+      btn.disabled = false;
+      btn.textContent = 'Add';
+      _showSearchMsg('Failed: ' + (data.error || 'Unknown error'), 'error');
+    }
+  })
+  .catch(function(err) {
+    btn.disabled = false;
+    btn.textContent = 'Add';
+    _showSearchMsg('Error: ' + String(err), 'error');
+  });
+}
+
+function _showSearchMsg(msg, type) {
+  var body = document.getElementById('search-body');
+  if (!body) return;
+  var existing = document.getElementById('search-msg');
+  if (existing) existing.remove();
+  var color = type === 'success' ? 'var(--green)' : 'var(--red)';
+  var div = document.createElement('div');
+  div.id = 'search-msg';
+  div.style.cssText = 'padding:6px 0;font-size:.82em;color:' + color;
+  div.textContent = msg;
+  body.insertBefore(div, body.firstChild);
+  setTimeout(function() { var el = document.getElementById('search-msg'); if (el) el.remove(); }, 5000);
 }
 
 // ---------------------------------------------------------------------------

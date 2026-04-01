@@ -106,7 +106,8 @@ ENV_SCHEMA = [
             ('NOTIFICATION_EVENTS', 'Notification Events', 'string', False,
              'Comma-separated event types: startup, shutdown, download_complete, download_error, '
              'library_refresh, symlink_created, symlink_failed, debrid_unavailable, '
-             'local_fallback_triggered, blocklist_added, health_error, daily_digest. '
+             'local_fallback_triggered, blocklist_added, health_error, daily_digest, '
+             'debrid_add_success, debrid_add_failed. '
              'Leave empty for all events'),
             ('NOTIFICATION_LEVEL', 'Minimum Level', 'select:info,warning,error', False, 'Minimum severity to send notifications'),
             ('NOTIFICATION_DIGEST_ENABLED', 'Daily Digest', 'boolean', False, 'Send a daily summary notification'),
@@ -160,6 +161,14 @@ ENV_SCHEMA = [
             ('RADARR_URL', 'Radarr URL', 'url', False, 'Radarr base URL (e.g. http://radarr:7878). Used for downloads, rescans, and folder naming'),
             ('RADARR_API_KEY', 'Radarr API Key', 'secret', False, 'Radarr API key (Settings > General in Radarr)'),
             ('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'Auto-Enforce Preferences', 'boolean', False, 'Automatically switch sources when content arrives matching a stored preference'),
+        ],
+    },
+    {
+        'name': 'Debrid Search',
+        'description': 'Interactive torrent search and one-click add to debrid',
+        'fields': [
+            ('TORRENTIO_URL', 'Torrentio URL', 'url', False,
+             'Torrentio API base URL (e.g. https://torrentio.strem.fun). Enables interactive torrent search in the Library detail view'),
         ],
     },
     {

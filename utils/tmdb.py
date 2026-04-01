@@ -160,12 +160,17 @@ def get_show_metadata(tmdb_id):
     """Fetch full show details including all season/episode data.
     Skips Season 0 (specials).
     """
-    show = _api_get(f'/tv/{tmdb_id}')
+    show = _api_get(f'/tv/{tmdb_id}', params={'append_to_response': 'external_ids'})
     if not show:
         return None
 
+    # IMDb ID from external_ids (appended to response)
+    ext = show.get('external_ids', {})
+    imdb_id = ext.get('imdb_id') or ''
+
     result = {
         'tmdb_id': tmdb_id,
+        'imdb_id': imdb_id,
         'title': show.get('name', ''),
         'overview': show.get('overview', ''),
         'poster_path': show.get('poster_path') or '',
@@ -206,6 +211,7 @@ def get_movie_metadata(tmdb_id):
         return None
     return {
         'tmdb_id': tmdb_id,
+        'imdb_id': data.get('imdb_id') or '',
         'title': data.get('title', ''),
         'overview': data.get('overview', ''),
         'poster_path': data.get('poster_path') or '',
@@ -324,6 +330,7 @@ def get_movie_info(title, year=None):
 def _format_show(entry):
     return {
         'tmdb_id': entry.get('tmdb_id'),
+        'imdb_id': entry.get('imdb_id') or '',
         'title': entry.get('title', ''),
         'overview': entry.get('overview', ''),
         'poster_url': _poster_url(entry.get('poster_path', '')),
@@ -335,6 +342,7 @@ def _format_show(entry):
 def _format_movie(entry):
     return {
         'tmdb_id': entry.get('tmdb_id'),
+        'imdb_id': entry.get('imdb_id') or '',
         'title': entry.get('title', ''),
         'overview': entry.get('overview', ''),
         'poster_url': _poster_url(entry.get('poster_path', '')),
@@ -394,6 +402,7 @@ def get_cached_posters(items):
                     'poster_url': _poster_url(entry.get('poster_path', '')),
                     'tmdb_status': entry.get('status', ''),
                     'total_episodes': aired_eps,
+                    'imdb_id': entry.get('imdb_id') or '',
                 }
         elif item_type == 'movie':
             entry = movies_cache.get(key)
@@ -406,6 +415,7 @@ def get_cached_posters(items):
                     'poster_url': _poster_url(entry.get('poster_path', '')),
                     'tmdb_status': status,
                     'runtime': entry.get('runtime', 0),
+                    'imdb_id': entry.get('imdb_id') or '',
                 }
 
     return result

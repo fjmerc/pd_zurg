@@ -1434,7 +1434,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(content)))
             self.end_headers()
             self.wfile.write(content)
-        elif self.path == '/library':
+        elif self.path == '/library' or self.path.startswith('/library?'):
             from utils.library_page import get_library_html
             html = get_library_html().encode()
             self.send_response(200)

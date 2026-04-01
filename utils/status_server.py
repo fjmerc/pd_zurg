@@ -515,103 +515,10 @@ pre{background:var(--bg);border:1px solid var(--border);border-radius:8px;paddin
 _DASHBOARD_HTML = '''<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark light">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
-<title>pd_zurg Status</title>
-<style>
-:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--border2:#21262d;--text:#c9d1d9;--text2:#8b949e;--text3:#636e7b;--blue:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#d29922;--orange:#db6d28}
-[data-theme="light"]{--bg:#f6f8fa;--card:#ffffff;--border:#d0d7de;--border2:#d8dee4;--text:#1f2328;--text2:#656d76;--text3:#8b949e;--blue:#0969da;--green:#1a7f37;--red:#cf222e;--yellow:#9a6700;--orange:#bc4c00}
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);padding:20px;max-width:1200px;margin:0 auto}
-a{color:var(--blue);text-decoration:none}
-h1{color:var(--blue);margin-bottom:4px;font-size:1.6em;font-weight:600}
-.header{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;gap:10px}
-.meta{color:var(--text2);font-size:.85em;margin-bottom:20px}
-.banner{padding:12px 16px;border-radius:8px;margin-bottom:16px;font-size:.9em;font-weight:500;display:none}
-.banner.warn{display:block;background:#d299221a;border:1px solid var(--yellow);color:var(--yellow)}
-.banner.crit{display:block;background:#f851491a;border:1px solid var(--red);color:var(--red)}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
-.grid.full{grid-template-columns:1fr}
-@media(max-width:768px){.grid{grid-template-columns:1fr}}
-.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;opacity:0;animation:fadeIn .3s ease forwards}
-@keyframes fadeIn{to{opacity:1}}
-.card h2{font-size:.8em;color:var(--text2);margin-bottom:12px;text-transform:uppercase;letter-spacing:.08em;font-weight:600}
-table{width:100%;border-collapse:collapse}
-th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border2);font-size:.85em}
-th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;letter-spacing:.05em}
-#procs td:nth-child(2),#procs td:nth-child(3){text-align:center}
-.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
-.dot.green{background:var(--green)}.dot.red{background:var(--red);border-radius:2px}.dot.yellow{background:transparent;border:2px solid var(--yellow);width:8px;height:8px}
-.svc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
-.svc-item{display:flex;align-items:center;padding:10px 12px;background:var(--bg);border-radius:6px;border:1px solid var(--border2)}
-.svc-item .svc-info{flex:1;margin-left:8px}
-.svc-item .svc-name{font-size:.85em;font-weight:500;color:var(--text)}
-.svc-item .svc-detail{font-size:.75em;color:var(--text2);margin-top:2px}
-.svc-item .svc-badge{font-size:.7em;padding:2px 6px;border-radius:4px;font-weight:500;margin-left:8px}
-.svc-item .svc-badge.premium{background:#3fb9501a;color:var(--green)}
-.svc-item .svc-badge.warn{background:#d299221a;color:var(--yellow)}
-.svc-item .svc-badge.crit{background:#f851491a;color:var(--red)}
-.svc-health{font-size:.72em;color:var(--text3);margin-top:3px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
-.svc-health span{white-space:nowrap}
-.rl-bar{display:inline-block;width:40px;height:6px;background:var(--border);border-radius:3px;vertical-align:middle;overflow:hidden;position:relative}
-.rl-fill{height:100%;border-radius:3px;transition:width .3s}
-.rl-fill.green{background:var(--green)}.rl-fill.yellow{background:var(--yellow)}.rl-fill.red{background:var(--red)}
-.events{max-height:280px;overflow-y:auto}
-.event{padding:5px 0;border-bottom:1px solid var(--border2);font-size:.8em;display:flex;gap:8px}
-.event .time{color:var(--text3);min-width:55px;font-family:monospace;font-size:.85em}
-.event .comp{color:var(--blue);font-weight:500;min-width:70px}
-.event.error .msg{color:var(--red)}.event.warning .msg{color:var(--yellow)}
-.stat-value{font-size:1.8em;font-weight:600;color:var(--blue)}
-.stat-label{font-size:.75em;color:var(--text2);margin-top:2px}
-.stats-row{display:flex;gap:32px}.stats-row>div{flex:1;text-align:center}
-.btn-restart,.btn-run{background:none;border:1px solid var(--border);color:var(--text2);border-radius:4px;cursor:pointer;padding:2px 8px;font-size:.8em}
-.btn-restart:hover,.btn-run:hover{border-color:var(--blue);color:var(--blue)}
-.btn-restart:disabled,.btn-run:disabled{opacity:.4;cursor:not-allowed}
-.task-ok{color:var(--green)}.task-err{color:var(--red)}.task-running{color:var(--blue)}
-.task-desc{color:var(--text2);font-size:.85em}
-.log-controls{display:flex;gap:8px;align-items:center;margin-bottom:8px}
-.log-controls select{background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:.8em}
-.log-controls label{font-size:.8em;color:var(--text2)}
-#log-content{max-height:350px;overflow-y:auto;background:var(--bg);border:1px solid var(--border2);border-radius:4px;padding:8px;font-size:.75em;line-height:1.5;white-space:pre-wrap;word-break:break-word;min-width:0}
-.log-line.error{color:var(--red)}.log-line.warning{color:var(--yellow)}.log-line.debug{color:var(--text3)}
-details{margin-top:0}
-details summary{cursor:pointer;color:var(--text2);font-size:.8em;padding:4px 0}
-details summary:hover{color:var(--blue)}
-.cfg-table td{font-family:monospace;font-size:.8em}
-.cfg-table td:first-child{color:var(--blue);font-weight:500;white-space:nowrap;padding-right:16px}
-.mount-timeline{margin-top:8px}
-.mt-row{display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:.8em}
-.mt-path{color:var(--text2);min-width:120px;overflow:hidden;text-overflow:ellipsis}
-.mt-blocks{display:flex;gap:1px;flex:1}
-.mt-block{height:16px;min-width:3px;flex:1;border-radius:2px}
-.mt-block.ok{background:var(--green)}.mt-block.down{background:var(--red)}.mt-block.partial{background:var(--yellow)}
-.mt-block:hover{opacity:.8}
-.footer{color:var(--text3);font-size:.78em;text-align:right;margin-top:12px;display:flex;justify-content:flex-end;align-items:center;gap:8px}
-#conn-status{color:var(--red);font-weight:500}
-#log-search:focus{border-color:var(--blue)}
-#log-content.nowrap{white-space:pre;overflow-x:auto;word-break:normal}
-.theme-toggle{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;cursor:pointer;padding:4px 8px;font-size:.85em;line-height:1;transition:border-color .15s,color .15s}
-.theme-toggle:hover{border-color:var(--blue);color:var(--blue)}
-[data-theme="light"] .svc-item{background:var(--card);border-color:var(--border)}
-dialog{background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:24px;max-width:380px;box-shadow:0 8px 32px rgba(0,0,0,.5)}
-dialog::backdrop{background:rgba(0,0,0,.6);backdrop-filter:blur(2px)}
-dialog h3{margin-bottom:12px;font-size:1em;color:var(--text)}
-dialog p{margin-bottom:20px;font-size:.9em;color:var(--text2)}
-dialog .dlg-actions{display:flex;gap:8px;justify-content:flex-end}
-dialog .dlg-btn{padding:8px 18px;border-radius:6px;font-size:.85em;cursor:pointer;border:none;font-weight:500}
-dialog .dlg-cancel{background:var(--border);color:var(--text)}
-dialog .dlg-confirm{background:var(--blue);color:#fff}
-.nav-badge{display:inline-block;background:var(--red);color:#fff;border-radius:8px;font-size:.72em;font-weight:700;padding:1px 6px;margin-left:4px;min-width:16px;text-align:center;vertical-align:middle;line-height:1.4}
-.type-badge{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-size:.75em;font-weight:500;white-space:nowrap}
-.type-grabbed{background:#58a6ff1a;color:var(--blue)}.type-cached{background:#3fb9501a;color:var(--green)}.type-symlink_created{background:#bc8cff1a;color:#bc8cff}.type-failed{background:#f851491a;color:var(--red)}.type-cleanup{background:#d299221a;color:var(--yellow)}.type-switched_source{background:#db6d281a;color:var(--orange)}.type-search_triggered{background:#58a6ff1a;color:var(--blue)}.type-rescan_triggered{background:#3fb9501a;color:var(--green)}.type-task_completed{background:var(--border);color:var(--text2)}.type-blocklisted{background:#f851491a;color:var(--red)}.type-blocklist_added{background:#db6d281a;color:var(--orange)}
-@media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
-</style>
-<script>(function(){try{var t=localStorage.getItem('pd_zurg_theme');if(t){document.documentElement.setAttribute('data-theme',t);document.querySelector('meta[name="color-scheme"]').content=t==='light'?'light':'dark';}}catch(e){}})()</script>
+__BASE_HEAD__
 </head>
 <body>
-<div class="header"><h1>pd_zurg</h1><span class="meta" id="header-meta"></span><div style="margin-left:auto;display:flex;gap:12px;align-items:center;font-size:.85em"><a href="/library">Library</a><a href="/library?filter=missing" id="nav-wanted-link" style="display:none">Wanted<span class="nav-badge" id="nav-wanted-count">0</span></a><a href="/settings">Settings</a><button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme" id="theme-btn">☀️</button></div></div>
+__NAV_HTML__
 <div class="meta">Uptime: <span id="uptime"></span></div>
 <div class="meta" id="error-line" style="display:none;color:var(--red)">Errors: <span id="errors">0</span></div>
 <div class="banner" id="banner"></div>
@@ -673,7 +580,7 @@ dialog .dlg-confirm{background:var(--blue);color:#fff}
         <option value="blocklist_added">Auto-Blocked</option>
       </select>
       <input type="text" id="activity-search" placeholder="Search titles..." oninput="loadActivity()" style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:.8em;color:var(--text);outline:none;min-width:120px">
-      <button class="btn-run" onclick="clearHistory()" id="activity-clear-btn" style="display:none">Clear</button>
+      <button class="btn btn-ghost btn-sm" onclick="clearHistory()" id="activity-clear-btn" style="display:none">Clear</button>
     </div>
     <table><thead><tr><th style="width:80px">Time</th><th style="width:90px">Type</th><th>Title</th><th>Detail</th><th style="width:60px">Source</th></tr></thead>
     <tbody id="activity-body"></tbody></table>
@@ -684,7 +591,7 @@ dialog .dlg-confirm{background:var(--blue);color:#fff}
   <div class="card">
     <h2>Blocklist <span id="blocklist-count" style="font-size:.7em;color:var(--text3)"></span></h2>
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
-      <button class="btn-run" onclick="clearBlocklist()" id="blocklist-clear-btn" style="display:none">Clear All</button>
+      <button class="btn btn-ghost btn-sm" onclick="clearBlocklist()" id="blocklist-clear-btn" style="display:none">Clear All</button>
     </div>
     <table><thead><tr><th>Title</th><th style="width:120px">Hash</th><th>Reason</th><th style="width:80px">Date</th><th style="width:60px">Source</th><th style="width:50px" id="bl-actions-hdr"></th></tr></thead>
     <tbody id="blocklist-body"></tbody></table>
@@ -831,21 +738,7 @@ dialog .dlg-confirm{background:var(--blue);color:#fff}
 <dialog id="confirm-dialog"><h3 id="dlg-title"></h3><p id="dlg-msg"></p><div class="dlg-actions"><button class="dlg-btn dlg-cancel" onclick="document.getElementById('confirm-dialog').close('cancel')">Cancel</button><button class="dlg-btn dlg-confirm" id="dlg-ok">Confirm</button></div></dialog>
 <div class="footer"><span id="conn-status"></span>Refresh: <select id="refresh-interval" onchange="setRefreshInterval(this.value)" style="background:var(--bg);color:var(--text2);border:1px solid var(--border);border-radius:3px;font-size:1em;padding:1px 4px"><option value="5">5s</option><option value="10" selected>10s</option><option value="30">30s</option><option value="0">Paused</option></select></div>
 <script>
-// Theme toggle
-function applyTheme(theme){
-  document.documentElement.setAttribute('data-theme',theme);
-  document.querySelector('meta[name="color-scheme"]').content=theme==='light'?'light':'dark';
-  document.getElementById('theme-btn').textContent=theme==='light'?'\U0001F319':'\u2600\uFE0F';
-}
-function toggleTheme(){
-  const cur=document.documentElement.getAttribute('data-theme')||'dark';
-  const next=cur==='dark'?'light':'dark';
-  applyTheme(next);
-  try{localStorage.setItem('pd_zurg_theme',next);}catch(e){}
-}
-
-// Sync theme button icon on load (head script sets data-theme before body renders)
-(function(){const t=document.documentElement.getAttribute('data-theme');if(t)applyTheme(t);})();
+__THEME_TOGGLE_JS__
 
 // Log wrap toggle
 function toggleLogWrap(){
@@ -933,7 +826,7 @@ function renderServices(svcs){
 
 function update(){
   fetch('/api/status').then(r=>r.json()).then(d=>{
-    document.getElementById('header-meta').textContent='v'+d.version;
+    var hm=document.getElementById('header-meta');if(hm)hm.textContent='v'+d.version;
     document.getElementById('uptime').textContent=fmt(d.uptime_seconds);
     document.getElementById('errors').textContent=d.error_count;
     document.getElementById('error-line').style.display=d.error_count>0?'block':'none';
@@ -976,7 +869,7 @@ function update(){
     let p='';const hasAuth=window._hasAuth;
     d.processes.forEach(x=>{
       const svcName=x.name.split(' w/ ')[0].toLowerCase();
-      const restartBtn=hasAuth?'<td><button class="btn-restart" onclick="restartSvc(this,\\x27'+esc(svcName)+'\\x27)" title="Restart">Restart</button></td>':'<td></td>';
+      const restartBtn=hasAuth?'<td><button class="btn btn-ghost btn-sm" onclick="restartSvc(this,\\x27'+esc(svcName)+'\\x27)" title="Restart">Restart</button></td>':'<td></td>';
       p+='<tr><td>'+esc(x.name)+'</td><td>'+(x.pid||'-')+'</td><td>'+(x.restart_count||0)+'</td><td>'+dot(x.running)+'</td>'+restartBtn+'</tr>';
     });
     document.getElementById('procs').innerHTML=p||'<tr><td colspan="5" style="color:var(--text2)">No processes</td></tr>';
@@ -1161,7 +1054,7 @@ function updateTasks(){
       }
       const next=t.next_run?timeAgo(t.next_run).replace(' ago','').replace(/^(\d+)/,'-$1'):'—';
       const nextLabel=t.next_run?(new Date(t.next_run)>new Date()?'in '+fmtInterval(Math.max(0,Math.floor((new Date(t.next_run)-Date.now())/1000))):'due'):'—';
-      const runBtn=hasAuth&&!t.running?'<td><button class="btn-run" onclick="runTask(this,\\x27'+esc(t.name)+'\\x27)">Run</button></td>':'<td>'+(t.running?'<span class="task-running" style="font-size:.8em">...</span>':'')+'</td>';
+      const runBtn=hasAuth&&!t.running?'<td><button class="btn btn-ghost btn-sm" onclick="runTask(this,\\x27'+esc(t.name)+'\\x27)">Run</button></td>':'<td>'+(t.running?'<span class="task-running" style="font-size:.8em">...</span>':'')+'</td>';
       const enabledDot=t.enabled?'':'<span style="color:var(--text3);font-size:.75em" title="Disabled"> (off)</span>';
       h+='<tr><td><span title="'+esc(t.description||'')+'">'+esc(t.name)+'</span>'+enabledDot+'</td><td>'+intv+'</td><td>'+lastRun+'</td><td>'+dur+'</td><td>'+result+'</td><td>'+nextLabel+'</td>'+runBtn+'</tr>';
     });
@@ -1198,21 +1091,7 @@ function setRefreshInterval(sec){
 update();updateLogs();updateTasks();
 setRefreshInterval(10);
 setTimeout(updateMountHistory,1000);
-// Wanted count badge
-(function tryWanted(attempt){
-  fetch('/api/library').then(function(r){
-    if(r.status===503&&attempt<5){setTimeout(function(){tryWanted(attempt+1)},3000);return null}
-    return r.ok?r.json():null;
-  }).then(function(data){
-    if(!data)return;
-    var count=0;
-    (data.shows||[]).forEach(function(s){if(s.missing_episodes>0)count++});
-    (data.movies||[]).forEach(function(m){if(m.missing_episodes>0)count++});
-    var link=document.getElementById('nav-wanted-link');
-    var badge=document.getElementById('nav-wanted-count');
-    if(link&&badge&&count>0){link.style.display='';badge.textContent=count}
-  }).catch(function(){});
-})(0);
+__WANTED_BADGE_JS__
 
 // Activity tab
 var _actPage=1;
@@ -1278,7 +1157,7 @@ function loadBlocklist(){
       h+='<td style="font-size:.8em;color:var(--text3);white-space:nowrap">'+timeAgo(e.date)+'</td>';
       h+='<td>'+srcBadge+'</td>';
       h+='<td>';
-      if(window._hasAuth)h+='<button class="btn-run bl-remove" style="font-size:.7em;padding:2px 6px" data-id="'+esc(e.id)+'">Remove</button>';
+      if(window._hasAuth)h+='<button class="btn btn-ghost btn-sm bl-remove" style="font-size:.7em;padding:2px 6px" data-id="'+esc(e.id)+'">Remove</button>';
       h+='</td></tr>';
     });
     el.innerHTML=h;
@@ -1302,6 +1181,90 @@ loadBlocklist();
 </script>
 </body>
 </html>'''
+
+_DASHBOARD_EXTRA_CSS = """
+body{max-width:1200px}
+.meta{color:var(--text2);font-size:.85em;margin-bottom:20px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+.grid.full{grid-template-columns:1fr}
+@media(max-width:768px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;opacity:0;animation:fadeIn .3s ease forwards}
+@keyframes fadeIn{to{opacity:1}}
+.card h2{font-size:.8em;color:var(--text2);margin-bottom:12px;text-transform:uppercase;letter-spacing:.08em;font-weight:600}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border2);font-size:.85em}
+th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;letter-spacing:.05em}
+#procs td:nth-child(2),#procs td:nth-child(3){text-align:center}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+.dot.green{background:var(--green)}.dot.red{background:var(--red);border-radius:2px}.dot.yellow{background:transparent;border:2px solid var(--yellow);width:8px;height:8px}
+.svc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
+.svc-item{display:flex;align-items:center;padding:10px 12px;background:var(--bg);border-radius:6px;border:1px solid var(--border2)}
+.svc-item .svc-info{flex:1;margin-left:8px}
+.svc-item .svc-name{font-size:.85em;font-weight:500;color:var(--text)}
+.svc-item .svc-detail{font-size:.75em;color:var(--text2);margin-top:2px}
+.svc-item .svc-badge{font-size:.7em;padding:2px 6px;border-radius:4px;font-weight:500;margin-left:8px}
+.svc-item .svc-badge.premium{background:#3fb9501a;color:var(--green)}
+.svc-item .svc-badge.warn{background:#d299221a;color:var(--yellow)}
+.svc-item .svc-badge.crit{background:#f851491a;color:var(--red)}
+.svc-health{font-size:.72em;color:var(--text3);margin-top:3px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.svc-health span{white-space:nowrap}
+.rl-bar{display:inline-block;width:40px;height:6px;background:var(--border);border-radius:3px;vertical-align:middle;overflow:hidden;position:relative}
+.rl-fill{height:100%;border-radius:3px;transition:width .3s}
+.rl-fill.green{background:var(--green)}.rl-fill.yellow{background:var(--yellow)}.rl-fill.red{background:var(--red)}
+.events{max-height:280px;overflow-y:auto}
+.event{padding:5px 0;border-bottom:1px solid var(--border2);font-size:.8em;display:flex;gap:8px}
+.event .time{color:var(--text3);min-width:55px;font-family:monospace;font-size:.85em}
+.event .comp{color:var(--blue);font-weight:500;min-width:70px}
+.event.error .msg{color:var(--red)}.event.warning .msg{color:var(--yellow)}
+.stat-value{font-size:1.8em;font-weight:600;color:var(--blue)}
+.stat-label{font-size:.75em;color:var(--text2);margin-top:2px}
+.stats-row{display:flex;gap:32px}.stats-row>div{flex:1;text-align:center}
+.task-ok{color:var(--green)}.task-err{color:var(--red)}.task-running{color:var(--blue)}
+.task-desc{color:var(--text2);font-size:.85em}
+.log-controls{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+.log-controls select{background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:.8em}
+.log-controls label{font-size:.8em;color:var(--text2)}
+#log-content{max-height:350px;overflow-y:auto;background:var(--bg);border:1px solid var(--border2);border-radius:4px;padding:8px;font-size:.75em;line-height:1.5;white-space:pre-wrap;word-break:break-word;min-width:0}
+.log-line.error{color:var(--red)}.log-line.warning{color:var(--yellow)}.log-line.debug{color:var(--text3)}
+details{margin-top:0}
+details summary{cursor:pointer;color:var(--text2);font-size:.8em;padding:4px 0}
+details summary:hover{color:var(--blue)}
+.cfg-table td{font-family:monospace;font-size:.8em}
+.cfg-table td:first-child{color:var(--blue);font-weight:500;white-space:nowrap;padding-right:16px}
+.mount-timeline{margin-top:8px}
+.mt-row{display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:.8em}
+.mt-path{color:var(--text2);min-width:120px;overflow:hidden;text-overflow:ellipsis}
+.mt-blocks{display:flex;gap:1px;flex:1}
+.mt-block{height:16px;min-width:3px;flex:1;border-radius:2px}
+.mt-block.ok{background:var(--green)}.mt-block.down{background:var(--red)}.mt-block.partial{background:var(--yellow)}
+.mt-block:hover{opacity:.8}
+.footer{display:flex;justify-content:flex-end;align-items:center;gap:8px}
+#conn-status{color:var(--red);font-weight:500}
+#log-search:focus{border-color:var(--blue)}
+#log-content.nowrap{white-space:pre;overflow-x:auto;word-break:normal}
+[data-theme="light"] .svc-item{background:var(--card);border-color:var(--border)}
+dialog{background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:24px;max-width:380px;box-shadow:0 8px 32px rgba(0,0,0,.5)}
+dialog::backdrop{background:rgba(0,0,0,.6);backdrop-filter:blur(2px)}
+dialog h3{margin-bottom:12px;font-size:1em;color:var(--text)}
+dialog p{margin-bottom:20px;font-size:.9em;color:var(--text2)}
+dialog .dlg-actions{display:flex;gap:8px;justify-content:flex-end}
+dialog .dlg-btn{padding:8px 18px;border-radius:6px;font-size:.85em;cursor:pointer;border:none;font-weight:500}
+dialog .dlg-cancel{background:var(--border);color:var(--text)}
+dialog .dlg-confirm{background:var(--blue);color:#fff}
+.type-badge{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-size:.75em;font-weight:500;white-space:nowrap}
+.type-grabbed{background:#58a6ff1a;color:var(--blue)}.type-cached{background:#3fb9501a;color:var(--green)}.type-symlink_created{background:#bc8cff1a;color:#bc8cff}.type-failed{background:#f851491a;color:var(--red)}.type-cleanup{background:#d299221a;color:var(--yellow)}.type-switched_source{background:#db6d281a;color:var(--orange)}.type-search_triggered{background:#58a6ff1a;color:var(--blue)}.type-rescan_triggered{background:#3fb9501a;color:var(--green)}.type-task_completed{background:var(--border);color:var(--text2)}.type-blocklisted{background:#f851491a;color:var(--red)}.type-blocklist_added{background:#db6d281a;color:var(--orange)}
+"""
+
+
+def get_dashboard_html():
+    """Return the complete dashboard HTML page with shared CSS and nav."""
+    from utils.ui_common import get_base_head, get_nav_html, THEME_TOGGLE_JS, WANTED_BADGE_JS
+    html = _DASHBOARD_HTML
+    html = html.replace('__BASE_HEAD__', get_base_head('pd_zurg Status', _DASHBOARD_EXTRA_CSS))
+    html = html.replace('__NAV_HTML__', get_nav_html('dashboard'))
+    html = html.replace('__THEME_TOGGLE_JS__', THEME_TOGGLE_JS)
+    html = html.replace('__WANTED_BADGE_JS__', WANTED_BADGE_JS)
+    return html
 
 
 # ---------------------------------------------------------------------------
@@ -1521,7 +1484,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             from utils import blocklist as blocklist_mod
             self._send_json_response(200, json.dumps(blocklist_mod.get_all()))
         elif self.path in ('/', '/status'):
-            html = _DASHBOARD_HTML.encode()
+            html = get_dashboard_html().encode()
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.send_header('Content-Length', str(len(html)))

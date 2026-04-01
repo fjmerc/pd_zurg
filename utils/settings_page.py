@@ -8,16 +8,22 @@ import json
 
 
 def get_settings_html(env_schema, pd_schema):
-    """Return the complete settings editor HTML page.
+    """Return the complete settings editor HTML page with shared CSS and nav.
 
     Args:
         env_schema: The env var schema dict from get_env_schema()
         pd_schema: The plex_debrid schema dict from get_plex_debrid_schema()
     """
+    from utils.ui_common import get_base_head, get_nav_html, THEME_TOGGLE_JS, WANTED_BADGE_JS
     # Escape </ to prevent script tag breakout in JSON-in-HTML context
     env_json = json.dumps(env_schema).replace('</', '<\\/')
     pd_json = json.dumps(pd_schema).replace('</', '<\\/')
-    html = _SETTINGS_HTML.replace('__ENV_SCHEMA_JSON__', env_json)
+    html = _SETTINGS_HTML
+    html = html.replace('__BASE_HEAD__', get_base_head('pd_zurg Settings'))
+    html = html.replace('__NAV_HTML__', get_nav_html('settings'))
+    html = html.replace('__THEME_TOGGLE_JS__', THEME_TOGGLE_JS)
+    html = html.replace('__WANTED_BADGE_JS__', WANTED_BADGE_JS)
+    html = html.replace('__ENV_SCHEMA_JSON__', env_json)
     html = html.replace('__PD_SCHEMA_JSON__', pd_json)
     return html
 
@@ -25,23 +31,12 @@ def get_settings_html(env_schema, pd_schema):
 _SETTINGS_HTML = r'''<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark light">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
-<title>pd_zurg Settings</title>
+__BASE_HEAD__
+</head>
+<body>
+__NAV_HTML__
 <style>
-:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--border2:#21262d;--text:#c9d1d9;--text2:#8b949e;--text3:#636e7b;--blue:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#d29922;--orange:#db6d28;--input-bg:#0d1117;--input-border:#30363d;--input-focus:#58a6ff}
-[data-theme="light"]{--bg:#f6f8fa;--card:#ffffff;--border:#d0d7de;--border2:#d8dee4;--text:#1f2328;--text2:#656d76;--text3:#8b949e;--blue:#0969da;--green:#1a7f37;--red:#cf222e;--yellow:#9a6700;--orange:#bc4c00;--input-bg:#ffffff;--input-border:#d0d7de;--input-focus:#0969da}
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);padding:20px;max-width:900px;margin:0 auto}
-a{color:var(--blue);text-decoration:none}
-a:hover{text-decoration:underline}
-
-/* Header */
-.header{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:16px;flex-wrap:wrap;gap:8px}
-.header h1{color:var(--blue);font-size:1.5em;font-weight:600}
-.nav{display:flex;gap:12px;font-size:.85em}
+body{max-width:900px}
 
 /* Tabs */
 .tabs{display:flex;gap:0;margin-bottom:16px;border-bottom:2px solid var(--border)}
@@ -57,13 +52,6 @@ a:hover{text-decoration:underline}
 .search-bar input{width:100%;background:var(--input-bg);border:1px solid var(--input-border);border-radius:6px;padding:9px 12px 9px 34px;color:var(--text);font-size:.85em;outline:none;transition:border-color .15s;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='%23636e7b' viewBox='0 0 16 16'%3E%3Cpath d='M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85zm-5.242.156a5 5 0 1 1 0-10 5 5 0 0 1 0 10z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:10px center}
 .search-bar input:focus{border-color:var(--input-focus)}
 .search-bar .search-count{font-size:.75em;color:var(--text2);margin-top:4px}
-
-/* Status banner */
-.banner{padding:12px 16px;border-radius:8px;margin-bottom:16px;font-size:.9em;font-weight:500;display:none;line-height:1.5}
-.banner.success{display:block;background:#3fb9501a;border:1px solid var(--green);color:var(--green)}
-.banner.error{display:block;background:#f851491a;border:1px solid var(--red);color:var(--red)}
-.banner.warning{display:block;background:#d299221a;border:1px solid var(--yellow);color:var(--yellow)}
-.banner.info{display:block;background:#58a6ff1a;border:1px solid var(--blue);color:var(--blue)}
 
 /* Category sections */
 .category{background:var(--card);border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden}
@@ -120,8 +108,6 @@ textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;l
 /* Password field with toggle */
 .secret-wrap{display:flex;gap:6px}
 .secret-wrap input{flex:1}
-.btn-show{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;padding:0 10px;cursor:pointer;font-size:.8em;white-space:nowrap}
-.btn-show:hover{border-color:var(--blue);color:var(--blue)}
 
 /* List inputs */
 .list-container{display:flex;flex-direction:column;gap:6px}
@@ -129,36 +115,25 @@ textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;l
 .list-row input{flex:1}
 .list-row .pair-input{display:flex;gap:6px;flex:1}
 .list-row .pair-input input{flex:1}
-.btn-list{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;width:28px;height:28px;cursor:pointer;font-size:.9em;display:flex;align-items:center;justify-content:center;flex-shrink:0}
-.btn-list:hover{border-color:var(--red);color:var(--red)}
-.btn-list.add{color:var(--green)}
-.btn-list.add:hover{border-color:var(--green);color:var(--green)}
+.list-row .btn-icon:hover{border-color:var(--red);color:var(--red)}
+.btn-icon.add{color:var(--green)}
+.btn-icon.add:hover{border-color:var(--green);color:var(--green)}
 .list-labels{display:flex;gap:6px;font-size:.75em;color:var(--text3);margin-bottom:2px}
 .list-labels span{flex:1}
 .list-labels .spacer{width:28px;flex-shrink:0}
 
 /* Buttons */
 .actions{display:flex;gap:10px;margin-top:20px;flex-wrap:wrap}
-.btn{padding:10px 20px;border-radius:8px;font-size:.9em;font-weight:500;cursor:pointer;border:none;transition:opacity .15s}
-.btn:disabled{opacity:.5;cursor:not-allowed}
-.btn-primary{background:var(--green);color:#fff}
-.btn-primary:hover:not(:disabled){opacity:.85}
-.btn-primary.dirty{box-shadow:0 0 0 2px var(--yellow);animation:pulse-save 2s ease-in-out infinite}
-@keyframes pulse-save{0%,100%{box-shadow:0 0 0 2px var(--yellow)}50%{box-shadow:0 0 8px 2px var(--yellow)}}
-.btn-secondary{background:transparent;border:1px solid var(--border);color:var(--text)}
-.btn-secondary:hover:not(:disabled){border-color:var(--blue);color:var(--blue)}
 
 /* Responsive */
 @media(max-width:768px){
   .field{grid-template-columns:1fr;gap:4px}
   .field-label{padding-top:0}
-  .header{flex-direction:column}
   .tabs{overflow-x:auto}
 }
 
-/* Spinner */
-.spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:spin .6s linear infinite;margin-right:6px;vertical-align:middle}
-@keyframes spin{to{transform:rotate(360deg)}}
+/* Settings spinner has margin-right for inline use */
+.spinner{margin-right:6px}
 
 /* OAuth panel */
 .oauth-panel{background:var(--bg);border:1px solid var(--blue);border-radius:8px;padding:16px;margin-top:8px}
@@ -166,9 +141,8 @@ textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;l
 .oauth-panel .oauth-url{font-size:.85em}
 .oauth-panel .oauth-url a{color:var(--blue)}
 .oauth-panel .oauth-status{font-size:.8em;color:var(--text2);margin-top:8px}
-.btn-oauth{background:none;border:1px solid var(--blue);color:var(--blue);border-radius:6px;padding:6px 14px;cursor:pointer;font-size:.8em;font-weight:500;margin-top:6px}
+.btn-oauth{border-color:var(--blue);color:var(--blue);font-size:.8em;margin-top:6px}
 .btn-oauth:hover{background:#58a6ff1a}
-.btn-oauth:disabled{opacity:.4;cursor:not-allowed}
 .btn-cancel{border-color:var(--red);color:var(--red)}
 .btn-cancel:hover{background:#f851491a}
 
@@ -198,25 +172,11 @@ textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;l
 
 /* Tab toolbar */
 .tab-toolbar{display:flex;gap:8px;margin-bottom:12px;justify-content:flex-end;flex-wrap:wrap}
-.btn-sm{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:.78em}
-.btn-sm:hover{border-color:var(--blue);color:var(--blue)}
-
-.footer{color:var(--text3);font-size:.78em;text-align:right;margin-top:16px}
-.theme-toggle{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;cursor:pointer;padding:4px 8px;font-size:.85em;line-height:1;transition:border-color .15s,color .15s}
-.theme-toggle:hover{border-color:var(--blue);color:var(--blue)}
 [data-theme="light"] .cat-header:hover{background:#f0f3f6}
 [data-theme="light"] .toggle .slider{background:var(--border)}
 [data-theme="light"] .toggle .slider:before{background:#fff}
 [data-theme="light"] .preset-card:hover{background:#0969da08}
-@media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
 </style>
-<script>(function(){try{var t=localStorage.getItem('pd_zurg_theme');if(t){document.documentElement.setAttribute('data-theme',t);document.querySelector('meta[name="color-scheme"]').content=t==='light'?'light':'dark';}}catch(e){}})()</script>
-</head>
-<body>
-<div class="header">
-  <h1>pd_zurg Settings</h1>
-  <div class="nav"><a href="/status">Dashboard</a> <a href="/library">Library</a> <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme" id="theme-btn">&#x2600;&#xFE0F;</button></div>
-</div>
 
 <div class="tabs" role="tablist">
   <div class="tab active" role="tab" tabindex="0" aria-selected="true" aria-controls="tab-env" onclick="switchTab('env')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('env')}">pd_zurg</div>
@@ -228,52 +188,39 @@ textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;l
 <!-- pd_zurg env vars tab -->
 <div class="tab-content active" id="tab-env" role="tabpanel">
   <div class="tab-toolbar">
-    <a class="btn-sm" href="/api/settings/export/env" download=".env">Export .env</a>
-    <label class="btn-sm" style="cursor:pointer">Import .env<input type="file" accept=".env,text/plain" style="display:none" onchange="envImport(this)"></label>
-    <button type="button" class="btn-sm" onclick="envResetDefaults()">Reset All to Defaults</button>
+    <a class="btn btn-ghost btn-sm" href="/api/settings/export/env" download=".env">Export .env</a>
+    <label class="btn btn-ghost btn-sm" style="cursor:pointer">Import .env<input type="file" accept=".env,text/plain" style="display:none" onchange="envImport(this)"></label>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="envResetDefaults()">Reset All to Defaults</button>
   </div>
   <div class="search-bar"><input type="text" id="search-env" placeholder="Filter settings..." oninput="filterSettings('env',this.value)"><div class="search-count" id="search-env-count"></div></div>
   <div id="env-categories"></div>
   <div class="actions">
     <button type="button" class="btn btn-primary" id="btn-env-save" onclick="envSave()">Save &amp; Apply</button>
-    <button type="button" class="btn btn-secondary" id="btn-env-validate" onclick="envValidate()">Validate</button>
-    <button type="button" class="btn btn-secondary" onclick="envReset()">Undo Changes</button>
+    <button type="button" class="btn btn-ghost" id="btn-env-validate" onclick="envValidate()">Validate</button>
+    <button type="button" class="btn btn-ghost" onclick="envReset()">Undo Changes</button>
   </div>
 </div>
 
 <!-- plex_debrid settings tab -->
 <div class="tab-content" id="tab-pd" role="tabpanel">
   <div class="tab-toolbar">
-    <a class="btn-sm" href="/api/settings/export/plex-debrid" download="settings.json">Export settings.json</a>
-    <label class="btn-sm" style="cursor:pointer">Import settings.json<input type="file" accept=".json,application/json" style="display:none" onchange="pdImport(this)"></label>
-    <button type="button" class="btn-sm" onclick="pdResetDefaults()">Reset to Defaults</button>
+    <a class="btn btn-ghost btn-sm" href="/api/settings/export/plex-debrid" download="settings.json">Export settings.json</a>
+    <label class="btn btn-ghost btn-sm" style="cursor:pointer">Import settings.json<input type="file" accept=".json,application/json" style="display:none" onchange="pdImport(this)"></label>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="pdResetDefaults()">Reset to Defaults</button>
   </div>
   <div class="search-bar"><input type="text" id="search-pd" placeholder="Filter settings..." oninput="filterSettings('pd',this.value)"><div class="search-count" id="search-pd-count"></div></div>
   <div id="pd-categories"></div>
   <div class="actions">
     <button type="button" class="btn btn-primary" id="btn-pd-save" onclick="pdSave()">Save &amp; Restart plex_debrid</button>
-    <button type="button" class="btn btn-secondary" id="btn-pd-validate" onclick="pdValidate()">Validate</button>
-    <button type="button" class="btn btn-secondary" onclick="pdReset()">Undo Changes</button>
+    <button type="button" class="btn btn-ghost" id="btn-pd-validate" onclick="pdValidate()">Validate</button>
+    <button type="button" class="btn btn-ghost" onclick="pdReset()">Undo Changes</button>
   </div>
 </div>
 
 <div class="footer">pd_zurg changes apply via SIGHUP reload. plex_debrid changes trigger a service restart.</div>
 
 <script>
-// Theme toggle
-function applyTheme(theme){
-  document.documentElement.setAttribute('data-theme',theme);
-  document.querySelector('meta[name="color-scheme"]').content=theme==='light'?'light':'dark';
-  document.getElementById('theme-btn').innerHTML=theme==='light'?'\u{1F319}':'\u{2600}\u{FE0F}';
-}
-function toggleTheme(){
-  const cur=document.documentElement.getAttribute('data-theme')||'dark';
-  const next=cur==='dark'?'light':'dark';
-  applyTheme(next);
-  try{localStorage.setItem('pd_zurg_theme',next);}catch(e){}
-}
-// Sync theme button icon on load (head script already set data-theme)
-(function(){const t=document.documentElement.getAttribute('data-theme');if(t)applyTheme(t);})();
+__THEME_TOGGLE_JS__
 
 const ENV_SCHEMA = __ENV_SCHEMA_JSON__;
 const PD_SCHEMA = __PD_SCHEMA_JSON__;
@@ -360,7 +307,7 @@ function renderEnvField(field, value) {
     const checked = isTrue ? ' checked' : '';
     inputHtml = `<div class="toggle-wrap"><label class="toggle"><input type="checkbox" id="${id}" data-key="${esc(field.key)}" data-type="boolean"${checked} aria-label="${esc(field.label)}"><span class="slider"></span></label></div>`;
   } else if (field.type === 'secret') {
-    inputHtml = `<div class="secret-wrap"><input type="password" id="${id}" data-key="${esc(field.key)}" data-type="secret" value="${esc(value || '')}"><button type="button" class="btn-show" onclick="toggleSecret(this)">Show</button></div>`;
+    inputHtml = `<div class="secret-wrap"><input type="password" id="${id}" data-key="${esc(field.key)}" data-type="secret" value="${esc(value || '')}"><button type="button" class="btn btn-ghost btn-sm" onclick="toggleSecret(this)">Show</button></div>`;
   } else if (field.type.startsWith('select:')) {
     const options = field.type.slice(7).split(',');
     let opts = '<option value="">— select —</option>';
@@ -510,9 +457,9 @@ function renderPdField(field, value) {
       break;
     }
     case 'secret': {
-      inputHtml = `<div class="secret-wrap"><input type="password" id="${id}" data-pdkey="${esc(field.key)}" data-pdtype="secret" value="${esc(value || '')}"><button type="button" class="btn-show" onclick="toggleSecret(this)">Show</button></div>`;
+      inputHtml = `<div class="secret-wrap"><input type="password" id="${id}" data-pdkey="${esc(field.key)}" data-pdtype="secret" value="${esc(value || '')}"><button type="button" class="btn btn-ghost btn-sm" onclick="toggleSecret(this)">Show</button></div>`;
       if (field.oauth) {
-        inputHtml += `<button type="button" class="btn-oauth" onclick="oauthConnect('${esc(field.oauth)}','${id}')" id="oauth-btn-${id}">Connect ${esc(field.label.replace(' API Key','').replace(' Key',''))}</button><div id="oauth-panel-${id}"></div>`;
+        inputHtml += `<button type="button" class="btn btn-ghost btn-oauth" onclick="oauthConnect('${esc(field.oauth)}','${id}')" id="oauth-btn-${id}">Connect ${esc(field.label.replace(' API Key','').replace(' Key',''))}</button><div id="oauth-panel-${id}"></div>`;
       }
       break;
     }
@@ -529,9 +476,9 @@ function renderPdField(field, value) {
       const items = Array.isArray(value) ? value : [];
       let rows = '';
       items.forEach((v, i) => {
-        rows += `<div class="list-row"><input type="text" value="${esc(v)}" data-pdkey="${esc(field.key)}" data-pdtype="list_strings"><button type="button" class="btn-list" onclick="removeListRow(this)" title="Remove">&times;</button></div>`;
+        rows += `<div class="list-row"><input type="text" value="${esc(v)}" data-pdkey="${esc(field.key)}" data-pdtype="list_strings"><button type="button" class="btn btn-ghost btn-icon" onclick="removeListRow(this)" title="Remove">&times;</button></div>`;
       });
-      inputHtml = `<div class="list-container" id="${id}">${rows}<button type="button" class="btn-list add" onclick="addListStringRow(this.parentElement,'${esc(field.key)}')" title="Add">+</button></div>`;
+      inputHtml = `<div class="list-container" id="${id}">${rows}<button type="button" class="btn btn-ghost btn-icon add" onclick="addListStringRow(this.parentElement,'${esc(field.key)}')" title="Add">+</button></div>`;
       break;
     }
     case 'list_pairs': {
@@ -542,11 +489,11 @@ function renderPdField(field, value) {
       items.forEach((pair, i) => {
         const a = Array.isArray(pair) ? (pair[0] || '') : '';
         const b = Array.isArray(pair) ? (pair[1] || '') : '';
-        rows += `<div class="list-row"><div class="pair-input"><input type="text" value="${esc(a)}" placeholder="${esc(cols[0])}"><input type="text" value="${esc(b)}" placeholder="${esc(cols[1])}"></div><button type="button" class="btn-list" onclick="removeListRow(this)" title="Remove">&times;</button></div>`;
+        rows += `<div class="list-row"><div class="pair-input"><input type="text" value="${esc(a)}" placeholder="${esc(cols[0])}"><input type="text" value="${esc(b)}" placeholder="${esc(cols[1])}"></div><button type="button" class="btn btn-ghost btn-icon" onclick="removeListRow(this)" title="Remove">&times;</button></div>`;
       });
-      inputHtml = `<div class="list-container" id="${id}" data-pdkey="${esc(field.key)}" data-pdtype="list_pairs" data-cols="${esc(JSON.stringify(cols))}">${labels}${rows}<button type="button" class="btn-list add" onclick="addListPairRow(this.parentElement)" title="Add">+</button></div>`;
+      inputHtml = `<div class="list-container" id="${id}" data-pdkey="${esc(field.key)}" data-pdtype="list_pairs" data-cols="${esc(JSON.stringify(cols))}">${labels}${rows}<button type="button" class="btn btn-ghost btn-icon add" onclick="addListPairRow(this.parentElement)" title="Add">+</button></div>`;
       if (field.oauth) {
-        inputHtml += `<button type="button" class="btn-oauth" onclick="oauthConnectPair('${esc(field.oauth)}','${id}')" id="oauth-btn-${id}">Connect via OAuth</button><div id="oauth-panel-${id}"></div>`;
+        inputHtml += `<button type="button" class="btn btn-ghost btn-oauth" onclick="oauthConnectPair('${esc(field.oauth)}','${id}')" id="oauth-btn-${id}">Connect via OAuth</button><div id="oauth-panel-${id}"></div>`;
       }
       break;
     }
@@ -614,20 +561,20 @@ function renderPdCategories(values) {
 
 // List manipulation
 function addListStringRow(container, key) {
-  const addBtn = container.querySelector('.btn-list.add');
+  const addBtn = container.querySelector('.btn-icon.add');
   const row = document.createElement('div');
   row.className = 'list-row';
-  row.innerHTML = `<input type="text" value="" data-pdkey="${esc(key)}" data-pdtype="list_strings"><button type="button" class="btn-list" onclick="removeListRow(this)" title="Remove">&times;</button>`;
+  row.innerHTML = `<input type="text" value="" data-pdkey="${esc(key)}" data-pdtype="list_strings"><button type="button" class="btn btn-ghost btn-icon" onclick="removeListRow(this)" title="Remove">&times;</button>`;
   container.insertBefore(row, addBtn);
   row.querySelector('input').focus();
 }
 
 function addListPairRow(container) {
-  const addBtn = container.querySelector('.btn-list.add');
+  const addBtn = container.querySelector('.btn-icon.add');
   const cols = JSON.parse(container.dataset.cols || '["",""]');
   const row = document.createElement('div');
   row.className = 'list-row';
-  row.innerHTML = `<div class="pair-input"><input type="text" value="" placeholder="${esc(cols[0])}"><input type="text" value="" placeholder="${esc(cols[1])}"></div><button type="button" class="btn-list" onclick="removeListRow(this)" title="Remove">&times;</button>`;
+  row.innerHTML = `<div class="pair-input"><input type="text" value="" placeholder="${esc(cols[0])}"><input type="text" value="" placeholder="${esc(cols[1])}"></div><button type="button" class="btn btn-ghost btn-icon" onclick="removeListRow(this)" title="Remove">&times;</button>`;
   container.insertBefore(row, addBtn);
   row.querySelector('input').focus();
 }
@@ -711,7 +658,7 @@ function renderRuleRow(rule, idx, profileIdx) {
     <select onchange="updateRule(${profileIdx},${idx},this.closest('.rule-row'))">${weightOpts}</select>
     <select onchange="updateRule(${profileIdx},${idx},this.closest('.rule-row'))">${opOpts}</select>
     ${valInput}
-    <button type="button" class="btn-list" onclick="deleteRule(${profileIdx},${idx})" title="Remove">&times;</button>
+    <button type="button" class="btn btn-ghost btn-icon" onclick="deleteRule(${profileIdx},${idx})" title="Remove">&times;</button>
   </div>`;
 }
 
@@ -739,7 +686,7 @@ function renderConditionRow(cond, idx, profileIdx) {
     <select onchange="condFieldChanged(${profileIdx},${idx},this)">${fieldOpts}</select>
     <select onchange="updateCondition(${profileIdx},${idx},this.closest('.rule-row'))">${opOpts}</select>
     ${valInput}
-    <button type="button" class="btn-list" onclick="deleteCondition(${profileIdx},${idx})" title="Remove">&times;</button>
+    <button type="button" class="btn btn-ghost btn-icon" onclick="deleteCondition(${profileIdx},${idx})" title="Remove">&times;</button>
   </div>`;
 }
 
@@ -769,19 +716,19 @@ function renderProfileCard(profile, idx) {
       <input type="text" value="${esc(name)}" onchange="_versionsData[${idx}][0]=this.value;isDirty=true" placeholder="Profile name">
       <select style="max-width:70px;font-size:.8em" onchange="_versionsData[${idx}][2]=this.value;isDirty=true" title="Language">${langOpts}</select>
       <div class="profile-actions">
-        <button type="button" class="btn-sm" id="profile-edit-btn-${idx}" onclick="toggleProfileRules(${idx})">${_expandedProfile===idx?'Close':'Edit'}</button>
-        <button type="button" class="btn-sm" onclick="duplicateProfile(${idx})">Duplicate</button>
-        <button type="button" class="btn-list" onclick="deleteProfile(${idx})" title="Delete profile">&times;</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="profile-edit-btn-${idx}" onclick="toggleProfileRules(${idx})">${_expandedProfile===idx?'Close':'Edit'}</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="duplicateProfile(${idx})">Duplicate</button>
+        <button type="button" class="btn btn-ghost btn-icon" onclick="deleteProfile(${idx})" title="Delete profile">&times;</button>
       </div>
     </div>
     <div class="profile-summary">${esc(summary)}</div>
     <div class="profile-rules" id="profile-rules-${idx}" style="display:${_expandedProfile===idx?'block':'none'}">
       <div class="rule-section-label">Conditions (${conditions.length})</div>
       ${condHtml}
-      <button type="button" class="btn-sm" onclick="addCondition(${idx})" style="margin-top:4px;color:var(--green);border-color:var(--green)">+ Add Condition</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="addCondition(${idx})" style="margin-top:4px;color:var(--green);border-color:var(--green)">+ Add Condition</button>
       <div class="rule-section-label" style="margin-top:12px">Rules (${rules.length})</div>
       ${rulesHtml}
-      <button type="button" class="btn-sm" onclick="addRule(${idx})" style="margin-top:4px;color:var(--green);border-color:var(--green)">+ Add Rule</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="addRule(${idx})" style="margin-top:4px;color:var(--green);border-color:var(--green)">+ Add Rule</button>
     </div>
   </div>`;
 }
@@ -804,12 +751,12 @@ function renderVersionsEditor(id, key, value) {
 
   // Toolbar
   const toolbarHtml = `<div class="versions-toolbar">
-    <button type="button" class="btn-sm" onclick="addEmptyProfile()" style="color:var(--green);border-color:var(--green)">+ New Profile</button>
-    <button type="button" class="btn-sm" id="versions-json-btn" onclick="toggleVersionsJson()">Edit as JSON</button>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="addEmptyProfile()" style="color:var(--green);border-color:var(--green)">+ New Profile</button>
+    <button type="button" class="btn btn-ghost btn-sm" id="versions-json-btn" onclick="toggleVersionsJson()">Edit as JSON</button>
   </div>
   <div id="versions-json-editor" style="display:none;margin-top:8px">
     <textarea id="versions-json-textarea" data-pdkey="${esc(key)}" data-pdtype="json" rows="12">${esc(JSON.stringify(_versionsData, null, 2))}</textarea>
-    <button type="button" class="btn-sm" onclick="applyVersionsJson()" style="margin-top:4px">Apply JSON</button>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="applyVersionsJson()" style="margin-top:4px">Apply JSON</button>
   </div>`;
 
   return `<div id="${id}" data-pdkey="${esc(key)}" data-pdtype="versions">
@@ -1113,7 +1060,7 @@ async function oauthConnect(service, fieldId) {
       <div class="oauth-url">Visit <a href="${esc(result.verification_url)}" target="_blank" rel="noopener">${esc(result.verification_url)}</a> and enter this code:</div>
       <div class="oauth-code">${esc(result.user_code)}</div>
       <div class="oauth-status"><span class="spinner"></span>Waiting for authorization...</div>
-      <button type="button" class="btn-oauth btn-cancel" onclick="oauthCancel('${esc(service)}','${fieldId}')">Cancel</button>
+      <button type="button" class="btn btn-ghost btn-oauth btn-cancel" onclick="oauthCancel('${esc(service)}','${fieldId}')">Cancel</button>
     </div>`;
 
     // Start polling
@@ -1185,7 +1132,7 @@ async function oauthConnectPair(service, containerId) {
       <div class="oauth-url">Visit <a href="${esc(result.verification_url)}" target="_blank" rel="noopener">${esc(result.verification_url)}</a> and enter this code:</div>
       <div class="oauth-code">${esc(result.user_code)}</div>
       <div class="oauth-status"><span class="spinner"></span>Waiting for authorization...</div>
-      <button type="button" class="btn-oauth btn-cancel" onclick="oauthCancel('${esc(service)}','${containerId}')">Cancel</button>
+      <button type="button" class="btn btn-ghost btn-oauth btn-cancel" onclick="oauthCancel('${esc(service)}','${containerId}')">Cancel</button>
     </div>`;
 
     const interval = (result.interval || 5) * 1000;
@@ -1209,11 +1156,11 @@ async function oauthConnectPair(service, containerId) {
           // Add a new pair row with [name, token]
           const container = document.getElementById(containerId);
           if (container) {
-            const addBtn = container.querySelector('.btn-list.add');
+            const addBtn = container.querySelector('.btn-icon.add');
             const cols = JSON.parse(container.dataset.cols || '["",""]');
             const row = document.createElement('div');
             row.className = 'list-row';
-            row.innerHTML = `<div class="pair-input"><input type="text" value="${esc(name)}" placeholder="${esc(cols[0])}"><input type="text" value="${esc(poll.token)}" placeholder="${esc(cols[1])}"></div><button type="button" class="btn-list" onclick="removeListRow(this)" title="Remove">&times;</button>`;
+            row.innerHTML = `<div class="pair-input"><input type="text" value="${esc(name)}" placeholder="${esc(cols[0])}"><input type="text" value="${esc(poll.token)}" placeholder="${esc(cols[1])}"></div><button type="button" class="btn btn-ghost btn-icon" onclick="removeListRow(this)" title="Remove">&times;</button>`;
             container.insertBefore(row, addBtn);
           }
           panelEl.innerHTML = `<div class="oauth-panel" style="border-color:var(--green)"><div style="color:var(--green)">Connected! User "${esc(name)}" added.</div></div>`;
@@ -1425,6 +1372,7 @@ document.addEventListener('keydown', (e) => {
     else pdSave();
   }
 });
+__WANTED_BADGE_JS__
 </script>
 </body>
 </html>'''

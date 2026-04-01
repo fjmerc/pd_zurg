@@ -7,31 +7,24 @@ built-in http.server — no framework dependencies.
 
 
 def get_library_html():
-    """Return the complete library browser HTML page."""
-    return _LIBRARY_HTML
+    """Return the complete library browser HTML page with shared CSS and nav."""
+    from utils.ui_common import get_base_head, get_nav_html, THEME_TOGGLE_JS
+    html = _LIBRARY_HTML
+    html = html.replace('__BASE_HEAD__', get_base_head('pd_zurg Library'))
+    html = html.replace('__NAV_HTML__', get_nav_html('library'))
+    html = html.replace('__THEME_TOGGLE_JS__', THEME_TOGGLE_JS)
+    return html
 
 
 _LIBRARY_HTML = r'''<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark light">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x26A1;</text></svg>">
-<title>pd_zurg Library</title>
+__BASE_HEAD__
+</head>
+<body>
+__NAV_HTML__
 <style>
-:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--border2:#21262d;--text:#c9d1d9;--text2:#8b949e;--text3:#636e7b;--blue:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#d29922;--orange:#db6d28;--input-bg:#0d1117;--input-border:#30363d;--input-focus:#58a6ff}
-[data-theme="light"]{--bg:#f6f8fa;--card:#ffffff;--border:#d0d7de;--border2:#d8dee4;--text:#1f2328;--text2:#656d76;--text3:#8b949e;--blue:#0969da;--green:#1a7f37;--red:#cf222e;--yellow:#9a6700;--orange:#bc4c00;--input-bg:#ffffff;--input-border:#d0d7de;--input-focus:#0969da}
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);padding:20px;max-width:1200px;margin:0 auto}
-a{color:var(--blue);text-decoration:none}
-a:hover{text-decoration:underline}
-
-/* Header */
-.header{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:16px;flex-wrap:wrap;gap:8px}
-.header h1{color:var(--blue);font-size:1.5em;font-weight:600}
-.nav{display:flex;gap:12px;font-size:.85em;align-items:center}
-.nav .current{color:var(--text);font-weight:600;pointer-events:none}
+body{max-width:1200px}
 
 /* Tabs */
 .tabs{display:flex;gap:0;margin-bottom:0;border-bottom:2px solid var(--border)}
@@ -49,9 +42,6 @@ a:hover{text-decoration:underline}
 .search-wrap input:focus{border-color:var(--input-focus)}
 .filter-select{background:var(--input-bg);border:1px solid var(--input-border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:.85em;outline:none;cursor:pointer;transition:border-color .15s}
 .filter-select:focus{border-color:var(--input-focus)}
-.btn-refresh{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;padding:8px 14px;font-size:.85em;cursor:pointer;white-space:nowrap;transition:border-color .15s,color .15s}
-.btn-refresh:hover:not(:disabled){border-color:var(--blue);color:var(--blue)}
-.btn-refresh:disabled{opacity:.5;cursor:not-allowed}
 .btn-select{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;padding:8px 14px;font-size:.85em;cursor:pointer;white-space:nowrap;transition:border-color .15s,color .15s,background .15s}
 .btn-select:hover{border-color:var(--blue);color:var(--blue)}
 .btn-select.active{background:var(--blue);color:#fff;border-color:var(--blue)}
@@ -129,7 +119,7 @@ a:hover{text-decoration:underline}
 @media(max-width:640px){
   .badge-local .badge-full,.badge-debrid .badge-full,.badge-missing .badge-full,.badge-pending .badge-full,.badge-migrating .badge-full,.badge-unavailable .badge-full,.badge-fallback .badge-full{display:none}
   .badge-local .badge-mini,.badge-debrid .badge-mini,.badge-missing .badge-mini,.badge-pending .badge-mini,.badge-migrating .badge-mini,.badge-unavailable .badge-mini,.badge-fallback .badge-mini{display:inline}
-  .ep-actions .btn-action{font-size:.68em;padding:2px 5px}
+  .ep-actions .btn{font-size:.68em;padding:2px 5px}
 }
 [data-theme="light"] .badge-local{background:#1a7f371a;border-color:#1a7f3740}
 [data-theme="light"] .badge-debrid{background:#0969da1a;border-color:#0969da40}
@@ -146,9 +136,8 @@ a:hover{text-decoration:underline}
 .ep-quality{display:flex;align-items:center;gap:6px;flex-wrap:nowrap}
 .ep-size{font-size:.78em;color:var(--text3);white-space:nowrap}
 
-/* Spinner */
-.spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle}
-@keyframes spin{to{transform:rotate(360deg)}}
+/* Spinner (override shared 14px to 16px for library) */
+.spinner{width:16px;height:16px}
 
 /* Skeleton loading */
 .skeleton-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:8px}
@@ -162,10 +151,6 @@ a:hover{text-decoration:underline}
 .state-panel{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;min-height:220px;color:var(--text2);font-size:.9em;text-align:center;padding:24px}
 .state-panel .state-hint{font-size:.82em;color:var(--text3)}
 .state-panel.error-state{color:var(--red)}
-
-/* Theme toggle */
-.theme-toggle{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;cursor:pointer;padding:4px 8px;font-size:.85em;line-height:1;transition:border-color .15s,color .15s}
-.theme-toggle:hover{border-color:var(--blue);color:var(--blue)}
 
 /* Detail view */
 .detail-view{max-width:900px}
@@ -210,19 +195,10 @@ a:hover{text-decoration:underline}
 .pref-row{display:flex;align-items:center;gap:8px;margin-top:8px}
 .pref-select{background:var(--input-bg);border:1px solid var(--input-border);border-radius:6px;padding:4px 8px;color:var(--text);font-size:.82em;outline:none;cursor:pointer}
 .pref-select:focus{border-color:var(--input-focus)}
-.btn-action{background:none;border:1px solid var(--border);color:var(--text2);border-radius:4px;padding:2px 8px;font-size:.75em;cursor:pointer;white-space:nowrap;transition:border-color .15s,color .15s}
-.btn-action:hover{border-color:var(--blue);color:var(--blue)}
-.btn-action.danger{color:var(--red);border-color:#f8514933}
-.btn-action.danger:hover{border-color:var(--red);background:#f851490f}
-.btn-action:disabled{opacity:.5;cursor:not-allowed}
-.btn-action.confirming{border-color:var(--orange);color:var(--orange);font-weight:600;animation:pulse-confirm .8s ease-in-out infinite}
-.btn-action.confirming.danger{border-color:var(--red);color:var(--red)}
-@keyframes pulse-confirm{0%,100%{opacity:1}50%{opacity:.7}}
-.btn-apply{background:var(--blue);color:#fff;border:none;border-radius:6px;padding:6px 16px;font-size:.82em;font-weight:600;cursor:pointer;transition:background .15s,opacity .15s;min-height:32px}
-.btn-apply:hover{background:#4c9aff}
-.btn-apply:disabled{opacity:.5;cursor:not-allowed}
-[data-theme="light"] .btn-apply{background:var(--blue);color:#fff}
-[data-theme="light"] .btn-apply:hover{background:#0860ca}
+/* Library primary buttons use blue instead of green */
+.btn-primary{background:var(--blue);border-color:var(--blue)}
+.btn-primary:hover:not(:disabled){opacity:.85;background:#4c9aff}
+[data-theme="light"] .btn-primary:hover:not(:disabled){background:#0860ca}
 .season-actions{margin-left:auto;display:flex;gap:4px}
 .transfer-msg{font-size:.78em;color:var(--yellow);margin-top:4px}
 .transfer-msg.msg-success{color:var(--green);border-left:3px solid var(--green);padding:6px 10px;background:#3fb9500a;border-radius:0 4px 4px 0}
@@ -231,10 +207,7 @@ a:hover{text-decoration:underline}
 .confirm-panel .confirm-title{font-weight:600;color:var(--red);margin-bottom:8px}
 .confirm-panel .confirm-list{font-size:.8em;color:var(--text);margin:0 0 12px 16px;list-style:disc}
 .confirm-panel .confirm-list li{margin-bottom:2px}
-.confirm-panel .btn-confirm-delete{background:var(--red);color:#fff;border:1px solid var(--red);border-radius:4px;font-weight:600;padding:4px 14px;font-size:.82em;cursor:pointer;transition:background .15s}
-.confirm-panel .btn-confirm-delete:hover{filter:brightness(1.15)}
-.confirm-panel .btn-confirm-cancel{background:none;border:1px solid var(--border);color:var(--text2);border-radius:4px;padding:4px 14px;font-size:.82em;cursor:pointer;transition:border-color .15s,color .15s}
-.confirm-panel .btn-confirm-cancel:hover{border-color:var(--blue);color:var(--blue)}
+.confirm-panel .btn{font-size:.82em;padding:4px 14px}
 
 /* Detail hero with poster */
 .detail-hero{display:flex;gap:16px;margin-bottom:16px}
@@ -284,8 +257,7 @@ a:hover{text-decoration:underline}
 
 /* Expand/collapse all */
 .expand-all-row{display:flex;justify-content:flex-end;margin-bottom:8px}
-.expand-all-btn{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;padding:4px 12px;font-size:.78em;cursor:pointer;transition:border-color .15s,color .15s;display:flex;align-items:center;gap:4px;font-family:inherit}
-.expand-all-btn:hover{border-color:var(--blue);color:var(--blue)}
+.expand-all-row .btn{display:flex;align-items:center;gap:4px}
 
 /* Ping dot for pending seasons */
 .ping-dot{position:relative;display:inline-block;width:8px;height:8px;margin-left:6px;vertical-align:middle}
@@ -300,8 +272,7 @@ a:hover{text-decoration:underline}
 /* Bulk action bar */
 .bulk-bar{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--border);padding:10px 20px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;z-index:20;box-shadow:0 -4px 12px rgba(0,0,0,.2);justify-content:center}
 .bulk-bar .bulk-count{font-size:.85em;font-weight:600;color:var(--text);white-space:nowrap}
-.bulk-bar .btn-apply{padding:6px 14px;font-size:.82em}
-.bulk-bar .btn-action{padding:6px 14px;font-size:.82em}
+.bulk-bar .btn{font-size:.82em}
 .bulk-bar .filter-select{font-size:.82em;padding:6px 10px}
 .bulk-progress{font-size:.82em;color:var(--yellow);white-space:nowrap}
 body.has-bulk-bar{padding-bottom:60px}
@@ -323,16 +294,8 @@ body.has-bulk-bar{padding-bottom:60px}
 
 /* Wanted bulk actions bar */
 .wanted-actions{display:flex;gap:8px;align-items:center;padding:8px 0;flex-wrap:wrap}
-.wanted-actions .btn-action{padding:6px 14px;font-size:.82em;background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;cursor:pointer;white-space:nowrap;transition:border-color .15s,color .15s;font-family:inherit}
-.wanted-actions .btn-action:hover:not(:disabled){border-color:var(--blue);color:var(--blue)}
-.wanted-actions .btn-action:disabled{opacity:.5;cursor:not-allowed}
+.wanted-actions .btn{font-size:.82em;padding:6px 14px}
 .wanted-actions .wanted-progress{font-size:.82em;color:var(--yellow);white-space:nowrap}
-
-/* Nav wanted badge */
-.nav-badge{display:inline-block;background:var(--red);color:#fff;border-radius:8px;font-size:.72em;font-weight:700;padding:1px 6px;margin-left:4px;min-width:16px;text-align:center;vertical-align:middle;line-height:1.4}
-
-/* Footer */
-.footer{color:var(--text3);font-size:.78em;text-align:right;margin-top:16px}
 
 /* Responsive */
 @media(max-width:640px){
@@ -340,7 +303,6 @@ body.has-bulk-bar{padding-bottom:60px}
   .controls{gap:6px}
   .search-wrap{min-width:120px}
   .scan-info{display:none}
-  .header{flex-direction:column;align-items:flex-start}
   .episode-table{display:block;overflow-x:auto}
   .detail-hero{flex-direction:column}
   .detail-poster{width:120px}
@@ -351,8 +313,6 @@ body.has-bulk-bar{padding-bottom:60px}
   .bulk-bar{padding:8px 12px;gap:6px}
   .wanted-pill{padding:3px 8px;font-size:.72em}
 }
-:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
-@media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
 .search-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.65);display:flex;align-items:flex-start;justify-content:center;z-index:1000;padding:40px 16px;overflow-y:auto;backdrop-filter:blur(2px)}
 .search-dialog{background:var(--card);border:1px solid var(--border);border-radius:10px;width:100%;max-width:780px;animation:modal-in .15s ease-out}
 @keyframes modal-in{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
@@ -381,9 +341,6 @@ body.has-bulk-bar{padding-bottom:60px}
 .badge-cached{display:inline-flex;align-items:center;gap:2px;font-size:.78em;font-weight:600}
 .badge-cached.is-cached{color:var(--green)}
 .badge-cached.not-cached{color:var(--text3)}
-.btn-search{background:none;border:1px solid var(--border);color:var(--text2);border-radius:4px;padding:2px 8px;font-size:.75em;cursor:pointer;white-space:nowrap;transition:border-color .15s,color .15s}
-.btn-search:hover{border-color:var(--blue);color:var(--blue)}
-.btn-search:disabled{opacity:.5;cursor:not-allowed}
 .btn-add-debrid{background:none;border:1px solid var(--green);color:var(--green);border-radius:4px;padding:2px 8px;font-size:.78em;cursor:pointer;transition:all .15s}
 .btn-add-debrid:hover:not(:disabled){background:#3fb95018;border-color:var(--green)}
 .btn-add-debrid.not-cached{border-color:var(--blue);color:var(--blue)}
@@ -393,19 +350,6 @@ body.has-bulk-bar{padding-bottom:60px}
 .search-empty{text-align:center;color:var(--text3);padding:24px 0;font-size:.88em}
 .search-count{font-size:.75em;color:var(--text3);margin-left:auto}
 </style>
-<script>(function(){try{var t=localStorage.getItem('pd_zurg_theme');if(t){document.documentElement.setAttribute('data-theme',t);document.querySelector('meta[name="color-scheme"]').content=t==='light'?'light':'dark';}}catch(e){}})()</script>
-</head>
-<body>
-<div class="header">
-  <h1><a href="/status" style="color:inherit;text-decoration:none">pd_zurg</a></h1>
-  <div class="nav">
-    <a href="/status">Dashboard</a>
-    <span class="current">Library</span>
-    <a href="/library?filter=missing" id="nav-wanted-link" style="display:none">Wanted<span class="nav-badge" id="nav-wanted-count">0</span></a>
-    <a href="/settings">Settings</a>
-    <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme" id="theme-btn">&#x2600;&#xFE0F;</button>
-  </div>
-</div>
 
 <div class="tabs" role="tablist">
   <div class="tab active" role="tab" tabindex="0" aria-selected="true" aria-controls="tab-movies"
@@ -449,7 +393,7 @@ body.has-bulk-bar{padding-bottom:60px}
     <option value="size">Sort: Size</option>
   </select>
   <button class="btn-select" id="btn-select" onclick="toggleSelectMode()" aria-pressed="false">Select</button>
-  <button class="btn-refresh" id="btn-refresh" onclick="triggerRefresh()">Refresh</button>
+  <button class="btn btn-ghost" id="btn-refresh" onclick="triggerRefresh()">Refresh</button>
   <span class="scan-info" id="scan-info"></span>
 </div>
 
@@ -460,8 +404,8 @@ body.has-bulk-bar{padding-bottom:60px}
   <button class="wanted-pill wanted-pill--fallback" data-preset="fallback" onclick="toggleWantedPreset('fallback')">Fallback <span class="pill-count" id="pill-count-fallback"></span></button>
 </div>
 <div class="wanted-actions" id="wanted-actions" style="display:none">
-  <button class="btn-action" id="wanted-search-btn" onclick="wantedSearchAll()" style="display:none">Search All on Debrid</button>
-  <button class="btn-action" id="wanted-download-btn" onclick="wantedDownloadAll()" style="display:none">Download All Locally</button>
+  <button class="btn btn-ghost btn-sm" id="wanted-search-btn" onclick="wantedSearchAll()" style="display:none">Search All on Debrid</button>
+  <button class="btn btn-ghost btn-sm" id="wanted-download-btn" onclick="wantedDownloadAll()" style="display:none">Download All Locally</button>
   <span class="wanted-progress" id="wanted-progress"></span>
 </div>
 
@@ -483,28 +427,14 @@ body.has-bulk-bar{padding-bottom:60px}
     <option value="prefer-local">Prefer Local</option>
     <option value="none">Clear Preference</option>
   </select>
-  <button class="btn-apply" id="bulk-pref-apply" onclick="bulkApplyPreference()">Apply</button>
-  <button class="btn-action" id="bulk-search" onclick="bulkSearchMissing()">Search Missing</button>
-  <button class="btn-action" id="bulk-deselect" onclick="deselectAll()">Deselect All</button>
+  <button class="btn btn-primary" id="bulk-pref-apply" onclick="bulkApplyPreference()">Apply</button>
+  <button class="btn btn-ghost btn-sm" id="bulk-search" onclick="bulkSearchMissing()">Search Missing</button>
+  <button class="btn btn-ghost btn-sm" id="bulk-deselect" onclick="deselectAll()">Deselect All</button>
   <span class="bulk-progress" id="bulk-progress" aria-live="polite"></span>
 </div>
 
 <script>
-// ---------------------------------------------------------------------------
-// Theme
-// ---------------------------------------------------------------------------
-function applyTheme(theme) {
-  document.documentElement.setAttribute('data-theme', theme);
-  document.querySelector('meta[name="color-scheme"]').content = theme === 'light' ? 'light' : 'dark';
-  document.getElementById('theme-btn').innerHTML = theme === 'light' ? '\u{1F319}' : '\u{2600}\u{FE0F}';
-}
-function toggleTheme() {
-  const cur = document.documentElement.getAttribute('data-theme') || 'dark';
-  const next = cur === 'dark' ? 'light' : 'dark';
-  applyTheme(next);
-  try { localStorage.setItem('pd_zurg_theme', next); } catch(e) {}
-}
-(function() { const t = document.documentElement.getAttribute('data-theme'); if (t) applyTheme(t); })();
+__THEME_TOGGLE_JS__
 
 // ---------------------------------------------------------------------------
 // State
@@ -1880,29 +1810,29 @@ function _renderMovieDetail(movie, meta) {
       html += '<option value="prefer-debrid"' + (moviePref === 'prefer-debrid' ? ' selected' : '') + '>Prefer Debrid</option>';
     }
     html += '</select>';
-    html += '<button class="btn-apply" id="movie-pref-apply-btn" style="display:none" onclick="applyMoviePreference()">Apply</button>';
+    html += '<button class="btn btn-primary" id="movie-pref-apply-btn" style="display:none" onclick="applyMoviePreference()">Apply</button>';
     html += '</div>';
     html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px;line-height:1.5"><strong style="color:var(--text2)">Prefer Local</strong> &mdash; switches the movie to a local copy.<br><strong style="color:var(--text2)">Prefer Debrid</strong> &mdash; removes the local copy and streams from debrid.</div>';
     html += '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">';
     if (moviePeDir === 'debrid-unavailable') {
-      html += '<button class="btn-action" onclick="_confirmBtn(this,function(){downloadMovieLocalFallback()})">Download Locally</button>';
+      html += '<button class="btn btn-ghost btn-sm" onclick="_confirmBtn(this,function(){downloadMovieLocalFallback()})">Download Locally</button>';
     } else if (moviePeDir === 'to-local-fallback') {
-      html += '<button class="btn-action" disabled>Downloading\u2026</button>';
+      html += '<button class="btn btn-ghost btn-sm" disabled>Downloading\u2026</button>';
     } else if (movie.source === 'debrid') {
       var movieDlLabel = _downloadServices.movie === 'overseerr' ? 'Request in Overseerr' : 'Switch to Local';
       var movieDebridPref = _downloadServices.movie === 'overseerr' ? undefined : false;
-      html += '<button class="btn-action" onclick="_confirmBtn(this,function(){downloadMovie(' + (movieDebridPref === undefined ? '' : movieDebridPref) + ')})">' + movieDlLabel + '</button>';
-      html += '<button class="btn-action danger" onclick="event.stopPropagation();blockMovie()">Block</button>';
+      html += '<button class="btn btn-ghost btn-sm" onclick="_confirmBtn(this,function(){downloadMovie(' + (movieDebridPref === undefined ? '' : movieDebridPref) + ')})">' + movieDlLabel + '</button>';
+      html += '<button class="btn btn-ghost btn-sm btn-danger" onclick="event.stopPropagation();blockMovie()">Block</button>';
     }
     if ((movie.source === 'local' || movie.source === 'both') && _downloadServices.movie === 'radarr') {
-      html += '<button class="btn-action danger" onclick="_confirmBtn(this,function(){removeMovie()})">Switch to Debrid</button>';
+      html += '<button class="btn btn-ghost btn-sm btn-danger" onclick="_confirmBtn(this,function(){removeMovie()})">Switch to Debrid</button>';
     }
     html += '</div>';
   } else if (movie.source === 'debrid') {
     html += '<div style="margin-top:10px;font-size:.82em;color:var(--text3)">To switch to local, configure <a href="/settings">Radarr or Overseerr</a> in Settings.</div>';
   }
   if (_searchEnabled && movie.imdb_id) {
-    html += '<div style="margin-top:8px"><button class="btn-search" data-imdb="' + esc(movie.imdb_id) + '" data-mtype="movie" data-label="' + esc(movie.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button></div>';
+    html += '<div style="margin-top:8px"><button class="btn btn-ghost btn-sm" data-imdb="' + esc(movie.imdb_id) + '" data-mtype="movie" data-label="' + esc(movie.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button></div>';
   }
   html += '</div></div>';
   html += '<div class="history-section"><button class="history-toggle" onclick="toggleShowHistory(this)"><span class="chevron">&#9654;</span> History</button><div class="history-list" class="history-list-content"><div style="color:var(--text3);font-size:.8em;padding:4px 0">Loading...</div></div></div>';
@@ -2069,26 +1999,26 @@ function _renderSeasonEpisodes(season, si) {
     html += '</td>';
     html += '<td class="ep-actions">';
     if (isUnavailable) {
-      html += '<button class="btn-action" aria-label="Download ' + epLabel + ' locally" onclick="_confirmBtn(this,function(){downloadLocalFallback(' + season.number + ',' + ep.number + ')})">Download Locally</button>';
+      html += '<button class="btn btn-ghost btn-sm" aria-label="Download ' + epLabel + ' locally" onclick="_confirmBtn(this,function(){downloadLocalFallback(' + season.number + ',' + ep.number + ')})">Download Locally</button>';
     } else if (isLocalFallback) {
-      html += '<button class="btn-action" disabled>Downloading\u2026</button>';
+      html += '<button class="btn btn-ghost btn-sm" disabled>Downloading\u2026</button>';
     } else if (isPending) {
       // Searching: disabled placeholder; Migrating: no button (already in-flight)
-      if (!isMigrating) html += '<button class="btn-action" disabled>\u2026</button>';
+      if (!isMigrating) html += '<button class="btn btn-ghost btn-sm" disabled>\u2026</button>';
     } else if (_downloadServices.show && _downloadServices.show !== 'overseerr') {
       if (ep.source === 'debrid') {
-        html += '<button class="btn-action" aria-label="Switch ' + epLabel + ' to Local" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ',false)})">Switch to Local</button>';
-        html += '<button class="btn-action danger" aria-label="Block ' + epLabel + '" onclick="event.stopPropagation();blockEpisode(' + season.number + ',' + ep.number + ')">Block</button>';
+        html += '<button class="btn btn-ghost btn-sm" aria-label="Switch ' + epLabel + ' to Local" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ',false)})">Switch to Local</button>';
+        html += '<button class="btn btn-ghost btn-sm btn-danger" aria-label="Block ' + epLabel + '" onclick="event.stopPropagation();blockEpisode(' + season.number + ',' + ep.number + ')">Block</button>';
       } else if (ep.source === 'local') {
-        html += '<button class="btn-action danger" aria-label="Switch ' + epLabel + ' to Debrid" onclick="_confirmBtn(this,function(){removeEp(' + season.number + ',' + ep.number + ')})">Switch to Debrid</button>';
+        html += '<button class="btn btn-ghost btn-sm btn-danger" aria-label="Switch ' + epLabel + ' to Debrid" onclick="_confirmBtn(this,function(){removeEp(' + season.number + ',' + ep.number + ')})">Switch to Debrid</button>';
       } else if (ep.source === 'both') {
-        html += '<button class="btn-action danger" aria-label="Switch ' + epLabel + ' to Debrid" onclick="_confirmBtn(this,function(){removeEp(' + season.number + ',' + ep.number + ')})">Switch to Debrid</button>';
+        html += '<button class="btn btn-ghost btn-sm btn-danger" aria-label="Switch ' + epLabel + ' to Debrid" onclick="_confirmBtn(this,function(){removeEp(' + season.number + ',' + ep.number + ')})">Switch to Debrid</button>';
       } else if (isMissing && (!ep.air_date || new Date(ep.air_date + 'T00:00:00').getTime() <= Date.now())) {
-        html += '<button class="btn-action" aria-label="Search ' + epLabel + '" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ',true)})">Search</button>';
+        html += '<button class="btn btn-ghost btn-sm" aria-label="Search ' + epLabel + '" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ',true)})">Search</button>';
       }
     }
     if (_searchEnabled && _detailItem && _detailItem.imdb_id) {
-      html += ' <button class="btn-search" title="Search torrents for ' + epLabel + '" data-imdb="' + esc(_detailItem.imdb_id) + '" data-mtype="series" data-season="' + season.number + '" data-episode="' + ep.number + '" data-label="' + esc(_detailItem.title + ' ' + epLabel) + '" onclick="event.stopPropagation();openSearchFromBtn(this)">&#128269;</button>';
+      html += ' <button class="btn btn-ghost btn-sm" title="Search torrents for ' + epLabel + '" data-imdb="' + esc(_detailItem.imdb_id) + '" data-mtype="series" data-season="' + season.number + '" data-episode="' + ep.number + '" data-label="' + esc(_detailItem.title + ' ' + epLabel) + '" onclick="event.stopPropagation();openSearchFromBtn(this)">&#128269;</button>';
     }
     html += '</td>';
     html += '</tr>';
@@ -2133,7 +2063,7 @@ function _shouldAutoExpand(season, showTitle) {
 }
 
 function _syncExpandAllBtn() {
-  var btn = document.querySelector('.expand-all-btn');
+  var btn = document.querySelector('.expand-all-row .btn');
   if (!btn) return;
   var headers = document.querySelectorAll('.season-header');
   var allExpanded = true;
@@ -2229,14 +2159,14 @@ function _renderShowDetail(show, meta) {
   html += '<option value="prefer-local"' + (curPref === 'prefer-local' ? ' selected' : '') + '>Prefer Local</option>';
   html += '<option value="prefer-debrid"' + (curPref === 'prefer-debrid' ? ' selected' : '') + '>Prefer Debrid</option>';
   html += '</select>';
-  html += '<button class="btn-apply" id="show-pref-apply-btn" style="display:none" onclick="applyPreference()">Apply</button>';
+  html += '<button class="btn btn-primary" id="show-pref-apply-btn" style="display:none" onclick="applyPreference()">Apply</button>';
   html += '</div>';
   html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px;line-height:1.5"><strong style="color:var(--text2)">Prefer Local</strong> &mdash; switches debrid-only episodes to local copies.<br><strong style="color:var(--text2)">Prefer Debrid</strong> &mdash; removes local copies and streams from debrid.</div>';
   html += '</div></div>';
 
   if (seasons.length > 1) {
     var allExpanded = hasPrev && seasons.every(function(s) { return !!expandedNums[String(s.number)]; });
-    html += '<div class="expand-all-row"><button class="expand-all-btn" onclick="toggleAllSeasons(this)">' + (allExpanded ? 'Collapse All' : 'Expand All') + '</button></div>';
+    html += '<div class="expand-all-row"><button class="btn btn-ghost btn-sm" onclick="toggleAllSeasons(this)">' + (allExpanded ? 'Collapse All' : 'Expand All') + '</button></div>';
   }
 
   for (var si = 0; si < seasons.length; si++) {
@@ -2276,15 +2206,15 @@ function _renderShowDetail(show, meta) {
     html += '<span class="season-actions">';
     if ((hasDebrid || hasMissing) && _downloadServices.show) {
       if (_downloadServices.show === 'overseerr') {
-        html += '<button class="btn-action" onclick="event.stopPropagation();_confirmBtn(this,function(){requestSeason(' + season.number + ')})">Request Season</button>';
+        html += '<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();_confirmBtn(this,function(){requestSeason(' + season.number + ')})">Request Season</button>';
       } else {
         if (hasDebrid) {
           var dlLabel = 'Switch ' + debridCount + ' Episode' + (debridCount !== 1 ? 's' : '') + ' to Local';
-          html += '<button class="btn-action" onclick="event.stopPropagation();_confirmBtn(this,function(){dlSeason(' + si + ')})">' + dlLabel + '</button>';
+          html += '<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();_confirmBtn(this,function(){dlSeason(' + si + ')})">' + dlLabel + '</button>';
         }
         if (hasMissing) {
           var searchLabel = 'Search ' + missingCount + ' Missing';
-          html += '<button class="btn-action" onclick="event.stopPropagation();_confirmBtn(this,function(){searchMissingSeason(' + si + ')})">' + searchLabel + '</button>';
+          html += '<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();_confirmBtn(this,function(){searchMissingSeason(' + si + ')})">' + searchLabel + '</button>';
         }
       }
     }
@@ -2294,7 +2224,7 @@ function _renderShowDetail(show, meta) {
         if (season.episodes[lci].source === 'local' || season.episodes[lci].source === 'both') localCount++;
       }
       var rmLabel = 'Switch ' + localCount + ' to Debrid';
-      html += '<button class="btn-action danger" onclick="event.stopPropagation();_confirmBtn(this,function(){rmSeason(' + si + ')})">' + rmLabel + '</button>';
+      html += '<button class="btn btn-ghost btn-sm btn-danger" onclick="event.stopPropagation();_confirmBtn(this,function(){rmSeason(' + si + ')})">' + rmLabel + '</button>';
     }
     html += '</span>';
     html += '</div>';
@@ -2955,7 +2885,7 @@ var _svcNames = {sonarr: 'Sonarr', radarr: 'Radarr', overseerr: 'Overseerr'};
 var _actionInFlight = false;
 
 function _setActionsDisabled(disabled) {
-  var btns = document.querySelectorAll('.btn-action, .btn-apply');
+  var btns = document.querySelectorAll('.detail-view .btn-ghost.btn-sm, .detail-view .btn-primary');
   for (var i = 0; i < btns.length; i++) btns[i].disabled = disabled;
 }
 
@@ -3035,8 +2965,8 @@ function _showDebridConfirmation(torrents, title, service, onConfirm, onCancel) 
   if (torrents.length > 10) html += '<li style="color:var(--text3)">... and ' + (torrents.length - 10) + ' more</li>';
   html += '</ul>';
   html += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
-  html += '<button class="btn-confirm-delete" id="confirm-delete-btn">Delete Permanently</button>';
-  html += '<button class="btn-confirm-cancel" id="cancel-delete-btn">Cancel</button>';
+  html += '<button class="btn btn-danger filled" id="confirm-delete-btn">Delete Permanently</button>';
+  html += '<button class="btn btn-ghost" id="cancel-delete-btn">Cancel</button>';
   html += '</div></div>';
   el.className = 'transfer-msg';
   el.innerHTML = html;

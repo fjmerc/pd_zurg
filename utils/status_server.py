@@ -1457,6 +1457,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 result['download_services'] = get_configured_services()
                 result['pending'] = get_all_pending()
                 result['preferences'] = get_all_preferences()
+                result['search_enabled'] = bool((os.environ.get('TORRENTIO_URL') or '').strip())
                 data = json.dumps(result)
                 self._send_json_response(200, data)
         elif self.path.startswith('/api/library/metadata'):
@@ -2393,6 +2394,82 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json_response(200, json.dumps({'status': 'added', 'id': entry_id}))
             else:
                 self._send_json_response(500, json.dumps({'error': 'Failed to add entry'}))
+        elif self.path == '/api/search':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 100_000:
+                    self._send_json_response(400, json.dumps({'error': 'Request body too large'}))
+                    return
+                body = self.rfile.read(content_length)
+                values = json.loads(body.decode('utf-8'))
+                if not isinstance(values, dict):
+                    self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
+                    return
+                imdb_id = (values.get('imdb_id') or '').strip()
+                media_type = (values.get('type') or 'movie').strip()
+                season = values.get('season')
+                episode = values.get('episode')
+                if not imdb_id:
+                    self._send_json_response(400, json.dumps({'error': 'imdb_id required'}))
+                    return
+                import re as _re
+                if not _re.match(r'^tt\d{7,8}$', imdb_id):
+                    self._send_json_response(400, json.dumps({'error': 'imdb_id must be tt followed by 7-8 digits'}))
+                    return
+                if media_type not in ('movie', 'series'):
+                    self._send_json_response(400, json.dumps({'error': 'type must be "movie" or "series"'}))
+                    return
+                if season is not None:
+                    try:
+                        season = int(season)
+                        if season < 0 or season > 1000:
+                            self._send_json_response(400, json.dumps({'error': 'season out of range'}))
+                            return
+                    except (ValueError, TypeError):
+                        self._send_json_response(400, json.dumps({'error': 'season must be integer'}))
+                        return
+                if episode is not None:
+                    try:
+                        episode = int(episode)
+                        if episode < 0 or episode > 10000:
+                            self._send_json_response(400, json.dumps({'error': 'episode out of range'}))
+                            return
+                    except (ValueError, TypeError):
+                        self._send_json_response(400, json.dumps({'error': 'episode must be integer'}))
+                        return
+                from utils.search import search_with_cache
+                results = search_with_cache(imdb_id, media_type, season, episode)
+                self._send_json_response(200, json.dumps({'results': results}))
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception:
+                logger.exception("[search] Unexpected error")
+                self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
+        elif self.path == '/api/search/add':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 100_000:
+                    self._send_json_response(400, json.dumps({'error': 'Request body too large'}))
+                    return
+                body = self.rfile.read(content_length)
+                values = json.loads(body.decode('utf-8'))
+                if not isinstance(values, dict):
+                    self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
+                    return
+                info_hash = (values.get('info_hash') or '').strip()
+                title = (values.get('title') or '').strip()[:500]
+                if not info_hash:
+                    self._send_json_response(400, json.dumps({'error': 'info_hash required'}))
+                    return
+                from utils.search import add_to_debrid
+                result = add_to_debrid(info_hash, title=title)
+                status_code = 200 if result.get('success') else 400
+                self._send_json_response(status_code, json.dumps(result))
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception:
+                logger.exception("[search/add] Unexpected error")
+                self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
         else:
             self.send_response(404)
             self.end_headers()

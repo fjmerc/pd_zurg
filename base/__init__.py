@@ -70,6 +70,8 @@ __all__ = [
     'NOTIFICATION_DIGEST_ENABLED', 'NOTIFICATION_DIGEST_TIME',
     # Blocklist
     'BLOCKLIST_AUTO_ADD',
+    # Debrid search
+    'TORRENTIO_URL',
 ]
 
 load_dotenv(find_dotenv('./config/.env'))
@@ -202,6 +204,8 @@ class Config:
         self.NOTIFICATION_DIGEST_TIME = os.getenv('NOTIFICATION_DIGEST_TIME', '08:00')
         # Blocklist
         self.BLOCKLIST_AUTO_ADD = os.getenv('BLOCKLIST_AUTO_ADD', 'true')
+        # Debrid search
+        self.TORRENTIO_URL = os.getenv('TORRENTIO_URL')
 
 
 # Default singleton instance — used by existing code via module-level globals
@@ -275,3 +279,4 @@ HISTORY_RETENTION_DAYS = config.HISTORY_RETENTION_DAYS
 NOTIFICATION_DIGEST_ENABLED = config.NOTIFICATION_DIGEST_ENABLED
 NOTIFICATION_DIGEST_TIME = config.NOTIFICATION_DIGEST_TIME
 BLOCKLIST_AUTO_ADD = config.BLOCKLIST_AUTO_ADD
+TORRENTIO_URL = config.TORRENTIO_URL

@@ -44,6 +44,9 @@ ALL_EVENTS = {
     # Safety
     'blocklist_added',            # Torrent added to blocklist
     'health_error',               # Process crash, mount failure
+    # Debrid search
+    'debrid_add_success',         # Torrent added to debrid from interactive search
+    'debrid_add_failed',          # Failed to add torrent to debrid
     # Digest
     'daily_digest',               # Daily summary notification
 }

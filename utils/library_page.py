@@ -70,7 +70,11 @@ body{max-width:1200px}
 .poster-container{position:relative;aspect-ratio:2/3;overflow:hidden;background:var(--border)}
 .poster-img{width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .3s}
 .poster-img.loaded{opacity:1}
-.poster-placeholder{display:flex;align-items:center;justify-content:center;height:100%;padding:16px;text-align:center;font-size:.9em;color:var(--text2);background:linear-gradient(135deg,var(--card),var(--border));overflow:hidden;word-break:break-word;line-height:1.4}
+.poster-placeholder{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;text-align:center;overflow:hidden;position:relative}
+.poster-placeholder .pp-initial{font-size:4.5em;font-weight:700;line-height:1;color:rgba(255,255,255,.85);text-shadow:0 2px 8px rgba(0,0,0,.3);margin-bottom:4px}
+.poster-placeholder .pp-title{font-size:.75em;color:rgba(255,255,255,.7);padding:0 10px;max-height:2.8em;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word;line-height:1.4}
+[data-theme="light"] .poster-placeholder .pp-initial{color:rgba(255,255,255,.9)}
+[data-theme="light"] .poster-placeholder .pp-title{color:rgba(255,255,255,.8)}
 .corner-badge{position:absolute;top:0;right:0;width:0;height:0;border-style:solid;border-width:0 28px 28px 0;border-color:transparent transparent transparent transparent;z-index:1}
 .corner-badge.ended{border-color:transparent #f05050 transparent transparent}
 .progress-bar{height:5px;background:#5b5b5b;width:100%}
@@ -95,8 +99,12 @@ body{max-width:1200px}
 .jump-letter{font-size:clamp(.7em,1.5vh,1.15em);font-weight:600;line-height:1;padding:clamp(1px,0.4vh,4px) 10px;cursor:pointer;color:var(--blue);border-radius:4px;user-select:none;transition:background .1s,color .1s}
 .jump-letter:hover{background:var(--blue);color:var(--bg)}
 .jump-letter.inactive{color:var(--text3);cursor:default;opacity:.4;pointer-events:none}
+.jump-letter[title]{position:relative}
+.jump-letter .jump-tip{display:none;position:absolute;right:100%;top:50%;transform:translateY(-50%);margin-right:6px;background:var(--card);border:1px solid var(--border);color:var(--text);font-size:.72em;font-weight:400;padding:3px 8px;border-radius:4px;white-space:nowrap;pointer-events:none;box-shadow:0 2px 6px rgba(0,0,0,.25);z-index:11}
+.jump-letter:hover .jump-tip{display:block}
 .poster-card.jump-highlight{outline:2px solid var(--blue);outline-offset:2px}
-@media(max-width:640px){.jump-bar{right:4px;padding:clamp(3px,0.8vh,6px) 3px}.jump-letter{padding:clamp(1px,0.3vh,3px) 7px}.grid{padding-right:38px}}
+@media(max-width:900px) and (min-width:641px){.jump-bar{padding:clamp(3px,0.8vh,6px) 3px}.jump-letter{font-size:clamp(.6em,1.2vh,.9em);padding:clamp(0px,0.2vh,2px) 6px}.grid{padding-right:32px}}
+@media(max-width:640px) and (min-width:481px){.jump-bar{position:sticky;top:0;right:auto;left:0;transform:none;flex-direction:row;max-height:none;overflow-x:auto;overflow-y:hidden;border-radius:0;border-left:none;border-right:none;padding:4px 8px;gap:0;z-index:15;width:100%;box-shadow:0 2px 6px rgba(0,0,0,.15)}.jump-letter{padding:3px 8px;font-size:.75em;flex-shrink:0}.jump-letter .jump-tip{display:none !important}.grid{padding-right:0}}
 @media(max-width:480px){.jump-bar{display:none}.grid{padding-right:0}}
 
 /* Media card (detail view only) */
@@ -291,6 +299,8 @@ body.has-bulk-bar{padding-bottom:60px}
 [data-theme="light"] .wanted-pill--unavailable.active{background:#bc4c001a;border-color:#bc4c0066;color:#bc4c00}
 [data-theme="light"] .wanted-pill--pending.active{background:#9a67001a;border-color:#9a670066;color:#9a6700}
 [data-theme="light"] .wanted-pill--fallback.active{background:#0969da1a;border-color:#0969da66;color:#0969da}
+.wanted-pill--recent.active{background:#a371f71a;border-color:#a371f766;color:#a371f7}
+[data-theme="light"] .wanted-pill--recent.active{background:#8250df1a;border-color:#8250df66;color:#8250df}
 
 /* Wanted bulk actions bar */
 .wanted-actions{display:flex;gap:8px;align-items:center;padding:8px 0;flex-wrap:wrap}
@@ -388,7 +398,9 @@ body.has-bulk-bar{padding-bottom:60px}
     <option value="az">Sort: A-Z</option>
     <option value="za">Sort: Z-A</option>
     <option value="added">Sort: Newest Added</option>
-    <option value="year">Sort: Year</option>
+    <option value="year-new">Sort: Year (Newest)</option>
+    <option value="year-old">Sort: Year (Oldest)</option>
+    <option value="complete">Sort: % Complete</option>
     <option value="episodes">Sort: Episodes</option>
     <option value="size">Sort: Size</option>
   </select>
@@ -402,6 +414,7 @@ body.has-bulk-bar{padding-bottom:60px}
   <button class="wanted-pill wanted-pill--unavailable" data-preset="unavailable" onclick="toggleWantedPreset('unavailable')">Unavailable <span class="pill-count" id="pill-count-unavailable"></span></button>
   <button class="wanted-pill wanted-pill--pending" data-preset="pending" onclick="toggleWantedPreset('pending')">Pending <span class="pill-count" id="pill-count-pending"></span></button>
   <button class="wanted-pill wanted-pill--fallback" data-preset="fallback" onclick="toggleWantedPreset('fallback')">Fallback <span class="pill-count" id="pill-count-fallback"></span></button>
+  <button class="wanted-pill wanted-pill--recent" data-preset="recent" onclick="toggleWantedPreset('recent')">Recently Added <span class="pill-count" id="pill-count-recent"></span></button>
 </div>
 <div class="wanted-actions" id="wanted-actions" style="display:none">
   <button class="btn btn-ghost btn-sm" id="wanted-search-btn" onclick="wantedSearchAll()" style="display:none">Search All on Debrid</button>
@@ -409,10 +422,10 @@ body.has-bulk-bar{padding-bottom:60px}
   <span class="wanted-progress" id="wanted-progress"></span>
 </div>
 
+<div class="jump-bar" id="jump-bar" role="navigation" aria-label="Alphabetical jump bar" style="display:none"></div>
 <div id="content-area">
   <div class="grid" id="skeleton-grid"></div>
 </div>
-<div class="jump-bar" id="jump-bar" role="navigation" aria-label="Alphabetical jump bar" style="display:none"></div>
 <script>
 (function(){var g=document.getElementById('skeleton-grid');if(!g)return;var h='';for(var i=0;i<12;i++)h+='<div class="skeleton-poster"><div class="poster-container"><div class="skeleton-line" style="width:100%;height:100%;border-radius:0"></div></div><div class="skeleton-line" style="height:5px;width:100%;border-radius:0"></div><div class="card-info"><div class="skeleton-line skeleton-title"></div><div class="skeleton-line skeleton-meta"></div></div></div>';g.innerHTML=h})();
 </script>
@@ -928,14 +941,36 @@ function computeProgress(item) {
           tooltip: (item.episodes || 0) + ' / ' + item.total_episodes + ' episodes'};
 }
 
+function _titleHue(title) {
+  title = title || '';
+  var h = 0;
+  for (var i = 0; i < title.length; i++) { h = ((h << 5) - h + title.charCodeAt(i)) | 0; }
+  return Math.abs(h) % 360;
+}
+
+function _placeholderBg(title) {
+  var hue = _titleHue(title);
+  return 'background:hsl(' + hue + ',45%,35%);background-image:radial-gradient(ellipse at 30% 20%,hsl(' + hue + ',55%,50%) 0%,hsl(' + hue + ',40%,25%) 100%)';
+}
+
+function _placeholderHtml(title) {
+  var initial = (title || '?').charAt(0).toUpperCase();
+  return '<div class="poster-placeholder" style="' + _placeholderBg(title) + '">'
+    + '<span class="pp-initial">' + esc(initial) + '</span>'
+    + '<span class="pp-title">' + esc(title) + '</span></div>';
+}
+
 function buildCard(item, index) {
   // Poster image or placeholder
   var posterHtml;
+  var phBg = _placeholderBg(item.title);
   if (item.poster_url) {
     posterHtml = '<img class="poster-img" src="' + esc(item.poster_url) + '" loading="lazy" decoding="async" alt="" onload="this.classList.add(\'loaded\')" onerror="this.style.display=\'none\';var p=this.parentElement.querySelector(\'.poster-placeholder\');if(p)p.style.display=\'flex\'">'
-      + '<div class="poster-placeholder" style="display:none">' + esc(item.title) + '</div>';
+      + '<div class="poster-placeholder" style="display:none;' + phBg + '">'
+      + '<span class="pp-initial">' + esc((item.title || '?').charAt(0).toUpperCase()) + '</span>'
+      + '<span class="pp-title">' + esc(item.title) + '</span></div>';
   } else {
-    posterHtml = '<div class="poster-placeholder">' + esc(item.title) + '</div>';
+    posterHtml = _placeholderHtml(item.title);
   }
 
   // Corner badge (Ended/Canceled shows get red triangle)
@@ -1029,11 +1064,14 @@ function applyFilters() {
   let sortBy = document.getElementById('sort-select').value;
   const dataset = _activeTab === 'movies' ? _allMovies : _allShows;
 
-  // Show/hide status filter and episodes sort (shows only)
+  // Show/hide status filter and shows-only sort options
   document.getElementById('status-filter').style.display = _activeTab === 'shows' ? '' : 'none';
-  var epOpt = document.querySelector('#sort-select option[value="episodes"]');
-  if (epOpt) epOpt.style.display = _activeTab === 'shows' ? '' : 'none';
-  if (_activeTab !== 'shows' && sortBy === 'episodes') {
+  var showsOnlySorts = ['episodes', 'complete'];
+  showsOnlySorts.forEach(function(val) {
+    var opt = document.querySelector('#sort-select option[value="' + val + '"]');
+    if (opt) opt.style.display = _activeTab === 'shows' ? '' : 'none';
+  });
+  if (_activeTab !== 'shows' && showsOnlySorts.indexOf(sortBy) !== -1) {
     document.getElementById('sort-select').value = 'az';
     sortBy = 'az';
   }
@@ -1075,24 +1113,37 @@ function applyFilters() {
   }
 
   // Wanted preset filter
-  if (_activeWantedPreset) {
+  if (_activeWantedPreset && _activeWantedPreset !== 'recent') {
     filtered = filtered.filter(function(item) {
       return _matchesWantedPreset(item, _activeWantedPreset);
     });
   }
 
-  // Sort
-  filtered = filtered.slice().sort(function(a, b) {
-    if (sortBy === 'za') return b.title.localeCompare(a.title);
-    if (sortBy === 'added') return (b.date_added || 0) - (a.date_added || 0);
-    if (sortBy === 'year') {
-      var dy = (b.year || 0) - (a.year || 0);
-      return dy !== 0 ? dy : a.title.localeCompare(b.title);
-    }
-    if (sortBy === 'episodes') return (b.episodes || 0) - (a.episodes || 0);
-    if (sortBy === 'size') return _getItemTotalSize(b) - _getItemTotalSize(a);
-    return a.title.localeCompare(b.title); // default A-Z
-  });
+  // Sort — "Recently Added" preset overrides sort to date_added desc + limit 20
+  if (_activeWantedPreset === 'recent') {
+    filtered = filtered.filter(function(item) { return (item.date_added || 0) > 0; });
+    filtered = filtered.slice().sort(function(a, b) { return (b.date_added || 0) - (a.date_added || 0); });
+    filtered = filtered.slice(0, 20);
+  } else {
+    filtered = filtered.slice().sort(function(a, b) {
+      if (sortBy === 'za') return b.title.localeCompare(a.title);
+      if (sortBy === 'added') return (b.date_added || 0) - (a.date_added || 0);
+      if (sortBy === 'year-new') {
+        return (b.year || 0) - (a.year || 0) || a.title.localeCompare(b.title);
+      }
+      if (sortBy === 'year-old') {
+        return (a.year || 9999) - (b.year || 9999) || a.title.localeCompare(b.title);
+      }
+      if (sortBy === 'complete') {
+        var pctA = (a.total_episodes > 0) ? (a.episodes || 0) / a.total_episodes : 0;
+        var pctB = (b.total_episodes > 0) ? (b.episodes || 0) / b.total_episodes : 0;
+        return (pctB - pctA) || a.title.localeCompare(b.title);
+      }
+      if (sortBy === 'episodes') return (b.episodes || 0) - (a.episodes || 0);
+      if (sortBy === 'size') return _getItemTotalSize(b) - _getItemTotalSize(a);
+      return a.title.localeCompare(b.title); // default A-Z
+    });
+  }
 
   // Persist preferences
   try {
@@ -1167,14 +1218,18 @@ function _updateJumpBar(items) {
   var bar = document.getElementById('jump-bar');
   if (!bar) return;
   if (!items || !items.length) { bar.style.display = 'none'; return; }
-  // Hide jump bar when sort is not alphabetical
+  // Hide jump bar when sort is not alphabetical or "recently added" preset is active
   var sortBy = document.getElementById('sort-select').value;
+  if (_activeWantedPreset === 'recent') { bar.style.display = 'none'; return; }
   if (sortBy !== 'az' && sortBy !== 'za') { bar.style.display = 'none'; return; }
 
-  // Build set of letters that have items
+  // Build set of letters that have items + first title per letter
   var activeLetters = {};
+  var firstTitle = {};
   for (var i = 0; i < items.length; i++) {
-    activeLetters[_getItemLetter(items[i].title)] = true;
+    var lt = _getItemLetter(items[i].title);
+    activeLetters[lt] = true;
+    if (!firstTitle[lt]) firstTitle[lt] = items[i].title;
   }
 
   var html = '';
@@ -1182,10 +1237,11 @@ function _updateJumpBar(items) {
     var letter = _JUMP_LETTERS[li];
     var active = !!activeLetters[letter];
     if (active) {
+      var tipText = firstTitle[letter] ? esc(firstTitle[letter]) : '';
       html += '<span class="jump-letter" tabindex="0" role="button" aria-label="Jump to ' + letter + '"'
         + ' onclick="jumpToLetter(\'' + letter + '\')"'
         + ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();jumpToLetter(\'' + letter + '\')}"'
-        + '>' + letter + '</span>';
+        + '>' + letter + (tipText ? '<span class="jump-tip">' + tipText + '</span>' : '') + '</span>';
     } else {
       html += '<span class="jump-letter inactive" aria-hidden="true">' + letter + '</span>';
     }
@@ -1375,25 +1431,29 @@ function _matchesWantedPreset(item, preset) {
     return dir === 'to-local' || dir === 'to-debrid' || dir === 'to-local-fallback';
   }
   if (preset === 'fallback') return _getPendingDirection(item) === 'to-local-fallback';
-  return true;
+  if (preset === 'recent') return (item.date_added || 0) > 0;
+  return false;
 }
 
 function _computeWantedCounts() {
   var dataset = _activeTab === 'movies' ? _allMovies : _allShows;
-  var counts = {missing: 0, unavailable: 0, pending: 0, fallback: 0};
+  var counts = {missing: 0, unavailable: 0, pending: 0, fallback: 0, recent: 0};
   for (var i = 0; i < dataset.length; i++) {
     if (_countAiredMissing(dataset[i]) > 0) counts.missing++;
     var dir = _getPendingDirection(dataset[i]);
     if (dir === 'debrid-unavailable') counts.unavailable++;
     if (dir === 'to-local' || dir === 'to-debrid' || dir === 'to-local-fallback') counts.pending++;
     if (dir === 'to-local-fallback') counts.fallback++;
+    if ((dataset[i].date_added || 0) > 0) counts.recent++;
   }
+  // Cap recent count to 20 (the display limit)
+  counts.recent = Math.min(counts.recent, 20);
   return counts;
 }
 
 function _updateWantedUI() {
   var counts = _computeWantedCounts();
-  var ids = ['missing', 'unavailable', 'pending', 'fallback'];
+  var ids = ['missing', 'unavailable', 'pending', 'fallback', 'recent'];
   for (var i = 0; i < ids.length; i++) {
     var el = document.getElementById('pill-count-' + ids[i]);
     if (el) el.textContent = counts[ids[i]] > 0 ? '(' + counts[ids[i]] + ')' : '';
@@ -1411,11 +1471,12 @@ function _updateWantedUI() {
   var actionsBar = document.getElementById('wanted-actions');
   var searchBtn = document.getElementById('wanted-search-btn');
   var downloadBtn = document.getElementById('wanted-download-btn');
-  if (_activeWantedPreset && !_wantedInFlight) {
+  var hasActions = _activeWantedPreset && _activeWantedPreset !== 'recent';
+  if (hasActions && !_wantedInFlight) {
     actionsBar.style.display = '';
     searchBtn.style.display = _activeWantedPreset === 'missing' ? '' : 'none';
     downloadBtn.style.display = _activeWantedPreset === 'unavailable' ? '' : 'none';
-  } else if (_activeWantedPreset && _wantedInFlight) {
+  } else if (hasActions && _wantedInFlight) {
     actionsBar.style.display = '';  // keep visible during bulk operation
   } else {
     actionsBar.style.display = 'none';
@@ -3371,6 +3432,7 @@ try {
   var _savedSource = localStorage.getItem('pd_library_source');
   var _savedStatus = localStorage.getItem('pd_library_status');
   var _savedYear = localStorage.getItem('pd_library_year');
+  if (_savedSort === 'year') _savedSort = 'year-new'; // migrate old value
   if (_savedSort) document.getElementById('sort-select').value = _savedSort;
   if (_savedSource) document.getElementById('source-filter').value = _savedSource;
   if (_savedStatus) document.getElementById('status-filter').value = _savedStatus;
@@ -3380,7 +3442,7 @@ try {
 try {
   var _urlParams = new URLSearchParams(window.location.search);
   var _urlFilter = _urlParams.get('filter');
-  if (_urlFilter && ['missing', 'unavailable', 'pending', 'fallback'].indexOf(_urlFilter) !== -1) {
+  if (_urlFilter && ['missing', 'unavailable', 'pending', 'fallback', 'recent'].indexOf(_urlFilter) !== -1) {
     _activeWantedPreset = _urlFilter;
   }
 } catch(e) {}

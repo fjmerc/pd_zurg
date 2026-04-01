@@ -17,6 +17,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs, unquote as url_unquote
+from utils.api_metrics import api_metrics as _api_metrics
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -418,6 +419,9 @@ class StatusData:
             events = list(self.recent_events)
             error_count = self.error_count
 
+        # Provider API health metrics
+        provider_health = _api_metrics.get_metrics()
+
         return {
             'version': self.version,
             'uptime_seconds': int(time.time() - self.start_time),
@@ -427,6 +431,7 @@ class StatusData:
             'system': get_system_stats(),
             'recent_events': events,
             'error_count': error_count,
+            'provider_health': provider_health,
         }
 
 
@@ -539,7 +544,7 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 #procs td:nth-child(2),#procs td:nth-child(3){text-align:center}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
 .dot.green{background:var(--green)}.dot.red{background:var(--red);border-radius:2px}.dot.yellow{background:transparent;border:2px solid var(--yellow);width:8px;height:8px}
-.svc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+.svc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
 .svc-item{display:flex;align-items:center;padding:10px 12px;background:var(--bg);border-radius:6px;border:1px solid var(--border2)}
 .svc-item .svc-info{flex:1;margin-left:8px}
 .svc-item .svc-name{font-size:.85em;font-weight:500;color:var(--text)}
@@ -548,6 +553,11 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .svc-item .svc-badge.premium{background:#3fb9501a;color:var(--green)}
 .svc-item .svc-badge.warn{background:#d299221a;color:var(--yellow)}
 .svc-item .svc-badge.crit{background:#f851491a;color:var(--red)}
+.svc-health{font-size:.72em;color:var(--text3);margin-top:3px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.svc-health span{white-space:nowrap}
+.rl-bar{display:inline-block;width:40px;height:6px;background:var(--border);border-radius:3px;vertical-align:middle;overflow:hidden;position:relative}
+.rl-fill{height:100%;border-radius:3px;transition:width .3s}
+.rl-fill.green{background:var(--green)}.rl-fill.yellow{background:var(--yellow)}.rl-fill.red{background:var(--red)}
 .events{max-height:280px;overflow-y:auto}
 .event{padding:5px 0;border-bottom:1px solid var(--border2);font-size:.8em;display:flex;gap:8px}
 .event .time{color:var(--text3);min-width:55px;font-family:monospace;font-size:.85em}
@@ -873,10 +883,14 @@ function dot(ok){return '<span class="dot '+(ok?'green':'red')+'"></span>'+(ok?'
 function mdot(ok,yes,no){return '<span class="dot '+(ok?'green':'red')+'"></span>'+(ok?(yes||'Yes'):(no||'No'));}
 function sdot(s){return '<span class="dot '+(s==='ok'?'green':'red')+'"></span>';}
 
+const _providerKeyMap={'Real-Debrid':'realdebrid','AllDebrid':'alldebrid','TorBox':'torbox'};
+let _providerHealth={};
 function renderServices(svcs){
   if(!svcs||!svcs.length)return '<div style="color:var(--text2);padding:8px">No services configured</div>';
   let h='';
   svcs.forEach(s=>{
+    const pk=_providerKeyMap[s.name];
+    const ph=pk?_providerHealth[pk]:null;
     h+='<div class="svc-item">'+sdot(s.status)+'<div class="svc-info"><div class="svc-name">'+esc(s.name)+'</div>';
     if(s.status==='ok'){
       let det='Connected';
@@ -884,6 +898,21 @@ function renderServices(svcs){
       h+='<div class="svc-detail">'+det+'</div>';
     }else{
       h+='<div class="svc-detail" style="color:var(--red)">'+(s.detail?esc(s.detail):'Unreachable')+'</div>';
+    }
+    if(ph&&ph.calls_today>0){
+      h+='<div class="svc-health">';
+      h+='<span>API: '+esc(ph.calls_today)+(ph.errors_today?' ('+esc(ph.errors_today)+' err)':'')+'</span>';
+      h+='<span>Avg: '+esc((ph.avg_response_ms/1000).toFixed(1))+'s</span>';
+      if(ph.rate_limit_remaining!=null&&ph.rate_limit_limit!=null&&ph.rate_limit_limit>0){
+        const pct=Math.round((ph.rate_limit_remaining/ph.rate_limit_limit)*100);
+        const used=100-pct;
+        const cls=used>80?'red':used>50?'yellow':'green';
+        h+='<span>RL: <span class="rl-bar"><span class="rl-fill '+cls+'" style="width:'+used+'%"></span></span> '+esc(ph.rate_limit_remaining)+'/'+esc(ph.rate_limit_limit)+'</span>';
+      }
+      h+='</div>';
+      if(ph.last_error){
+        h+='<div class="svc-health" style="color:var(--red)"><span>Last err: '+esc(ph.last_error)+(ph.last_error_time?' ('+esc(ph.last_error_time)+')':'')+'</span></div>';
+      }
     }
     h+='</div>';
     if(s.days_remaining!==undefined&&s.days_remaining!==null){
@@ -909,7 +938,10 @@ function update(){
     document.getElementById('errors').textContent=d.error_count;
     document.getElementById('error-line').style.display=d.error_count>0?'block':'none';
 
-    // Banner for RD premium expiry
+    // Store provider health for renderServices
+    _providerHealth=d.provider_health||{};
+
+    // Banner for RD premium expiry + rate limit warnings
     const banner=document.getElementById('banner');
     let bannerShown=false;
     if(d.services)d.services.forEach(s=>{
@@ -921,6 +953,20 @@ function update(){
         bannerShown=true;
       }
     });
+    if(!bannerShown){
+      for(const[pk,ph] of Object.entries(_providerHealth)){
+        if(ph.rate_limit_remaining!=null&&ph.rate_limit_limit!=null&&ph.rate_limit_limit>0){
+          const usedPct=Math.round(((ph.rate_limit_limit-ph.rate_limit_remaining)/ph.rate_limit_limit)*100);
+          if(usedPct>=80){
+            const name=Object.entries(_providerKeyMap).find(([,v])=>v===pk);
+            const label=name?name[0]:pk;
+            banner.className='banner '+(usedPct>=95?'crit':'warn');
+            banner.innerHTML=esc(label)+' API rate limit at '+usedPct+'% — automated searches may be throttled.';
+            bannerShown=true;break;
+          }
+        }
+      }
+    }
     if(!bannerShown)banner.className='banner';
 
     // Services

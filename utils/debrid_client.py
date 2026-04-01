@@ -11,6 +11,7 @@ import re
 import requests
 
 from base import load_secret_or_env
+from utils.api_metrics import tracked_request
 from utils.library import normalize_title, parse_folder_name
 from utils.logger import get_logger
 
@@ -119,7 +120,8 @@ class RealDebridClient(DebridClientBase):
         return {'Authorization': f'Bearer {self._api_key}'}
 
     def list_torrents(self):
-        resp = requests.get(
+        resp = tracked_request(
+            self._name, requests.get,
             f'{self._BASE}/torrents',
             headers=self._headers(),
             params={'limit': 2500},
@@ -144,7 +146,8 @@ class RealDebridClient(DebridClientBase):
             logger.error(f"[debrid] RD invalid torrent ID: {torrent_id!r}")
             return False
         try:
-            resp = requests.delete(
+            resp = tracked_request(
+                self._name, requests.delete,
                 f'{self._BASE}/torrents/delete/{torrent_id}',
                 headers=self._headers(),
                 timeout=_TIMEOUT,
@@ -172,7 +175,8 @@ class AllDebridClient(DebridClientBase):
         return {'agent': 'pd_zurg', 'apikey': self._api_key}
 
     def list_torrents(self):
-        resp = requests.get(
+        resp = tracked_request(
+            self._name, requests.get,
             f'{self._BASE}/magnet/status',
             params=self._params(),
             timeout=_TIMEOUT,
@@ -198,7 +202,8 @@ class AllDebridClient(DebridClientBase):
             return False
         try:
             params = {**self._params(), 'id': torrent_id}
-            resp = requests.get(
+            resp = tracked_request(
+                self._name, requests.get,
                 f'{self._BASE}/magnet/delete',
                 params=params,
                 timeout=_TIMEOUT,
@@ -228,7 +233,8 @@ class TorBoxClient(DebridClientBase):
         return {'Authorization': f'Bearer {self._api_key}'}
 
     def list_torrents(self):
-        resp = requests.get(
+        resp = tracked_request(
+            self._name, requests.get,
             f'{self._BASE}/torrents/mylist',
             headers=self._headers(),
             params={'bypass_cache': 'true'},
@@ -254,7 +260,8 @@ class TorBoxClient(DebridClientBase):
             logger.error(f"[debrid] TB invalid torrent ID: {torrent_id!r}")
             return False
         try:
-            resp = requests.post(
+            resp = tracked_request(
+                self._name, requests.post,
                 f'{self._BASE}/torrents/controltorrent',
                 headers=self._headers(),
                 json={'torrent_id': int(torrent_id), 'operation': 'Delete'},

@@ -103,8 +103,14 @@ ENV_SCHEMA = [
         'description': 'Apprise notification service',
         'fields': [
             ('NOTIFICATION_URL', 'Notification URL(s)', 'string', False, 'Apprise notification URL(s), comma-separated'),
-            ('NOTIFICATION_EVENTS', 'Notification Events', 'string', False, 'Comma-separated event types to notify on'),
+            ('NOTIFICATION_EVENTS', 'Notification Events', 'string', False,
+             'Comma-separated event types: startup, shutdown, download_complete, download_error, '
+             'library_refresh, symlink_created, symlink_failed, debrid_unavailable, '
+             'local_fallback_triggered, blocklist_added, health_error, daily_digest. '
+             'Leave empty for all events'),
             ('NOTIFICATION_LEVEL', 'Minimum Level', 'select:info,warning,error', False, 'Minimum severity to send notifications'),
+            ('NOTIFICATION_DIGEST_ENABLED', 'Daily Digest', 'boolean', False, 'Send a daily summary notification'),
+            ('NOTIFICATION_DIGEST_TIME', 'Digest Time (HH:MM)', 'string', False, 'When to send the daily digest (24h format, default: 08:00)'),
         ],
     },
     {

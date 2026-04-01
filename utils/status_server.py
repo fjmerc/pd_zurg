@@ -1760,6 +1760,8 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 from utils.library_prefs import set_pending
                 norm = normalize_title(title)
 
+                fallback_triggered = False
+                season = None
                 if service_name == 'sonarr':
                     season = values.get('season')
                     episodes = values.get('episodes', [])
@@ -1779,12 +1781,32 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     if result.get('status') in ('sent', 'pending'):
                         pending_eps = [{'season': season, 'episode': e} for e in episodes]
                         set_pending(norm, pending_eps, 'to-local-fallback')
+                        fallback_triggered = True
                 elif service_name == 'radarr':
                     result = client.ensure_and_search(title, tmdb_id, prefer_debrid=False)
                     if result.get('status') in ('sent', 'pending'):
                         set_pending(norm, [{'season': 0, 'episode': 0}], 'to-local-fallback')
+                        fallback_triggered = True
                 else:
                     result = {'status': 'error', 'message': f'Local fallback requires Sonarr/Radarr, got {service_name}'}
+
+                if fallback_triggered:
+                    try:
+                        from utils.notifications import notify
+                        ep_detail = f' S{season:02d}' if service_name == 'sonarr' else ''
+                        notify('local_fallback_triggered',
+                               f'Local Fallback: {title}{ep_detail}',
+                               f'Downloading locally as debrid fallback via {service_name}')
+                    except Exception:
+                        pass
+                    try:
+                        from utils import history as _hist
+                        episode_str = f'S{season:02d}' if service_name == 'sonarr' else None
+                        _hist.log_event('local_fallback_triggered', title,
+                                        episode=episode_str, source='library',
+                                        detail=f'Local fallback download via {service_name}')
+                    except Exception:
+                        pass
 
                 status_code = 200 if result.get('status') != 'error' else 400
                 self._send_json_response(status_code, json.dumps(result))

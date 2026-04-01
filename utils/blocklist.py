@@ -77,7 +77,18 @@ def add(info_hash, title, reason='', source='manual'):
 
         _save_unlocked()
         logger.info(f"[blocklist] Added: {title} ({info_hash[:16]}...) reason={reason} source={source}")
-        return entry_id
+
+    # Notify outside the lock to avoid holding it during I/O
+    try:
+        from utils.notifications import notify
+        reason_str = f': {reason}' if reason else ''
+        notify('blocklist_added',
+               f'Blocklisted: {title[:60]}',
+               f'Torrent blocklisted ({source}){reason_str}')
+    except Exception:
+        pass
+
+    return entry_id
 
 
 def remove(entry_id):

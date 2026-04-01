@@ -1513,6 +1513,7 @@ class LibraryScanner:
 
         now = datetime.now(timezone.utc)
         threshold_days = self._debrid_unavailable_days
+        escalated = []
 
         for norm_title, entry in list(pending.items()):
             if entry.get('direction') != 'to-debrid':
@@ -1527,11 +1528,29 @@ class LibraryScanner:
                 age_days = (now - created_dt).days
                 if age_days >= threshold_days:
                     mark_debrid_unavailable(norm_title)
+                    escalated.append(norm_title)
                     logger.info(
                         f"[library] Marked {norm_title!r} as debrid-unavailable "
                         f"after {age_days} days"
                     )
             except (ValueError, TypeError):
+                pass
+
+        if escalated:
+            if _history:
+                for t in escalated:
+                    _history.log_event('debrid_unavailable', t, source='library',
+                                       detail=f'Marked debrid-unavailable after {threshold_days}+ days')
+            try:
+                from utils.notifications import notify
+                summary = ', '.join(escalated[:5])
+                if len(escalated) > 5:
+                    summary += f', +{len(escalated) - 5} more'
+                notify('debrid_unavailable',
+                       f'Debrid Unavailable ({len(escalated)})',
+                       f'Content not found on debrid after {threshold_days} days: {summary}',
+                       level='warning')
+            except Exception:
                 pass
 
     def _recover_local_fallback_routing(self, shows, movies):
@@ -1679,6 +1698,7 @@ class LibraryScanner:
         created = 0
         symlinked_shows = set()   # titles that got new symlinks
         symlinked_movies = set()  # titles that got new symlinks
+        failed_titles = {}        # title -> last error string
 
         # Fetch arr libraries for canonical folder names and rescan IDs.
         # Index by both exact lowercase title and normalized title (stripped
@@ -1840,6 +1860,7 @@ class LibraryScanner:
                 except FileExistsError:
                     pass
                 except OSError as e:
+                    failed_titles[title] = str(e)
                     logger.warning(
                         "[library] Failed to create movie symlink for %r: %s",
                         title, e
@@ -1910,6 +1931,7 @@ class LibraryScanner:
                         except FileExistsError:
                             pass
                         except OSError as e:
+                            failed_titles[title] = str(e)
                             logger.warning(
                                 "[library] Failed to create symlink for %r S%02dE%02d: %s",
                                 title, snum, enum, e
@@ -1924,6 +1946,38 @@ class LibraryScanner:
                 for t in symlinked_movies:
                     _history.log_event('symlink_created', t, source='library',
                                        detail=f'Debrid symlink(s) created in local library')
+            # Batch notification for symlink_created
+            try:
+                from utils.notifications import notify
+                all_titles = sorted(symlinked_shows | symlinked_movies)
+                summary = ', '.join(all_titles[:5])
+                if len(all_titles) > 5:
+                    summary += f', +{len(all_titles) - 5} more'
+                notify('symlink_created',
+                       f'Debrid Symlinks Created ({created})',
+                       f'Created {created} symlink(s): {summary}')
+            except Exception:
+                pass
+
+        if failed_titles:
+            if _history:
+                for t, err in failed_titles.items():
+                    _history.log_event('symlink_failed', t, source='library',
+                                       detail=f'Symlink creation failed: {err}')
+            try:
+                from utils.notifications import notify
+                titles = sorted(failed_titles)[:5]
+                summary = ', '.join(titles)
+                if len(failed_titles) > 5:
+                    summary += f', +{len(failed_titles) - 5} more'
+                notify('symlink_failed',
+                       f'Symlink Failed ({len(failed_titles)})',
+                       f'Failed to create symlinks: {summary}',
+                       level='warning')
+            except Exception:
+                pass
+
+        if created:
             # Trigger arr rescans so Sonarr/Radarr discover the new files
             if symlinked_shows and not sonarr_map:
                 if sonarr_fetch_failed:

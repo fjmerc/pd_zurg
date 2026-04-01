@@ -24,6 +24,30 @@ _lock = threading.Lock()
 LEVEL_ORDER = {'info': 0, 'warning': 1, 'error': 2}
 _VALID_LEVELS = ('info', 'warning', 'error')
 
+# All supported event types for NOTIFICATION_EVENTS filtering.
+# Users can subscribe to any subset via comma-separated list.
+# Set — order is not significant; see settings_api.py for documentation order.
+ALL_EVENTS = {
+    # Core lifecycle
+    'startup',                    # Service/container started or config reloaded
+    'shutdown',                   # Service shutting down
+    # Downloads (blackhole)
+    'download_complete',          # Torrent download & symlink succeeded
+    'download_error',             # Torrent download failed
+    # Library
+    'library_refresh',            # Source switch or library change
+    'symlink_created',            # Debrid symlinks created in local library
+    'symlink_failed',             # Symlink creation failed (mount/path issue)
+    # Debrid availability
+    'debrid_unavailable',         # Content marked debrid-unavailable after threshold
+    'local_fallback_triggered',   # Local download started as debrid fallback
+    # Safety
+    'blocklist_added',            # Torrent added to blocklist
+    'health_error',               # Process crash, mount failure
+    # Digest
+    'daily_digest',               # Daily summary notification
+}
+
 
 def init():
     """Initialize Apprise from environment. Call once at startup."""

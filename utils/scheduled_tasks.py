@@ -7,7 +7,7 @@ optional 'message', and optional 'items' count for result tracking.
 import os
 import shutil
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -589,6 +589,82 @@ def mount_liveness_probe():
 
 
 # ---------------------------------------------------------------------------
+# Task: Notification Digest (Daily summary)
+# ---------------------------------------------------------------------------
+
+def notification_digest():
+    """Send a daily summary notification of the last 24 hours of events."""
+    if not _history:
+        return {'status': 'skipped', 'message': 'History module not available'}
+
+    now = datetime.now(timezone.utc)
+    start_iso = (now - timedelta(hours=24)).isoformat(timespec='seconds')
+
+    result = _history.query(start=start_iso, limit=200)
+    events = result.get('events', [])
+    if not events:
+        return {'status': 'success', 'message': 'No events today, digest skipped'}
+
+    # Tally by event type
+    counts = {}
+    for ev in events:
+        t = ev.get('type', 'unknown')
+        counts[t] = counts.get(t, 0) + 1
+
+    # Build human-readable summary
+    labels = {
+        'grabbed': 'torrents grabbed',
+        'cached': 'cached on debrid',
+        'symlink_created': 'symlinks created',
+        'symlink_failed': 'symlink failures',
+        'failed': 'failures',
+        'debrid_unavailable': 'marked unavailable',
+        'local_fallback_triggered': 'local fallback downloads',
+        'blocklist_added': 'blocklisted',
+        'cleanup': 'cleanups',
+        'source_switch': 'source switches',
+        'search': 'searches triggered',
+        'rescan': 'rescans triggered',
+    }
+
+    parts = []
+    for event_type, count in sorted(counts.items(), key=lambda x: -x[1]):
+        label = labels.get(event_type, event_type.replace('_', ' '))
+        parts.append(f'{count} {label}')
+
+    body = 'Today: ' + ', '.join(parts)
+
+    try:
+        from utils.notifications import notify
+        notify('daily_digest', 'pd_zurg Daily Summary', body)
+    except Exception as e:
+        logger.error(f"[scheduler] Digest notification failed: {e}")
+        return {'status': 'error', 'message': str(e)}
+
+    return {'status': 'success', 'message': body, 'items': len(events)}
+
+
+def _compute_digest_delay():
+    """Compute seconds until next NOTIFICATION_DIGEST_TIME (local wall clock)."""
+    time_str = os.environ.get('NOTIFICATION_DIGEST_TIME', '08:00').strip()
+    try:
+        parts = time_str.split(':')
+        hour = int(parts[0])
+        minute = int(parts[1]) if len(parts) > 1 else 0
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError(f"out of range: {hour}:{minute}")
+    except (ValueError, IndexError):
+        logger.warning(f"[scheduler] Invalid NOTIFICATION_DIGEST_TIME='{time_str}', using 08:00")
+        hour, minute = 8, 0
+
+    now = datetime.now()
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -695,6 +771,17 @@ def register_all():
             interval_seconds=_get_interval('MOUNT_LIVENESS_INTERVAL'),
             description='Verify rclone FUSE mount is responsive',
             initial_delay=60,
+        )
+
+    # Notification Digest — daily summary if enabled
+    digest_enabled = os.environ.get('NOTIFICATION_DIGEST_ENABLED', 'false').lower() == 'true'
+    if digest_enabled and os.environ.get('NOTIFICATION_URL'):
+        scheduler.register(
+            'notification_digest',
+            notification_digest,
+            interval_seconds=24 * 3600,  # once per day
+            description='Send daily summary of pipeline events',
+            initial_delay=_compute_digest_delay(),
         )
 
     logger.info(f"[scheduler] Registered {len(scheduler.get_status())} total tasks")

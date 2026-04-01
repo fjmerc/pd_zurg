@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Version [2.16.0] - 2026-03-31
 
+### Fixed
+
+- **Wanted nav link 404**: The "Wanted" navigation link (`/library?filter=missing`) returned a 404 because the server route used exact path matching, ignoring query parameters.
+
 ### Added
 
 - **Provider Health Card**: Dashboard service cards for debrid providers now display API call counts, error rates, average response times, and rate limit usage. A color-coded rate limit bar visualizes remaining quota. A warning banner appears when rate limit usage exceeds 80%.

@@ -519,7 +519,7 @@ __BASE_HEAD__
 </head>
 <body>
 __NAV_HTML__
-<div class="meta">Uptime: <span id="uptime"></span></div>
+<div class="meta">Uptime: <span id="uptime"></span> <span class="freshness"><span class="pulse-dot" id="fetch-dot"></span><span id="freshness-text"></span></span></div>
 <div class="meta" id="error-line" style="display:none;color:var(--red)">Errors: <span id="errors">0</span></div>
 <div class="banner" id="banner"></div>
 <div class="grid full">
@@ -545,8 +545,8 @@ __NAV_HTML__
   <div class="card">
     <h2>System</h2>
     <div class="stats-row">
-      <div><div class="stat-value" id="mem-used">-</div><div class="stat-label" id="mem-label">Memory Used</div></div>
-      <div><div class="stat-value" id="cpu-used">-</div><div class="stat-label" id="cpu-label">CPU</div></div>
+      <div class="stat-container"><svg class="stat-ring" viewBox="0 0 120 120"><circle cx="60" cy="60" r="52" class="ring-bg"/><circle cx="60" cy="60" r="52" class="ring-fill" id="mem-ring-fill"/></svg><div class="stat-inner"><div class="stat-value" id="mem-used">-</div><div class="stat-label" id="mem-label">Memory Used</div></div></div>
+      <div class="stat-container"><svg class="stat-ring" viewBox="0 0 120 120"><circle cx="60" cy="60" r="52" class="ring-bg"/><circle cx="60" cy="60" r="52" class="ring-fill" id="cpu-ring-fill"/></svg><div class="stat-inner"><div class="stat-value" id="cpu-used">-</div><div class="stat-label" id="cpu-label">CPU</div></div></div>
     </div>
   </div>
   <div class="card">
@@ -824,7 +824,24 @@ function renderServices(svcs){
   return h;
 }
 
+var _lastFetchTime=0;
+function updateRing(id,pct){var f=document.getElementById(id);if(!f)return;var c=326.73,o=c-(c*Math.min(pct,100)/100);f.style.strokeDashoffset=o;f.style.stroke=pct>85?'var(--red)':pct>60?'var(--yellow)':'var(--green)';}
+function setCardHealth(h2Text,cls){var heads=document.querySelectorAll('.card h2');for(var i=0;i<heads.length;i++){if(heads[i].textContent.trim().startsWith(h2Text)){var c=heads[i].parentElement;c.classList.remove('card-ok','card-warn','card-crit');if(cls)c.classList.add(cls);break;}}}
+function updateCardStates(d){
+  var sH='ok',pH='ok',mH='ok',yH='ok',eH='ok',overall='ok';
+  if(d.services){d.services.forEach(function(s){if(s.status!=='ok')sH='crit';if(s.days_remaining!=null){if(s.days_remaining<=3)sH='crit';else if(s.days_remaining<=7&&sH==='ok')sH='warn';}});for(var pk in _providerHealth){var ph=_providerHealth[pk];if(ph.rate_limit_remaining!=null&&ph.rate_limit_limit!=null&&ph.rate_limit_limit>0){var u=Math.round(((ph.rate_limit_limit-ph.rate_limit_remaining)/ph.rate_limit_limit)*100);if(u>=80&&sH==='ok')sH='warn';}}}
+  d.processes.forEach(function(p){if(!p.running)pH='crit';});
+  d.mounts.forEach(function(m){if(!m.mounted||!m.accessible)mH='crit';});
+  if(d.system.memory_percent!=null){if(d.system.memory_percent>85)yH='crit';else if(d.system.memory_percent>60)yH='warn';}
+  if(d.system.cpu_percent!=null){if(d.system.cpu_percent>85)yH='crit';else if(d.system.cpu_percent>60&&yH==='ok')yH='warn';}
+  if(d.recent_events)d.recent_events.forEach(function(v){if(v.level==='error')eH='warn';});
+  setCardHealth('Services','card-'+sH);setCardHealth('Processes','card-'+pH);setCardHealth('Mounts','card-'+mH);setCardHealth('System','card-'+yH);setCardHealth('Recent Events','card-'+eH);
+  if(sH==='crit'||pH==='crit'||mH==='crit'||yH==='crit')overall='crit';else if(sH==='warn'||pH==='warn'||mH==='warn'||yH==='warn')overall='warn';
+  if(typeof updateFavicon==='function')updateFavicon(overall);
+}
+
 function update(){
+  var _fd=document.getElementById('fetch-dot');if(_fd)_fd.className='pulse-dot fetching';
   fetch('/api/status').then(r=>r.json()).then(d=>{
     var hm=document.getElementById('header-meta');if(hm)hm.textContent='v'+d.version;
     document.getElementById('uptime').textContent=fmt(d.uptime_seconds);
@@ -889,10 +906,12 @@ function update(){
         document.getElementById('mem-label').textContent='Memory Used (no limit)';
       }
     }
+    updateRing('mem-ring-fill',d.system.memory_percent||0);
     // System — CPU
     if(d.system.cpu_percent!==undefined){
       document.getElementById('cpu-used').textContent=d.system.cpu_percent.toFixed(1)+'%';
       document.getElementById('cpu-label').textContent='CPU';
+      updateRing('cpu-ring-fill',d.system.cpu_percent);
     }else if(d.system.cpu_usage_usec!==undefined){
       document.getElementById('cpu-used').textContent=(d.system.cpu_usage_usec/1000000).toFixed(1)+'s';
       document.getElementById('cpu-label').textContent='CPU Time';
@@ -923,9 +942,12 @@ function update(){
     document.getElementById('events').innerHTML=e;
     _failCount=0;
     document.getElementById('conn-status').textContent='';
+    _lastFetchTime=Date.now();
+    if(_fd){_fd.className='pulse-dot';document.getElementById('freshness-text').textContent='Updated just now';}
+    updateCardStates(d);
   }).catch(()=>{
     _failCount++;
-    if(_failCount>=3)document.getElementById('conn-status').textContent='Connection lost \u2014 retrying... ';
+    if(_failCount>=3){document.getElementById('conn-status').textContent='Connection lost \u2014 retrying... ';if(_fd)_fd.className='pulse-dot lost';}
   });
 }
 // Detect auth by trying an auth-required endpoint
@@ -1091,6 +1113,7 @@ function setRefreshInterval(sec){
 update();updateLogs();updateTasks();
 setRefreshInterval(10);
 setTimeout(updateMountHistory,1000);
+setInterval(function(){if(!_lastFetchTime)return;var s=Math.floor((Date.now()-_lastFetchTime)/1000);var el=document.getElementById('freshness-text');if(!el)return;if(s<5)el.textContent='Updated just now';else if(s<60)el.textContent='Updated '+s+'s ago';else el.textContent='Updated '+Math.floor(s/60)+'m ago';},1000);
 __WANTED_BADGE_JS__
 
 // Activity tab
@@ -1253,6 +1276,19 @@ dialog .dlg-cancel{background:var(--border);color:var(--text)}
 dialog .dlg-confirm{background:var(--blue);color:#fff}
 .type-badge{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-size:.75em;font-weight:500;white-space:nowrap}
 .type-grabbed{background:#58a6ff1a;color:var(--blue)}.type-cached{background:#3fb9501a;color:var(--green)}.type-symlink_created{background:#bc8cff1a;color:#bc8cff}.type-failed{background:#f851491a;color:var(--red)}.type-cleanup{background:#d299221a;color:var(--yellow)}.type-switched_source{background:#db6d281a;color:var(--orange)}.type-search_triggered{background:#58a6ff1a;color:var(--blue)}.type-rescan_triggered{background:#3fb9501a;color:var(--green)}.type-task_completed{background:var(--border);color:var(--text2)}.type-blocklisted{background:#f851491a;color:var(--red)}.type-blocklist_added{background:#db6d281a;color:var(--orange)}
+.freshness{margin-left:12px;font-size:.9em;color:var(--text3);display:inline-flex;align-items:center;gap:4px}
+.pulse-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0}
+.pulse-dot.fetching{background:var(--blue);animation:pulse-fetch 1s ease-in-out infinite}
+@keyframes pulse-fetch{0%,100%{opacity:1}50%{opacity:.3}}
+.pulse-dot.lost{background:var(--red)}
+.card-ok{box-shadow:inset 3px 0 0 var(--green)}
+.card-warn{box-shadow:inset 3px 0 0 var(--yellow)}
+.card-crit{box-shadow:inset 3px 0 0 var(--red)}
+.stat-container{position:relative;flex:1;display:flex;flex-direction:column;align-items:center}
+.stat-ring{width:110px;height:110px;transform:rotate(-90deg)}
+.ring-bg{fill:none;stroke:var(--border);stroke-width:6}
+.ring-fill{fill:none;stroke:var(--green);stroke-width:6;stroke-linecap:round;stroke-dasharray:326.73;stroke-dashoffset:326.73;transition:stroke-dashoffset var(--motion-slow) ease,stroke var(--motion-normal)}
+.stat-inner{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;pointer-events:none}
 """
 
 

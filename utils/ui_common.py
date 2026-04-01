@@ -139,6 +139,37 @@ WANTED_BADGE_JS = r"""
 })(0);
 """
 
+# ---------------------------------------------------------------------------
+# Dynamic favicon JS (changes color based on system health)
+# ---------------------------------------------------------------------------
+
+FAVICON_JS = r"""
+(function(){
+  var _fts=0;
+  function _fsvg(c){return 'data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path d="M58 2L22 52h20L34 98 78 42H54z" fill="'+c+'"/></svg>');}
+  window.updateFavicon=function(h){
+    var c=h==='crit'?'#f85149':h==='warn'?'#d29922':'#3fb950';
+    var l=document.querySelector('link[rel="icon"]');
+    if(l)l.href=_fsvg(c);
+    _fts=Date.now();
+  };
+  function _poll(){
+    if(Date.now()-_fts<25000){setTimeout(_poll,30000);return;}
+    fetch('/api/status').then(function(r){return r.json()}).then(function(d){
+      var h='ok';
+      if(d.services)d.services.forEach(function(s){if(s.status!=='ok')h='crit';});
+      (d.processes||[]).forEach(function(p){if(!p.running)h='crit';});
+      (d.mounts||[]).forEach(function(m){if(!m.mounted||!m.accessible)h='crit';});
+      if(d.system){if(d.system.memory_percent!=null&&d.system.memory_percent>85&&h==='ok')h='warn';if(d.system.cpu_percent!=null&&d.system.cpu_percent>85&&h==='ok')h='warn';}
+      if(h==='ok'&&d.services)d.services.forEach(function(s){if(s.days_remaining!=null&&s.days_remaining<=7){h=s.days_remaining<=3?'crit':'warn';}});
+      updateFavicon(h);
+    }).catch(function(){updateFavicon('warn');});
+    setTimeout(_poll,30000);
+  }
+  setTimeout(_poll,2000);
+})();
+"""
+
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -159,7 +190,7 @@ def get_base_head(title, extra_css=''):
         '<meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
         '<meta name="color-scheme" content="dark light">',
-        '<link rel="icon" href="data:image/svg+xml,<svg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 100 100\'><text y=\'.9em\' font-size=\'90\'>&#x26A1;</text></svg>">',
+        '<link rel="icon" href="data:image/svg+xml,<svg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 100 100\'><path d=\'M58 2L22 52h20L34 98 78 42H54z\' fill=\'%233fb950\'/></svg>">',
         '<title>' + title + '</title>',
         '<style>' + BASE_CSS,
     ]
@@ -167,6 +198,7 @@ def get_base_head(title, extra_css=''):
         parts.append(extra_css)
     parts.append('</style>')
     parts.append(THEME_INIT_SCRIPT)
+    parts.append('<script>' + FAVICON_JS + '</script>')
     return '\n'.join(parts)
 
 

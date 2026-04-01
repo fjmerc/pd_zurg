@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
-## Version [2.16.0] - 2026-03-31
+## Version [2.16.0] - 2026-04-01
 
 ### Changed
 
@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Data Freshness Indicator**: Dashboard now shows "Updated Xs ago" next to uptime, with a pulsing dot during active fetch and red indicator on connection loss.
+- **Card Priority Signaling**: Dashboard cards display colored left-border accents based on health state — green (healthy), yellow (warnings like rate limits near threshold), red (errors like service down or mount failure). Health is evaluated per-card for Services, Processes, Mounts, System, and Events.
+- **System Stats Progress Rings**: CPU and Memory stats now feature SVG circular progress rings behind the numeric values, color-coded by percentage (green <60%, yellow 60-85%, red >85%).
+- **Dynamic Favicon**: The browser tab favicon is now an SVG lightning bolt that changes color based on overall system health (green/yellow/red). Updates on each status poll on the dashboard, and via a lightweight 30-second poller on Library and Settings pages.
 - **Provider Health Card**: Dashboard service cards for debrid providers now display API call counts, error rates, average response times, and rate limit usage. A color-coded rate limit bar visualizes remaining quota. A warning banner appears when rate limit usage exceeds 80%.
 - **Structured Activity History**: All debrid pipeline events (grabs, cache hits, symlinks, failures, source switches, searches, rescans, task completions) are now logged to persistent JSONL storage. New Activity section on the dashboard displays events in a filterable, paginated table with type badges and auto-refresh. Per-show/movie history is available as a collapsible section in the library detail view. History is automatically rotated based on `HISTORY_RETENTION_DAYS` (default 30). API endpoints: `GET /api/history`, `GET /api/history/show/{title}`, `DELETE /api/history`.
 - **Mass Editor**: Library browser now supports bulk selection mode — click "Select" to toggle checkboxes on poster cards, shift-click for range selection, then apply preferences or trigger missing-episode searches across multiple shows/movies at once via a fixed action bar. Selections persist across tab switches.

@@ -29,6 +29,10 @@ Test fixtures in `tests/conftest.py`: `tmp_dir`, `env_vars` (monkeypatch), `clea
 - **Services:** `zurg/`, `rclone/`, `plex_debrid_/` each have setup, update, and download modules.
 - **HTTP dashboard:** `utils/status_server.py` + `settings_api.py` + `settings_page.py` — raw `http.server.HTTPServer`, no framework.
 - **Library scanner:** `utils/library.py` — `LibraryScanner` with split `_scan_read()` (read-only enumeration) and `_scan_effects()` (preference enforcement, arr searches, symlinks). `refresh()` updates the cache after the read phase so the UI gets data in seconds, then runs effects in the background. Tries WebDAV PROPFIND to Zurg directly (`utils/webdav.py`) before falling back to FUSE mount scanning.
+- **Debrid search:** `utils/search.py` — Torrentio client + debrid cache checks (RD/AD/TB) + add-to-debrid. Uses urllib only (no requests). Enabled by `TORRENTIO_URL` env var. IMDb IDs flow from TMDB cache (`tmdb.py` `imdb_id` field) → library enrichment (`library.py`) → `/api/library` response → UI search buttons.
+- **History:** `utils/history.py` — JSONL event log. `log_event(type, title, ...)` appends events. Query via `query()` or `/api/history`.
+- **Blocklist:** `utils/blocklist.py` — Hash-based torrent rejection. `is_blocked(hash)` for O(1) lookup, `add(hash, title, ...)` to block.
+- **Notifications:** `utils/notifications.py` — Apprise-based. `notify(event, title, body, level)` sends if event+level are enabled.
 
 ## Gotchas and Key Patterns
 
@@ -37,12 +41,15 @@ Test fixtures in `tests/conftest.py`: `tmp_dir`, `env_vars` (monkeypatch), `clea
 - **NEVER use raw `subprocess.Popen`.** Always use `utils/processes.py` wrappers so processes are registered for coordinated shutdown.
 - **ALWAYS use `utils/file_utils.py` atomic write** for file writes to prevent corruption.
 - **Sonarr and Radarr are parallel systems.** Any feature, fix, or API integration for one MUST have an equivalent for the other. This applies to arr client code, symlink creation, library scanning, pending state, download/remove endpoints, and rescan triggers. Always implement both in the same change.
-- **`arr_client.py` and `webdav.py` use urllib only** — no requests/httpx dependency. Keep it that way.
+- **`arr_client.py`, `webdav.py`, and `search.py` use urllib only** — no requests/httpx dependency. Keep it that way.
 - **Two separate symlink systems exist.** Blackhole completed-dir symlinks (`blackhole.py:_create_symlinks`) use original torrent folder names for arr import. Library debrid symlinks (`library.py:_create_debrid_symlinks`) use the arr's canonical folder name from API. Changes to symlink target construction, path translation, or verification must be checked against BOTH systems.
 - **Title matching uses a 3-level cascade: exact → `_norm_for_matching` → TMDB ID fallback.** Most real titles require the TMDB ID fallback (e.g., torrent "F1 The Movie" → Radarr "F1"). This cascade appears in 4 places that must stay symmetric: movie dir selection, show dir selection, movie rescan trigger, show rescan trigger. Never add or change a level in one without updating all four.
 - **`_normalize_title` ≠ `_norm_for_matching`.** `_normalize_title` is the TMDB cache key (lowercase + strip trailing year). `_norm_for_matching` is the arr fuzzy-match key (transliterate + strip punctuation + hyphens→spaces). They are NOT interchangeable. Changing either affects all downstream consumers.
 - **Symlink targets use `BLACKHOLE_SYMLINK_TARGET_BASE`** (exists in arr/Plex containers, NOT in pd_zurg). Verification code in `verify_symlinks` and `_cleanup_symlinks` must translate targets back to `BLACKHOLE_RCLONE_MOUNT` before checking existence. These are inverse operations — if creation logic changes, verification must change identically.
 - **`MEDIA_EXTENSIONS` is defined in three files** (`library.py`, `blackhole.py`, `scheduled_tasks.py`). These sets MUST be identical. A mismatch causes files visible to creation but invisible to verification or vice versa.
+- **TMDB cache stores `imdb_id`** for both movies and shows. `get_show_metadata()` uses `append_to_response=external_ids` to fetch it. `get_cached_posters()` includes it. `_enrich_with_tmdb_cache()` propagates it to library items. Clearing the TMDB cache (`/config/tmdb_cache.json`) forces a full re-fetch — takes several minutes for large libraries.
+- **`search.py` logs strip query parameters** via `_safe_log_url()` to prevent debrid API key leakage. Never log full URLs containing credentials.
+- **New notification events** must be added to `ALL_EVENTS` in `notifications.py` AND documented in the `NOTIFICATION_EVENTS` help text in `settings_api.py`.
 
 ## Commit Checklist
 

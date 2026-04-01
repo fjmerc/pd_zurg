@@ -176,6 +176,30 @@ textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;l
 [data-theme="light"] .toggle .slider{background:var(--border)}
 [data-theme="light"] .toggle .slider:before{background:#fff}
 [data-theme="light"] .preset-card:hover{background:#0969da08}
+
+/* 4a: Sticky save bar */
+.save-bar{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--border);padding:10px 20px;display:flex;align-items:center;gap:12px;z-index:20;box-shadow:0 -4px 12px rgba(0,0,0,.2);justify-content:center;transform:translateY(100%);transition:transform .3s ease,opacity .3s ease;pointer-events:none;opacity:0}
+.save-bar.visible{transform:translateY(0);pointer-events:auto;opacity:1}
+.save-bar .change-count{font-size:.85em;font-weight:600;color:var(--yellow);white-space:nowrap}
+body.has-save-bar{padding-bottom:72px}
+body.has-save-bar .footer{margin-bottom:48px}
+[data-theme="light"] .save-bar{box-shadow:0 -4px 12px rgba(0,0,0,.08)}
+
+/* 4b: Category modification indicators */
+.cat-dirty{display:none;align-items:center;gap:6px;margin-left:auto;margin-right:8px}
+.cat-header.has-changes .cat-dirty{display:flex}
+.cat-dirty-dot{width:8px;height:8px;border-radius:50%;background:var(--yellow);flex-shrink:0}
+.cat-dirty-count{font-size:.72em;color:var(--yellow);font-weight:500;white-space:nowrap}
+
+/* 4c: Search result highlighting */
+mark{background:var(--yellow);color:#0d1117;border-radius:2px;padding:0 1px}
+[data-theme="light"] mark{background:#fff3bf;color:var(--text)}
+
+/* 4d: Per-field reset */
+.field-reset{display:none;align-self:start;align-items:center;justify-content:center;width:28px;height:28px;min-width:28px;border:1px solid var(--border2);border-radius:6px;background:transparent;color:var(--text3);cursor:pointer;font-size:1em;flex-shrink:0;transition:color .15s,border-color .15s;margin-top:4px;padding:0;line-height:1}
+.field-reset:hover{color:var(--yellow);border-color:var(--yellow)}
+.field.changed .field-reset{display:inline-flex}
+.field.changed{background:rgba(210,153,34,.04);border-radius:4px;margin:0 -6px;padding:10px 6px}
 </style>
 
 <div class="tabs" role="tablist">
@@ -219,6 +243,12 @@ textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;l
 
 <div class="footer">pd_zurg changes apply via SIGHUP reload. plex_debrid changes trigger a service restart.</div>
 
+<div class="save-bar" id="save-bar" role="status" aria-live="polite">
+  <span class="change-count" id="save-bar-count"></span>
+  <button type="button" class="btn btn-primary btn-sm" id="save-bar-btn" onclick="saveBarSave()">Save &amp; Apply</button>
+  <button type="button" class="btn btn-ghost btn-sm" onclick="saveBarDiscard()">Discard</button>
+</div>
+
 <script>
 __THEME_TOGGLE_JS__
 
@@ -238,6 +268,7 @@ function esc(s) {
   d.appendChild(document.createTextNode(String(s ?? '')));
   return d.innerHTML;
 }
+function escJs(s) { return String(s ?? '').replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
 
 let _bannerTimer = null;
 function showBanner(type, html) {
@@ -254,7 +285,7 @@ function hideBanner() {
 }
 
 function switchTab(name) {
-  const curDirty = activeTabName() === 'env' ? envDirty : pdDirty;
+  const curDirty = (activeTabName() === 'env' ? getEnvChangedFields() : getPdChangedFields()).size > 0;
   if (curDirty && !confirm('You have unsaved changes. Switch tabs anyway?')) return;
   document.querySelectorAll('.tab').forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
   document.querySelectorAll('.tab-content').forEach(t => { t.classList.remove('active'); });
@@ -268,6 +299,7 @@ function switchTab(name) {
     document.getElementById('tab-pd').classList.add('active');
   }
   hideBanner();
+  updateDirtyUI();
 }
 
 function toggleCategory(header) {
@@ -327,8 +359,9 @@ function renderEnvField(field, value) {
 
   const helpHtml = field.help ? `<div class="field-help">${esc(field.help)}</div>` : '';
   const reqMark = field.required ? '<span class="required">*</span>' : '';
+  const resetBtn = `<button type="button" class="field-reset" onclick="resetField('env','${escJs(field.key)}')" title="Undo change">\u21BA</button>`;
 
-  return `<div class="field" id="row-${field.key}"><div class="field-label"><span>${esc(field.label)}${reqMark}</span><span class="key">${esc(field.key)}</span></div><div class="field-input">${inputHtml}${helpHtml}<div class="field-error" id="err-${field.key}"></div></div></div>`;
+  return `<div class="field" id="row-${field.key}" data-field-key="${esc(field.key)}"><div class="field-label"><span><span class="label-text">${esc(field.label)}</span>${reqMark}</span><span class="key">${esc(field.key)}</span></div><div class="field-input"><div style="display:flex;gap:6px;align-items:start">${inputHtml}${resetBtn}</div>${helpHtml}<div class="field-error" id="err-${field.key}"></div></div></div>`;
 }
 
 function renderEnvCategories(values) {
@@ -339,7 +372,7 @@ function renderEnvCategories(values) {
     let fieldsHtml = '';
     cat.fields.forEach(f => { fieldsHtml += renderEnvField(f, values[f.key] || ''); });
     const expanded = i === 0 ? 'true' : 'false';
-    html += `<div class="category"><div class="cat-header${openClass}" role="button" tabindex="0" aria-expanded="${expanded}" onclick="toggleCategory(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleCategory(this)}"><h2>${esc(cat.name)} <span class="desc">\u2014 ${esc(cat.description)}</span></h2><span class="arrow" aria-hidden="true">&#9660;</span></div><div class="cat-body${openClass}">${fieldsHtml}</div></div>`;
+    html += `<div class="category" data-cat-idx="${i}" data-tab="env"><div class="cat-header${openClass}" role="button" tabindex="0" aria-expanded="${expanded}" onclick="toggleCategory(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleCategory(this)}"><h2><span class="cat-name">${esc(cat.name)}</span> <span class="desc">\u2014 ${esc(cat.description)}</span></h2><span class="cat-dirty"><span class="cat-dirty-dot"></span><span class="cat-dirty-count"></span></span><span class="arrow" aria-hidden="true">&#9660;</span></div><div class="cat-body${openClass}">${fieldsHtml}</div></div>`;
   });
   container.innerHTML = html;
 }
@@ -415,7 +448,7 @@ async function envSave() {
   finally { setButtonLoading('btn-env-save', false, 'Save & Apply'); }
 }
 
-function envReset() { clearFieldErrors(document.getElementById('tab-env')); hideBanner(); renderEnvCategories(envValues); }
+function envReset() { clearFieldErrors(document.getElementById('tab-env')); hideBanner(); renderEnvCategories(envValues); updateDirtyUI(); }
 
 // -----------------------------------------------------------------------
 // plex_debrid settings tab
@@ -515,7 +548,9 @@ function renderPdField(field, value) {
   }
 
   const helpHtml = field.help ? `<div class="field-help">${esc(field.help)}</div>` : '';
-  return `<div class="field" id="pdrow-${id}"><div class="field-label"><span>${esc(field.label)}</span><span class="key">${esc(field.key)}</span></div><div class="field-input">${inputHtml}${helpHtml}<div class="field-error" id="pderr-${id}"></div></div></div>`;
+  const resetBtn = `<button type="button" class="field-reset" onclick="resetField('pd','${escJs(field.key)}')" title="Undo change">\u21BA</button>`;
+
+  return `<div class="field" id="pdrow-${id}" data-field-key="${esc(field.key)}"><div class="field-label"><span><span class="label-text">${esc(field.label)}</span></span><span class="key">${esc(field.key)}</span></div><div class="field-input"><div style="display:flex;gap:6px;align-items:start">${inputHtml}${resetBtn}</div>${helpHtml}<div class="field-error" id="pderr-${id}"></div></div></div>`;
 }
 
 function renderPdCategories(values) {
@@ -544,7 +579,7 @@ function renderPdCategories(values) {
     }
 
     const expanded = i === 0 ? 'true' : 'false';
-    html += `<div class="category"><div class="cat-header${openClass}" role="button" tabindex="0" aria-expanded="${expanded}" onclick="toggleCategory(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleCategory(this)}"><h2>${esc(cat.name)} <span class="desc">\u2014 ${esc(cat.description)}</span></h2><span class="arrow" aria-hidden="true">&#9660;</span></div><div class="cat-body${openClass}">${mainFields}${advHtml}</div></div>`;
+    html += `<div class="category" data-cat-idx="${i}" data-tab="pd"><div class="cat-header${openClass}" role="button" tabindex="0" aria-expanded="${expanded}" onclick="toggleCategory(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleCategory(this)}"><h2><span class="cat-name">${esc(cat.name)}</span> <span class="desc">\u2014 ${esc(cat.description)}</span></h2><span class="cat-dirty"><span class="cat-dirty-dot"></span><span class="cat-dirty-count"></span></span><span class="arrow" aria-hidden="true">&#9660;</span></div><div class="cat-body${openClass}">${mainFields}${advHtml}</div></div>`;
   });
   container.innerHTML = html;
 
@@ -713,8 +748,8 @@ function renderProfileCard(profile, idx) {
 
   return `<div class="profile-card" id="profile-${idx}">
     <div class="profile-header">
-      <input type="text" value="${esc(name)}" onchange="_versionsData[${idx}][0]=this.value;isDirty=true" placeholder="Profile name">
-      <select style="max-width:70px;font-size:.8em" onchange="_versionsData[${idx}][2]=this.value;isDirty=true" title="Language">${langOpts}</select>
+      <input type="text" value="${esc(name)}" onchange="_versionsData[${idx}][0]=this.value" placeholder="Profile name">
+      <select style="max-width:70px;font-size:.8em" onchange="_versionsData[${idx}][2]=this.value" title="Language">${langOpts}</select>
       <div class="profile-actions">
         <button type="button" class="btn btn-ghost btn-sm" id="profile-edit-btn-${idx}" onclick="toggleProfileRules(${idx})">${_expandedProfile===idx?'Close':'Edit'}</button>
         <button type="button" class="btn btn-ghost btn-sm" onclick="duplicateProfile(${idx})">Duplicate</button>
@@ -774,7 +809,7 @@ function refreshVersionsUI() {
   // Update JSON textarea if visible
   const ta = document.getElementById('versions-json-textarea');
   if (ta) ta.value = JSON.stringify(_versionsData, null, 2);
-  pdDirty = true; isDirty = true; updateDirtyUI();
+  updateDirtyUI();
 }
 
 function addPreset(key) {
@@ -834,7 +869,7 @@ function updateRule(profileIdx, ruleIdx, row) {
   const op = selects[2]?.value || '';
   const val = input?.value || '';
   _versionsData[profileIdx][3][ruleIdx] = [field, weight, op, val];
-  pdDirty = true; isDirty = true; updateDirtyUI();
+  updateDirtyUI();
 }
 
 function ruleFieldChanged(profileIdx, ruleIdx, select) {
@@ -866,7 +901,7 @@ function updateCondition(profileIdx, condIdx, row) {
     selects[1]?.value || '',
     input?.value || ''
   ];
-  pdDirty = true; isDirty = true; updateDirtyUI();
+  updateDirtyUI();
 }
 
 function condFieldChanged(profileIdx, condIdx, select) {
@@ -1025,7 +1060,7 @@ async function pdSave() {
   finally { setButtonLoading('btn-pd-save', false, 'Save & Restart plex_debrid'); }
 }
 
-function pdReset() { clearFieldErrors(document.getElementById('tab-pd')); hideBanner(); renderPdCategories(pdValues); }
+function pdReset() { clearFieldErrors(document.getElementById('tab-pd')); hideBanner(); renderPdCategories(pdValues); updateDirtyUI(); }
 
 // -----------------------------------------------------------------------
 // OAuth
@@ -1198,6 +1233,7 @@ async function envResetDefaults() {
     const resp = await fetch('/api/settings/reset/env', {method: 'POST'});
     const defaults = await resp.json();
     renderEnvCategories(defaults);
+    updateDirtyUI();
     showBanner('info', 'Form reset to defaults. Click <strong>Save &amp; Apply</strong> to write changes.');
   } catch (e) { showBanner('error', 'Reset failed: ' + esc(e.message)); }
 }
@@ -1208,6 +1244,7 @@ async function pdResetDefaults() {
     const resp = await fetch('/api/settings/reset/plex-debrid', {method: 'POST'});
     const defaults = await resp.json();
     renderPdCategories(defaults);
+    updateDirtyUI();
     showBanner('info', 'Form reset to defaults. Click <strong>Save &amp; Restart plex_debrid</strong> to write changes.');
   } catch (e) { showBanner('error', 'Reset failed: ' + esc(e.message)); }
 }
@@ -1239,6 +1276,7 @@ function envImport(input) {
     // Merge imported values into current form
     const merged = Object.assign({}, envValues, imported);
     renderEnvCategories(merged);
+    updateDirtyUI();
     showBanner('info', 'Imported ' + Object.keys(imported).length + ' settings into form. Review and click <strong>Save &amp; Apply</strong> to write changes.');
   };
   reader.readAsText(file);
@@ -1257,6 +1295,7 @@ function pdImport(input) {
         return;
       }
       renderPdCategories(imported);
+      updateDirtyUI();
       showBanner('info', 'Settings imported into form. Review and click <strong>Save &amp; Restart plex_debrid</strong> to apply.');
     } catch (err) {
       showBanner('error', 'Failed to parse JSON: ' + esc(err.message));
@@ -1269,15 +1308,46 @@ function pdImport(input) {
 // -----------------------------------------------------------------------
 // Settings search/filter
 // -----------------------------------------------------------------------
+function clearHighlights(container) {
+  container.querySelectorAll('mark').forEach(m => {
+    const parent = m.parentNode;
+    parent.replaceChild(document.createTextNode(m.textContent), m);
+    parent.normalize();
+  });
+}
+
+function highlightText(el, query) {
+  if (!el || !query) return;
+  const text = el.textContent;
+  const lc = text.toLowerCase();
+  const frag = document.createDocumentFragment();
+  let pos = 0, idx;
+  while ((idx = lc.indexOf(query, pos)) !== -1) {
+    if (idx > pos) frag.appendChild(document.createTextNode(text.substring(pos, idx)));
+    const mark = document.createElement('mark');
+    mark.textContent = text.substring(idx, idx + query.length);
+    frag.appendChild(mark);
+    pos = idx + query.length;
+  }
+  if (pos === 0) return;
+  if (pos < text.length) frag.appendChild(document.createTextNode(text.substring(pos)));
+  el.textContent = '';
+  el.appendChild(frag);
+}
+
 function filterSettings(tab, query) {
   const container = document.getElementById(tab === 'env' ? 'env-categories' : 'pd-categories');
   const q = query.toLowerCase().trim();
   const countEl = document.getElementById('search-' + tab + '-count');
   let total = 0, shown = 0;
 
+  // Clear previous highlights
+  clearHighlights(container);
+
   container.querySelectorAll('.category').forEach(cat => {
     const body = cat.querySelector('.cat-body');
     const header = cat.querySelector('.cat-header');
+    const catName = cat.querySelector('.cat-name');
     let catVisible = 0;
 
     // Check both regular and advanced fields
@@ -1288,19 +1358,28 @@ function filterSettings(tab, query) {
         field.style.display = '';
         shown++;
         catVisible++;
+        // Highlight matching text in label and help
+        if (q) {
+          const labelText = field.querySelector('.label-text');
+          const helpText = field.querySelector('.field-help');
+          highlightText(labelText, q);
+          highlightText(helpText, q);
+        }
       } else {
         field.style.display = 'none';
       }
     });
 
     if (q && catVisible > 0) {
+      // Highlight category name if it matches and has visible fields
+      if (catName) highlightText(catName, q);
       // Auto-expand categories with matches
       header.classList.add('open');
       body.classList.add('open');
       // Also expand advanced section if it has matches
       const adv = body.querySelector('.advanced-fields');
       if (adv) {
-        const advVisible = adv.querySelectorAll('.field:not([style*="display: none"])').length;
+        const advVisible = adv.querySelectorAll('.field').length - adv.querySelectorAll('.field[style*="display"]').length;
         if (advVisible > 0) { adv.classList.add('open'); }
       }
     }
@@ -1312,25 +1391,154 @@ function filterSettings(tab, query) {
 }
 
 // -----------------------------------------------------------------------
-// Dirty state UI
+// Change detection & dirty state UI
 // -----------------------------------------------------------------------
 function activeTabName() {
   return document.getElementById('tab-env').classList.contains('active') ? 'env' : 'pd';
 }
-function markDirty() {
-  const tab = activeTabName();
-  if (tab === 'env') envDirty = true; else pdDirty = true;
-  isDirty = envDirty || pdDirty;
-  updateDirtyUI();
+
+function getEnvChangedFields() {
+  const changes = new Set();
+  document.querySelectorAll('#tab-env [data-key]').forEach(el => {
+    const key = el.dataset.key;
+    const current = el.dataset.type === 'boolean' ? (el.checked ? 'true' : 'false') : el.value;
+    const saved = envValues[key] !== undefined ? String(envValues[key]) : '';
+    if (current !== saved) changes.add(key);
+  });
+  return changes;
 }
+
+function getPdChangedFields() {
+  const changes = new Set();
+  try {
+    const current = collectPdData();
+    const allKeys = new Set([...Object.keys(current), ...Object.keys(pdValues)]);
+    allKeys.forEach(key => {
+      const a = key in current ? current[key] : null;
+      const b = key in pdValues ? pdValues[key] : null;
+      if (JSON.stringify(a) !== JSON.stringify(b)) {
+        changes.add(key);
+      }
+    });
+  } catch(e) { /* form not ready yet */ }
+  return changes;
+}
+
+let _dirtyRaf = 0;
+function markDirty() {
+  if (!_dirtyRaf) {
+    _dirtyRaf = requestAnimationFrame(() => { _dirtyRaf = 0; updateDirtyUI(); });
+  }
+}
+
 function updateDirtyUI() {
+  const envChanges = getEnvChangedFields();
+  const pdChanges = getPdChangedFields();
+  envDirty = envChanges.size > 0;
+  pdDirty = pdChanges.size > 0;
   isDirty = envDirty || pdDirty;
+
+  // Tab dirty indicators
   const envTab = document.querySelector('.tab:nth-child(1)');
   const pdTab = document.querySelector('.tab:nth-child(2)');
   envTab.classList.toggle('dirty', envDirty);
   pdTab.classList.toggle('dirty', pdDirty);
   document.getElementById('btn-env-save').classList.toggle('dirty', envDirty);
   document.getElementById('btn-pd-save').classList.toggle('dirty', pdDirty);
+
+  // Save bar
+  const activeTab = activeTabName();
+  const activeChanges = activeTab === 'env' ? envChanges : pdChanges;
+  const bar = document.getElementById('save-bar');
+  const countEl = document.getElementById('save-bar-count');
+  const saveBtn = document.getElementById('save-bar-btn');
+  if (activeChanges.size > 0) {
+    countEl.textContent = activeChanges.size + ' unsaved change' + (activeChanges.size !== 1 ? 's' : '');
+    saveBtn.textContent = activeTab === 'env' ? 'Save & Apply' : 'Save & Restart';
+    bar.classList.add('visible');
+    document.body.classList.add('has-save-bar');
+  } else {
+    bar.classList.remove('visible');
+    document.body.classList.remove('has-save-bar');
+  }
+
+  // Per-field changed class + category indicators
+  updateFieldAndCategoryIndicators('env', envChanges, ENV_SCHEMA);
+  updateFieldAndCategoryIndicators('pd', pdChanges, PD_SCHEMA);
+}
+
+function updateFieldAndCategoryIndicators(tab, changes, schema) {
+  const containerId = tab === 'env' ? 'env-categories' : 'pd-categories';
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  // Per-field changed class
+  container.querySelectorAll('.field[data-field-key]').forEach(field => {
+    field.classList.toggle('changed', changes.has(field.dataset.fieldKey));
+  });
+
+  // Category indicators
+  container.querySelectorAll('.category[data-cat-idx]').forEach(catEl => {
+    const idx = parseInt(catEl.dataset.catIdx);
+    const cat = schema.categories[idx];
+    if (!cat) return;
+    let count = 0;
+    cat.fields.forEach(f => { if (changes.has(f.key)) count++; });
+    const header = catEl.querySelector('.cat-header');
+    const countSpan = catEl.querySelector('.cat-dirty-count');
+    header.classList.toggle('has-changes', count > 0);
+    if (countSpan) countSpan.textContent = count > 0 ? count + ' changed' : '';
+  });
+}
+
+// Save bar actions
+function saveBarSave() {
+  const btn = document.getElementById('save-bar-btn');
+  if (btn) btn.disabled = true;
+  const done = () => { if (btn) btn.disabled = false; };
+  (activeTabName() === 'env' ? envSave() : pdSave()).finally(done);
+}
+function saveBarDiscard() {
+  if (activeTabName() === 'env') envReset(); else pdReset();
+}
+
+// Per-field reset
+function resetField(tab, key) {
+  if (tab === 'env') {
+    const el = document.getElementById('env-' + key);
+    if (!el) return;
+    const saved = envValues[key] !== undefined ? String(envValues[key]) : '';
+    if (el.dataset.type === 'boolean') {
+      el.checked = saved.toLowerCase() === 'true';
+    } else {
+      el.value = saved;
+    }
+  } else {
+    // Fast path for simple pd field types — set value directly
+    const saved = pdValues[key];
+    let handled = false;
+    const simpleEl = document.querySelector('#tab-pd [data-pdkey="' + CSS.escape(key) + '"]');
+    if (simpleEl) {
+      const t = simpleEl.dataset.pdtype;
+      if (t === 'string' || t === 'secret' || t === 'select') {
+        simpleEl.value = saved !== undefined ? String(saved) : '';
+        handled = true;
+      } else if (t === 'boolean_str') {
+        simpleEl.checked = String(saved).toLowerCase() === 'true';
+        handled = true;
+      }
+    }
+    if (!handled) {
+      // Complex types (lists, versions, json): re-render with this key reverted
+      const current = collectPdData();
+      current[key] = saved !== undefined ? JSON.parse(JSON.stringify(saved)) : '';
+      renderPdCategories(current);
+      // Reapply active search filter if present
+      const searchInput = document.getElementById('search-pd');
+      if (searchInput && searchInput.value.trim()) filterSettings('pd', searchInput.value);
+    }
+  }
+  updateDirtyUI();
 }
 
 // -----------------------------------------------------------------------

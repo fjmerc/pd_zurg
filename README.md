@@ -22,7 +22,7 @@ pd_zurg packages three tools into a single Docker container: **[Zurg](https://gi
 - **Local library dedup** — checks your existing library before submitting to debrid to avoid duplicates
 - **Notifications** — 90+ services via [Apprise](https://github.com/caronc/apprise) (Discord, Telegram, Slack, email, etc.)
 - **Status dashboard** — process health, mount status, system resources, and a browser-based settings editor
-- **Library browser** — browse your combined debrid + local library with TMDB metadata, source preference management, and episode-level download/switch controls
+- **Library browser** — browse your combined debrid + local library with TMDB metadata, source preference management, episode-level download/switch controls, and interactive debrid torrent search with cache status
 - **Auto debrid symlinks** — automatically creates organized symlinks in your local library for debrid-only content so Sonarr/Radarr can discover it, with automatic rescan triggers
 - **ffprobe recovery** — detects and kills stuck ffprobe processes on debrid mounts
 - **MDBList integration** — subscribe to curated lists that auto-feed plex_debrid
@@ -376,8 +376,34 @@ All settings are documented in [`.env.example`](.env.example) with inline commen
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `NOTIFICATION_URL` | [Apprise](https://github.com/caronc/apprise) URL(s), comma-separated (e.g., `discord://webhook_id/webhook_token`) | |
-| `NOTIFICATION_EVENTS` | Events: `startup`, `shutdown`, `mount_success`, `health_error`, `download_complete`, `library_refresh` | all |
+| `NOTIFICATION_EVENTS` | Comma-separated events to subscribe to: `startup`, `shutdown`, `download_complete`, `download_error`, `library_refresh`, `symlink_created`, `symlink_failed`, `debrid_unavailable`, `local_fallback_triggered`, `blocklist_added`, `health_error`, `daily_digest`, `debrid_add_success`, `debrid_add_failed`. Leave empty for all | all |
 | `NOTIFICATION_LEVEL` | Minimum severity: `info`, `warning`, `error` | `info` |
+| `NOTIFICATION_DIGEST_ENABLED` | Send a daily summary instead of individual notifications | `false` |
+| `NOTIFICATION_DIGEST_TIME` | When to send the daily digest (24h format) | `08:00` |
+
+</details>
+
+<details>
+<summary><strong>Media Services — Sonarr/Radarr</strong></summary>
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SONARR_URL` | Sonarr base URL (e.g., `http://sonarr:8989`). Used for downloads, rescans, and folder naming | |
+| `SONARR_API_KEY` | Sonarr API key (Settings > General in Sonarr) | |
+| `RADARR_URL` | Radarr base URL (e.g., `http://radarr:7878`). Used for downloads, rescans, and folder naming | |
+| `RADARR_API_KEY` | Radarr API key (Settings > General in Radarr) | |
+
+</details>
+
+<details>
+<summary><strong>Library Metadata & Debrid Search</strong></summary>
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TMDB_API_KEY` | [TMDB](https://www.themoviedb.org/) API key (free). Enables posters, episode titles, missing episode detection, and IMDb ID resolution for debrid search | |
+| `TORRENTIO_URL` | Torrentio API base URL (e.g., `https://torrentio.strem.fun`). Enables interactive torrent search in the Library detail view with debrid cache status and one-click add | |
+| `HISTORY_RETENTION_DAYS` | Days to keep activity history events | `30` |
+| `BLOCKLIST_AUTO_ADD` | Auto-blocklist torrents that hit terminal debrid errors | `true` |
 
 </details>
 

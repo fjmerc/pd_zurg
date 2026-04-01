@@ -36,6 +36,8 @@ try:
 except ImportError:
     _blocklist = None
 
+from utils.api_metrics import tracked_request
+
 _watcher = None
 
 # Retry configuration for failed torrent submissions
@@ -252,13 +254,13 @@ class BlackholeWatcher:
             with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
                 magnet_link = f.read().strip()
             url = 'https://api.real-debrid.com/rest/1.0/torrents/addMagnet'
-            response = requests.post(url, headers=headers, data={'magnet': magnet_link}, timeout=30)
+            response = tracked_request('realdebrid', requests.post, url, headers=headers, data={'magnet': magnet_link}, timeout=30)
         elif ext == '.torrent':
             url = 'https://api.real-debrid.com/rest/1.0/torrents/addTorrent'
             with open(file_path, 'rb') as f:
-                response = requests.put(url,
-                                        headers={**headers, 'Content-Type': 'application/x-bittorrent'},
-                                        data=f.read(), timeout=30)
+                response = tracked_request('realdebrid', requests.put, url,
+                                           headers={**headers, 'Content-Type': 'application/x-bittorrent'},
+                                           data=f.read(), timeout=30)
         else:
             return False, f'Unsupported extension: {ext}'
 
@@ -267,7 +269,7 @@ class BlackholeWatcher:
             if not torrent_id:
                 return False, 'Real-Debrid response missing torrent id'
             select_url = f'https://api.real-debrid.com/rest/1.0/torrents/selectFiles/{torrent_id}'
-            select_resp = requests.post(select_url, headers=headers, data={'files': 'all'}, timeout=30)
+            select_resp = tracked_request('realdebrid', requests.post, select_url, headers=headers, data={'files': 'all'}, timeout=30)
             if select_resp.status_code not in (200, 202, 204):
                 logger.warning(f"[blackhole] selectFiles failed for {torrent_id}: HTTP {select_resp.status_code}")
             return True, torrent_id
@@ -283,11 +285,11 @@ class BlackholeWatcher:
             with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
                 magnet_link = f.read().strip()
             url = 'https://api.alldebrid.com/v4/magnet/upload'
-            response = requests.post(url, params=params, data={'magnets[]': magnet_link}, timeout=30)
+            response = tracked_request('alldebrid', requests.post, url, params=params, data={'magnets[]': magnet_link}, timeout=30)
         elif ext == '.torrent':
             url = 'https://api.alldebrid.com/v4/magnet/upload/file'
             with open(file_path, 'rb') as f:
-                response = requests.post(url, params=params, files={'files[]': f}, timeout=30)
+                response = tracked_request('alldebrid', requests.post, url, params=params, files={'files[]': f}, timeout=30)
         else:
             return False, f'Unsupported extension: {ext}'
 
@@ -305,10 +307,10 @@ class BlackholeWatcher:
         if ext == '.magnet':
             with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
                 magnet_link = f.read().strip()
-            response = requests.post(url, headers=headers, data={'magnet': magnet_link}, timeout=30)
+            response = tracked_request('torbox', requests.post, url, headers=headers, data={'magnet': magnet_link}, timeout=30)
         elif ext == '.torrent':
             with open(file_path, 'rb') as f:
-                response = requests.post(url, headers=headers, files={'file': f}, timeout=30)
+                response = tracked_request('torbox', requests.post, url, headers=headers, files={'file': f}, timeout=30)
         else:
             return False, f'Unsupported extension: {ext}'
 
@@ -339,7 +341,7 @@ class BlackholeWatcher:
         """Check torrent status on Real-Debrid. Returns (status, info_dict)."""
         headers = {'Authorization': f'Bearer {self.debrid_api_key}'}
         url = f'https://api.real-debrid.com/rest/1.0/torrents/info/{torrent_id}'
-        response = requests.get(url, headers=headers, timeout=30)
+        response = tracked_request('realdebrid', requests.get, url, headers=headers, timeout=30)
         if response.status_code == 200:
             info = response.json()
             return info.get('status', 'unknown'), info
@@ -353,7 +355,7 @@ class BlackholeWatcher:
         """Check torrent status on AllDebrid. Returns (status, info_dict)."""
         params = {'agent': 'pd_zurg', 'apikey': self.debrid_api_key, 'id': torrent_id}
         url = 'https://api.alldebrid.com/v4/magnet/status'
-        response = requests.get(url, params=params, timeout=30)
+        response = tracked_request('alldebrid', requests.get, url, params=params, timeout=30)
         if response.status_code == 200:
             info = response.json()
             if info.get('status') != 'success':
@@ -374,7 +376,7 @@ class BlackholeWatcher:
         headers = {'Authorization': f'Bearer {self.debrid_api_key}'}
         url = 'https://api.torbox.app/v1/api/torrents/mylist'
         params = {'id': torrent_id}
-        response = requests.get(url, headers=headers, params=params, timeout=30)
+        response = tracked_request('torbox', requests.get, url, headers=headers, params=params, timeout=30)
         if response.status_code == 200:
             info = response.json()
             data = info.get('data')

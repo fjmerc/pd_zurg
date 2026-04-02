@@ -133,7 +133,7 @@ body{max-width:1200px}
 [data-theme="light"] .badge-local{background:#1a7f371a;border-color:#1a7f3740}
 [data-theme="light"] .badge-debrid{background:#7c3aed1a;border-color:#7c3aed40;color:#7c3aed}
 
-.btn-switch:hover:not(:disabled){border-color:#2dd4bf;color:#2dd4bf}
+.btn-ghost.btn-switch:hover:not(:disabled):not(.confirming){border-color:#2dd4bf;color:#2dd4bf}
 
 /* Quality badges */
 .badge-quality{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;white-space:nowrap}
@@ -2323,7 +2323,7 @@ function _renderShowDetail(show, meta) {
       } else {
         if (hasDebrid) {
           var dlLabel = 'Switch ' + debridCount + ' Episode' + (debridCount !== 1 ? 's' : '') + ' to Local';
-          html += '<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();_confirmBtn(this,function(){dlSeason(' + si + ')})">' + dlLabel + '</button>';
+          html += '<button class="btn btn-ghost btn-sm btn-switch" onclick="event.stopPropagation();_confirmBtn(this,function(){dlSeason(' + si + ')})">' + dlLabel + '</button>';
         }
         if (hasMissing) {
           var searchLabel = 'Search ' + missingCount + ' Missing';
@@ -3260,7 +3260,7 @@ function startTsRefresh() {
 var _searchResults = [];
 var _searchSortCol = 'quality';
 var _searchSortAsc = false;
-var _searchMinQuality = 0;
+var _searchQualityFilter = 0;
 
 function openSearchFromBtn(btn) {
   var imdbId = btn.getAttribute('data-imdb');
@@ -3295,7 +3295,7 @@ function openSearchModal(imdbId, mediaType, season, episode, displayTitle) {
   _searchResults = [];
   _searchSortCol = 'quality';
   _searchSortAsc = false;
-  _searchMinQuality = 0;
+  _searchQualityFilter = 0;
 
   var payload = {imdb_id: imdbId, type: mediaType};
   if (seasonStr) payload.season = parseInt(seasonStr, 10);
@@ -3328,7 +3328,7 @@ function _renderSearchResults() {
   if (!body) return;
 
   var filtered = _searchResults.filter(function(r) {
-    if (_searchMinQuality > 0 && r.quality.score !== _searchMinQuality) return false;
+    if (_searchQualityFilter > 0 && r.quality.score !== _searchQualityFilter) return false;
     return true;
   });
 
@@ -3347,12 +3347,12 @@ function _renderSearchResults() {
   });
 
   var html = '<div class="search-filter-row">';
-  html += '<label>Quality: <select id="search-quality-filter" onchange="_searchMinQuality=parseInt(this.value,10);_renderSearchResults()">';
-  html += '<option value="0"' + (_searchMinQuality === 0 ? ' selected' : '') + '>Any</option>';
-  html += '<option value="1"' + (_searchMinQuality === 1 ? ' selected' : '') + '>480p</option>';
-  html += '<option value="2"' + (_searchMinQuality === 2 ? ' selected' : '') + '>720p</option>';
-  html += '<option value="3"' + (_searchMinQuality === 3 ? ' selected' : '') + '>1080p</option>';
-  html += '<option value="4"' + (_searchMinQuality === 4 ? ' selected' : '') + '>2160p</option>';
+  html += '<label>Quality: <select id="search-quality-filter" onchange="_searchQualityFilter=parseInt(this.value,10);_renderSearchResults()">';
+  html += '<option value="0"' + (_searchQualityFilter === 0 ? ' selected' : '') + '>Any</option>';
+  html += '<option value="1"' + (_searchQualityFilter === 1 ? ' selected' : '') + '>480p</option>';
+  html += '<option value="2"' + (_searchQualityFilter === 2 ? ' selected' : '') + '>720p</option>';
+  html += '<option value="3"' + (_searchQualityFilter === 3 ? ' selected' : '') + '>1080p</option>';
+  html += '<option value="4"' + (_searchQualityFilter === 4 ? ' selected' : '') + '>2160p</option>';
   html += '</select></label>';
   html += '<span class="search-count">' + filtered.length + ' of ' + _searchResults.length + ' results</span>';
   html += '</div>';

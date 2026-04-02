@@ -2184,6 +2184,68 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
             return
 
+        if self.path == '/api/library/delete':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 100_000:
+                    self._send_json_response(400, json.dumps({'error': 'Request body too large'}))
+                    return
+                body = self.rfile.read(content_length)
+                values = json.loads(body.decode('utf-8'))
+                if not isinstance(values, dict):
+                    self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
+                    return
+                title = values.get('title', '').strip()
+                media_type = values.get('type', '').strip()
+                if not title or media_type not in ('movie', 'show'):
+                    self._send_json_response(400, json.dumps({'error': 'title and type (movie/show) required'}))
+                    return
+                tmdb_id = values.get('tmdb_id')
+                if tmdb_id is not None:
+                    try:
+                        tmdb_id = int(tmdb_id)
+                    except (ValueError, TypeError):
+                        tmdb_id = None
+
+                from utils.arr_client import get_download_service
+                client, service_name = get_download_service(media_type)
+                if client is None or service_name not in ('sonarr', 'radarr'):
+                    self._send_json_response(400, json.dumps({
+                        'error': f'Delete requires {"Sonarr" if media_type == "show" else "Radarr"} — configure it in Settings'
+                    }))
+                    return
+
+                if media_type == 'show' and service_name == 'sonarr':
+                    result = client.delete_series(title, tmdb_id=tmdb_id)
+                elif media_type == 'movie' and service_name == 'radarr':
+                    result = client.delete_movie(title, tmdb_id=tmdb_id)
+                else:
+                    self._send_json_response(400, json.dumps({
+                        'error': f'Cannot delete {media_type} via {service_name}'
+                    }))
+                    return
+
+                if result.get('status') == 'deleted':
+                    from utils.library import get_scanner
+                    scanner = get_scanner()
+                    if scanner:
+                        scanner.refresh()
+                    try:
+                        from utils import history as _hist
+                        _hist.log_event('arr_deleted', title, source='library',
+                                        detail=f'Deleted from {service_name}')
+                    except Exception:
+                        pass
+                    self._send_json_response(200, json.dumps(result))
+                else:
+                    self._send_json_response(400, json.dumps(result))
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception:
+                logger.exception("[delete] Unexpected error")
+                self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
+            return
+
         if self.path == '/api/settings/env':
             try:
                 content_length = int(self.headers.get('Content-Length', 0))

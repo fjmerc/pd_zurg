@@ -134,7 +134,7 @@ body{max-width:1200px}
 [data-theme="light"] .badge-debrid{background:#0969da1a;border-color:#0969da40}
 
 /* Quality badges */
-.badge-quality{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600}
+.badge-quality{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;white-space:nowrap}
 .badge-quality-2160p{background:#a855f70f;color:#a855f7;border:1px solid #a855f733}
 .badge-quality-1080p{background:#58a6ff0f;color:var(--blue);border:1px solid #58a6ff33}
 .badge-quality-720p{background:#db6d280f;color:var(--orange);border:1px solid #db6d2833}
@@ -167,7 +167,7 @@ body{max-width:1200px}
 .detail-back:hover{text-decoration:underline}
 .detail-header{margin-bottom:16px}
 .detail-header h2{font-size:1.3em;font-weight:600;margin-bottom:6px}
-.detail-header .card-badges{margin-top:4px}
+.detail-header .card-badges{margin-top:8px}
 
 /* Show history (collapsible) */
 .history-section{margin-top:16px;border:1px solid var(--border);border-radius:8px;overflow:hidden}
@@ -204,6 +204,7 @@ body{max-width:1200px}
 .pref-row{display:flex;align-items:center;gap:8px;margin-top:8px}
 .pref-select{background:var(--input-bg);border:1px solid var(--input-border);border-radius:6px;padding:4px 8px;color:var(--text);font-size:.82em;outline:none;cursor:pointer}
 .pref-select:focus{border-color:var(--input-focus)}
+.pref-row .btn{font-size:.82em;padding:4px 12px}
 /* Library primary buttons use blue instead of green */
 .btn-primary{background:var(--blue);border-color:var(--blue)}
 .btn-primary:hover:not(:disabled){opacity:.85;background:#4c9aff}
@@ -223,7 +224,8 @@ body{max-width:1200px}
 .detail-poster{width:150px;min-width:150px;border-radius:8px;overflow:hidden}
 .detail-poster img{width:100%;display:block;border-radius:8px}
 .detail-info{flex:1;min-width:0}
-.detail-overview{font-size:.85em;color:var(--text2);margin-top:8px;line-height:1.5;max-height:6em;overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,black 60%,transparent);mask-image:linear-gradient(to bottom,black 60%,transparent)}
+.detail-overview{font-size:.85em;color:var(--text2);margin-top:8px;line-height:1.5;max-height:7.5em;overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,black 85%,transparent);mask-image:linear-gradient(to bottom,black 85%,transparent);cursor:pointer;transition:max-height .3s ease}
+.detail-overview.expanded{max-height:60em;-webkit-mask-image:none;mask-image:none}
 .detail-status{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:var(--border);color:var(--text2);margin-left:6px}
 .detail-runtime{font-size:.82em;color:var(--text2);margin-top:6px}
 
@@ -344,7 +346,7 @@ body.has-bulk-bar{padding-bottom:60px}
 .search-results-tbl tr.added-row td{opacity:.5}
 .sr-title{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sr-title:hover{white-space:normal;word-break:break-word}
-.badge-quality{display:inline-block;padding:1px 6px;border-radius:4px;font-size:.78em;font-weight:600}
+.badge-quality{display:inline-block;padding:1px 6px;border-radius:4px;font-size:.78em;font-weight:600;white-space:nowrap}
 .badge-quality.q-2160p{background:#ff6b0014;color:#ff8c3a;border:1px solid #ff6b0030}
 .badge-quality.q-1080p{background:#58a6ff14;color:var(--blue);border:1px solid #58a6ff30}
 .badge-quality.q-720p{background:#3fb95014;color:var(--green);border:1px solid #3fb95030}
@@ -1883,7 +1885,7 @@ function _renderMovieDetail(movie, meta) {
     if (meta.runtime) runtimeParts.push(esc(String(meta.runtime)) + ' min');
     if (meta.release_date) runtimeParts.push('Released ' + esc(meta.release_date));
     if (runtimeParts.length) html += '<div class="detail-runtime">' + runtimeParts.join(' &middot; ') + '</div>';
-    if (meta.overview) html += '<div class="detail-overview">' + esc(meta.overview) + '</div>';
+    if (meta.overview) html += '<div class="detail-overview" onclick="this.classList.toggle(\'expanded\')">' + esc(meta.overview) + '</div>';
   }
   // Movie preference dropdown + action buttons
   var movieNk = normTitle(movie.title);
@@ -1918,6 +1920,9 @@ function _renderMovieDetail(movie, meta) {
     html += '</div>';
   } else if (movie.source === 'debrid') {
     html += '<div style="margin-top:10px;font-size:.82em;color:var(--text3)">To switch to local, configure <a href="/settings">Radarr or Overseerr</a> in Settings.</div>';
+  }
+  if (_downloadServices.movie === 'radarr') {
+    html += '<div style="margin-top:8px"><button class="btn btn-ghost btn-sm btn-danger" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'movie\')})">Delete from Radarr</button></div>';
   }
   if (_searchEnabled && movie.imdb_id) {
     html += '<div style="margin-top:8px"><button class="btn btn-ghost btn-sm" data-imdb="' + esc(movie.imdb_id) + '" data-mtype="movie" data-label="' + esc(movie.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button></div>';
@@ -2237,7 +2242,7 @@ function _renderShowDetail(show, meta) {
   if (meta && meta.status) html += '<span class="detail-status">' + esc(meta.status) + '</span>';
   html += '</h2>';
   html += '<div class="card-badges">' + buildBadges(show.source) + '</div>';
-  if (meta && meta.overview) html += '<div class="detail-overview">' + esc(meta.overview) + '</div>';
+  if (meta && meta.overview) html += '<div class="detail-overview" onclick="this.classList.toggle(\'expanded\')">' + esc(meta.overview) + '</div>';
   if ((show.source === 'debrid' || show.source === 'both') && !_downloadServices.show) {
     html += '<div style="font-size:.82em;color:var(--text3);margin-top:8px">To switch episodes to local, configure <a href="/settings">Sonarr or Overseerr</a> in Settings.</div>';
   }
@@ -2250,6 +2255,9 @@ function _renderShowDetail(show, meta) {
   html += '<button class="btn btn-primary" id="show-pref-apply-btn" style="display:none" onclick="applyPreference()">Apply</button>';
   html += '</div>';
   html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px;line-height:1.5"><strong style="color:var(--text2)">Prefer Local</strong> &mdash; switches debrid-only episodes to local copies.<br><strong style="color:var(--text2)">Prefer Debrid</strong> &mdash; removes local copies and streams from debrid.</div>';
+  if (_downloadServices.show === 'sonarr') {
+    html += '<div style="margin-top:8px"><button class="btn btn-ghost btn-sm btn-danger" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'show\')})">Delete from Sonarr</button></div>';
+  }
   html += '</div></div>';
 
   if (seasons.length > 1) {
@@ -2788,6 +2796,39 @@ function blockMovie() {
       _showMsg('Failed to blocklist: ' + (d.error || ''), 'error');
     }
   }).catch(function() { _showMsg('Failed to blocklist', 'error'); });
+}
+
+function deleteItem(mediaType) {
+  if (!_detailItem) return;
+  var svc = mediaType === 'movie' ? 'Radarr' : 'Sonarr';
+  if (!_detailMeta || !_detailMeta.tmdb_id) {
+    _showMsg('Waiting for metadata to load — please try again in a moment.', 'error');
+    return;
+  }
+  _actionInFlight = true;
+  _setActionsDisabled(true);
+  _showMsgHtml('<span class="scanning-dot"></span>Deleting from ' + svc + '...');
+  var titleCopy = _detailItem.title;
+  fetch('/api/library/delete', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({title: titleCopy, type: mediaType, tmdb_id: _detailMeta.tmdb_id})
+  }).then(function(r) {
+    return r.json().then(function(d) { return {ok: r.ok, d: d}; });
+  }).then(function(res) {
+    if (res.ok && res.d.status === 'deleted') {
+      hideDetail();
+      _showMsg('Deleted ' + titleCopy + ' from ' + svc, 'success');
+      fetchLibrary();
+    } else {
+      _showMsg('Failed: ' + (res.d.error || res.d.message || 'Unknown error'), 'error');
+    }
+  }).catch(function(e) {
+    _showMsg('Delete failed: ' + e, 'error');
+  }).finally(function() {
+    _actionInFlight = false;
+    _setActionsDisabled(false);
+  });
 }
 
 function dlSeason(seasonIdx) {

@@ -1660,6 +1660,25 @@ function _applyLibraryData(data, opts) {
   _lastScan       = data.last_scan || null;
   _scanDurationMs = data.scan_duration_ms || null;
 
+  // Auto-switch tab if wanted preset has no matches in current tab but other tab does
+  if (_activeWantedPreset && _activeWantedPreset !== 'recent') {
+    var _curData = _activeTab === 'movies' ? _allMovies : _allShows;
+    var _othData = _activeTab === 'movies' ? _allShows : _allMovies;
+    var _othTab  = _activeTab === 'movies' ? 'shows' : 'movies';
+    var _hasCur = _curData.some(function(item) { return _matchesWantedPreset(item, _activeWantedPreset); });
+    if (!_hasCur) {
+      var _hasOth = _othData.some(function(item) { return _matchesWantedPreset(item, _activeWantedPreset); });
+      if (_hasOth) {
+        _activeTab = _othTab;
+        document.querySelectorAll('.tab').forEach(function(t) {
+          var active = t.getAttribute('aria-controls') === 'tab-' + _othTab;
+          t.classList.toggle('active', active);
+          t.setAttribute('aria-selected', active ? 'true' : 'false');
+        });
+      }
+    }
+  }
+
   if (!opts.quiet) {
     applyFilters();
     updateScanInfo();

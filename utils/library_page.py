@@ -1918,18 +1918,18 @@ function _renderMovieDetail(movie, meta) {
   } else if (movie.source === 'debrid') {
     html += '<div style="margin-top:10px;font-size:.82em;color:var(--text3)">To switch to local, configure <a href="/settings">Radarr or Overseerr</a> in Settings.</div>';
   }
-  var _movieActionBtns = [];
+  var movieActionBtns = [];
   if (_downloadServices.movie === 'radarr') {
-    _movieActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'movie\')})">Delete from Radarr</button>');
+    movieActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'movie\')})">Delete from Radarr</button>');
   }
   if (_searchEnabled && movie.imdb_id) {
-    _movieActionBtns.push('<button class="btn btn-ghost btn-sm" data-imdb="' + esc(movie.imdb_id) + '" data-mtype="movie" data-label="' + esc(movie.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button>');
+    movieActionBtns.push('<button class="btn btn-ghost btn-sm" data-imdb="' + esc(movie.imdb_id) + '" data-mtype="movie" data-label="' + esc(movie.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button>');
   }
-  if (_movieActionBtns.length) {
-    html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">' + _movieActionBtns.join('') + '</div>';
+  if (movieActionBtns.length) {
+    html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">' + movieActionBtns.join('') + '</div>';
   }
   html += '</div></div>';
-  html += '<div class="history-section"><button class="history-toggle" onclick="toggleShowHistory(this)"><span class="chevron">&#9654;</span> History</button><div class="history-list" class="history-list-content"><div style="color:var(--text3);font-size:.8em;padding:4px 0">Loading...</div></div></div>';
+  html += '<div class="history-section"><button class="history-toggle" onclick="toggleShowHistory(this)"><span class="chevron">&#9654;</span> History</button><div class="history-list history-list-content"><div style="color:var(--text3);font-size:.8em;padding:4px 0">Loading...</div></div></div>';
   html += '<div id="transfer-msg" aria-live="polite"></div>';
   html += '</div>';
   area.innerHTML = html;
@@ -2256,8 +2256,15 @@ function _renderShowDetail(show, meta) {
   html += '<button class="btn btn-primary" id="show-pref-apply-btn" style="display:none" onclick="applyPreference()">Apply</button>';
   html += '</div>';
   html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px;line-height:1.5"><strong style="color:var(--text2)">Prefer Local</strong> &mdash; switches debrid-only episodes to local copies.<br><strong style="color:var(--text2)">Prefer Debrid</strong> &mdash; removes local copies and streams from debrid.</div>';
+  var showActionBtns = [];
   if (_downloadServices.show === 'sonarr') {
-    html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"><button class="btn btn-ghost btn-sm btn-danger" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'show\')})">Delete from Sonarr</button></div>';
+    showActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'show\')})">Delete from Sonarr</button>');
+  }
+  if (_searchEnabled && show.imdb_id) {
+    showActionBtns.push('<button class="btn btn-ghost btn-sm" data-imdb="' + esc(show.imdb_id) + '" data-mtype="series" data-label="' + esc(show.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button>');
+  }
+  if (showActionBtns.length) {
+    html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">' + showActionBtns.join('') + '</div>';
   }
   html += '</div></div>';
 
@@ -2321,7 +2328,7 @@ function _renderShowDetail(show, meta) {
         if (season.episodes[lci].source === 'local' || season.episodes[lci].source === 'both') localCount++;
       }
       var rmLabel = 'Switch ' + localCount + ' to Debrid';
-      html += '<button class="btn btn-ghost btn-sm btn-danger" onclick="event.stopPropagation();_confirmBtn(this,function(){rmSeason(' + si + ')})">' + rmLabel + '</button>';
+      html += '<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();_confirmBtn(this,function(){rmSeason(' + si + ')})">' + rmLabel + '</button>';
     }
     html += '</span>';
     html += '</div>';
@@ -2335,7 +2342,7 @@ function _renderShowDetail(show, meta) {
     html += '</div></div>';
   }
 
-  html += '<div class="history-section"><button class="history-toggle" onclick="toggleShowHistory(this)"><span class="chevron">&#9654;</span> History</button><div class="history-list" class="history-list-content"><div style="color:var(--text3);font-size:.8em;padding:4px 0">Loading...</div></div></div>';
+  html += '<div class="history-section"><button class="history-toggle" onclick="toggleShowHistory(this)"><span class="chevron">&#9654;</span> History</button><div class="history-list history-list-content"><div style="color:var(--text3);font-size:.8em;padding:4px 0">Loading...</div></div></div>';
   html += '<div id="transfer-msg" aria-live="polite"></div>';
   html += '</div>';
   area.innerHTML = html;

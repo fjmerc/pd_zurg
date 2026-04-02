@@ -8,6 +8,8 @@ built-in http.server — no framework dependencies.
 import base64
 import collections
 import glob as glob_mod
+import gzip as gzip_mod
+import hashlib
 import hmac
 import http.server
 import json
@@ -21,6 +23,16 @@ from utils.api_metrics import api_metrics as _api_metrics
 from utils.logger import get_logger
 
 logger = get_logger()
+
+
+# ---------------------------------------------------------------------------
+# Gzip compression cache (content hash → compressed bytes)
+# ---------------------------------------------------------------------------
+
+_gzip_cache = {}
+_gzip_cache_lock = threading.Lock()
+_GZIP_CACHE_MAX = 10
+_GZIP_MIN_SIZE = 256  # Don't bother compressing tiny responses
 
 
 # ---------------------------------------------------------------------------
@@ -579,7 +591,7 @@ __NAV_HTML__
         <option value="blocklisted">Blocklisted</option>
         <option value="blocklist_added">Auto-Blocked</option>
       </select>
-      <input type="text" id="activity-search" placeholder="Search titles..." oninput="loadActivity()" style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:.8em;color:var(--text);outline:none;min-width:120px">
+      <input type="text" id="activity-search" data-kb="search" placeholder="Search titles... (/)" oninput="loadActivity()" style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:.8em;color:var(--text);outline:none;min-width:120px">
       <button class="btn btn-ghost btn-sm" onclick="clearHistory()" id="activity-clear-btn" style="display:none">Clear</button>
     </div>
     <table><thead><tr><th style="width:80px">Time</th><th style="width:90px">Type</th><th>Title</th><th>Detail</th><th style="width:60px">Source</th></tr></thead>
@@ -1294,11 +1306,12 @@ dialog .dlg-confirm{background:var(--blue);color:#fff}
 
 def get_dashboard_html():
     """Return the complete dashboard HTML page with shared CSS and nav."""
-    from utils.ui_common import get_base_head, get_nav_html, THEME_TOGGLE_JS, WANTED_BADGE_JS
+    from utils.ui_common import (get_base_head, get_nav_html, THEME_TOGGLE_JS,
+                                 WANTED_BADGE_JS, KEYBOARD_JS, TOAST_JS)
     html = _DASHBOARD_HTML
     html = html.replace('__BASE_HEAD__', get_base_head('pd_zurg Status', _DASHBOARD_EXTRA_CSS))
     html = html.replace('__NAV_HTML__', get_nav_html('dashboard'))
-    html = html.replace('__THEME_TOGGLE_JS__', THEME_TOGGLE_JS)
+    html = html.replace('__THEME_TOGGLE_JS__', THEME_TOGGLE_JS + KEYBOARD_JS + TOAST_JS)
     html = html.replace('__WANTED_BADGE_JS__', WANTED_BADGE_JS)
     return html
 
@@ -1370,21 +1383,11 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == '/settings':
             # Settings editor — requires auth
             if not self.auth_credentials:
-                html = _SETTINGS_SETUP_HTML.encode()
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/html; charset=utf-8')
-                self.send_header('Content-Length', str(len(html)))
-                self.end_headers()
-                self.wfile.write(html)
+                self._send_html_response(_SETTINGS_SETUP_HTML.encode())
                 return
             from utils.settings_api import get_env_schema, get_plex_debrid_schema
             from utils.settings_page import get_settings_html
-            html = get_settings_html(get_env_schema(), get_plex_debrid_schema()).encode()
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.send_header('Content-Length', str(len(html)))
-            self.end_headers()
-            self.wfile.write(html)
+            self._send_html_response(get_settings_html(get_env_schema(), get_plex_debrid_schema()).encode())
         elif self.path == '/api/settings/env':
             # Read current env values — requires auth to be configured
             if not self.auth_credentials:
@@ -1435,12 +1438,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(content)
         elif self.path == '/library' or self.path.startswith('/library?'):
             from utils.library_page import get_library_html
-            html = get_library_html().encode()
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.send_header('Content-Length', str(len(html)))
-            self.end_headers()
-            self.wfile.write(html)
+            self._send_html_response(get_library_html().encode())
         elif self.path == '/api/library':
             from utils.library import get_scanner
             scanner = get_scanner()
@@ -1520,12 +1518,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             from utils import blocklist as blocklist_mod
             self._send_json_response(200, json.dumps(blocklist_mod.get_all()))
         elif self.path in ('/', '/status'):
-            html = get_dashboard_html().encode()
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.send_header('Content-Length', str(len(html)))
-            self.end_headers()
-            self.wfile.write(html)
+            self._send_html_response(get_dashboard_html().encode())
         else:
             self.send_response(404)
             self.end_headers()
@@ -2514,11 +2507,73 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
         self.send_header('WWW-Authenticate', 'Basic realm="pd_zurg"')
         self.end_headers()
 
+    def _accepts_gzip(self):
+        """Check if the client accepts gzip encoding."""
+        accept = self.headers.get('Accept-Encoding', '')
+        return 'gzip' in accept
+
+    def _gzip_body(self, body):
+        """Compress body with gzip, using cache for repeated content."""
+        content_hash = hashlib.md5(body, usedforsecurity=False).hexdigest()
+        with _gzip_cache_lock:
+            cached = _gzip_cache.get(content_hash)
+            if cached is not None:
+                return cached
+        compressed = gzip_mod.compress(body, compresslevel=6)
+        with _gzip_cache_lock:
+            # Re-check: another thread may have inserted while we compressed
+            if content_hash in _gzip_cache:
+                return _gzip_cache[content_hash]
+            if len(_gzip_cache) >= _GZIP_CACHE_MAX:
+                try:
+                    del _gzip_cache[next(iter(_gzip_cache))]
+                except StopIteration:
+                    pass
+            _gzip_cache[content_hash] = compressed
+        return compressed
+
+    def _send_html_response(self, html_bytes):
+        """Send an HTML response with gzip compression, ETag, and cache headers."""
+        etag = '"' + hashlib.md5(html_bytes, usedforsecurity=False).hexdigest() + '"'
+
+        # Check If-None-Match for 304
+        if_none_match = self.headers.get('If-None-Match', '')
+        if etag in [t.strip() for t in if_none_match.split(',')] or if_none_match == '*':
+            self.send_response(304)
+            self.send_header('ETag', etag)
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('Vary', 'Accept-Encoding')
+            self.end_headers()
+            return
+
+        body = html_bytes
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('ETag', etag)
+        self.send_header('Cache-Control', 'no-cache')
+
+        if self._accepts_gzip() and len(body) >= _GZIP_MIN_SIZE:
+            body = self._gzip_body(body)
+            self.send_header('Content-Encoding', 'gzip')
+            self.send_header('Vary', 'Accept-Encoding')
+
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _send_json_response(self, code, data):
-        """Send a JSON response with proper headers."""
+        """Send a JSON response with gzip compression and cache headers."""
         body = data.encode() if isinstance(data, str) else data
         self.send_response(code)
         self.send_header('Content-Type', 'application/json')
+        self.send_header('Cache-Control', 'no-store')
+
+        if self._accepts_gzip() and len(body) >= _GZIP_MIN_SIZE:
+            # Compress inline — don't pollute the cache with one-off JSON
+            body = gzip_mod.compress(body, compresslevel=6)
+            self.send_header('Content-Encoding', 'gzip')
+            self.send_header('Vary', 'Accept-Encoding')
+
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)

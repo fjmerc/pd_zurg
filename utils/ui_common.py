@@ -172,6 +172,168 @@ FAVICON_JS = r"""
 
 
 # ---------------------------------------------------------------------------
+# Keyboard shortcuts JS (/ search, r refresh, Esc close, 1/2/3 tabs, ? help)
+# ---------------------------------------------------------------------------
+
+KEYBOARD_CSS = r"""
+/* === Keyboard Help Overlay === */
+.kb-overlay{display:none;position:fixed;inset:0;z-index:20000;background:rgba(0,0,0,.6);align-items:center;justify-content:center}
+.kb-overlay.visible{display:flex}
+.kb-dialog{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:24px 28px;max-width:380px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+.kb-dialog h3{margin-bottom:12px;font-size:1em;color:var(--text)}
+.kb-dialog dl{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;font-size:.85em}
+.kb-dialog dt{text-align:right}
+.kb-dialog dd{color:var(--text2);margin:0}
+.kb-dialog kbd{display:inline-block;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-family:inherit;font-size:.85em;min-width:20px;text-align:center;color:var(--text)}
+.kb-dialog .kb-close{margin-top:16px;text-align:right}
+"""
+
+KEYBOARD_JS = r"""
+(function(){
+  /* Keyboard shortcut overlay HTML (injected once) */
+  var _kbEl=null;
+  function _ensureOverlay(){
+    if(_kbEl)return _kbEl;
+    var d=document.createElement('div');
+    d.className='kb-overlay';
+    d.setAttribute('role','dialog');
+    d.setAttribute('aria-label','Keyboard shortcuts');
+    d.innerHTML='<div class="kb-dialog">'
+      +'<h3>Keyboard Shortcuts</h3>'
+      +'<dl>'
+      +'<dt><kbd>/</kbd></dt><dd>Focus search</dd>'
+      +'<dt><kbd>R</kbd></dt><dd>Refresh data</dd>'
+      +'<dt><kbd>Esc</kbd></dt><dd>Close / clear</dd>'
+      +'<dt><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></dt><dd>Switch tabs</dd>'
+      +'<dt><kbd>?</kbd></dt><dd>Show this help</dd>'
+      +'</dl>'
+      +'<div class="kb-close"><button class="btn btn-ghost btn-sm" onclick="window._kbToggle()">Close <kbd>?</kbd></button></div>'
+      +'</div>';
+    d.addEventListener('click',function(e){if(e.target===d)window._kbToggle();});
+    document.body.appendChild(d);
+    _kbEl=d;
+    return d;
+  }
+  window._kbToggle=function(){
+    var o=_ensureOverlay();
+    o.classList.toggle('visible');
+  };
+
+  document.addEventListener('keydown',function(e){
+    /* Skip when typing in inputs */
+    var tag=document.activeElement&&document.activeElement.tagName;
+    var editable=tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT'||
+      (document.activeElement&&document.activeElement.isContentEditable);
+
+    /* Escape always works — close overlay/modal/search */
+    if(e.key==='Escape'){
+      var ov=document.querySelector('.kb-overlay.visible');
+      if(ov){ov.classList.remove('visible');e.preventDefault();return;}
+      /* If typing in an input, blur it first */
+      if(editable&&document.activeElement){document.activeElement.blur();e.preventDefault();return;}
+      /* Then try page-specific escape handler */
+      if(typeof window.onKbEscape==='function'){window.onKbEscape();e.preventDefault();return;}
+      return;
+    }
+
+    if(editable)return;
+    if(e.ctrlKey||e.altKey||e.metaKey)return;
+
+    if(e.key==='/'){
+      e.preventDefault();
+      /* Find a visible search input (multiple may exist across tabs) */
+      var all=document.querySelectorAll('[data-kb="search"]');
+      for(var i=0;i<all.length;i++){if(all[i].offsetParent!==null){all[i].focus();all[i].select();break;}}
+      return;
+    }
+    if(e.key==='r'||e.key==='R'){
+      e.preventDefault();
+      var rb=document.querySelector('[data-kb="refresh"]');
+      if(rb&&!rb.disabled)rb.click();
+      return;
+    }
+    if(e.key==='?'){
+      e.preventDefault();
+      window._kbToggle();
+      return;
+    }
+    if(e.key>='1'&&e.key<='9'){
+      var tb=document.querySelector('[data-kb="tab-'+e.key+'"]');
+      if(tb){e.preventDefault();tb.click();}
+      return;
+    }
+  });
+})();
+"""
+
+# ---------------------------------------------------------------------------
+# Toast notification system
+# ---------------------------------------------------------------------------
+
+TOAST_CSS = r"""
+/* === Toast Notifications === */
+.toast-container{position:fixed;bottom:20px;right:20px;z-index:15000;display:flex;flex-direction:column-reverse;gap:8px;pointer-events:none;max-width:380px;width:calc(100% - 40px)}
+.toast{pointer-events:auto;display:flex;align-items:flex-start;gap:10px;padding:12px 16px;border-radius:8px;font-size:.85em;line-height:1.4;box-shadow:0 4px 16px rgba(0,0,0,.3);animation:toast-in var(--motion-slow) ease forwards;opacity:0;transform:translateX(40px)}
+.toast.removing{animation:toast-out var(--motion-normal) ease forwards}
+.toast-success{background:#3fb9501a;border:1px solid var(--green);color:var(--green)}
+.toast-error{background:#f851491a;border:1px solid var(--red);color:var(--red)}
+.toast-warning{background:#d299221a;border:1px solid var(--yellow);color:var(--yellow)}
+.toast-info{background:#58a6ff1a;border:1px solid var(--blue);color:var(--blue)}
+.toast-msg{flex:1;word-break:break-word}
+.toast-close{background:none;border:none;color:inherit;cursor:pointer;font-size:1.1em;padding:0 2px;opacity:.7;line-height:1;flex-shrink:0}
+.toast-close:hover{opacity:1}
+@keyframes toast-in{to{opacity:1;transform:translateX(0)}}
+@keyframes toast-out{from{opacity:1;transform:translateX(0)}to{opacity:0;transform:translateX(40px)}}
+@media(max-width:480px){.toast-container{right:10px;bottom:10px;max-width:calc(100% - 20px);width:calc(100% - 20px)}}
+"""
+
+TOAST_JS = r"""
+(function(){
+  var _tc=null;
+  function _container(){
+    if(_tc)return _tc;
+    var c=document.createElement('div');
+    c.className='toast-container';
+    c.setAttribute('aria-live','polite');
+    c.setAttribute('role','status');
+    document.body.appendChild(c);
+    _tc=c;
+    return c;
+  }
+  window.showToast=function(msg,type,duration){
+    type=type||'info';
+    if(typeof duration==='undefined'||duration===null){
+      duration=type==='error'?0:type==='warning'?8000:5000;
+    }
+    var t=document.createElement('div');
+    t.className='toast toast-'+type;
+    var m=document.createElement('span');
+    m.className='toast-msg';
+    m.textContent=msg;
+    t.appendChild(m);
+    var cb=document.createElement('button');
+    cb.className='toast-close';
+    cb.innerHTML='&times;';
+    cb.title='Dismiss';
+    cb.onclick=function(){_remove(t)};
+    t.appendChild(cb);
+    var c=_container();
+    c.appendChild(t);
+    /* Cap at 5 visible toasts — force-remove oldest synchronously */
+    while(c.children.length>5){c.removeChild(c.children[0]);}
+    if(duration>0){
+      setTimeout(function(){_remove(t)},duration);
+    }
+  };
+  function _remove(el){
+    if(!el||!el.parentNode||el.classList.contains('removing'))return;
+    el.classList.add('removing');
+    setTimeout(function(){if(el.parentNode)el.parentNode.removeChild(el)},200);
+  }
+})();
+"""
+
+# ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
 
@@ -183,8 +345,9 @@ def get_base_css():
 def get_base_head(title, extra_css=''):
     """Return complete <head> content for a page.
 
-    Includes meta tags, favicon, shared CSS, optional extra CSS,
-    and the theme initialisation script.
+    Includes meta tags, favicon, shared CSS (with keyboard help and toast
+    styles), optional extra CSS, theme init script, favicon JS, keyboard
+    shortcuts JS, and toast JS.
     """
     parts = [
         '<meta charset="utf-8">',
@@ -192,7 +355,7 @@ def get_base_head(title, extra_css=''):
         '<meta name="color-scheme" content="dark light">',
         '<link rel="icon" href="data:image/svg+xml,<svg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 100 100\'><path d=\'M58 2L22 52h20L34 98 78 42H54z\' fill=\'%233fb950\'/></svg>">',
         '<title>' + title + '</title>',
-        '<style>' + BASE_CSS,
+        '<style>' + BASE_CSS + KEYBOARD_CSS + TOAST_CSS,
     ]
     if extra_css:
         parts.append(extra_css)

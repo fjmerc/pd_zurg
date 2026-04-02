@@ -1920,7 +1920,7 @@ function _renderMovieDetail(movie, meta) {
   }
   var movieActionBtns = [];
   if (_downloadServices.movie === 'radarr') {
-    movieActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'movie\')})">Delete from Radarr</button>');
+    movieActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" title="Delete from Radarr" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'movie\')})">&#128465; Delete</button>');
   }
   if (_searchEnabled && movie.imdb_id) {
     movieActionBtns.push('<button class="btn btn-ghost btn-sm" data-imdb="' + esc(movie.imdb_id) + '" data-mtype="movie" data-label="' + esc(movie.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button>');
@@ -2258,7 +2258,7 @@ function _renderShowDetail(show, meta) {
   html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px;line-height:1.5"><strong style="color:var(--text2)">Prefer Local</strong> &mdash; switches debrid-only episodes to local copies.<br><strong style="color:var(--text2)">Prefer Debrid</strong> &mdash; removes local copies and streams from debrid.</div>';
   var showActionBtns = [];
   if (_downloadServices.show === 'sonarr') {
-    showActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'show\')})">Delete from Sonarr</button>');
+    showActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" title="Delete from Sonarr" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'show\')})">&#128465; Delete</button>');
   }
   if (_searchEnabled && show.imdb_id) {
     showActionBtns.push('<button class="btn btn-ghost btn-sm" data-imdb="' + esc(show.imdb_id) + '" data-mtype="series" data-label="' + esc(show.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button>');

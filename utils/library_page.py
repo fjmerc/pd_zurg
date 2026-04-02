@@ -197,7 +197,7 @@ body{max-width:1200px}
 .ep-num{font-weight:600;color:var(--text2);white-space:nowrap;width:50px}
 .ep-file{color:var(--text)}
 .ep-source{white-space:nowrap;text-align:right}
-.ep-quality{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;white-space:nowrap}
+.ep-quality{white-space:nowrap}
 .ep-actions{white-space:nowrap;text-align:right}
 
 /* Preference & action controls */

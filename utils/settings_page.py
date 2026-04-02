@@ -14,14 +14,15 @@ def get_settings_html(env_schema, pd_schema):
         env_schema: The env var schema dict from get_env_schema()
         pd_schema: The plex_debrid schema dict from get_plex_debrid_schema()
     """
-    from utils.ui_common import get_base_head, get_nav_html, THEME_TOGGLE_JS, WANTED_BADGE_JS
+    from utils.ui_common import (get_base_head, get_nav_html, THEME_TOGGLE_JS,
+                                 WANTED_BADGE_JS, KEYBOARD_JS, TOAST_JS)
     # Escape </ to prevent script tag breakout in JSON-in-HTML context
     env_json = json.dumps(env_schema).replace('</', '<\\/')
     pd_json = json.dumps(pd_schema).replace('</', '<\\/')
     html = _SETTINGS_HTML
     html = html.replace('__BASE_HEAD__', get_base_head('pd_zurg Settings'))
     html = html.replace('__NAV_HTML__', get_nav_html('settings'))
-    html = html.replace('__THEME_TOGGLE_JS__', THEME_TOGGLE_JS)
+    html = html.replace('__THEME_TOGGLE_JS__', THEME_TOGGLE_JS + KEYBOARD_JS + TOAST_JS)
     html = html.replace('__WANTED_BADGE_JS__', WANTED_BADGE_JS)
     html = html.replace('__ENV_SCHEMA_JSON__', env_json)
     html = html.replace('__PD_SCHEMA_JSON__', pd_json)
@@ -203,8 +204,8 @@ mark{background:var(--yellow);color:#0d1117;border-radius:2px;padding:0 1px}
 </style>
 
 <div class="tabs" role="tablist">
-  <div class="tab active" role="tab" tabindex="0" aria-selected="true" aria-controls="tab-env" onclick="switchTab('env')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('env')}">pd_zurg</div>
-  <div class="tab" role="tab" tabindex="0" aria-selected="false" aria-controls="tab-pd" onclick="switchTab('pd')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('pd')}">plex_debrid</div>
+  <div class="tab active" role="tab" tabindex="0" aria-selected="true" aria-controls="tab-env" data-kb="tab-1" onclick="switchTab('env')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('env')}">pd_zurg</div>
+  <div class="tab" role="tab" tabindex="0" aria-selected="false" aria-controls="tab-pd" data-kb="tab-2" onclick="switchTab('pd')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('pd')}">plex_debrid</div>
 </div>
 
 <div class="banner" id="banner"></div>
@@ -216,7 +217,7 @@ mark{background:var(--yellow);color:#0d1117;border-radius:2px;padding:0 1px}
     <label class="btn btn-ghost btn-sm" style="cursor:pointer">Import .env<input type="file" accept=".env,text/plain" style="display:none" onchange="envImport(this)"></label>
     <button type="button" class="btn btn-ghost btn-sm" onclick="envResetDefaults()">Reset All to Defaults</button>
   </div>
-  <div class="search-bar"><input type="text" id="search-env" placeholder="Filter settings..." oninput="filterSettings('env',this.value)"><div class="search-count" id="search-env-count"></div></div>
+  <div class="search-bar"><input type="text" id="search-env" data-kb="search" placeholder="Filter settings... (/)" oninput="filterSettings('env',this.value)"><div class="search-count" id="search-env-count"></div></div>
   <div id="env-categories"></div>
   <div class="actions">
     <button type="button" class="btn btn-primary" id="btn-env-save" onclick="envSave()">Save &amp; Apply</button>
@@ -232,7 +233,7 @@ mark{background:var(--yellow);color:#0d1117;border-radius:2px;padding:0 1px}
     <label class="btn btn-ghost btn-sm" style="cursor:pointer">Import settings.json<input type="file" accept=".json,application/json" style="display:none" onchange="pdImport(this)"></label>
     <button type="button" class="btn btn-ghost btn-sm" onclick="pdResetDefaults()">Reset to Defaults</button>
   </div>
-  <div class="search-bar"><input type="text" id="search-pd" placeholder="Filter settings..." oninput="filterSettings('pd',this.value)"><div class="search-count" id="search-pd-count"></div></div>
+  <div class="search-bar"><input type="text" id="search-pd" data-kb="search" placeholder="Filter settings... (/)" oninput="filterSettings('pd',this.value)"><div class="search-count" id="search-pd-count"></div></div>
   <div id="pd-categories"></div>
   <div class="actions">
     <button type="button" class="btn btn-primary" id="btn-pd-save" onclick="pdSave()">Save &amp; Restart plex_debrid</button>
@@ -259,6 +260,14 @@ let pdValues = {};
 let isDirty = false;  // combined flag for beforeunload
 let envDirty = false;
 let pdDirty = false;
+
+/* Keyboard shortcut: Escape handler for this page */
+window.onKbEscape = function() {
+  var envTab = document.getElementById('tab-env');
+  var id = envTab && envTab.classList.contains('active') ? 'search-env' : 'search-pd';
+  var si = document.getElementById(id);
+  if (si && si.value) { si.value = ''; filterSettings(id === 'search-env' ? 'env' : 'pd', ''); }
+};
 
 // -----------------------------------------------------------------------
 // Shared helpers
@@ -433,18 +442,21 @@ async function envSave() {
     if (result.status === 'error') {
       showBanner('error', '<strong>Save failed:</strong><br>' + result.errors.map(e => '&bull; ' + esc(e)).join('<br>'));
       highlightErrors(result.errors);
+      showToast('Save failed: ' + result.errors.length + ' error(s)', 'error');
     } else if (result.status === 'saved') {
       let html = '<strong>Settings saved and applied!</strong>';
       if (result.restarted && result.restarted.length) html += '<br>Services restarting: ' + result.restarted.map(s => esc(s)).join(', ');
       if (result.warnings && result.warnings.length) html += '<br><br><strong>Warnings:</strong><br>' + result.warnings.map(w => '&bull; ' + esc(w)).join('<br>');
       showBanner('success', html);
+      showToast('Settings saved and applied!', 'success');
       envValues = collectEnvData();
       envDirty = false;
       updateDirtyUI();
     } else {
       showBanner('warning', '<strong>Saved</strong> (reload failed \u2014 restart container to apply)');
+      showToast('Saved (reload failed \u2014 restart container)', 'warning');
     }
-  } catch (e) { showBanner('error', 'Failed: ' + esc(e.message)); }
+  } catch (e) { showBanner('error', 'Failed: ' + esc(e.message)); showToast('Save failed', 'error'); }
   finally { setButtonLoading('btn-env-save', false, 'Save & Apply'); }
 }
 
@@ -937,12 +949,12 @@ function applyVersionsJson() {
   const ta = document.getElementById('versions-json-textarea');
   try {
     const parsed = JSON.parse(ta.value);
-    if (!Array.isArray(parsed)) { alert('Versions must be a JSON array'); return; }
+    if (!Array.isArray(parsed)) { showToast('Versions must be a JSON array', 'error'); return; }
     _versionsData = parsed;
     refreshVersionsUI();
     showBanner('success', 'JSON applied to profile editor');
   } catch (e) {
-    alert('Invalid JSON: ' + e.message);
+    showToast('Invalid JSON: ' + e.message, 'error');
   }
 }
 
@@ -1045,18 +1057,21 @@ async function pdSave() {
     const result = await resp.json();
     if (result.status === 'error') {
       showBanner('error', '<strong>Save failed:</strong><br>' + result.errors.map(e => '&bull; ' + esc(e)).join('<br>'));
+      showToast('Save failed: ' + result.errors.length + ' error(s)', 'error');
     } else if (result.status === 'saved') {
       let html = '<strong>plex_debrid settings saved!</strong>';
       if (result.restarted) html += ' Service is restarting.';
       if (result.warnings && result.warnings.length) html += '<br><br><strong>Warnings:</strong><br>' + result.warnings.map(w => '&bull; ' + esc(w)).join('<br>');
       showBanner('success', html);
+      showToast('plex_debrid settings saved!', 'success');
       pdValues = data;
       pdDirty = false;
       updateDirtyUI();
     } else {
       showBanner('warning', '<strong>Saved</strong> (restart failed \u2014 restart container manually)');
+      showToast('Saved (restart failed)', 'warning');
     }
-  } catch (e) { showBanner('error', 'Failed: ' + esc(e.message)); }
+  } catch (e) { showBanner('error', 'Failed: ' + esc(e.message)); showToast('Save failed', 'error'); }
   finally { setButtonLoading('btn-pd-save', false, 'Save & Restart plex_debrid'); }
 }
 

@@ -8,11 +8,12 @@ built-in http.server — no framework dependencies.
 
 def get_library_html():
     """Return the complete library browser HTML page with shared CSS and nav."""
-    from utils.ui_common import get_base_head, get_nav_html, THEME_TOGGLE_JS
+    from utils.ui_common import (get_base_head, get_nav_html, THEME_TOGGLE_JS,
+                                 KEYBOARD_JS, TOAST_JS)
     html = _LIBRARY_HTML
     html = html.replace('__BASE_HEAD__', get_base_head('pd_zurg Library'))
     html = html.replace('__NAV_HTML__', get_nav_html('library'))
-    html = html.replace('__THEME_TOGGLE_JS__', THEME_TOGGLE_JS)
+    html = html.replace('__THEME_TOGGLE_JS__', THEME_TOGGLE_JS + KEYBOARD_JS + TOAST_JS)
     return html
 
 
@@ -363,18 +364,18 @@ body.has-bulk-bar{padding-bottom:60px}
 
 <div class="tabs" role="tablist">
   <div class="tab active" role="tab" tabindex="0" aria-selected="true" aria-controls="tab-movies"
-       onclick="switchTab('movies')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('movies')}">
+       data-kb="tab-1" onclick="switchTab('movies')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('movies')}">
     Movies<span class="badge" id="badge-movies">0</span>
   </div>
   <div class="tab" role="tab" tabindex="0" aria-selected="false" aria-controls="tab-shows"
-       onclick="switchTab('shows')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('shows')}">
+       data-kb="tab-2" onclick="switchTab('shows')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('shows')}">
     Shows<span class="badge" id="badge-shows">0</span>
   </div>
 </div>
 
 <div class="controls">
   <div class="search-wrap">
-    <input type="search" id="search-input" placeholder="Search titles..." autocomplete="off"
+    <input type="search" id="search-input" data-kb="search" placeholder="Search titles... (/)" autocomplete="off"
            oninput="clearTimeout(_searchTimer);_searchTimer=setTimeout(applyFilters,150)" aria-label="Search titles">
   </div>
   <select class="filter-select" id="source-filter" onchange="applyFilters()" aria-label="Filter by source">
@@ -405,7 +406,7 @@ body.has-bulk-bar{padding-bottom:60px}
     <option value="size">Sort: Size</option>
   </select>
   <button class="btn-select" id="btn-select" onclick="toggleSelectMode()" aria-pressed="false">Select</button>
-  <button class="btn btn-ghost" id="btn-refresh" onclick="triggerRefresh()">Refresh</button>
+  <button class="btn btn-ghost" id="btn-refresh" data-kb="refresh" onclick="triggerRefresh()" title="Refresh library (R)">Refresh</button>
   <span class="scan-info" id="scan-info"></span>
 </div>
 
@@ -470,6 +471,13 @@ let _searchTimer = null;
 let _refreshTimer = null;
 let _activeWantedPreset = null;
 let _wantedInFlight = false;
+
+/* Keyboard shortcut: Escape handler for this page */
+window.onKbEscape = function() {
+  if (_inDetailView) { hideDetail(); return; }
+  var si = document.getElementById('search-input');
+  if (si && si.value) { si.value = ''; applyFilters(); return; }
+};
 let _lastTransferText = '';
 let _lastTransferType = '';
 let _transferClearTimer = null;
@@ -823,7 +831,7 @@ function bulkSearchMissing() {
     }
   }
   if (!tasks.length) {
-    alert('No missing episodes found in selected items.');
+    showToast('No missing episodes found in selected items.', 'warning');
     return;
   }
   var totalShows = new Set(tasks.map(function(t) { return normTitle(t.item.title); })).size;
@@ -2620,7 +2628,7 @@ function _savePref(nk, pref) {
     var btn = _getPrefElements().btn;
     if (btn) btn.style.display = 'none';
     return true;
-  }).catch(function(e) { alert('Failed to save preference: ' + e); return false; });
+  }).catch(function(e) { showToast('Failed to save preference: ' + e, 'error'); return false; });
 }
 
 function downloadEp(season, episode, preferDebrid) {

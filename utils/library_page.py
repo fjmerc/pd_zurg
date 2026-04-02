@@ -122,7 +122,7 @@ body{max-width:1200px}
 
 /* Source badges */
 .badge-local{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#3fb9500f;color:var(--green);border:1px solid #3fb95033}
-.badge-debrid{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#2dd4bf0f;color:#2dd4bf;border:1px solid #2dd4bf33}
+.badge-debrid{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#c084fc0f;color:#c084fc;border:1px solid #c084fc33}
 .badge-local .badge-full,.badge-debrid .badge-full,.badge-missing .badge-full,.badge-pending .badge-full,.badge-migrating .badge-full,.badge-unavailable .badge-full,.badge-fallback .badge-full{display:inline}
 .badge-local .badge-mini,.badge-debrid .badge-mini,.badge-missing .badge-mini,.badge-pending .badge-mini,.badge-migrating .badge-mini,.badge-unavailable .badge-mini,.badge-fallback .badge-mini{display:none}
 @media(max-width:640px){
@@ -131,7 +131,7 @@ body{max-width:1200px}
   .ep-actions .btn:not(.btn-icon){font-size:.68em;padding:2px 5px}
 }
 [data-theme="light"] .badge-local{background:#1a7f371a;border-color:#1a7f3740}
-[data-theme="light"] .badge-debrid{background:#0d94851a;border-color:#0d948540;color:#0d9485}
+[data-theme="light"] .badge-debrid{background:#7c3aed1a;border-color:#7c3aed40;color:#7c3aed}
 
 /* Quality badges */
 .badge-quality{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;white-space:nowrap}

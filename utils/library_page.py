@@ -191,14 +191,14 @@ body{max-width:1200px}
 .season-header.expanded .season-chevron{transform:rotate(90deg)}
 
 /* Episode table */
-.episode-table{width:100%;border-collapse:collapse;table-layout:fixed}
+.episode-table{width:100%;border-collapse:collapse}
 .episode-table tr{border-top:1px solid var(--border)}
 .episode-table td{padding:7px 14px;font-size:.82em;color:var(--text);vertical-align:middle}
 .ep-num{font-weight:600;color:var(--text2);white-space:nowrap;width:50px}
-.ep-file{color:var(--text);overflow:hidden;text-overflow:ellipsis}
-.ep-source{white-space:nowrap;text-align:right;width:70px}
-.ep-quality{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;width:140px}
-.ep-actions{white-space:nowrap;text-align:right;width:170px}
+.ep-file{color:var(--text)}
+.ep-source{white-space:nowrap;text-align:right}
+.ep-quality{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;white-space:nowrap}
+.ep-actions{white-space:nowrap;text-align:right}
 
 /* Preference & action controls */
 .pref-row{display:flex;align-items:center;gap:8px;margin-top:8px}

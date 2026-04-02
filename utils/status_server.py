@@ -2491,8 +2491,8 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     except (ValueError, TypeError):
                         self._send_json_response(400, json.dumps({'error': 'episode must be integer'}))
                         return
-                from utils.search import search_with_cache
-                results = search_with_cache(imdb_id, media_type, season, episode)
+                from utils.search import search_torrents
+                results = search_torrents(imdb_id, media_type, season, episode)
                 self._send_json_response(200, json.dumps({'results': results}))
             except json.JSONDecodeError:
                 self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))

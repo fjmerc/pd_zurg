@@ -327,7 +327,7 @@ body.has-bulk-bar{padding-bottom:60px}
   .wanted-pill{padding:3px 8px;font-size:.72em}
 }
 .search-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.65);display:flex;align-items:flex-start;justify-content:center;z-index:1000;padding:40px 16px;overflow-y:auto;backdrop-filter:blur(2px)}
-.search-dialog{background:var(--card);border:1px solid var(--border);border-radius:10px;width:100%;max-width:780px;animation:modal-in .15s ease-out}
+.search-dialog{background:var(--card);border:1px solid var(--border);border-radius:10px;width:100%;max-width:1000px;animation:modal-in .15s ease-out}
 @keyframes modal-in{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
 .search-dialog-hdr{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border)}
 .search-dialog-hdr h3{margin:0;font-size:.95em;font-weight:600}
@@ -338,26 +338,24 @@ body.has-bulk-bar{padding-bottom:60px}
 .search-filter-row label{font-size:.78em;color:var(--text2);display:flex;align-items:center;gap:4px;cursor:pointer}
 .search-filter-row select{font-size:.78em;padding:2px 6px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px}
 .search-results-tbl{width:100%;border-collapse:collapse;font-size:.82em}
-.search-results-tbl th{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);color:var(--text3);font-weight:500;font-size:.85em;cursor:pointer;user-select:none;white-space:nowrap}
+.search-results-tbl th{text-align:center;padding:6px 8px;border-bottom:1px solid var(--border);color:var(--text3);font-weight:500;font-size:.85em;cursor:pointer;user-select:none;white-space:nowrap}
 .search-results-tbl th:hover{color:var(--text)}
 .search-results-tbl th .sort-arrow{font-size:.7em;margin-left:2px}
-.search-results-tbl td{padding:6px 8px;border-bottom:1px solid var(--border);vertical-align:middle}
+.search-results-tbl td{padding:6px 8px;border-bottom:1px solid var(--border);vertical-align:middle;text-align:center}
 .search-results-tbl tr:last-child td{border-bottom:none}
 .search-results-tbl tr.added-row td{opacity:.5}
-.sr-title{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.search-results-tbl th:first-child,.search-results-tbl th:nth-child(2){text-align:left}
+.search-results-tbl th:first-child,.search-results-tbl th:nth-child(2),.search-results-tbl th:last-child{cursor:default}
+.sr-title{max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
 .sr-title:hover{white-space:normal;word-break:break-word}
+.sr-indexer{text-align:left;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .badge-quality{display:inline-block;padding:1px 6px;border-radius:4px;font-size:.78em;font-weight:600;white-space:nowrap}
 .badge-quality.q-2160p{background:#ff6b0014;color:#ff8c3a;border:1px solid #ff6b0030}
 .badge-quality.q-1080p{background:#58a6ff14;color:var(--blue);border:1px solid #58a6ff30}
 .badge-quality.q-720p{background:#3fb95014;color:var(--green);border:1px solid #3fb95030}
 .badge-quality.q-480p,.badge-quality.q-Unknown{background:var(--border);color:var(--text3);border:1px solid var(--border)}
-.badge-cached{display:inline-flex;align-items:center;gap:2px;font-size:.78em;font-weight:600}
-.badge-cached.is-cached{color:var(--green)}
-.badge-cached.not-cached{color:var(--text3)}
 .btn-add-debrid{background:none;border:1px solid var(--green);color:var(--green);border-radius:4px;padding:2px 8px;font-size:.78em;cursor:pointer;transition:all .15s}
 .btn-add-debrid:hover:not(:disabled){background:#3fb95018;border-color:var(--green)}
-.btn-add-debrid.not-cached{border-color:var(--blue);color:var(--blue)}
-.btn-add-debrid.not-cached:hover:not(:disabled){background:#58a6ff18}
 .btn-add-debrid:disabled{opacity:.5;cursor:not-allowed}
 .btn-add-debrid.added{border-color:var(--green);color:var(--green);cursor:default}
 .search-empty{text-align:center;color:var(--text3);padding:24px 0;font-size:.88em}
@@ -3264,9 +3262,8 @@ function startTsRefresh() {
 // Debrid Search Modal (F9)
 // ---------------------------------------------------------------------------
 var _searchResults = [];
-var _searchSortCol = 'cached';
+var _searchSortCol = 'quality';
 var _searchSortAsc = false;
-var _searchCachedOnly = false;
 var _searchMinQuality = 0;
 
 function openSearchFromBtn(btn) {
@@ -3300,9 +3297,8 @@ function openSearchModal(imdbId, mediaType, season, episode, displayTitle) {
 
   // Reset state
   _searchResults = [];
-  _searchSortCol = 'cached';
+  _searchSortCol = 'quality';
   _searchSortAsc = false;
-  _searchCachedOnly = false;
   _searchMinQuality = 0;
 
   var payload = {imdb_id: imdbId, type: mediaType};
@@ -3336,7 +3332,6 @@ function _renderSearchResults() {
   if (!body) return;
 
   var filtered = _searchResults.filter(function(r) {
-    if (_searchCachedOnly && !r.cached) return false;
     if (r.quality.score < _searchMinQuality) return false;
     return true;
   });
@@ -3344,22 +3339,18 @@ function _renderSearchResults() {
   // Sort
   filtered.sort(function(a, b) {
     var va, vb;
-    if (_searchSortCol === 'cached') { va = a.cached ? 1 : 0; vb = b.cached ? 1 : 0; }
-    else if (_searchSortCol === 'quality') { va = a.quality.score; vb = b.quality.score; }
+    if (_searchSortCol === 'quality') { va = a.quality.score; vb = b.quality.score; }
     else if (_searchSortCol === 'size') { va = a.size_bytes; vb = b.size_bytes; }
     else if (_searchSortCol === 'seeds') { va = a.seeds; vb = b.seeds; }
-    else { va = a.cached ? 1 : 0; vb = b.cached ? 1 : 0; }
+    else { va = a.quality.score; vb = b.quality.score; }
     if (va === vb) {
-      // Tiebreak: cached > quality > seeds
-      if (a.cached !== b.cached) return b.cached ? 1 : -1;
-      if (a.quality.score !== b.quality.score) return b.quality.score - a.quality.score;
+      if (_searchSortCol !== 'quality' && a.quality.score !== b.quality.score) return b.quality.score - a.quality.score;
       return b.seeds - a.seeds;
     }
     return _searchSortAsc ? (va - vb) : (vb - va);
   });
 
   var html = '<div class="search-filter-row">';
-  html += '<label><input type="checkbox" id="search-cached-toggle"' + (_searchCachedOnly ? ' checked' : '') + ' onchange="_searchCachedOnly=this.checked;_renderSearchResults()"> Cached only</label>';
   html += '<label>Min quality: <select id="search-quality-filter" onchange="_searchMinQuality=parseInt(this.value,10);_renderSearchResults()">';
   html += '<option value="0"' + (_searchMinQuality === 0 ? ' selected' : '') + '>Any</option>';
   html += '<option value="1"' + (_searchMinQuality === 1 ? ' selected' : '') + '>480p+</option>';
@@ -3379,15 +3370,15 @@ function _renderSearchResults() {
   html += '<table class="search-results-tbl"><thead><tr>';
   var cols = [
     {key: 'title', label: 'Release'},
+    {key: 'indexer', label: 'Indexer'},
     {key: 'quality', label: 'Quality'},
     {key: 'size', label: 'Size'},
     {key: 'seeds', label: 'Seeds'},
-    {key: 'cached', label: 'Cached'},
     {key: 'action', label: ''},
   ];
   for (var ci = 0; ci < cols.length; ci++) {
     var col = cols[ci];
-    if (col.key === 'action' || col.key === 'title') {
+    if (col.key === 'action' || col.key === 'title' || col.key === 'indexer') {
       html += '<th>' + col.label + '</th>';
     } else {
       var arrow = _searchSortCol === col.key ? (_searchSortAsc ? ' &#9650;' : ' &#9660;') : '';
@@ -3400,19 +3391,17 @@ function _renderSearchResults() {
     var r = filtered[ri];
     var addedClass = r._added ? ' added-row' : '';
     html += '<tr class="' + addedClass + '">';
-    html += '<td class="sr-title" title="' + esc(r.title) + '">' + esc(r.title);
-    if (r.source_name) html += ' <span style="color:var(--text3);font-size:.85em">' + esc(r.source_name) + '</span>';
-    html += '</td>';
+    html += '<td class="sr-title" title="' + esc(r.title) + '">' + esc(r.title) + '</td>';
+    html += '<td class="sr-indexer" title="' + esc(r.source_name || '') + '">' + esc(r.source_name || '') + '</td>';
     var qCls = 'q-' + r.quality.label.replace(/\s/g, '');
     html += '<td><span class="badge-quality ' + qCls + '">' + esc(r.quality.label) + '</span></td>';
     html += '<td>' + _formatBytes(r.size_bytes) + '</td>';
     html += '<td>' + (r.seeds || 0) + '</td>';
-    html += '<td><span class="badge-cached ' + (r.cached ? 'is-cached' : 'not-cached') + '">' + (r.cached ? '&#10003; Cached' : '&mdash;') + '</span></td>';
     html += '<td>';
     if (r._added) {
       html += '<span style="color:var(--green);font-size:.82em">&#10003; Added</span>';
     } else {
-      html += '<button class="btn-add-debrid ' + (r.cached ? '' : 'not-cached') + '" data-hash="' + esc(r.info_hash) + '" onclick="addSearchResult(this)">Add</button>';
+      html += '<button class="btn-add-debrid" data-hash="' + esc(r.info_hash) + '" onclick="addSearchResult(this)">Add</button>';
     }
     html += '</td></tr>';
   }
@@ -3460,9 +3449,7 @@ function addSearchResult(btn) {
       }
       _renderSearchResults();
       // Show success message
-      var msg = r.cached
-        ? 'Added! Library will update on next scan.'
-        : 'Added \u2014 downloading on ' + (data.service || 'debrid') + '\u2026';
+      var msg = 'Added to ' + (data.service || 'debrid') + '! Library will update on next scan.';
       _showSearchMsg(msg, 'success');
     } else {
       btn.disabled = false;

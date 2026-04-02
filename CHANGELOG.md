@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Delete from Sonarr/Radarr**: Movie and show detail pages now have a "Delete from Radarr/Sonarr" button that removes the entry and its files from the respective arr service. Includes two-click confirmation, history logging (`arr_deleted` event), and notification support.
 - **Expandable descriptions**: Show/movie overview text can now be clicked to expand the full description instead of being permanently truncated with a fade.
 
+### Changed
+
+- **Search modal redesign**: Removed the "Cached only" checkbox and "Cached" column (Real-Debrid deprecated their instantAvailability endpoint in Nov 2024, so cache status was always empty). Added a dedicated "Indexer" column, widened the modal, and centered data columns. Search results now sort by quality then seeds. The backend no longer makes the failing cache check API call, so searches return faster.
+
 ### Fixed
 
 - **Quality badge text wrapping**: Quality badges like "WEB-DL 1080p" and "Remux 1080p" no longer wrap onto two lines in episode tables.

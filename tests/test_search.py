@@ -1,4 +1,4 @@
-"""Tests for utils/search.py — Torrentio search, cache checks, and debrid add."""
+"""Tests for utils/search.py — Torrentio search and debrid add."""
 
 import json
 import os
@@ -17,8 +17,7 @@ from utils.search import (
     _parse_size_from_title,
     _parse_source,
     search_torrentio,
-    check_cache,
-    search_with_cache,
+    search_torrents,
     add_to_debrid,
 )
 
@@ -214,30 +213,10 @@ class TestSearchTorrentio:
         assert search_torrentio('tt1234567') == []
 
 
-class TestSearchWithCacheMerge:
+class TestSearchSortAndFilter:
 
-    @patch('utils.search.check_cache')
     @patch('utils.search.search_torrentio')
-    def test_cached_field_set_correctly(self, mock_search, mock_cache):
-        """Verify cached field is set correctly from cache check."""
-        mock_search.return_value = [
-            {'info_hash': 'a' * 40, 'title': 'R1', 'seeds': 100,
-             'quality': {'label': '1080p', 'score': 3}, 'size_bytes': 1000, 'source_name': 'S'},
-            {'info_hash': 'b' * 40, 'title': 'R2', 'seeds': 50,
-             'quality': {'label': '720p', 'score': 2}, 'size_bytes': 500, 'source_name': 'S'},
-        ]
-        mock_cache.return_value = {'a' * 40}
-
-        results = search_with_cache('tt1234567')
-
-        cached_result = next(r for r in results if r['info_hash'] == 'a' * 40)
-        not_cached = next(r for r in results if r['info_hash'] == 'b' * 40)
-        assert cached_result['cached'] is True
-        assert not_cached['cached'] is False
-
-    @patch('utils.search.check_cache')
-    @patch('utils.search.search_torrentio')
-    def test_blocklist_filtering(self, mock_search, mock_cache):
+    def test_blocklist_filtering(self, mock_search):
         """Verify blocked hashes are excluded from results."""
         mock_search.return_value = [
             {'info_hash': 'a' * 40, 'title': 'R1', 'seeds': 100,
@@ -245,19 +224,17 @@ class TestSearchWithCacheMerge:
             {'info_hash': 'b' * 40, 'title': 'R2', 'seeds': 50,
              'quality': {'label': '720p', 'score': 2}, 'size_bytes': 500, 'source_name': 'S'},
         ]
-        mock_cache.return_value = set()
 
         with patch('utils.blocklist.is_blocked', side_effect=lambda h: h == 'a' * 40):
-            results = search_with_cache('tt1234567')
+            results = search_torrents('tt1234567')
 
         hashes = [r['info_hash'] for r in results]
         assert 'a' * 40 not in hashes
         assert 'b' * 40 in hashes
 
-    @patch('utils.search.check_cache')
     @patch('utils.search.search_torrentio')
-    def test_sort_order(self, mock_search, mock_cache):
-        """Verify sort: cached first, then quality desc, then seeds desc."""
+    def test_sort_order(self, mock_search):
+        """Verify sort: quality desc, then seeds desc."""
         mock_search.return_value = [
             {'info_hash': 'a' * 40, 'title': 'R1', 'seeds': 10,
              'quality': {'label': '720p', 'score': 2}, 'size_bytes': 500, 'source_name': 'S'},
@@ -266,17 +243,13 @@ class TestSearchWithCacheMerge:
             {'info_hash': 'c' * 40, 'title': 'R3', 'seeds': 50,
              'quality': {'label': '2160p', 'score': 4}, 'size_bytes': 2000, 'source_name': 'S'},
         ]
-        # Only 'a' is cached
-        mock_cache.return_value = {'a' * 40}
 
-        results = search_with_cache('tt1234567')
+        results = search_torrents('tt1234567')
 
-        # 'a' is cached so it should be first despite lower quality
-        assert results[0]['info_hash'] == 'a' * 40
-        assert results[0]['cached'] is True
-        # Then non-cached sorted by quality desc: c (2160p) > b (1080p)
-        assert results[1]['info_hash'] == 'c' * 40
-        assert results[2]['info_hash'] == 'b' * 40
+        # Sorted by quality desc: c (2160p) > b (1080p) > a (720p)
+        assert results[0]['info_hash'] == 'c' * 40
+        assert results[1]['info_hash'] == 'b' * 40
+        assert results[2]['info_hash'] == 'a' * 40
 
 
 class TestAddToDebrid:

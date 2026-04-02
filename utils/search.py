@@ -1,8 +1,8 @@
-"""Interactive debrid torrent search via Torrentio + provider cache checks.
+"""Interactive debrid torrent search via Torrentio.
 
-Allows users to search for torrents from the library detail view, see
-which results are instantly available (cached) on their debrid provider,
-and one-click add them.  Uses urllib only (no requests dependency).
+Allows users to search for torrents from the library detail view
+and one-click add them to their debrid provider.  Uses urllib only
+(no requests dependency).
 """
 
 import json
@@ -18,7 +18,6 @@ from utils.logger import get_logger
 logger = get_logger()
 
 _SEARCH_TIMEOUT = 10
-_CACHE_CHECK_TIMEOUT = 10
 _ADD_TIMEOUT = 15
 
 # Quality tiers — higher score = better
@@ -239,134 +238,17 @@ def search_torrentio(imdb_id, media_type='movie', season=None, episode=None):
 
 
 # ---------------------------------------------------------------------------
-# F9.2 — Debrid cache checks
+# F9.2 — Search + filter
 # ---------------------------------------------------------------------------
 
-def check_rd_cache(hashes, api_key):
-    """Check Real-Debrid instant availability for a list of hashes.
+def search_torrents(imdb_id, media_type='movie', season=None, episode=None):
+    """Search Torrentio for torrents, sorted by quality then seeds.
 
-    Returns set of lowercase hashes that are cached.
-    """
-    if not hashes or not api_key:
-        return set()
+    Returns list of dicts sorted by quality (desc), then seeds (desc).
+    Blocklisted hashes are filtered out.
 
-    cached = set()
-    # RD supports up to ~100 hashes per request via path
-    batch_size = 100
-    for i in range(0, len(hashes), batch_size):
-        batch = hashes[i:i + batch_size]
-        hash_path = '/'.join(h.lower() for h in batch)
-        url = f'https://api.real-debrid.com/rest/1.0/torrents/instantAvailability/{hash_path}'
-        headers = {'Authorization': f'Bearer {api_key}'}
-        data = _urllib_get(url, headers=headers, timeout=_CACHE_CHECK_TIMEOUT)
-        if not data or not isinstance(data, dict):
-            continue
-        # RD returns {hash: {rd: [{file_id: {filename, filesize}}]}} for cached
-        for h, info in data.items():
-            h_lower = h.lower()
-            if isinstance(info, dict):
-                rd_entries = info.get('rd', [])
-                if rd_entries:
-                    cached.add(h_lower)
-
-    return cached
-
-
-def check_ad_cache(hashes, api_key):
-    """Check AllDebrid instant availability for a list of hashes.
-
-    Returns set of lowercase hashes that are cached.
-    """
-    if not hashes or not api_key:
-        return set()
-
-    cached = set()
-    # AD uses magnets[] query params
-    batch_size = 100
-    for i in range(0, len(hashes), batch_size):
-        batch = hashes[i:i + batch_size]
-        params = [('agent', 'pd_zurg'), ('apikey', api_key)]
-        for h in batch:
-            params.append(('magnets[]', f'{_MAGNET_PREFIX}{h.lower()}'))
-        url = f'https://api.alldebrid.com/v4/magnet/instant?{urllib.parse.urlencode(params)}'
-        data = _urllib_get(url, timeout=_CACHE_CHECK_TIMEOUT)
-        if not data or not isinstance(data, dict):
-            continue
-        magnets_data = data.get('data', {}).get('magnets', [])
-        if not isinstance(magnets_data, list):
-            continue
-        for idx, magnet_info in enumerate(magnets_data):
-            if isinstance(magnet_info, dict) and magnet_info.get('instant'):
-                if idx < len(batch):
-                    cached.add(batch[idx].lower())
-
-    return cached
-
-
-def check_tb_cache(hashes, api_key):
-    """Check TorBox instant availability for a list of hashes.
-
-    Returns set of lowercase hashes that are cached.
-    """
-    if not hashes or not api_key:
-        return set()
-
-    cached = set()
-    batch_size = 100
-    for i in range(0, len(hashes), batch_size):
-        batch = hashes[i:i + batch_size]
-        hash_str = ','.join(h.lower() for h in batch)
-        url = f'https://api.torbox.app/v1/api/torrents/checkcached?hash={urllib.parse.quote(hash_str)}&list_files=false'
-        headers = {'Authorization': f'Bearer {api_key}'}
-        data = _urllib_get(url, headers=headers, timeout=_CACHE_CHECK_TIMEOUT)
-        if not data or not isinstance(data, dict):
-            continue
-        cache_data = data.get('data', {})
-        if isinstance(cache_data, dict):
-            for h_lower, info in cache_data.items():
-                if info:
-                    cached.add(h_lower.lower())
-
-    return cached
-
-
-def check_cache(hashes):
-    """Check debrid cache for a list of info hashes using the configured provider.
-
-    Returns set of lowercase hashes that are cached.
-    """
-    if not hashes:
-        return set()
-
-    service, api_key = _get_debrid_service()
-    if not service:
-        return set()
-
-    checkers = {
-        'realdebrid': check_rd_cache,
-        'alldebrid': check_ad_cache,
-        'torbox': check_tb_cache,
-    }
-    checker = checkers.get(service)
-    if not checker:
-        return set()
-
-    try:
-        return checker(hashes, api_key)
-    except Exception as e:
-        logger.error(f"[search] Cache check failed for {service}: {type(e).__name__}: {e}")
-        return set()
-
-
-# ---------------------------------------------------------------------------
-# F9.3 — Combined search + cache check
-# ---------------------------------------------------------------------------
-
-def search_with_cache(imdb_id, media_type='movie', season=None, episode=None):
-    """Search Torrentio and enrich results with debrid cache status.
-
-    Returns list of dicts sorted by: cached first, then quality (desc),
-    then seeds (desc). Blocklisted hashes are filtered out.
+    Note: Debrid cache checking was removed because Real-Debrid deprecated
+    their instantAvailability endpoint in Nov 2024.
     """
     results = search_torrentio(imdb_id, media_type, season, episode)
     if not results:
@@ -379,16 +261,8 @@ def search_with_cache(imdb_id, media_type='movie', season=None, episode=None):
     except ImportError:
         pass
 
-    # Check cache status in one batch
-    all_hashes = [r['info_hash'] for r in results]
-    cached_hashes = check_cache(all_hashes)
-
-    for r in results:
-        r['cached'] = r['info_hash'] in cached_hashes
-
-    # Sort: cached first, then quality score desc, then seeds desc
+    # Sort: quality score desc, then seeds desc
     results.sort(key=lambda r: (
-        r['cached'],
         r['quality']['score'],
         r['seeds'],
     ), reverse=True)
@@ -397,7 +271,7 @@ def search_with_cache(imdb_id, media_type='movie', season=None, episode=None):
 
 
 # ---------------------------------------------------------------------------
-# F9.4 — Add to debrid
+# F9.3 — Add to debrid
 # ---------------------------------------------------------------------------
 
 def add_to_debrid(info_hash, title=''):

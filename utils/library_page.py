@@ -128,7 +128,7 @@ body{max-width:1200px}
 @media(max-width:640px){
   .badge-local .badge-full,.badge-debrid .badge-full,.badge-missing .badge-full,.badge-pending .badge-full,.badge-migrating .badge-full,.badge-unavailable .badge-full,.badge-fallback .badge-full{display:none}
   .badge-local .badge-mini,.badge-debrid .badge-mini,.badge-missing .badge-mini,.badge-pending .badge-mini,.badge-migrating .badge-mini,.badge-unavailable .badge-mini,.badge-fallback .badge-mini{display:inline}
-  .ep-actions .btn{font-size:.68em;padding:2px 5px}
+  .ep-actions .btn:not(.btn-icon){font-size:.68em;padding:2px 5px}
 }
 [data-theme="light"] .badge-local{background:#1a7f371a;border-color:#1a7f3740}
 [data-theme="light"] .badge-debrid{background:#0969da1a;border-color:#0969da40}
@@ -166,7 +166,6 @@ body{max-width:1200px}
 .detail-back:hover{text-decoration:underline}
 .detail-header{margin-bottom:16px}
 .detail-header h2{font-size:1.3em;font-weight:600;margin-bottom:6px}
-.detail-header .card-badges{margin-top:8px}
 
 /* Show history (collapsible) */
 .history-section{margin-top:16px;border:1px solid var(--border);border-radius:8px;overflow:hidden}
@@ -1920,7 +1919,7 @@ function _renderMovieDetail(movie, meta) {
   }
   var movieActionBtns = [];
   if (movie.source === 'debrid' || movie.source === 'both') {
-    movieActionBtns.push('<button class="btn btn-ghost btn-sm btn-icon" title="Block this torrent" onclick="event.stopPropagation();blockMovie()">&#128683;</button>');
+    movieActionBtns.push('<button class="btn btn-ghost btn-icon" title="Block this torrent" onclick="event.stopPropagation();_blockItem()">&#128683;</button>');
   }
   if (_downloadServices.movie === 'radarr') {
     movieActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" title="Delete from Radarr" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'movie\')})">&#128465; Delete</button>');
@@ -2105,7 +2104,6 @@ function _renderSeasonEpisodes(season, si) {
     } else if (_downloadServices.show && _downloadServices.show !== 'overseerr') {
       if (ep.source === 'debrid') {
         html += '<button class="btn btn-ghost btn-sm" aria-label="Switch ' + epLabel + ' to Local" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ',false)})">Switch to Local</button>';
-        html += '<button class="btn btn-ghost btn-sm btn-icon" title="Block this torrent" aria-label="Block ' + epLabel + '" onclick="event.stopPropagation();blockEpisode(' + season.number + ',' + ep.number + ')">&#128683;</button>';
       } else if (ep.source === 'local') {
         html += '<button class="btn btn-ghost btn-sm" aria-label="Switch ' + epLabel + ' to Debrid" onclick="_confirmBtn(this,function(){removeEp(' + season.number + ',' + ep.number + ')})">Switch to Debrid</button>';
       } else if (ep.source === 'both') {
@@ -2113,6 +2111,9 @@ function _renderSeasonEpisodes(season, si) {
       } else if (isMissing && (!ep.air_date || new Date(ep.air_date + 'T00:00:00').getTime() <= Date.now())) {
         html += '<button class="btn btn-ghost btn-sm" aria-label="Search ' + epLabel + '" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ',true)})">Search</button>';
       }
+    }
+    if (ep.source === 'debrid' || ep.source === 'both') {
+      html += '<button class="btn btn-ghost btn-icon" title="Block this torrent" aria-label="Block ' + epLabel + '" onclick="event.stopPropagation();_blockItem()">&#128683;</button>';
     }
     if (_searchEnabled && _detailItem && _detailItem.imdb_id) {
       html += ' <button class="btn btn-ghost btn-sm" title="Search torrents for ' + epLabel + '" data-imdb="' + esc(_detailItem.imdb_id) + '" data-mtype="series" data-season="' + season.number + '" data-episode="' + ep.number + '" data-label="' + esc(_detailItem.title + ' ' + epLabel) + '" onclick="event.stopPropagation();openSearchFromBtn(this)">&#128269;</button>';
@@ -2260,6 +2261,9 @@ function _renderShowDetail(show, meta) {
   html += '</div>';
   html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px;line-height:1.5"><strong style="color:var(--text2)">Prefer Local</strong> &mdash; switches debrid-only episodes to local copies.<br><strong style="color:var(--text2)">Prefer Debrid</strong> &mdash; removes local copies and streams from debrid.</div>';
   var showActionBtns = [];
+  if (show.source === 'debrid' || show.source === 'both') {
+    showActionBtns.push('<button class="btn btn-ghost btn-icon" title="Block this torrent" onclick="event.stopPropagation();_blockItem()">&#128683;</button>');
+  }
   if (_downloadServices.show === 'sonarr') {
     showActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" title="Delete from Sonarr" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'show\')})">&#128465; Delete</button>');
   }
@@ -2763,30 +2767,7 @@ function removeEp(season, episode) {
   });
 }
 
-function blockEpisode(season, episode) {
-  if (!_detailItem) return;
-  var reasons = ['Wrong content', 'Corrupt file', 'Wrong language', 'Low quality', 'Other'];
-  var reason = prompt('Reason for blocking this torrent?\\n\\n1. Wrong content\\n2. Corrupt file\\n3. Wrong language\\n4. Low quality\\n5. Other\\n\\nEnter number or custom reason:');
-  if (reason === null) return;
-  reason = reason.trim();
-  var idx = parseInt(reason, 10);
-  if (idx >= 1 && idx <= reasons.length) reason = reasons[idx - 1];
-  if (!reason) reason = 'Blocked from library';
-  var title = _detailItem.title;
-  fetch('/api/blocklist', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({title: title, reason: reason})
-  }).then(function(r) { return r.json(); }).then(function(d) {
-    if (d.status === 'added') {
-      _showMsg('Blocklisted: ' + title, 'success');
-    } else {
-      _showMsg('Failed to blocklist: ' + (d.error || ''), 'error');
-    }
-  }).catch(function() { _showMsg('Failed to blocklist', 'error'); });
-}
-
-function blockMovie() {
+function _blockItem() {
   if (!_detailItem) return;
   var reasons = ['Wrong content', 'Corrupt file', 'Wrong language', 'Low quality', 'Other'];
   var reason = prompt('Reason for blocking this torrent?\\n\\n1. Wrong content\\n2. Corrupt file\\n3. Wrong language\\n4. Low quality\\n5. Other\\n\\nEnter number or custom reason:');

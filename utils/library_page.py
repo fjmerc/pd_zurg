@@ -3326,7 +3326,7 @@ function _renderSearchResults() {
   if (!body) return;
 
   var filtered = _searchResults.filter(function(r) {
-    if (r.quality.score < _searchMinQuality) return false;
+    if (_searchMinQuality > 0 && r.quality.score !== _searchMinQuality) return false;
     return true;
   });
 
@@ -3345,11 +3345,11 @@ function _renderSearchResults() {
   });
 
   var html = '<div class="search-filter-row">';
-  html += '<label>Min quality: <select id="search-quality-filter" onchange="_searchMinQuality=parseInt(this.value,10);_renderSearchResults()">';
+  html += '<label>Quality: <select id="search-quality-filter" onchange="_searchMinQuality=parseInt(this.value,10);_renderSearchResults()">';
   html += '<option value="0"' + (_searchMinQuality === 0 ? ' selected' : '') + '>Any</option>';
-  html += '<option value="1"' + (_searchMinQuality === 1 ? ' selected' : '') + '>480p+</option>';
-  html += '<option value="2"' + (_searchMinQuality === 2 ? ' selected' : '') + '>720p+</option>';
-  html += '<option value="3"' + (_searchMinQuality === 3 ? ' selected' : '') + '>1080p+</option>';
+  html += '<option value="1"' + (_searchMinQuality === 1 ? ' selected' : '') + '>480p</option>';
+  html += '<option value="2"' + (_searchMinQuality === 2 ? ' selected' : '') + '>720p</option>';
+  html += '<option value="3"' + (_searchMinQuality === 3 ? ' selected' : '') + '>1080p</option>';
   html += '<option value="4"' + (_searchMinQuality === 4 ? ' selected' : '') + '>2160p</option>';
   html += '</select></label>';
   html += '<span class="search-count">' + filtered.length + ' of ' + _searchResults.length + ' results</span>';

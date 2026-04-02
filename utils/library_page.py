@@ -122,7 +122,7 @@ body{max-width:1200px}
 
 /* Source badges */
 .badge-local{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#3fb9500f;color:var(--green);border:1px solid #3fb95033}
-.badge-debrid{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#58a6ff0f;color:var(--blue);border:1px solid #58a6ff33}
+.badge-debrid{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#2dd4bf0f;color:#2dd4bf;border:1px solid #2dd4bf33}
 .badge-local .badge-full,.badge-debrid .badge-full,.badge-missing .badge-full,.badge-pending .badge-full,.badge-migrating .badge-full,.badge-unavailable .badge-full,.badge-fallback .badge-full{display:inline}
 .badge-local .badge-mini,.badge-debrid .badge-mini,.badge-missing .badge-mini,.badge-pending .badge-mini,.badge-migrating .badge-mini,.badge-unavailable .badge-mini,.badge-fallback .badge-mini{display:none}
 @media(max-width:640px){
@@ -131,7 +131,7 @@ body{max-width:1200px}
   .ep-actions .btn:not(.btn-icon){font-size:.68em;padding:2px 5px}
 }
 [data-theme="light"] .badge-local{background:#1a7f371a;border-color:#1a7f3740}
-[data-theme="light"] .badge-debrid{background:#0969da1a;border-color:#0969da40}
+[data-theme="light"] .badge-debrid{background:#0d94851a;border-color:#0d948540;color:#0d9485}
 
 /* Quality badges */
 .badge-quality{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;white-space:nowrap}
@@ -1864,19 +1864,19 @@ function _renderMovieDetail(movie, meta) {
   var moviePnk = normTitle(movie.title);
   var moviePe = _pending[moviePnk];
   var moviePeDir = moviePe ? (moviePe.direction || '') : '';
+  html += '<div class="card-badges">';
+  html += buildBadges(movie.source);
   if (moviePeDir === 'debrid-unavailable') {
-    html += '<div class="card-badges">' + buildBadges(movie.source) + ' <span class="badge-unavailable">Debrid N/A</span></div>';
+    html += ' <span class="badge-unavailable">Debrid N/A</span>';
   } else if (moviePeDir === 'to-local-fallback') {
-    html += '<div class="card-badges">' + buildBadges(movie.source) + ' <span class="badge-fallback">Downloading Locally</span></div>';
-  } else {
-    html += '<div class="card-badges">' + buildBadges(movie.source) + '</div>';
+    html += ' <span class="badge-fallback">Downloading Locally</span>';
   }
   if (movie.quality && movie.quality.label) {
-    html += '<div style="margin-top:4px">' + _qualityBadge(movie.quality);
+    html += ' ' + _qualityBadge(movie.quality);
     var movieSzStr = _formatBytes(movie.size_bytes);
     if (movieSzStr) html += ' <span class="ep-size">' + esc(movieSzStr) + '</span>';
-    html += '</div>';
   }
+  html += '</div>';
   if (meta) {
     var runtimeParts = [];
     if (meta.runtime) runtimeParts.push(esc(String(meta.runtime)) + ' min');
@@ -1919,7 +1919,7 @@ function _renderMovieDetail(movie, meta) {
   }
   var movieActionBtns = [];
   if (movie.source === 'debrid' || movie.source === 'both') {
-    movieActionBtns.push('<button class="btn btn-ghost btn-icon" title="Block this torrent" onclick="event.stopPropagation();_blockItem()">&#128683;</button>');
+    movieActionBtns.push('<button class="btn btn-ghost btn-icon" title="Block this torrent file" onclick="event.stopPropagation();_blockItem()">&#128683;</button>');
   }
   if (_downloadServices.movie === 'radarr') {
     movieActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" title="Delete from Radarr" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'movie\')})">&#128465; Delete</button>');
@@ -2113,7 +2113,7 @@ function _renderSeasonEpisodes(season, si) {
       }
     }
     if (ep.source === 'debrid' || ep.source === 'both') {
-      html += '<button class="btn btn-ghost btn-icon" title="Block this torrent" aria-label="Block ' + epLabel + '" onclick="event.stopPropagation();_blockItem()">&#128683;</button>';
+      html += '<button class="btn btn-ghost btn-icon" title="Block this torrent file" aria-label="Block ' + epLabel + '" onclick="event.stopPropagation();_blockItem()">&#128683;</button>';
     }
     if (_searchEnabled && _detailItem && _detailItem.imdb_id) {
       html += ' <button class="btn btn-ghost btn-sm" title="Search torrents for ' + epLabel + '" data-imdb="' + esc(_detailItem.imdb_id) + '" data-mtype="series" data-season="' + season.number + '" data-episode="' + ep.number + '" data-label="' + esc(_detailItem.title + ' ' + epLabel) + '" onclick="event.stopPropagation();openSearchFromBtn(this)">&#128269;</button>';
@@ -2262,7 +2262,7 @@ function _renderShowDetail(show, meta) {
   html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px;line-height:1.5"><strong style="color:var(--text2)">Prefer Local</strong> &mdash; switches debrid-only episodes to local copies.<br><strong style="color:var(--text2)">Prefer Debrid</strong> &mdash; removes local copies and streams from debrid.</div>';
   var showActionBtns = [];
   if (show.source === 'debrid' || show.source === 'both') {
-    showActionBtns.push('<button class="btn btn-ghost btn-icon" title="Block this torrent" onclick="event.stopPropagation();_blockItem()">&#128683;</button>');
+    showActionBtns.push('<button class="btn btn-ghost btn-icon" title="Block this torrent file" onclick="event.stopPropagation();_blockItem()">&#128683;</button>');
   }
   if (_downloadServices.show === 'sonarr') {
     showActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" title="Delete from Sonarr" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'show\')})">&#128465; Delete</button>');

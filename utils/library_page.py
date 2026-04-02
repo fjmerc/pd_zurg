@@ -224,6 +224,7 @@ body{max-width:1200px}
 .detail-poster{width:150px;min-width:150px;border-radius:8px;overflow:hidden}
 .detail-poster img{width:100%;display:block;border-radius:8px}
 .detail-info{flex:1;min-width:0}
+.detail-info .card-badges{margin-top:6px}
 .detail-overview{font-size:.85em;color:var(--text2);margin-top:8px;line-height:1.5;max-height:7.5em;overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,black 85%,transparent);mask-image:linear-gradient(to bottom,black 85%,transparent);cursor:pointer;transition:max-height .3s ease}
 .detail-overview.expanded{max-height:60em;-webkit-mask-image:none;mask-image:none}
 .detail-status{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:var(--border);color:var(--text2);margin-left:6px}
@@ -1909,7 +1910,6 @@ function _renderMovieDetail(movie, meta) {
       var movieDlLabel = _downloadServices.movie === 'overseerr' ? 'Request in Overseerr' : 'Switch to Local';
       var movieDebridPref = _downloadServices.movie === 'overseerr' ? undefined : false;
       html += '<button class="btn btn-ghost btn-sm" onclick="_confirmBtn(this,function(){downloadMovie(' + (movieDebridPref === undefined ? '' : movieDebridPref) + ')})">' + movieDlLabel + '</button>';
-      html += '<button class="btn btn-ghost btn-sm btn-danger" onclick="event.stopPropagation();blockMovie()">Block</button>';
     }
     if ((movie.source === 'local' || movie.source === 'both') && _downloadServices.movie === 'radarr') {
       html += '<button class="btn btn-ghost btn-sm" onclick="_confirmBtn(this,function(){removeMovie()})">Switch to Debrid</button>';
@@ -1919,6 +1919,9 @@ function _renderMovieDetail(movie, meta) {
     html += '<div style="margin-top:10px;font-size:.82em;color:var(--text3)">To switch to local, configure <a href="/settings">Radarr or Overseerr</a> in Settings.</div>';
   }
   var movieActionBtns = [];
+  if (movie.source === 'debrid' || movie.source === 'both') {
+    movieActionBtns.push('<button class="btn btn-ghost btn-sm btn-icon" title="Block this torrent" onclick="event.stopPropagation();blockMovie()">&#128683;</button>');
+  }
   if (_downloadServices.movie === 'radarr') {
     movieActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" title="Delete from Radarr" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'movie\')})">&#128465; Delete</button>');
   }
@@ -2102,7 +2105,7 @@ function _renderSeasonEpisodes(season, si) {
     } else if (_downloadServices.show && _downloadServices.show !== 'overseerr') {
       if (ep.source === 'debrid') {
         html += '<button class="btn btn-ghost btn-sm" aria-label="Switch ' + epLabel + ' to Local" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ',false)})">Switch to Local</button>';
-        html += '<button class="btn btn-ghost btn-sm btn-danger" aria-label="Block ' + epLabel + '" onclick="event.stopPropagation();blockEpisode(' + season.number + ',' + ep.number + ')">Block</button>';
+        html += '<button class="btn btn-ghost btn-sm btn-icon" title="Block this torrent" aria-label="Block ' + epLabel + '" onclick="event.stopPropagation();blockEpisode(' + season.number + ',' + ep.number + ')">&#128683;</button>';
       } else if (ep.source === 'local') {
         html += '<button class="btn btn-ghost btn-sm" aria-label="Switch ' + epLabel + ' to Debrid" onclick="_confirmBtn(this,function(){removeEp(' + season.number + ',' + ep.number + ')})">Switch to Debrid</button>';
       } else if (ep.source === 'both') {

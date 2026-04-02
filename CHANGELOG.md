@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Wanted nav link 404**: The "Wanted" navigation link (`/library?filter=missing`) returned a 404 because the server route used exact path matching, ignoring query parameters.
+- **Wanted filter showing empty results**: Clicking the nav "Wanted" link defaulted to the movies tab, showing "No results match your filters" when all missing content was in shows. The library now auto-switches to the tab that has matching items.
 
 ### Added
 

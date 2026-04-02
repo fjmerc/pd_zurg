@@ -344,11 +344,10 @@ body.has-bulk-bar{padding-bottom:60px}
 .search-results-tbl td{padding:6px 8px;border-bottom:1px solid var(--border);vertical-align:middle;text-align:center}
 .search-results-tbl tr:last-child td{border-bottom:none}
 .search-results-tbl tr.added-row td{opacity:.5}
-.search-results-tbl th:first-child,.search-results-tbl th:nth-child(2){text-align:left}
-.search-results-tbl th:first-child,.search-results-tbl th:nth-child(2),.search-results-tbl th:last-child{cursor:default}
-.sr-title{max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
-.sr-title:hover{white-space:normal;word-break:break-word}
-.sr-indexer{text-align:left;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.search-results-tbl th:first-child{text-align:left}
+.search-results-tbl th:first-child,.search-results-tbl th:last-child{cursor:default}
+.search-results-tbl .sr-title{max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
+.search-results-tbl .sr-indexer{max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .badge-quality{display:inline-block;padding:1px 6px;border-radius:4px;font-size:.78em;font-weight:600;white-space:nowrap}
 .badge-quality.q-2160p{background:#ff6b0014;color:#ff8c3a;border:1px solid #ff6b0030}
 .badge-quality.q-1080p{background:#58a6ff14;color:var(--blue);border:1px solid #58a6ff30}

@@ -106,7 +106,7 @@ ENV_SCHEMA = [
             ('NOTIFICATION_EVENTS', 'Notification Events', 'string', False,
              'Comma-separated event types: startup, shutdown, download_complete, download_error, '
              'library_refresh, symlink_created, symlink_failed, debrid_unavailable, '
-             'local_fallback_triggered, blocklist_added, health_error, daily_digest, '
+             'local_fallback_triggered, blocklist_added, arr_deleted, health_error, daily_digest, '
              'debrid_add_success, debrid_add_failed. '
              'Leave empty for all events'),
             ('NOTIFICATION_LEVEL', 'Minimum Level', 'select:info,warning,error', False, 'Minimum severity to send notifications'),

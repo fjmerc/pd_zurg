@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## Version [2.16.1] - 2026-04-02
+
+### Added
+
+- **Delete from Sonarr/Radarr**: Movie and show detail pages now have a "Delete from Radarr/Sonarr" button that removes the entry and its files from the respective arr service. Includes two-click confirmation, history logging (`arr_deleted` event), and notification support.
+- **Expandable descriptions**: Show/movie overview text can now be clicked to expand the full description instead of being permanently truncated with a fade.
+
+### Fixed
+
+- **Quality badge text wrapping**: Quality badges like "WEB-DL 1080p" and "Remux 1080p" no longer wrap onto two lines in episode tables.
+- **Apply button sizing**: The source preference Apply button now matches the dropdown's proportions.
+- **Badge spacing**: Added breathing room between the title and the source badge on detail pages.
+- **Description fade**: The overview text fade-out gradient now starts at 85% instead of 60%, so only the very bottom edge fades.
+
 ## Version [2.16.0] - 2026-04-01
 
 ### Changed

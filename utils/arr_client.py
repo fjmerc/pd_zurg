@@ -812,6 +812,27 @@ class SonarrClient(_ArrClientBase):
             'removed': deleted,
         }
 
+    def delete_series(self, title, tmdb_id=None, delete_files=True):
+        """Delete a series entirely from Sonarr."""
+        series = self.find_series_in_library(tmdb_id=tmdb_id, title=title)
+        if not series:
+            return {'status': 'error', 'message': f'Series not found in Sonarr: {title}'}
+
+        series_id = series.get('id')
+        if series_id is None:
+            return {'status': 'error', 'message': 'Sonarr returned series without ID'}
+
+        params = {'deleteFiles': str(delete_files).lower()}
+        result = self._delete(f'/api/v3/series/{series_id}', params=params)
+        # _request returns {} for 204 No Content (success), None for errors
+        if result is not None:
+            return {
+                'status': 'deleted',
+                'service': 'sonarr',
+                'message': f'Deleted {title} from Sonarr',
+            }
+        return {'status': 'error', 'message': 'Failed to delete series from Sonarr'}
+
     def audit_routing(self):
         """Re-audit download client and indexer routing tags.
 
@@ -1480,6 +1501,27 @@ class RadarrClient(_ArrClientBase):
             'message': f'Removed {title} via Radarr',
             'removed': 1,
         }
+
+    def delete_movie(self, title, tmdb_id=None, delete_files=True):
+        """Delete a movie entirely from Radarr."""
+        movie = self.find_movie_in_library(tmdb_id=tmdb_id, title=title)
+        if not movie:
+            return {'status': 'error', 'message': f'Movie not found in Radarr: {title}'}
+
+        movie_id = movie.get('id')
+        if movie_id is None:
+            return {'status': 'error', 'message': 'Radarr returned movie without ID'}
+
+        params = {'deleteFiles': str(delete_files).lower()}
+        result = self._delete(f'/api/v3/movie/{movie_id}', params=params)
+        # _request returns {} for 204 No Content (success), None for errors
+        if result is not None:
+            return {
+                'status': 'deleted',
+                'service': 'radarr',
+                'message': f'Deleted {title} from Radarr',
+            }
+        return {'status': 'error', 'message': 'Failed to delete movie from Radarr'}
 
     def audit_routing(self):
         """Re-audit download client and indexer routing tags.

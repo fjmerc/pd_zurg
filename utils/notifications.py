@@ -43,6 +43,7 @@ ALL_EVENTS = {
     'local_fallback_triggered',   # Local download started as debrid fallback
     # Safety
     'blocklist_added',            # Torrent added to blocklist
+    'arr_deleted',                # Movie/series deleted from Sonarr/Radarr
     'health_error',               # Process crash, mount failure
     # Debrid search
     'debrid_add_success',         # Torrent added to debrid from interactive search

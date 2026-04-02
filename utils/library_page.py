@@ -1912,17 +1912,21 @@ function _renderMovieDetail(movie, meta) {
       html += '<button class="btn btn-ghost btn-sm btn-danger" onclick="event.stopPropagation();blockMovie()">Block</button>';
     }
     if ((movie.source === 'local' || movie.source === 'both') && _downloadServices.movie === 'radarr') {
-      html += '<button class="btn btn-ghost btn-sm btn-danger" onclick="_confirmBtn(this,function(){removeMovie()})">Switch to Debrid</button>';
+      html += '<button class="btn btn-ghost btn-sm" onclick="_confirmBtn(this,function(){removeMovie()})">Switch to Debrid</button>';
     }
     html += '</div>';
   } else if (movie.source === 'debrid') {
     html += '<div style="margin-top:10px;font-size:.82em;color:var(--text3)">To switch to local, configure <a href="/settings">Radarr or Overseerr</a> in Settings.</div>';
   }
+  var _movieActionBtns = [];
   if (_downloadServices.movie === 'radarr') {
-    html += '<div style="margin-top:8px"><button class="btn btn-ghost btn-sm btn-danger" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'movie\')})">Delete from Radarr</button></div>';
+    _movieActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'movie\')})">Delete from Radarr</button>');
   }
   if (_searchEnabled && movie.imdb_id) {
-    html += '<div style="margin-top:8px"><button class="btn btn-ghost btn-sm" data-imdb="' + esc(movie.imdb_id) + '" data-mtype="movie" data-label="' + esc(movie.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button></div>';
+    _movieActionBtns.push('<button class="btn btn-ghost btn-sm" data-imdb="' + esc(movie.imdb_id) + '" data-mtype="movie" data-label="' + esc(movie.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button>');
+  }
+  if (_movieActionBtns.length) {
+    html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">' + _movieActionBtns.join('') + '</div>';
   }
   html += '</div></div>';
   html += '<div class="history-section"><button class="history-toggle" onclick="toggleShowHistory(this)"><span class="chevron">&#9654;</span> History</button><div class="history-list" class="history-list-content"><div style="color:var(--text3);font-size:.8em;padding:4px 0">Loading...</div></div></div>';
@@ -2100,9 +2104,9 @@ function _renderSeasonEpisodes(season, si) {
         html += '<button class="btn btn-ghost btn-sm" aria-label="Switch ' + epLabel + ' to Local" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ',false)})">Switch to Local</button>';
         html += '<button class="btn btn-ghost btn-sm btn-danger" aria-label="Block ' + epLabel + '" onclick="event.stopPropagation();blockEpisode(' + season.number + ',' + ep.number + ')">Block</button>';
       } else if (ep.source === 'local') {
-        html += '<button class="btn btn-ghost btn-sm btn-danger" aria-label="Switch ' + epLabel + ' to Debrid" onclick="_confirmBtn(this,function(){removeEp(' + season.number + ',' + ep.number + ')})">Switch to Debrid</button>';
+        html += '<button class="btn btn-ghost btn-sm" aria-label="Switch ' + epLabel + ' to Debrid" onclick="_confirmBtn(this,function(){removeEp(' + season.number + ',' + ep.number + ')})">Switch to Debrid</button>';
       } else if (ep.source === 'both') {
-        html += '<button class="btn btn-ghost btn-sm btn-danger" aria-label="Switch ' + epLabel + ' to Debrid" onclick="_confirmBtn(this,function(){removeEp(' + season.number + ',' + ep.number + ')})">Switch to Debrid</button>';
+        html += '<button class="btn btn-ghost btn-sm" aria-label="Switch ' + epLabel + ' to Debrid" onclick="_confirmBtn(this,function(){removeEp(' + season.number + ',' + ep.number + ')})">Switch to Debrid</button>';
       } else if (isMissing && (!ep.air_date || new Date(ep.air_date + 'T00:00:00').getTime() <= Date.now())) {
         html += '<button class="btn btn-ghost btn-sm" aria-label="Search ' + epLabel + '" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ',true)})">Search</button>';
       }
@@ -2253,7 +2257,7 @@ function _renderShowDetail(show, meta) {
   html += '</div>';
   html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px;line-height:1.5"><strong style="color:var(--text2)">Prefer Local</strong> &mdash; switches debrid-only episodes to local copies.<br><strong style="color:var(--text2)">Prefer Debrid</strong> &mdash; removes local copies and streams from debrid.</div>';
   if (_downloadServices.show === 'sonarr') {
-    html += '<div style="margin-top:8px"><button class="btn btn-ghost btn-sm btn-danger" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'show\')})">Delete from Sonarr</button></div>';
+    html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"><button class="btn btn-ghost btn-sm btn-danger" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'show\')})">Delete from Sonarr</button></div>';
   }
   html += '</div></div>';
 

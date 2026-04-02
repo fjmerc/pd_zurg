@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Detail page action buttons**: "Delete from Radarr/Sonarr" and "Search Torrents" buttons now display in a horizontal row instead of stacking vertically. "Switch to Debrid" is no longer styled as a destructive (red) action.
 - **Quality badge text wrapping**: Quality badges like "WEB-DL 1080p" and "Remux 1080p" no longer wrap onto two lines in episode tables.
 - **Apply button sizing**: The source preference Apply button now matches the dropdown's proportions.
 - **Badge spacing**: Added breathing room between the title and the source badge on detail pages.

@@ -133,6 +133,8 @@ body{max-width:1200px}
 [data-theme="light"] .badge-local{background:#1a7f371a;border-color:#1a7f3740}
 [data-theme="light"] .badge-debrid{background:#7c3aed1a;border-color:#7c3aed40;color:#7c3aed}
 
+.btn-switch:hover:not(:disabled){border-color:#2dd4bf;color:#2dd4bf}
+
 /* Quality badges */
 .badge-quality{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;white-space:nowrap}
 .badge-quality-2160p{background:#a855f70f;color:#a855f7;border:1px solid #a855f733}
@@ -1908,10 +1910,10 @@ function _renderMovieDetail(movie, meta) {
     } else if (movie.source === 'debrid') {
       var movieDlLabel = _downloadServices.movie === 'overseerr' ? 'Request in Overseerr' : 'Switch to Local';
       var movieDebridPref = _downloadServices.movie === 'overseerr' ? undefined : false;
-      html += '<button class="btn btn-ghost btn-sm" onclick="_confirmBtn(this,function(){downloadMovie(' + (movieDebridPref === undefined ? '' : movieDebridPref) + ')})">' + movieDlLabel + '</button>';
+      html += '<button class="btn btn-ghost btn-sm btn-switch" onclick="_confirmBtn(this,function(){downloadMovie(' + (movieDebridPref === undefined ? '' : movieDebridPref) + ')})">' + movieDlLabel + '</button>';
     }
     if ((movie.source === 'local' || movie.source === 'both') && _downloadServices.movie === 'radarr') {
-      html += '<button class="btn btn-ghost btn-sm" onclick="_confirmBtn(this,function(){removeMovie()})">Switch to Debrid</button>';
+      html += '<button class="btn btn-ghost btn-sm btn-switch" onclick="_confirmBtn(this,function(){removeMovie()})">Switch to Debrid</button>';
     }
     html += '</div>';
   } else if (movie.source === 'debrid') {
@@ -2103,11 +2105,11 @@ function _renderSeasonEpisodes(season, si) {
       if (!isMigrating) html += '<button class="btn btn-ghost btn-sm" disabled>\u2026</button>';
     } else if (_downloadServices.show && _downloadServices.show !== 'overseerr') {
       if (ep.source === 'debrid') {
-        html += '<button class="btn btn-ghost btn-sm" aria-label="Switch ' + epLabel + ' to Local" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ',false)})">Switch to Local</button>';
+        html += '<button class="btn btn-ghost btn-sm btn-switch" aria-label="Switch ' + epLabel + ' to Local" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ',false)})">Switch to Local</button>';
       } else if (ep.source === 'local') {
-        html += '<button class="btn btn-ghost btn-sm" aria-label="Switch ' + epLabel + ' to Debrid" onclick="_confirmBtn(this,function(){removeEp(' + season.number + ',' + ep.number + ')})">Switch to Debrid</button>';
+        html += '<button class="btn btn-ghost btn-sm btn-switch" aria-label="Switch ' + epLabel + ' to Debrid" onclick="_confirmBtn(this,function(){removeEp(' + season.number + ',' + ep.number + ')})">Switch to Debrid</button>';
       } else if (ep.source === 'both') {
-        html += '<button class="btn btn-ghost btn-sm" aria-label="Switch ' + epLabel + ' to Debrid" onclick="_confirmBtn(this,function(){removeEp(' + season.number + ',' + ep.number + ')})">Switch to Debrid</button>';
+        html += '<button class="btn btn-ghost btn-sm btn-switch" aria-label="Switch ' + epLabel + ' to Debrid" onclick="_confirmBtn(this,function(){removeEp(' + season.number + ',' + ep.number + ')})">Switch to Debrid</button>';
       } else if (isMissing && (!ep.air_date || new Date(ep.air_date + 'T00:00:00').getTime() <= Date.now())) {
         html += '<button class="btn btn-ghost btn-sm" aria-label="Search ' + epLabel + '" onclick="_confirmBtn(this,function(){downloadEp(' + season.number + ',' + ep.number + ',true)})">Search</button>';
       }
@@ -2335,7 +2337,7 @@ function _renderShowDetail(show, meta) {
         if (season.episodes[lci].source === 'local' || season.episodes[lci].source === 'both') localCount++;
       }
       var rmLabel = 'Switch ' + localCount + ' to Debrid';
-      html += '<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();_confirmBtn(this,function(){rmSeason(' + si + ')})">' + rmLabel + '</button>';
+      html += '<button class="btn btn-ghost btn-sm btn-switch" onclick="event.stopPropagation();_confirmBtn(this,function(){rmSeason(' + si + ')})">' + rmLabel + '</button>';
     }
     html += '</span>';
     html += '</div>';

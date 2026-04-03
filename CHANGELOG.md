@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Switch to Debrid button deleting local-only movies**: For movies with only a local copy, clicking "Switch to Debrid" would delete the local file without searching for a debrid alternative — the user lost their only copy. It now saves a prefer-debrid preference and triggers a Radarr search, preserving the local file until the debrid copy arrives and auto-enforcement swaps it.
 - **Slow preference enforcement after blackhole completion**: After a torrent completed and symlinks were created, auto-enforcement of source preferences could be delayed up to 1 hour (the default library scan interval). The blackhole now triggers a library scan immediately after symlink creation.
 - **Refresh button exits detail view**: Clicking the Refresh button while on a movie or show detail page would navigate back to the library grid instead of refreshing the detail page in place. The grid re-render is now skipped when in detail view, matching the behavior of the auto-refresh path.
+- **Browser refresh loses detail view**: Pressing F5 or using the browser refresh button on a movie/show detail page would return to the library grid. The detail view now persists its state in the URL (`?detail=...&type=...`) so browser refresh restores it.
 
 ## Version [2.16.1] - 2026-04-02
 

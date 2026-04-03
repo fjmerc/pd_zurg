@@ -3583,6 +3583,20 @@ try {
     _activeWantedPreset = _urlFilter;
   }
 } catch(e) {}
+// If restoring a detail view, hide library chrome immediately to avoid flash
+try {
+  var _dp = new URLSearchParams(window.location.search);
+  if (_dp.get('detail')) {
+    document.querySelector('.tabs').style.display = 'none';
+    document.querySelector('.controls').style.display = 'none';
+    document.getElementById('wanted-presets').style.display = 'none';
+    document.getElementById('wanted-actions').style.display = 'none';
+    document.getElementById('footer').style.display = 'none';
+    document.getElementById('jump-bar').style.display = 'none';
+    document.getElementById('content-area').innerHTML =
+      '<div class="state-panel"><div>Loading...</div></div>';
+  }
+} catch(e) {}
 fetchLibrary();
 startTsRefresh();
 </script>

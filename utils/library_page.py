@@ -1039,7 +1039,7 @@ function buildCard(item, index) {
       pendingBadge = '<span class="badge-pending">Searching</span>';
     } else {
       var upDir = dir === 'to-local' ? 'Local' : 'Debrid';
-      pendingBadge = '<span class="badge-migrating">Migrating to ' + upDir + '</span>';
+      pendingBadge = '<span class="badge-migrating"><span class="badge-full">Migrating to ' + upDir + '</span><span class="badge-mini">\u2197</span></span>';
     }
     } // end else (not debrid-unavailable/local-fallback)
   }
@@ -1393,12 +1393,20 @@ function _applyMeta(card, meta) {
       if (missing > 0) {
         var metaEl = card.querySelector('.card-meta');
         if (!metaEl) {
-          // Create meta element if it didn't exist (no initial missing count)
-          var infoEl = card.querySelector('.card-info');
-          if (infoEl) {
-            metaEl = document.createElement('div');
+          // Create status row + meta element if they didn't exist
+          var statusEl = card.querySelector('.card-status');
+          if (!statusEl) {
+            var infoEl = card.querySelector('.card-info');
+            if (infoEl) {
+              statusEl = document.createElement('div');
+              statusEl.className = 'card-status';
+              infoEl.appendChild(statusEl);
+            }
+          }
+          if (statusEl) {
+            metaEl = document.createElement('span');
             metaEl.className = 'card-meta';
-            infoEl.appendChild(metaEl);
+            statusEl.appendChild(metaEl);
           }
         }
         if (metaEl && !metaEl.hasAttribute('data-enriched')) {

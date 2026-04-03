@@ -24,10 +24,11 @@ a:hover{text-decoration:underline}
 
 /* === Sidebar === */
 .sidebar{position:fixed;top:0;left:0;bottom:0;width:var(--sidebar-w);background:var(--sidebar-bg);border-right:1px solid var(--border);display:flex;flex-direction:column;z-index:1000;overflow-y:auto;overflow-x:hidden}
-.sidebar-brand{padding:16px;text-align:center}
-.sidebar-brand a{font-size:1.2em;font-weight:700;color:var(--blue);text-decoration:none;display:block}
+.sidebar-brand{padding:14px 16px;display:flex;align-items:center;gap:8px}
+.sidebar-brand a{font-size:1.2em;font-weight:700;color:var(--blue);text-decoration:none}
 .sidebar-brand a:hover{text-decoration:none;opacity:.85}
-.sidebar-version{display:block;font-size:.7em;color:var(--text3);margin-top:2px}
+.sidebar-brand-info{flex:1;min-width:0}
+.sidebar-version{display:block;font-size:.7em;color:var(--text3);margin-top:1px}
 .sidebar-nav{display:flex;flex-direction:column;padding:8px 0}
 .sidebar-link{display:flex;align-items:center;gap:10px;padding:9px 16px;color:var(--text2);font-size:.85em;font-weight:500;text-decoration:none;border-left:3px solid transparent;transition:color var(--motion-fast),background var(--motion-fast),border-color var(--motion-fast)}
 .sidebar-link:hover{color:var(--text);background:var(--border2);text-decoration:none}
@@ -38,9 +39,8 @@ a:hover{text-decoration:underline}
 .sidebar-link svg{width:18px;height:18px;flex-shrink:0;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .sidebar-badge{display:inline-block;background:var(--red);color:#fff;border-radius:8px;font-size:.72em;font-weight:700;padding:1px 6px;margin-left:auto;min-width:16px;text-align:center;line-height:1.4}
 .sidebar-divider{height:1px;background:var(--border);margin:4px 12px}
-.sidebar-bottom{margin-top:auto;padding:8px 0 12px}
-.sidebar-theme{display:flex;align-items:center;justify-content:center;width:calc(100% - 24px);margin:4px 12px;padding:6px;background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;cursor:pointer;font-size:.85em;transition:border-color var(--motion-fast),color var(--motion-fast)}
-.sidebar-theme:hover{border-color:var(--blue);color:var(--blue)}
+.sidebar-theme{background:none;border:none;color:var(--text3);cursor:pointer;font-size:1em;padding:4px;border-radius:4px;line-height:1;flex-shrink:0;transition:color var(--motion-fast)}
+.sidebar-theme:hover{color:var(--blue)}
 
 /* === Main Content === */
 .main-content{margin-left:var(--sidebar-w);padding:20px;min-height:100vh}
@@ -530,8 +530,12 @@ def get_nav_html(current_page='status'):
     return (
         '<aside class="sidebar" id="sidebar">'
         '<div class="sidebar-brand">'
+        '<div class="sidebar-brand-info">'
         '<a href="/status">pd_zurg</a>'
         '<span class="sidebar-version" id="header-meta"></span>'
+        '</div>'
+        '<button class="sidebar-theme" onclick="toggleTheme()" '
+        'title="Toggle theme" id="theme-btn">&#x2600;&#xFE0F;</button>'
         '</div>'
         '<div class="sidebar-divider"></div>'
         '<nav class="sidebar-nav">'
@@ -539,11 +543,6 @@ def get_nav_html(current_page='status'):
         + '<div class="sidebar-divider"></div>'
         + ''.join(nav_system)
         + '</nav>'
-        '<div class="sidebar-bottom">'
-        '<div class="sidebar-divider"></div>'
-        '<button class="sidebar-theme" onclick="toggleTheme()" '
-        'title="Toggle theme" id="theme-btn">&#x2600;&#xFE0F;</button>'
-        '</div>'
         '</aside>'
         '<div class="sidebar-backdrop" id="sidebar-backdrop" onclick="closeSidebar()"></div>'
         '<button class="hamburger-btn" id="hamburger-btn" onclick="toggleSidebar()" '

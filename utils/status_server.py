@@ -813,7 +813,7 @@ __WANTED_BADGE_JS__
 </html>'''
 
 _DASHBOARD_EXTRA_CSS = """
-.main-content{max-width:1200px}
+.main-content{max-width:1600px}
 .meta{color:var(--text2);font-size:.85em;margin-bottom:20px}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
 .grid.full{grid-template-columns:1fr}

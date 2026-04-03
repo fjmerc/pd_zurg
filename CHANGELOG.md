@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Movie prefer-debrid auto-enforcement**: Movies with `prefer-debrid` preference now automatically replace the local file with a debrid symlink when `source=both` is detected during library scans. Previously only TV shows had this auto-enforcement — movies required a manual second click.
 - **Blackhole dedup bypass for prefer-debrid**: The blackhole local dedup check now respects source preferences. Previously it would reject debrid grabs for titles that already existed locally, blocking the prefer-debrid workflow entirely.
 - **Stale source badge after enforcement**: After auto-enforcement replaced a local file with a debrid symlink, the UI continued showing "Local & Debrid" until the next scan. The library cache is now invalidated immediately after enforcement so the next UI poll reflects the correct source.
+- **Switch to Debrid button deleting local-only movies**: For movies with only a local copy, clicking "Switch to Debrid" would delete the local file without searching for a debrid alternative — the user lost their only copy. It now saves a prefer-debrid preference and triggers a Radarr search, preserving the local file until the debrid copy arrives and auto-enforcement swaps it.
+- **Slow preference enforcement after blackhole completion**: After a torrent completed and symlinks were created, auto-enforcement of source preferences could be delayed up to 1 hour (the default library scan interval). The blackhole now triggers a library scan immediately after symlink creation.
 
 ## Version [2.16.1] - 2026-04-02
 

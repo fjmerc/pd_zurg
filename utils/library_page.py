@@ -2897,12 +2897,53 @@ function downloadMovie(preferDebrid) {
 }
 
 function removeMovie() {
-  if (!_detailItem) return;
+  if (!_detailItem || _actionInFlight) return;
   var tmdbId = _detailMeta ? _detailMeta.tmdb_id : null;
-  _postRemove({
-    title: _detailItem.title, type: 'movie', tmdb_id: tmdbId,
-    episodes: []
-  });
+  var nk = normTitle(_detailItem.title);
+
+  if (_detailItem.source === 'local') {
+    // No debrid copy yet — save preference and search via Radarr
+    var capturedTitle = _detailItem.title;
+    _savePref(nk, 'prefer-debrid').then(function(saved) {
+      if (!saved) { _showMsg('Failed to save preference.', 'error'); return; }
+      _setPending(capturedTitle, [{season: 0, episode: 0}], 'to-debrid');
+      _postDownload({
+        title: capturedTitle, type: 'movie', tmdb_id: tmdbId,
+        prefer_debrid: true
+      }).then(function(ok) {
+        if (ok) {
+          _showMsg('Preference saved. Searching for debrid copy.', 'success');
+        } else {
+          _showMsg('Preference saved but search failed.', 'error');
+        }
+        _scheduleRefresh(1000);
+      });
+    });
+  } else {
+    // source=both — debrid copy exists, remove local file
+    var oldPref = _savedPref;
+    var capturedBothTitle = _detailItem.title;
+    _actionInFlight = true;
+    _setActionsDisabled(true);
+    _showMsgHtml('<span class="scanning-dot"></span>Switching to debrid...');
+    _savePref(nk, 'prefer-debrid').then(function(saved) {
+      if (!saved) { _showMsg('Failed to save preference.', 'error'); return; }
+      _actionInFlight = false;
+      return _postRemove({
+        title: capturedBothTitle, type: 'movie', tmdb_id: tmdbId,
+        episodes: []
+      }).then(function(ok) {
+        if (!ok) { _savePref(nk, oldPref); }
+        else { _showMsg('Switched to debrid streaming.', 'success'); }
+        _scheduleRefresh(1000);
+      });
+    }).catch(function(e) {
+      _showMsg('Operation failed: ' + e, 'error');
+    }).finally(function() {
+      _actionInFlight = false;
+      _setActionsDisabled(false);
+    });
+  }
 }
 
 function applyMoviePreference() {

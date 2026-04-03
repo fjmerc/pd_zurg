@@ -771,6 +771,13 @@ class BlackholeWatcher:
                 if _notify:
                     _notify('download_complete', 'Blackhole: Symlinks Created',
                             f'{count} symlink(s) created for {release_name}')
+                try:
+                    from utils.library import get_scanner
+                    scanner = get_scanner()
+                    if scanner:
+                        scanner.refresh()
+                except Exception:
+                    pass
             else:
                 logger.warning(f"[blackhole] No media files found to symlink for {release_name}")
         except Exception as e:

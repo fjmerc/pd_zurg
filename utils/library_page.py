@@ -3621,6 +3621,13 @@ try {
 } catch(e) {}
 fetchLibrary();
 startTsRefresh();
+/* Show tooltip on truncated card titles only */
+document.addEventListener('mouseenter',function(e){
+  var t=e.target;
+  if(t&&t.classList&&t.classList.contains('card-title')){
+    t.title=t.scrollWidth>t.clientWidth?t.textContent:'';
+  }
+},true);
 </script>
 </main>
 </body>

@@ -370,6 +370,9 @@ FodyWeavers.xsd
 # Implementation plans (local only)
 .plans/
 
+# Python virtual environment
+.venv/
+
 # pytest / coverage
 .pytest_cache/
 htmlcov/
@@ -377,3 +380,4 @@ htmlcov/
 
 .claude
 CLAUDE.md
+.playwright-mcp/

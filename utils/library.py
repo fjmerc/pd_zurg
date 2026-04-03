@@ -991,17 +991,23 @@ class LibraryScanner:
         with self._path_lock:
             path_index = dict(self._path_index)
             local_path_index = dict(self._local_path_index)
-        self._enforce_preferences(shows, movies, preferences, path_index, local_path_index,
-                                  force=force_enforce)
+        changed = self._enforce_preferences(shows, movies, preferences, path_index,
+                                              local_path_index, force=force_enforce)
         self._search_for_debrid_copies(shows, movies, preferences)
         self._recover_local_fallback_routing(shows, movies)
         self._clear_resolved_pending(shows, movies)
         self._escalate_stuck_pending()
         self._create_debrid_symlinks(shows, movies, path_index)
+        return changed
 
     def scan(self, force_enforce=False):
         data = self._scan_read()
-        self._scan_effects(data, force_enforce)
+        changed = self._scan_effects(data, force_enforce)
+        if changed:
+            # Enforcement modified files — invalidate cache so next access
+            # triggers a fresh read with correct source info
+            with self._lock:
+                self._cache_time = 0
         return data
 
     def get_data(self):
@@ -1067,7 +1073,12 @@ class LibraryScanner:
                         run_effects = True
             if run_effects:
                 try:
-                    self._scan_effects(data)
+                    changed = self._scan_effects(data)
+                    if changed:
+                        # Enforcement modified files — invalidate cache so next
+                        # UI poll triggers a fresh read with correct source info
+                        with self._lock:
+                            self._cache_time = 0
                 except Exception as e:
                     logger.error(f"[library] Scan effects error: {e}")
                 finally:
@@ -1110,6 +1121,8 @@ class LibraryScanner:
         For prefer-debrid: if an episode has source=both (debrid copy arrived),
         replace the local file with a symlink to the debrid mount.
 
+        Returns True if any enforcement action was taken (cache should be invalidated).
+
         For prefer-local: if an episode has source=both (local copy arrived),
         delete the debrid torrent via provider API.
 
@@ -1118,13 +1131,13 @@ class LibraryScanner:
         if not force:
             auto_enforce = os.environ.get('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'false').lower() == 'true'
             if not auto_enforce:
-                return
+                return False
 
         rclone_mount = os.environ.get('BLACKHOLE_RCLONE_MOUNT', '').strip()
         symlink_base = os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', '').strip()
 
         if not preferences:
-            return
+            return False
 
         from utils.library_prefs import replace_local_with_symlinks, clear_pending, get_all_pending
 
@@ -1182,6 +1195,7 @@ class LibraryScanner:
                             f"[library] Auto-enforced prefer-debrid for {show['title']}: "
                             f"switched {result['switched']} episode(s) to symlinks"
                         )
+                        enforced_this_scan.add(norm)
                         if _history:
                             _history.log_event('switched_source', show['title'], source='library',
                                                detail=f"Switched {result['switched']} episode(s) to debrid")
@@ -1361,6 +1375,8 @@ class LibraryScanner:
                                     pass
             except Exception as e:
                 logger.error(f"[library] Auto-enforce prefer-local failed: {e}")
+
+        return bool(enforced_this_scan)
 
     _SEARCH_BUDGET_SECONDS = 30
 

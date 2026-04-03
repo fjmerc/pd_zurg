@@ -452,3 +452,232 @@ class TestAutoEnforcement:
         with patch.object(lp, 'replace_local_with_symlinks') as mock_switch:
             scanner._enforce_preferences([show], [], {}, {}, {})
             mock_switch.assert_not_called()
+
+    # --- Movie enforcement ---
+
+    def _make_movie_scanner(self, local_movies, local_tv, monkeypatch):
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_LOCAL_LIBRARY_MOVIES', local_movies)
+        monkeypatch.setenv('BLACKHOLE_LOCAL_LIBRARY_TV', local_tv)
+        monkeypatch.setenv('RCLONE_MOUNT_NAME', '')
+        scanner = LibraryScanner()
+        scanner._local_tv_path = local_tv
+        scanner._local_movies_path = local_movies
+        return scanner
+
+    def test_prefer_debrid_movie_switches_to_symlink(self, tmp_dir, monkeypatch):
+        """source=both movie + prefer-debrid → local file replaced with symlink."""
+        local_movies = os.path.join(tmp_dir, 'movies')
+        movie_dir = os.path.join(local_movies, 'Black Adam (2022)')
+        os.makedirs(movie_dir)
+        local_file = os.path.join(movie_dir, 'Black Adam (2022).mkv')
+        with open(local_file, 'w') as f:
+            f.write('local movie content')
+
+        mount = os.path.join(tmp_dir, 'mount')
+        debrid_dir = os.path.join(mount, 'movies', 'Black.Adam.2022.1080p')
+        os.makedirs(debrid_dir)
+        debrid_file = os.path.join(debrid_dir, 'Black.Adam.2022.1080p.mkv')
+        with open(debrid_file, 'w') as f:
+            f.write('debrid movie content')
+
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', mount)
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.setenv('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'true')
+
+        local_tv = os.path.join(tmp_dir, 'tv')
+        os.makedirs(local_tv)
+        scanner = self._make_movie_scanner(local_movies, local_tv, monkeypatch)
+
+        from utils.library import _normalize_title
+        norm = _normalize_title('Black Adam')
+        preferences = {norm: 'prefer-debrid'}
+        movie = {
+            'title': 'Black Adam', 'year': 2022, 'source': 'both',
+            'type': 'movie', 'path': debrid_dir, 'local_path': movie_dir,
+        }
+
+        scanner._enforce_preferences([], [movie], preferences, {}, {})
+
+        assert os.path.islink(local_file)
+        target = os.readlink(local_file)
+        assert target.startswith('/mnt/debrid/')
+        assert 'Black.Adam.2022.1080p.mkv' in target
+
+    def test_prefer_debrid_movie_skips_local_only(self, tmp_dir, monkeypatch):
+        """source=local movie + prefer-debrid → no action (debrid copy not yet available)."""
+        local_movies = os.path.join(tmp_dir, 'movies')
+        os.makedirs(local_movies)
+        local_tv = os.path.join(tmp_dir, 'tv')
+        os.makedirs(local_tv)
+
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', os.path.join(tmp_dir, 'mount'))
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.setenv('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'true')
+
+        scanner = self._make_movie_scanner(local_movies, local_tv, monkeypatch)
+
+        from utils.library import _normalize_title
+        norm = _normalize_title('Black Adam')
+        preferences = {norm: 'prefer-debrid'}
+        movie = {
+            'title': 'Black Adam', 'year': 2022, 'source': 'local',
+            'type': 'movie', 'path': os.path.join(local_movies, 'Black Adam (2022)'),
+        }
+
+        with patch.object(lp, 'replace_local_with_symlinks') as mock_switch:
+            scanner._enforce_preferences([], [movie], preferences, {}, {})
+            mock_switch.assert_not_called()
+
+    def test_prefer_debrid_movie_skips_already_symlinked(self, tmp_dir, monkeypatch):
+        """Movie whose only media file is already a symlink → no action."""
+        local_movies = os.path.join(tmp_dir, 'movies')
+        movie_dir = os.path.join(local_movies, 'Black Adam (2022)')
+        os.makedirs(movie_dir)
+        local_file = os.path.join(movie_dir, 'Black Adam (2022).mkv')
+        os.symlink('/mnt/debrid/movies/Black.Adam.mkv', local_file)
+
+        mount = os.path.join(tmp_dir, 'mount')
+        debrid_dir = os.path.join(mount, 'movies', 'Black.Adam.2022')
+        os.makedirs(debrid_dir)
+        debrid_file = os.path.join(debrid_dir, 'Black.Adam.mkv')
+        with open(debrid_file, 'w') as f:
+            f.write('debrid')
+
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', mount)
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.setenv('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'true')
+
+        local_tv = os.path.join(tmp_dir, 'tv')
+        os.makedirs(local_tv)
+        scanner = self._make_movie_scanner(local_movies, local_tv, monkeypatch)
+
+        from utils.library import _normalize_title
+        norm = _normalize_title('Black Adam')
+        preferences = {norm: 'prefer-debrid'}
+        movie = {
+            'title': 'Black Adam', 'year': 2022, 'source': 'both',
+            'type': 'movie', 'path': debrid_dir, 'local_path': movie_dir,
+        }
+
+        with patch.object(lp, 'replace_local_with_symlinks') as mock_switch:
+            scanner._enforce_preferences([], [movie], preferences, {}, {})
+            mock_switch.assert_not_called()
+
+    def test_prefer_local_movie_deletes_debrid_torrent(self, tmp_dir, monkeypatch):
+        """source=both movie + prefer-local → debrid torrent deleted."""
+        local_movies = os.path.join(tmp_dir, 'movies')
+        os.makedirs(local_movies)
+        local_tv = os.path.join(tmp_dir, 'tv')
+        os.makedirs(local_tv)
+
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', os.path.join(tmp_dir, 'mount'))
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.setenv('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'true')
+
+        scanner = self._make_movie_scanner(local_movies, local_tv, monkeypatch)
+
+        from utils.library import _normalize_title
+        norm = _normalize_title('Black Adam')
+        preferences = {norm: 'prefer-local'}
+        movie = {
+            'title': 'Black Adam', 'year': 2022, 'source': 'both',
+            'type': 'movie',
+        }
+
+        mock_client = MagicMock()
+        mock_client.find_torrents_by_title.return_value = [
+            {'id': 'XYZ', 'filename': 'Black.Adam.2022.mkv', 'parsed_title': 'Black Adam', 'year': 2022}
+        ]
+        mock_client.delete_torrent.return_value = True
+
+        with patch('utils.debrid_client.get_debrid_client', return_value=(mock_client, 'realdebrid')):
+            scanner._enforce_preferences([], [movie], preferences, {}, {})
+
+        mock_client.delete_torrent.assert_called_once_with('XYZ')
+
+    def test_prefer_debrid_movie_does_not_trigger_prefer_local_in_same_pass(self, tmp_dir, monkeypatch):
+        """After switching movie to debrid symlink, prefer-local must NOT delete the debrid torrent."""
+        local_movies = os.path.join(tmp_dir, 'movies')
+        movie_dir = os.path.join(local_movies, 'Black Adam (2022)')
+        os.makedirs(movie_dir)
+        local_file = os.path.join(movie_dir, 'Black Adam (2022).mkv')
+        with open(local_file, 'w') as f:
+            f.write('local movie content')
+
+        mount = os.path.join(tmp_dir, 'mount')
+        debrid_dir = os.path.join(mount, 'movies', 'Black.Adam.2022.1080p')
+        os.makedirs(debrid_dir)
+        debrid_file = os.path.join(debrid_dir, 'Black.Adam.2022.1080p.mkv')
+        with open(debrid_file, 'w') as f:
+            f.write('debrid movie content')
+
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', mount)
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.setenv('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'true')
+
+        local_tv = os.path.join(tmp_dir, 'tv')
+        os.makedirs(local_tv)
+        scanner = self._make_movie_scanner(local_movies, local_tv, monkeypatch)
+
+        from utils.library import _normalize_title
+        norm = _normalize_title('Black Adam')
+        preferences = {norm: 'prefer-debrid'}
+        movie = {
+            'title': 'Black Adam', 'year': 2022, 'source': 'both',
+            'type': 'movie', 'path': debrid_dir, 'local_path': movie_dir,
+        }
+
+        mock_client = MagicMock()
+        mock_client.find_torrents_by_title.return_value = [{'id': 'ABC', 'filename': 'f.mkv', 'parsed_title': 'Black Adam', 'year': 2022}]
+        mock_client.delete_torrent.return_value = True
+
+        with patch('utils.debrid_client.get_debrid_client', return_value=(mock_client, 'realdebrid')):
+            scanner._enforce_preferences([], [movie], preferences, {}, {})
+
+        # Symlink should have been created
+        assert os.path.islink(local_file)
+        # But debrid torrent should NOT have been deleted (enforced_this_scan guard)
+        mock_client.delete_torrent.assert_not_called()
+
+    def test_prefer_debrid_movie_skips_local_fallback(self, tmp_dir, monkeypatch):
+        """Movies in to-local-fallback pending state should not be auto-switched."""
+        local_movies = os.path.join(tmp_dir, 'movies')
+        movie_dir = os.path.join(local_movies, 'Black Adam (2022)')
+        os.makedirs(movie_dir)
+        local_file = os.path.join(movie_dir, 'Black Adam (2022).mkv')
+        with open(local_file, 'w') as f:
+            f.write('local movie content')
+
+        mount = os.path.join(tmp_dir, 'mount')
+        debrid_dir = os.path.join(mount, 'movies', 'Black.Adam.2022')
+        os.makedirs(debrid_dir)
+        with open(os.path.join(debrid_dir, 'movie.mkv'), 'w') as f:
+            f.write('debrid')
+
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', mount)
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.setenv('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'true')
+
+        local_tv = os.path.join(tmp_dir, 'tv')
+        os.makedirs(local_tv)
+        scanner = self._make_movie_scanner(local_movies, local_tv, monkeypatch)
+
+        from utils.library import _normalize_title
+        norm = _normalize_title('Black Adam')
+        preferences = {norm: 'prefer-debrid'}
+        movie = {
+            'title': 'Black Adam', 'year': 2022, 'source': 'both',
+            'type': 'movie', 'path': debrid_dir, 'local_path': movie_dir,
+        }
+
+        # Mark movie as to-local-fallback pending
+        lp.set_pending(norm, [{'season': 0, 'episode': 0}], 'to-local-fallback')
+
+        with patch.object(lp, 'replace_local_with_symlinks') as mock_switch:
+            scanner._enforce_preferences([], [movie], preferences, {}, {})
+            mock_switch.assert_not_called()
+
+        # Local file should still be a real file
+        assert os.path.isfile(local_file)
+        assert not os.path.islink(local_file)

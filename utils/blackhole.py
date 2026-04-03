@@ -809,6 +809,8 @@ class BlackholeWatcher:
         """Check if content from this torrent already exists locally.
 
         Returns True if content exists locally (should skip), False otherwise.
+        Skips dedup for titles with prefer-debrid preference (user explicitly
+        wants the debrid copy even though a local copy exists).
         """
         if not self.dedup_enabled:
             return False
@@ -818,6 +820,16 @@ class BlackholeWatcher:
             return False
 
         name_norm = self._normalize_name(name)
+
+        # Skip dedup for prefer-debrid titles — user wants the debrid copy
+        try:
+            from utils.library_prefs import get_all_preferences
+            prefs = get_all_preferences()
+            if prefs.get(name_norm) == 'prefer-debrid':
+                logger.info(f"[blackhole] Bypassing local dedup for {filename}: prefer-debrid preference set")
+                return False
+        except Exception:
+            pass
 
         if is_tv and self.local_library_tv and os.path.isdir(self.local_library_tv):
             for folder in os.listdir(self.local_library_tv):

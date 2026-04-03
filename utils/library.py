@@ -860,8 +860,11 @@ class LibraryScanner:
                 item['source'] = 'both'
                 # Use earliest date_added from either source
                 local_movie = local_movie_map.get(matched_key)
-                if local_movie and local_movie.get('date_added'):
-                    item['date_added'] = min(item.get('date_added', 0), local_movie['date_added'])
+                if local_movie:
+                    if local_movie.get('date_added'):
+                        item['date_added'] = min(item.get('date_added', 0), local_movie['date_added'])
+                    if local_movie.get('path'):
+                        item['local_path'] = local_movie['path']
                 merged_local_movie_keys.add(matched_key)
             movies.append(item)
 
@@ -1197,6 +1200,106 @@ class LibraryScanner:
                                    f"Switched {result['switched']} episode(s) to debrid streaming")
                         except Exception:
                             pass
+
+        # Enforce prefer-debrid for movies: replace local file with symlink
+        if rclone_mount and symlink_base and self._local_movies_path:
+            for movie in movies:
+                norm = _normalize_title(movie['title'])
+                if norm in enforced_this_scan:
+                    continue
+                pref = self._get_pref(norm, preferences)
+                if pref != 'prefer-debrid':
+                    continue
+                if movie.get('source') != 'both':
+                    continue
+
+                # Guard: don't replace local files for movies downloaded via local-fallback
+                fb_entry = all_pending.get(norm, {})
+                if not fb_entry:
+                    for alias in self._alias_norms.get(norm, ()):
+                        fb_entry = all_pending.get(alias, {})
+                        if fb_entry:
+                            break
+                if fb_entry.get('direction') == 'to-local-fallback':
+                    continue
+
+                local_dir = movie.get('local_path')
+                debrid_dir = movie.get('path')
+                if not local_dir or not debrid_dir:
+                    continue
+
+                # Find largest media file in local dir
+                local_file = None
+                local_size = -1
+                try:
+                    for fname in os.listdir(local_dir):
+                        ext = os.path.splitext(fname)[1].lower()
+                        if ext in MEDIA_EXTENSIONS:
+                            fpath = os.path.join(local_dir, fname)
+                            if os.path.islink(fpath):
+                                continue  # already a symlink
+                            try:
+                                sz = os.path.getsize(fpath)
+                            except OSError:
+                                sz = 0
+                            if sz > local_size:
+                                local_size = sz
+                                local_file = fname
+                except OSError:
+                    continue
+                if not local_file:
+                    continue
+
+                # Find largest media file in debrid dir
+                debrid_file = None
+                debrid_size = -1
+                try:
+                    for fname in os.listdir(debrid_dir):
+                        ext = os.path.splitext(fname)[1].lower()
+                        if ext in MEDIA_EXTENSIONS:
+                            fpath = os.path.join(debrid_dir, fname)
+                            try:
+                                sz = os.path.getsize(fpath)
+                            except OSError:
+                                sz = 0
+                            if sz > debrid_size:
+                                debrid_size = sz
+                                debrid_file = fname
+                except OSError:
+                    continue
+                if not debrid_file:
+                    continue
+
+                local_fpath = os.path.join(local_dir, local_file)
+                debrid_fpath = os.path.join(debrid_dir, debrid_file)
+
+                to_switch = [{
+                    'local_path': local_fpath,
+                    'debrid_path': debrid_fpath,
+                    'season': 0,
+                    'episode': 0,
+                }]
+                result = replace_local_with_symlinks(
+                    to_switch, self._local_movies_path, rclone_mount, symlink_base
+                )
+                if result.get('switched', 0) > 0:
+                    logger.info(
+                        f"[library] Auto-enforced prefer-debrid for movie {movie['title']}: "
+                        f"switched to symlink"
+                    )
+                    if _history:
+                        _history.log_event('switched_source', movie['title'], source='library',
+                                           detail="Switched movie to debrid")
+                    # Movie is atomic — one file switched means the whole title is done
+                    clear_pending(norm)
+                    enforced_this_scan.add(norm)
+                    try:
+                        from utils.notifications import notify
+                        notify('library_refresh',
+                               f"Source switch: {movie['title']}",
+                               f"Switched movie to debrid streaming")
+                    except Exception:
+                        pass
 
         # Enforce prefer-local: delete debrid torrents ONLY when ALL debrid
         # episodes have local copies (source=both for every debrid episode).

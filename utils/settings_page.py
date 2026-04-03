@@ -36,8 +36,9 @@ __BASE_HEAD__
 </head>
 <body>
 __NAV_HTML__
+<main class="main-content">
 <style>
-body{max-width:900px}
+.main-content{max-width:900px}
 
 /* Tabs */
 .tabs{display:flex;gap:0;margin-bottom:16px;border-bottom:2px solid var(--border)}
@@ -1597,5 +1598,6 @@ document.addEventListener('keydown', (e) => {
 });
 __WANTED_BADGE_JS__
 </script>
+</main>
 </body>
 </html>'''

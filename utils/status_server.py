@@ -531,6 +531,7 @@ __BASE_HEAD__
 </head>
 <body>
 __NAV_HTML__
+<main class="main-content">
 <div class="meta">Uptime: <span id="uptime"></span> <span class="freshness"><span class="pulse-dot" id="fetch-dot"></span><span id="freshness-text"></span></span></div>
 <div class="meta" id="error-line" style="display:none;color:var(--red)">Errors: <span id="errors">0</span></div>
 <div class="banner" id="banner"></div>
@@ -566,224 +567,13 @@ __NAV_HTML__
     <div class="events" id="events"></div>
   </div>
 </div>
-<div class="grid full">
-  <div class="card">
-    <h2>Scheduled Tasks</h2>
-    <table><thead><tr><th>Task</th><th>Interval</th><th>Last Run</th><th>Duration</th><th>Result</th><th>Next Run</th><th id="task-actions-hdr"></th></tr></thead>
-    <tbody id="tasks"></tbody></table>
-  </div>
-</div>
-<div class="grid full">
-  <div class="card">
-    <h2>Activity</h2>
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
-      <select id="activity-type" onchange="loadActivity()" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:.8em">
-        <option value="">All Types</option>
-        <option value="grabbed">Grabbed</option>
-        <option value="cached">Cached</option>
-        <option value="symlink_created">Symlink</option>
-        <option value="failed">Failed</option>
-        <option value="cleanup">Cleanup</option>
-        <option value="switched_source">Source Switch</option>
-        <option value="search_triggered">Search</option>
-        <option value="rescan_triggered">Rescan</option>
-        <option value="task_completed">Task</option>
-        <option value="blocklisted">Blocklisted</option>
-        <option value="blocklist_added">Auto-Blocked</option>
-      </select>
-      <input type="text" id="activity-search" data-kb="search" placeholder="Search titles... (/)" oninput="loadActivity()" style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:.8em;color:var(--text);outline:none;min-width:120px">
-      <button class="btn btn-ghost btn-sm" onclick="clearHistory()" id="activity-clear-btn" style="display:none">Clear</button>
-    </div>
-    <table><thead><tr><th style="width:80px">Time</th><th style="width:90px">Type</th><th>Title</th><th>Detail</th><th style="width:60px">Source</th></tr></thead>
-    <tbody id="activity-body"></tbody></table>
-    <div style="display:flex;justify-content:center;margin-top:8px;gap:8px" id="activity-pager"></div>
-  </div>
-</div>
-<div class="grid full">
-  <div class="card">
-    <h2>Blocklist <span id="blocklist-count" style="font-size:.7em;color:var(--text3)"></span></h2>
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
-      <button class="btn btn-ghost btn-sm" onclick="clearBlocklist()" id="blocklist-clear-btn" style="display:none">Clear All</button>
-    </div>
-    <table><thead><tr><th>Title</th><th style="width:120px">Hash</th><th>Reason</th><th style="width:80px">Date</th><th style="width:60px">Source</th><th style="width:50px" id="bl-actions-hdr"></th></tr></thead>
-    <tbody id="blocklist-body"></tbody></table>
-  </div>
-</div>
-<div class="grid full">
-  <div class="card">
-    <h2>Logs</h2>
-    <div class="log-controls">
-      <select id="log-level" onchange="updateLogs()">
-        <option value="">All Levels</option>
-        <option value="ERROR">Error</option>
-        <option value="WARNING">Warning</option>
-        <option value="INFO">Info</option>
-        <option value="DEBUG">Debug</option>
-      </select>
-      <input type="text" id="log-search" placeholder="Search logs..." oninput="filterLogs()" style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:.8em;color:var(--text);outline:none;min-width:100px">
-      <label><input type="checkbox" id="log-wrap" checked onchange="toggleLogWrap()"> Wrap</label>
-      <label><input type="checkbox" id="log-autoscroll" checked> Auto-scroll</label>
-    </div>
-    <div id="log-content"></div>
-  </div>
-</div>
-<div class="grid full">
-  <div class="card">
-    <details>
-      <summary>Running Configuration (click to expand)</summary>
-      <table class="cfg-table" id="config-table"><tbody></tbody></table>
-    </details>
-  </div>
-</div>
-<div class="grid full">
-  <div class="card">
-    <details>
-      <summary>How it works (click to expand)</summary>
-      <style>
-.wf{margin:16px 0 8px}.wf-title{font-size:.8em;font-weight:600;color:var(--text);margin-bottom:10px;display:flex;align-items:center;gap:8px}.wf-title span{font-size:.85em;font-weight:400;color:var(--text3)}
-.wf-row{display:flex;align-items:center;flex-wrap:wrap;gap:0;margin-bottom:6px}
-.wf-node{padding:8px 14px;border-radius:8px;background:var(--bg);border:1.5px solid var(--border);font-size:.8em;font-weight:600;text-align:center;white-space:nowrap;min-width:80px}
-.wf-node small{display:block;font-weight:400;color:var(--text2);font-size:.85em;margin-top:2px}
-.wf-node.green{border-color:var(--green);color:var(--green)}.wf-node.blue{border-color:var(--blue);color:var(--blue)}.wf-node.yellow{border-color:var(--yellow);color:var(--yellow)}.wf-node.orange{border-color:var(--orange);color:var(--orange)}.wf-node.purple{border-color:#bc8cff;color:#bc8cff}.wf-node.muted{border-color:var(--border);color:var(--text2)}
-.wf-arrow{color:var(--text3);font-size:1.1em;padding:0 6px;flex-shrink:0}
-.wf-label{font-size:.65em;color:var(--text3);text-align:center;margin-top:-4px;margin-bottom:2px;padding:0 6px}
-.wf-branch{display:flex;flex-direction:column;gap:10px;margin:8px 0 0 0}
-.wf-branch>div{padding:12px;border-radius:8px;border:1px solid var(--border2);background:var(--bg)}
-.wf-branch>div>.wf-branch-title{font-size:.75em;font-weight:600;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--border2)}
-.wf-branch>div>.wf-branch-title.local{color:var(--text2)}.wf-branch>div>.wf-branch-title.debrid{color:var(--yellow)}
-.wf-glossary{margin-top:16px;padding-top:14px;border-top:1px solid var(--border2)}
-.wf-glossary-title{font-size:.8em;font-weight:600;color:var(--text);margin-bottom:10px}
-.wf-glossary dl{margin:0;font-size:.78em;line-height:1.6}
-.wf-glossary dt{color:var(--text);font-weight:600;margin-top:8px}
-.wf-glossary dd{color:var(--text2);margin:0 0 0 0;padding:0 0 8px 0;border-bottom:1px solid var(--border2)}
-@media(max-width:600px){.wf-row{gap:2px}.wf-node{padding:6px 8px;font-size:.72em;min-width:60px}.wf-arrow{font-size:.9em;padding:0 3px}}
-      </style>
-
-      <!-- Workflow 1: Watchlist / plex_debrid flow -->
-      <div class="wf">
-        <div class="wf-title">Watchlist Flow <span>&mdash; plex_debrid monitors your watchlists automatically</span></div>
-        <div class="wf-row">
-          <div class="wf-node muted">Watchlist<small>Plex / Trakt / Overseerr</small></div>
-          <div class="wf-arrow">&rarr;</div>
-          <div class="wf-node green">plex_debrid<small>Search &amp; Match</small></div>
-          <div class="wf-arrow">&rarr;</div>
-          <div class="wf-node yellow">Real-Debrid<small>Cloud Cache</small></div>
-          <div class="wf-arrow">&rarr;</div>
-          <div class="wf-node blue">Zurg<small>WebDAV</small></div>
-          <div class="wf-arrow">&rarr;</div>
-          <div class="wf-node blue">rclone<small>/data mount</small></div>
-          <div class="wf-arrow">&rarr;</div>
-          <div class="wf-node green">Plex / Jellyfin<small>Stream</small></div>
-        </div>
-      </div>
-
-      <!-- Workflow 2: Arr + Blackhole flow -->
-      <div class="wf">
-        <div class="wf-title">Arr + Blackhole Flow <span>&mdash; Sonarr/Radarr with tag-based routing</span></div>
-        <div class="wf-row">
-          <div class="wf-node muted">Overseerr<small>Requests</small></div>
-          <div class="wf-arrow">&rarr;</div>
-          <div class="wf-node muted">Sonarr / Radarr<small>Tag-based routing</small></div>
-        </div>
-        <div class="wf-branch">
-          <div>
-            <div class="wf-branch-title local">Local Path &mdash; no debrid tag</div>
-            <div class="wf-row">
-              <div class="wf-node purple">VPN<small>gluetun / Mullvad</small></div>
-              <div class="wf-arrow">&rarr;</div>
-              <div class="wf-node muted">qBittorrent / Usenet<small>Download</small></div>
-              <div class="wf-arrow">&rarr;</div>
-              <div class="wf-node muted">Local Disk<small>Storage</small></div>
-              <div class="wf-arrow">&rarr;</div>
-              <div class="wf-node green">Plex<small>Stream</small></div>
-            </div>
-          </div>
-          <div>
-            <div class="wf-branch-title debrid">Debrid Path &mdash; tag: debrid &mdash; no VPN needed</div>
-            <div class="wf-row">
-              <div class="wf-node orange">Blackhole<small>/watch folder</small></div>
-              <div class="wf-arrow">&rarr;</div>
-              <div class="wf-node orange">pd_zurg<small>Send to RD</small></div>
-              <div class="wf-arrow">&rarr;</div>
-              <div class="wf-node yellow">Real-Debrid<small>Cache</small></div>
-              <div class="wf-arrow">&rarr;</div>
-              <div class="wf-node blue">Zurg / rclone<small>Mount</small></div>
-              <div class="wf-arrow">&rarr;</div>
-              <div class="wf-node orange">Symlinks<small>/completed</small></div>
-              <div class="wf-arrow">&rarr;</div>
-              <div class="wf-node muted">Sonarr / Radarr<small>Import</small></div>
-              <div class="wf-arrow">&rarr;</div>
-              <div class="wf-node green">Plex<small>Stream</small></div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Component glossary -->
-      <div class="wf-glossary">
-        <div class="wf-glossary-title">Glossary</div>
-        <dl>
-          <dt style="color:var(--green)">Plex / Jellyfin</dt>
-          <dd>Media server that streams your library to any device. Scans local disks and rclone mounts for content.</dd>
-          <dt style="color:var(--text)">Overseerr</dt>
-          <dd>Request management UI. Users browse and request movies/shows, which get routed to Sonarr/Radarr for automated downloading.</dd>
-          <dt style="color:var(--text)">Sonarr / Radarr</dt>
-          <dd>Automated TV show and movie managers. Monitor indexers, manage quality profiles, rename files, and track new episodes. Route downloads to different clients using tags.</dd>
-          <dt style="color:var(--green)">plex_debrid</dt>
-          <dd>Monitors Plex/Trakt/Overseerr watchlists. Searches torrent indexers for cached releases matching your quality profile and sends the best match to your debrid service.</dd>
-          <dt style="color:var(--yellow)">Real-Debrid / AllDebrid</dt>
-          <dd>Cloud torrent cache. Stores popular torrents on fast servers. Instant access via HTTPS &mdash; no seeding, no VPN needed on this path.</dd>
-          <dt style="color:var(--blue)">Zurg</dt>
-          <dd>Connects to your debrid API and serves your cached content as a WebDAV file server. Makes your cloud library look like local files.</dd>
-          <dt style="color:var(--blue)">rclone</dt>
-          <dd>Mounts the Zurg WebDAV server as a local directory at <code style="color:var(--green);font-size:.95em">/data/pd_zurg</code> so your media server can access the files.</dd>
-          <dt style="color:var(--orange)">Blackhole</dt>
-          <dd>Watches a folder for .torrent/.magnet files dropped by Sonarr/Radarr. Sends them to Real-Debrid, waits for content on the mount, then creates symlinks in a completed directory for Sonarr/Radarr to import. Optional dedup checks your local library first.</dd>
-          <dt>qBittorrent / Usenet</dt>
-          <dd>Traditional download clients for the local path. qBittorrent handles torrents, SABnzbd/NZBGet handle Usenet NZBs. Both store files to local disk.</dd>
-          <dt style="color:#bc8cff">VPN</dt>
-          <dd>Encrypts torrent/Usenet traffic and hides your IP. Required for the local download path (gluetun, Mullvad, etc). Not needed for the debrid path &mdash; that&rsquo;s just HTTPS to Real-Debrid&rsquo;s API.</dd>
-        </dl>
-      </div>
-    </details>
-  </div>
-</div>
-<dialog id="confirm-dialog"><h3 id="dlg-title"></h3><p id="dlg-msg"></p><div class="dlg-actions"><button class="dlg-btn dlg-cancel" onclick="document.getElementById('confirm-dialog').close('cancel')">Cancel</button><button class="dlg-btn dlg-confirm" id="dlg-ok">Confirm</button></div></dialog>
 <div class="footer"><span id="conn-status"></span>Refresh: <select id="refresh-interval" onchange="setRefreshInterval(this.value)" style="background:var(--bg);color:var(--text2);border:1px solid var(--border);border-radius:3px;font-size:1em;padding:1px 4px"><option value="5">5s</option><option value="10" selected>10s</option><option value="30">30s</option><option value="0">Paused</option></select></div>
 <script>
 __THEME_TOGGLE_JS__
 
-// Log wrap toggle
-function toggleLogWrap(){
-  const el=document.getElementById('log-content');
-  const wrap=document.getElementById('log-wrap').checked;
-  el.classList.toggle('nowrap',!wrap);
-  try{localStorage.setItem('pd_zurg_log_wrap',wrap?'1':'0');}catch(e){}
-}
-(function(){try{const w=localStorage.getItem('pd_zurg_log_wrap');if(w==='0'){document.getElementById('log-wrap').checked=false;document.getElementById('log-content').classList.add('nowrap');}}catch(e){}})();
-
-function fmt(s){
-  if(s<60)return s+'s';
-  if(s<3600)return Math.floor(s/60)+'m '+s%60+'s';
-  const h=Math.floor(s/3600),m=Math.floor((s%3600)/60);
-  if(h>=24){const d=Math.floor(h/24);return d+'d '+(h%24)+'h';}
-  return h+'h '+m+'m';
-}
-function fmtBytes(b){
-  if(b>1073741824)return(b/1073741824).toFixed(1)+'G';
-  if(b>1048576)return(b/1048576).toFixed(0)+'M';
-  return(b/1024).toFixed(0)+'K';
-}
-function timeAgo(ts){
-  const sec=Math.floor((Date.now()-new Date(ts).getTime())/1000);
-  if(sec<60)return sec+'s ago';
-  if(sec<3600)return Math.floor(sec/60)+'m ago';
-  if(sec<86400)return Math.floor(sec/3600)+'h ago';
-  return Math.floor(sec/86400)+'d ago';
-}
-let _failCount=0;
-let _statusTimer,_logTimer,_mtTimer;
-let _refreshSec=10;
-function esc(s){const d=document.createElement('div');d.appendChild(document.createTextNode(String(s)));return d.innerHTML;}
+var _failCount=0;
+var _statusTimer,_mtTimer;
+var _refreshSec=10;
 function dot(ok){return '<span class="dot '+(ok?'green':'red')+'"></span>'+(ok?'Running':'Stopped');}
 function mdot(ok,yes,no){return '<span class="dot '+(ok?'green':'red')+'"></span>'+(ok?(yes||'Yes'):(no||'No'));}
 function sdot(s){return '<span class="dot '+(s==='ok'?'green':'red')+'"></span>';}
@@ -962,24 +752,6 @@ function update(){
     if(_failCount>=3){document.getElementById('conn-status').textContent='Connection lost \u2014 retrying... ';if(_fd)_fd.className='pulse-dot lost';}
   });
 }
-// Detect auth by trying an auth-required endpoint
-window._hasAuth=false;
-fetch('/api/restart/test',{method:'POST'}).then(r=>{window._hasAuth=r.status!==403;}).catch(()=>{});
-
-// Styled confirm dialog
-function showConfirm(title,msg){
-  return new Promise(resolve=>{
-    const dlg=document.getElementById('confirm-dialog');
-    document.getElementById('dlg-title').textContent=title;
-    document.getElementById('dlg-msg').textContent=msg;
-    const okBtn=document.getElementById('dlg-ok');
-    const handler=()=>{dlg.close('ok');};
-    okBtn.onclick=handler;
-    dlg.onclose=()=>{okBtn.onclick=null;resolve(dlg.returnValue==='ok');};
-    dlg.showModal();
-  });
-}
-
 // Restart service
 async function restartSvc(btn,name){
   if(!await showConfirm('Restart '+name+'?','This will restart the '+name+' process.'))return;
@@ -989,42 +761,6 @@ async function restartSvc(btn,name){
     setTimeout(()=>{btn.disabled=false;btn.textContent='Restart';},5000);
   }).catch(()=>{btn.disabled=false;btn.textContent='Restart';});
 }
-
-// Log viewer
-function updateLogs(){
-  const level=document.getElementById('log-level').value;
-  const url='/api/logs?lines=200'+(level?'&level='+level:'');
-  fetch(url).then(r=>r.json()).then(lines=>{
-    const el=document.getElementById('log-content');
-    let h='';
-    lines.forEach(l=>{
-      let cls='';
-      if(l.includes('ERROR'))cls='error';
-      else if(l.includes('WARNING'))cls='warning';
-      else if(l.includes('DEBUG'))cls='debug';
-      h+='<div class="log-line '+cls+'">'+esc(l)+'</div>';
-    });
-    el.innerHTML=h||'<div style="color:var(--text2)">No log entries</div>';
-    filterLogs();
-    if(document.getElementById('log-autoscroll').checked)el.scrollTop=el.scrollHeight;
-  }).catch(()=>{});
-}
-
-// Log search filter
-function filterLogs(){
-  const q=(document.getElementById('log-search').value||'').toLowerCase();
-  const lines=document.querySelectorAll('#log-content .log-line');
-  lines.forEach(l=>{l.style.display=(!q||l.textContent.toLowerCase().includes(q))?'':'none';});
-}
-
-// Config viewer (load once)
-fetch('/api/config').then(r=>r.json()).then(cfg=>{
-  let h='';
-  Object.keys(cfg).forEach(k=>{
-    h+='<tr><td>'+esc(k)+'</td><td>'+esc(cfg[k])+'</td></tr>';
-  });
-  document.querySelector('#config-table tbody').innerHTML=h||'<tr><td colspan="2" style="color:var(--text2)">No config</td></tr>';
-}).catch(()=>{});
 
 // Mount history timeline — only shown when state changes have occurred
 function updateMountHistory(){
@@ -1056,169 +792,28 @@ function updateMountHistory(){
   }).catch(()=>{});
 }
 
-// Tasks
-function fmtInterval(s){
-  if(s<60)return s+'s';
-  if(s<3600)return Math.floor(s/60)+'m';
-  if(s<86400)return Math.floor(s/3600)+'h';
-  return Math.floor(s/86400)+'d';
-}
-function updateTasks(){
-  fetch('/api/tasks').then(r=>r.json()).then(tasks=>{
-    const el=document.getElementById('tasks');
-    const hasAuth=window._hasAuth;
-    document.getElementById('task-actions-hdr').textContent=hasAuth?'Actions':'';
-    if(!tasks||!tasks.length){el.innerHTML='<tr><td colspan="7" style="color:var(--text2)">No tasks registered</td></tr>';return;}
-    let h='';
-    tasks.forEach(t=>{
-      const intv=fmtInterval(t.interval);
-      const lastRun=t.last_run?timeAgo(t.last_run):'Never';
-      const dur=t.last_duration!==null?t.last_duration+'s':'-';
-      let result='-';
-      if(t.running){result='<span class="task-running">Running...</span>';}
-      else if(t.last_result){
-        const r=t.last_result;
-        if(r.status==='success'){
-          let msg=r.message||'OK';
-          if(r.items!==undefined&&r.items!==null)msg+=' ('+r.items+')';
-          result='<span class="task-ok">'+esc(msg)+'</span>';
-        }else{
-          result='<span class="task-err">'+esc(r.message||'Error')+'</span>';
-        }
-      }
-      const next=t.next_run?timeAgo(t.next_run).replace(' ago','').replace(/^(\d+)/,'-$1'):'—';
-      const nextLabel=t.next_run?(new Date(t.next_run)>new Date()?'in '+fmtInterval(Math.max(0,Math.floor((new Date(t.next_run)-Date.now())/1000))):'due'):'—';
-      const runBtn=hasAuth&&!t.running?'<td><button class="btn btn-ghost btn-sm" onclick="runTask(this,\\x27'+esc(t.name)+'\\x27)">Run</button></td>':'<td>'+(t.running?'<span class="task-running" style="font-size:.8em">...</span>':'')+'</td>';
-      const enabledDot=t.enabled?'':'<span style="color:var(--text3);font-size:.75em" title="Disabled"> (off)</span>';
-      h+='<tr><td><span title="'+esc(t.description||'')+'">'+esc(t.name)+'</span>'+enabledDot+'</td><td>'+intv+'</td><td>'+lastRun+'</td><td>'+dur+'</td><td>'+result+'</td><td>'+nextLabel+'</td>'+runBtn+'</tr>';
-    });
-    el.innerHTML=h;
-  }).catch(()=>{});
-}
-async function runTask(btn,name){
-  btn.disabled=true;btn.textContent='...';
-  try{
-    const r=await fetch('/api/tasks/'+encodeURIComponent(name)+'/run',{method:'POST'});
-    const d=await r.json();
-    btn.textContent=d.status==='started'?'OK':'Err';
-    setTimeout(()=>{btn.disabled=false;btn.textContent='Run';updateTasks();},3000);
-  }catch(e){btn.disabled=false;btn.textContent='Run';}
-}
-
 // Configurable refresh
-let _taskTimer;
 function setRefreshInterval(sec){
   _refreshSec=parseInt(sec)||0;
   if(_statusTimer)clearInterval(_statusTimer);
-  if(_logTimer)clearInterval(_logTimer);
   if(_mtTimer)clearInterval(_mtTimer);
-  if(_taskTimer)clearInterval(_taskTimer);
-  if(typeof _actTimer!=='undefined'&&_actTimer)clearInterval(_actTimer);
   if(_refreshSec>0){
     _statusTimer=setInterval(update,_refreshSec*1000);
-    _logTimer=setInterval(updateLogs,_refreshSec*1000);
     _mtTimer=setInterval(updateMountHistory,Math.max(_refreshSec*3,30)*1000);
-    _taskTimer=setInterval(updateTasks,Math.max(_refreshSec*2,15)*1000);
-    _actTimer=setInterval(loadActivity,Math.max(_refreshSec,10)*1000);
   }
 }
-update();updateLogs();updateTasks();
+update();
 setRefreshInterval(10);
 setTimeout(updateMountHistory,1000);
 setInterval(function(){if(!_lastFetchTime)return;var s=Math.floor((Date.now()-_lastFetchTime)/1000);var el=document.getElementById('freshness-text');if(!el)return;if(s<5)el.textContent='Updated just now';else if(s<60)el.textContent='Updated '+s+'s ago';else el.textContent='Updated '+Math.floor(s/60)+'m ago';},1000);
 __WANTED_BADGE_JS__
-
-// Activity tab
-var _actPage=1;
-var _actIcons={grabbed:'\u2B07',cached:'\u2705',symlink_created:'\U0001F517',failed:'\u274C',cleanup:'\U0001F5D1',switched_source:'\u21C4',search_triggered:'\U0001F50D',rescan_triggered:'\U0001F504',task_completed:'\u2699',blocklisted:'\U0001F6AB',blocklist_added:'\u26D4'};
-function loadActivity(page){
-  if(page)_actPage=page; else _actPage=1;
-  var t=document.getElementById('activity-type').value;
-  var q=document.getElementById('activity-search').value.trim();
-  var url='/api/history?page='+_actPage+'&limit=50';
-  if(t)url+='&type='+encodeURIComponent(t);
-  if(q)url+='&title='+encodeURIComponent(q);
-  fetch(url).then(function(r){return r.json()}).then(function(d){
-    var el=document.getElementById('activity-body');
-    if(!d.events||!d.events.length){el.innerHTML='<tr><td colspan="5" style="color:var(--text3);text-align:center;padding:16px">No activity recorded yet</td></tr>';document.getElementById('activity-pager').innerHTML='';return}
-    var h='';
-    d.events.forEach(function(e){
-      var icon=_actIcons[e.type]||'\u2022';
-      h+='<tr><td style="font-size:.8em;color:var(--text3);white-space:nowrap">'+timeAgo(e.ts)+'</td>';
-      h+='<td><span class="type-badge type-'+esc(e.type)+'">'+icon+' '+esc(e.type.replace(/_/g,' '))+'</span></td>';
-      h+='<td style="font-size:.85em">'+esc(e.title)+(e.episode?' <span style="color:var(--text2)">'+esc(e.episode)+'</span>':'')+'</td>';
-      h+='<td style="font-size:.8em;color:var(--text2)">'+esc(e.detail||'')+'</td>';
-      h+='<td style="font-size:.75em;color:var(--text3)">'+esc(e.source||'')+'</td></tr>';
-    });
-    el.innerHTML=h;
-    // Pager
-    var pg='';
-    if(d.pages>1){
-      for(var i=1;i<=d.pages;i++){
-        if(i===d.page)pg+='<span style="color:var(--blue);font-weight:600;font-size:.85em">'+i+'</span>';
-        else pg+='<a href="#" onclick="loadActivity('+i+');return false" style="font-size:.85em">'+i+'</a>';
-      }
-    }
-    document.getElementById('activity-pager').innerHTML=pg;
-    // Show clear button if auth
-    if(window._hasAuth)document.getElementById('activity-clear-btn').style.display='';
-  }).catch(function(){});
-}
-function clearHistory(){
-  if(!confirm('Clear all activity history?'))return;
-  fetch('/api/history',{method:'DELETE'}).then(function(){loadActivity()}).catch(function(){});
-}
-loadActivity();
-
-// Blocklist
-function loadBlocklist(){
-  fetch('/api/blocklist').then(function(r){return r.json()}).then(function(entries){
-    var el=document.getElementById('blocklist-body');
-    var cnt=document.getElementById('blocklist-count');
-    if(!entries||!entries.length){
-      el.innerHTML='<tr><td colspan="6" style="color:var(--text3);text-align:center;padding:16px">No blocklisted torrents</td></tr>';
-      cnt.textContent='';
-      return;
-    }
-    cnt.textContent='('+entries.length+')';
-    var h='';
-    entries.forEach(function(e){
-      var shortHash=e.info_hash?(e.info_hash.substring(0,12)+'\u2026'):'';
-      var srcBadge=e.source==='auto'?'<span style="color:var(--orange);font-size:.75em">\u2699 auto</span>':'<span style="font-size:.75em">manual</span>';
-      h+='<tr>';
-      h+='<td style="font-size:.85em">'+esc(e.title||'')+'</td>';
-      h+='<td class="bl-hash" style="font-size:.75em;font-family:monospace;color:var(--text2);cursor:pointer" title="Click to copy" data-hash="'+esc(e.info_hash||'')+'">'+esc(shortHash)+'</td>';
-      h+='<td style="font-size:.8em;color:var(--text2)">'+esc(e.reason||'')+'</td>';
-      h+='<td style="font-size:.8em;color:var(--text3);white-space:nowrap">'+timeAgo(e.date)+'</td>';
-      h+='<td>'+srcBadge+'</td>';
-      h+='<td>';
-      if(window._hasAuth)h+='<button class="btn btn-ghost btn-sm bl-remove" style="font-size:.7em;padding:2px 6px" data-id="'+esc(e.id)+'">Remove</button>';
-      h+='</td></tr>';
-    });
-    el.innerHTML=h;
-    // Event delegation for copy and remove actions (avoids inline JS injection)
-    el.querySelectorAll('.bl-hash').forEach(function(td){td.addEventListener('click',function(){navigator.clipboard.writeText(this.dataset.hash||'')})});
-    el.querySelectorAll('.bl-remove').forEach(function(btn){btn.addEventListener('click',function(){removeBlocklistEntry(this.dataset.id)})});
-    if(window._hasAuth)document.getElementById('blocklist-clear-btn').style.display='';
-    if(window._hasAuth)document.getElementById('bl-actions-hdr').textContent='Actions';
-  }).catch(function(){});
-}
-function removeBlocklistEntry(id){
-  fetch('/api/blocklist/'+encodeURIComponent(id),{method:'DELETE'}).then(function(r){
-    if(r.ok)loadBlocklist();
-  }).catch(function(){});
-}
-function clearBlocklist(){
-  if(!confirm('Remove all blocklisted torrents? They may be re-downloaded.'))return;
-  fetch('/api/blocklist',{method:'DELETE',headers:{'X-Confirm-Clear':'true'}}).then(function(){loadBlocklist()}).catch(function(){});
-}
-loadBlocklist();
 </script>
+</main>
 </body>
 </html>'''
 
 _DASHBOARD_EXTRA_CSS = """
-body{max-width:1200px}
+.main-content{max-width:1200px}
 .meta{color:var(--text2);font-size:.85em;margin-bottom:20px}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
 .grid.full{grid-template-columns:1fr}
@@ -1254,18 +849,6 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .stat-value{font-size:1.8em;font-weight:600;color:var(--blue)}
 .stat-label{font-size:.75em;color:var(--text2);margin-top:2px}
 .stats-row{display:flex;gap:32px}.stats-row>div{flex:1;text-align:center}
-.task-ok{color:var(--green)}.task-err{color:var(--red)}.task-running{color:var(--blue)}
-.task-desc{color:var(--text2);font-size:.85em}
-.log-controls{display:flex;gap:8px;align-items:center;margin-bottom:8px}
-.log-controls select{background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:.8em}
-.log-controls label{font-size:.8em;color:var(--text2)}
-#log-content{max-height:350px;overflow-y:auto;background:var(--bg);border:1px solid var(--border2);border-radius:4px;padding:8px;font-size:.75em;line-height:1.5;white-space:pre-wrap;word-break:break-word;min-width:0}
-.log-line.error{color:var(--red)}.log-line.warning{color:var(--yellow)}.log-line.debug{color:var(--text3)}
-details{margin-top:0}
-details summary{cursor:pointer;color:var(--text2);font-size:.8em;padding:4px 0}
-details summary:hover{color:var(--blue)}
-.cfg-table td{font-family:monospace;font-size:.8em}
-.cfg-table td:first-child{color:var(--blue);font-weight:500;white-space:nowrap;padding-right:16px}
 .mount-timeline{margin-top:8px}
 .mt-row{display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:.8em}
 .mt-path{color:var(--text2);min-width:120px;overflow:hidden;text-overflow:ellipsis}
@@ -1275,19 +858,7 @@ details summary:hover{color:var(--blue)}
 .mt-block:hover{opacity:.8}
 .footer{display:flex;justify-content:flex-end;align-items:center;gap:8px}
 #conn-status{color:var(--red);font-weight:500}
-#log-search:focus{border-color:var(--blue)}
-#log-content.nowrap{white-space:pre;overflow-x:auto;word-break:normal}
 [data-theme="light"] .svc-item{background:var(--card);border-color:var(--border)}
-dialog{background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:24px;max-width:380px;box-shadow:0 8px 32px rgba(0,0,0,.5)}
-dialog::backdrop{background:rgba(0,0,0,.6);backdrop-filter:blur(2px)}
-dialog h3{margin-bottom:12px;font-size:1em;color:var(--text)}
-dialog p{margin-bottom:20px;font-size:.9em;color:var(--text2)}
-dialog .dlg-actions{display:flex;gap:8px;justify-content:flex-end}
-dialog .dlg-btn{padding:8px 18px;border-radius:6px;font-size:.85em;cursor:pointer;border:none;font-weight:500}
-dialog .dlg-cancel{background:var(--border);color:var(--text)}
-dialog .dlg-confirm{background:var(--blue);color:#fff}
-.type-badge{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-size:.75em;font-weight:500;white-space:nowrap}
-.type-grabbed{background:#58a6ff1a;color:var(--blue)}.type-cached{background:#3fb9501a;color:var(--green)}.type-symlink_created{background:#bc8cff1a;color:#bc8cff}.type-failed{background:#f851491a;color:var(--red)}.type-cleanup{background:#d299221a;color:var(--yellow)}.type-switched_source{background:#db6d281a;color:var(--orange)}.type-search_triggered{background:#58a6ff1a;color:var(--blue)}.type-rescan_triggered{background:#3fb9501a;color:var(--green)}.type-task_completed{background:var(--border);color:var(--text2)}.type-blocklisted{background:#f851491a;color:var(--red)}.type-blocklist_added{background:#db6d281a;color:var(--orange)}
 .freshness{margin-left:12px;font-size:.9em;color:var(--text3);display:inline-flex;align-items:center;gap:4px}
 .pulse-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0}
 .pulse-dot.fetching{background:var(--blue);animation:pulse-fetch 1s ease-in-out infinite}
@@ -1310,7 +881,7 @@ def get_dashboard_html():
                                  WANTED_BADGE_JS, KEYBOARD_JS, TOAST_JS)
     html = _DASHBOARD_HTML
     html = html.replace('__BASE_HEAD__', get_base_head('pd_zurg Status', _DASHBOARD_EXTRA_CSS))
-    html = html.replace('__NAV_HTML__', get_nav_html('dashboard'))
+    html = html.replace('__NAV_HTML__', get_nav_html('status'))
     html = html.replace('__THEME_TOGGLE_JS__', THEME_TOGGLE_JS + KEYBOARD_JS + TOAST_JS)
     html = html.replace('__WANTED_BADGE_JS__', WANTED_BADGE_JS)
     return html
@@ -1438,7 +1009,8 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(content)
         elif self.path == '/library' or self.path.startswith('/library?'):
             from utils.library_page import get_library_html
-            self._send_html_response(get_library_html().encode())
+            nav_page = 'wanted' if 'filter=missing' in self.path else 'library'
+            self._send_html_response(get_library_html(nav_page).encode())
         elif self.path == '/api/library':
             from utils.library import get_scanner
             scanner = get_scanner()
@@ -1517,6 +1089,12 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == '/api/blocklist':
             from utils import blocklist as blocklist_mod
             self._send_json_response(200, json.dumps(blocklist_mod.get_all()))
+        elif self.path == '/activity':
+            from utils.activity_page import get_activity_html
+            self._send_html_response(get_activity_html().encode())
+        elif self.path == '/system':
+            from utils.system_page import get_system_html
+            self._send_html_response(get_system_html().encode())
         elif self.path in ('/', '/status'):
             self._send_html_response(get_dashboard_html().encode())
         else:

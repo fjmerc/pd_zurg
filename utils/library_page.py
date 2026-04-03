@@ -1662,7 +1662,7 @@ function _applyLibraryData(data, opts) {
   _scanDurationMs = data.scan_duration_ms || null;
 
   // Auto-switch tab if wanted preset has no matches in current tab but other tab does
-  if (_activeWantedPreset && _activeWantedPreset !== 'recent') {
+  if (!_inDetailView && _activeWantedPreset && _activeWantedPreset !== 'recent') {
     var _curData = _activeTab === 'movies' ? _allMovies : _allShows;
     var _othData = _activeTab === 'movies' ? _allShows : _allMovies;
     var _othTab  = _activeTab === 'movies' ? 'shows' : 'movies';
@@ -1681,9 +1681,11 @@ function _applyLibraryData(data, opts) {
   }
 
   if (!opts.quiet) {
-    applyFilters();
+    if (!_inDetailView) {
+      applyFilters();
+      _updateWantedUI();
+    }
     updateScanInfo();
-    _updateWantedUI();
   }
   _checkSmartPoll();
 

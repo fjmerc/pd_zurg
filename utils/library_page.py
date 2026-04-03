@@ -87,9 +87,11 @@ __NAV_HTML__
 .progress-fill{height:100%;transition:width .3s ease}
 [data-theme="light"] .progress-bar{background:#d0d7de}
 .card-info{padding:8px 10px}
-.card-info .card-title{font-size:.85em;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.35}
+.card-header{display:flex;align-items:baseline;gap:6px}
+.card-header .card-title{flex:1;min-width:0;font-size:.85em;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.35}
+.card-header .card-badges{flex-shrink:0;display:flex;gap:3px}
 .card-info .card-meta{font-size:.72em;color:var(--text2);margin-top:2px}
-.card-info .card-badges{margin-top:4px;display:flex;gap:4px;flex-wrap:wrap}
+.card-status{display:flex;align-items:center;gap:6px;margin-top:3px;flex-wrap:wrap}
 
 /* Poster skeleton */
 .skeleton-poster{overflow:hidden;border-radius:8px;background:var(--card)}
@@ -253,8 +255,10 @@ __NAV_HTML__
 @keyframes pending-shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 [data-theme="light"] .badge-pending{background:#bc4c001a;border-color:#bc4c0040;color:#bc4c00}
 [data-theme="light"] .badge-pending::before{background:#bc4c00}
-.badge-migrating{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:var(--text3);border:1px solid var(--border2);margin-left:4px}
-[data-theme="light"] .badge-migrating{color:var(--text3);border-color:var(--border2)}
+.badge-migrating{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:#2dd4bf;border:1px solid #2dd4bf33;position:relative;overflow:hidden;background:linear-gradient(90deg,#2dd4bf18 0%,#2dd4bf08 50%,#2dd4bf18 100%);background-size:200% 100%;animation:pending-shimmer 2s ease-in-out infinite}
+.badge-migrating::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:#2dd4bf;margin-right:4px;vertical-align:middle;animation:pulse-dot 1s ease-in-out infinite}
+[data-theme="light"] .badge-migrating{color:#0d9488;border-color:#0d948840;background:linear-gradient(90deg,#0d94881a 0%,#0d94880a 50%,#0d94881a 100%);background-size:200% 100%}
+[data-theme="light"] .badge-migrating::before{background:#0d9488}
 .badge-unavailable{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:var(--red);border:1px solid #f8514933;background:#f851490f}
 [data-theme="light"] .badge-unavailable{background:#cf222e1a;border-color:#cf222e40;color:#cf222e}
 .badge-fallback{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:var(--orange);border:1px solid #db6d2833;background:#db6d280f}
@@ -326,8 +330,9 @@ body.has-bulk-bar{padding-bottom:60px}
   .episode-table{display:block;overflow-x:auto}
   .detail-hero{flex-direction:column}
   .detail-poster{width:120px}
-  .card-info .card-title{font-size:.78em}
-  .card-info .card-badges{gap:3px}
+  .card-header .card-title{font-size:.78em}
+  .card-header .card-badges{gap:2px}
+  .card-status{gap:4px;margin-top:2px}
   .legend{gap:6px 12px;font-size:.72em}
   body.has-bulk-bar{padding-bottom:120px}
   .bulk-bar{padding:8px 12px;gap:6px}
@@ -1000,7 +1005,7 @@ function buildCard(item, index) {
   // Meta line
   var metaLine = '';
   if (item.type === 'show' && item.missing_episodes > 0) {
-    metaLine = '<div class="card-meta"><span style="color:var(--red)">' + item.missing_episodes + ' missing</span></div>';
+    metaLine = '<span class="card-meta" style="color:var(--red)">' + item.missing_episodes + ' missing</span>';
   }
 
   // Pending badge — distinguish migrating (available) vs searching (missing)
@@ -1039,7 +1044,11 @@ function buildCard(item, index) {
     } // end else (not debrid-unavailable/local-fallback)
   }
 
-  var badges = buildBadges(item.source) + pendingBadge;
+  var sourceBadges = buildBadges(item.source);
+  var statusLine = '';
+  if (pendingBadge || metaLine) {
+    statusLine = '<div class="card-status">' + pendingBadge + metaLine + '</div>';
+  }
   var nk = normTitle(item.title);
   var isSelected = !!_selectedItems[nk];
   var checkboxHtml = '<div class="card-checkbox' + (isSelected ? ' checked' : '') + '" role="checkbox" aria-checked="' + (isSelected ? 'true' : 'false') + '"></div>';
@@ -1051,9 +1060,9 @@ function buildCard(item, index) {
     + '<div class="poster-container">' + checkboxHtml + posterHtml + cornerBadge + '</div>'
     + progressHtml
     + '<div class="card-info">'
-    + '<div class="card-title">' + esc(item.title) + '</div>'
-    + '<div class="card-badges">' + badges + '</div>'
-    + metaLine
+    + '<div class="card-header"><div class="card-title">' + esc(item.title) + '</div>'
+    + '<div class="card-badges">' + sourceBadges + '</div></div>'
+    + statusLine
     + '</div></div>';
 }
 

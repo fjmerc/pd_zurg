@@ -30,7 +30,7 @@ __BASE_HEAD__
 __NAV_HTML__
 <main class="main-content">
 <style>
-.main-content{max-width:1200px}
+.main-content{max-width:1400px}
 
 /* Tabs */
 .tabs{display:flex;gap:0;margin-bottom:0;border-bottom:2px solid var(--border)}

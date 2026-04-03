@@ -342,8 +342,9 @@ class TestAutoEnforcement:
         local_path_index = {(norm, 1, 1): local_file}
         preferences = {norm: 'prefer-debrid'}
 
-        scanner._enforce_preferences([show], [], preferences, path_index, local_path_index)
+        result = scanner._enforce_preferences([show], [], preferences, path_index, local_path_index)
 
+        assert result is True
         assert os.path.islink(local_file)
         assert os.readlink(local_file).startswith('/mnt/debrid/')
 
@@ -417,8 +418,9 @@ class TestAutoEnforcement:
         preferences = {norm: 'prefer-debrid'}
 
         with patch.object(lp, 'replace_local_with_symlinks') as mock_switch:
-            scanner._enforce_preferences([show], [], preferences, {(norm, 1, 1): '/x'}, {(norm, 1, 1): '/y'})
+            result = scanner._enforce_preferences([show], [], preferences, {(norm, 1, 1): '/x'}, {(norm, 1, 1): '/y'})
             mock_switch.assert_not_called()
+            assert result is False
 
     def test_no_action_for_non_both_source(self, tmp_dir, monkeypatch):
         """Episodes with source=local or source=debrid are not auto-enforced."""
@@ -497,8 +499,9 @@ class TestAutoEnforcement:
             'type': 'movie', 'path': debrid_dir, 'local_path': movie_dir,
         }
 
-        scanner._enforce_preferences([], [movie], preferences, {}, {})
+        result = scanner._enforce_preferences([], [movie], preferences, {}, {})
 
+        assert result is True
         assert os.path.islink(local_file)
         target = os.readlink(local_file)
         assert target.startswith('/mnt/debrid/')

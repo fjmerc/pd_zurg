@@ -1714,6 +1714,7 @@ function fetchLibrary() {
     })
     .then(function(data) {
       _applyLibraryData(data);
+      _restoreDetailFromUrl();
     })
     .catch(function(err) {
       document.getElementById('content-area').innerHTML =
@@ -1721,6 +1722,38 @@ function fetchLibrary() {
         + '<div class="state-hint">' + esc(String(err)) + '</div></div>';
       updateBadges(0);
     });
+}
+
+function _restoreDetailFromUrl() {
+  try {
+    var params = new URLSearchParams(window.location.search);
+    var detailTitle = params.get('detail');
+    var detailType = params.get('type');
+    if (!detailTitle || !detailType) return;
+    var items = detailType === 'movie' ? _allMovies : _allShows;
+    var nk = normTitle(detailTitle);
+    for (var i = 0; i < items.length; i++) {
+      if (normTitle(items[i].title) === nk) {
+        // Switch to the correct tab so _displayedItems contains the item
+        if (_activeTab !== (detailType === 'movie' ? 'movies' : 'shows')) {
+          _activeTab = detailType === 'movie' ? 'movies' : 'shows';
+          document.querySelectorAll('.tab').forEach(function(t) {
+            var active = t.getAttribute('aria-controls') === 'tab-' + _activeTab;
+            t.classList.toggle('active', active);
+            t.setAttribute('aria-selected', active ? 'true' : 'false');
+          });
+          applyFilters();
+        }
+        // Find the item index in _displayedItems
+        var dispIdx = -1;
+        for (var j = 0; j < _displayedItems.length; j++) {
+          if (normTitle(_displayedItems[j].title) === nk) { dispIdx = j; break; }
+        }
+        if (dispIdx !== -1) showDetail(dispIdx);
+        return;
+      }
+    }
+  } catch(e) {}
 }
 
 function _finishRefresh() {
@@ -1819,6 +1852,12 @@ function showDetail(index) {
   document.getElementById('jump-bar').style.display = 'none';
   document.getElementById('bulk-bar').style.display = 'none';
   document.body.classList.remove('has-bulk-bar');
+
+  // Persist detail view in URL so browser refresh restores it
+  var _dUrl = new URL(window.location);
+  _dUrl.searchParams.set('detail', item.title);
+  _dUrl.searchParams.set('type', item.type);
+  history.replaceState(null, '', _dUrl);
 
   _renderDetail();
   var backBtn = document.querySelector('.detail-back');
@@ -2368,6 +2407,10 @@ function hideDetail() {
   if (_refreshTimer) { clearTimeout(_refreshTimer); _refreshTimer = null; }
   if (_pendingConfirmCleanup) { _pendingConfirmCleanup(); _pendingConfirmCleanup = null; }
   document.title = 'pd_zurg Library';
+  var _hUrl = new URL(window.location);
+  _hUrl.searchParams.delete('detail');
+  _hUrl.searchParams.delete('type');
+  history.replaceState(null, '', _hUrl);
   document.querySelector('.tabs').style.display = '';
   document.querySelector('.controls').style.display = '';
   document.getElementById('wanted-presets').style.display = '';

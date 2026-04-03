@@ -6,13 +6,17 @@ built-in http.server — no framework dependencies.
 """
 
 
-def get_library_html():
-    """Return the complete library browser HTML page with shared CSS and nav."""
+def get_library_html(current_page='library'):
+    """Return the complete library browser HTML page with shared CSS and nav.
+
+    Args:
+        current_page: 'library' or 'wanted' to control sidebar active state.
+    """
     from utils.ui_common import (get_base_head, get_nav_html, THEME_TOGGLE_JS,
                                  KEYBOARD_JS, TOAST_JS)
     html = _LIBRARY_HTML
     html = html.replace('__BASE_HEAD__', get_base_head('pd_zurg Library'))
-    html = html.replace('__NAV_HTML__', get_nav_html('library'))
+    html = html.replace('__NAV_HTML__', get_nav_html(current_page))
     html = html.replace('__THEME_TOGGLE_JS__', THEME_TOGGLE_JS + KEYBOARD_JS + TOAST_JS)
     return html
 
@@ -24,8 +28,9 @@ __BASE_HEAD__
 </head>
 <body>
 __NAV_HTML__
+<main class="main-content">
 <style>
-body{max-width:1200px}
+.main-content{max-width:1200px}
 
 /* Tabs */
 .tabs{display:flex;gap:0;margin-bottom:0;border-bottom:2px solid var(--border)}
@@ -3600,5 +3605,6 @@ try {
 fetchLibrary();
 startTsRefresh();
 </script>
+</main>
 </body>
 </html>'''

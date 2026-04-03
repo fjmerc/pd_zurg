@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## Version [2.17.0] - 2026-04-03
+
+### Added
+
+- **Sidebar navigation**: Replaced the horizontal top navigation bar with a fixed left sidebar inspired by Sonarr/Radarr. Includes SVG icons, active-state left border accent, dark/light theme support, and a mobile hamburger menu with slide-out overlay.
+- **Activity page**: New dedicated page at `/activity` with two tabs — History (event log with type filter, search, pagination) and Blocklist (manage blocked torrents). Previously these were buried at the bottom of the dashboard.
+- **System page**: New dedicated page at `/system` with three tabs — Logs (level filter, search, wrap/auto-scroll), Tasks (scheduled task management with manual run), and Config (running configuration + "How it Works" reference). Previously these required scrolling through the entire dashboard.
+- **Shared JS utilities**: Common functions (`esc`, `timeAgo`, `fmt`, `fmtBytes`, `showConfirm`, auth detection) extracted into a shared module available to all pages, eliminating duplication.
+
+### Changed
+
+- **Dashboard slimmed to Status page**: The dashboard now shows only health-critical information — services, processes, mounts, system stats, and recent events. Activity, blocklist, logs, tasks, and config have moved to their dedicated pages.
+- **Wanted sidebar highlighting**: Navigating to the library with `?filter=missing` now highlights "Wanted" in the sidebar instead of "Library".
+
 ## Version [2.16.2] - 2026-04-03
 
 ### Fixed

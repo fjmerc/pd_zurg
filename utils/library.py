@@ -1394,20 +1394,22 @@ class LibraryScanner:
         return bool(enforced_this_scan)
 
     _SEARCH_BUDGET_SECONDS = 30
+    _SEARCH_RETRY_HOURS = 6
 
     def _search_for_debrid_copies(self, shows, movies, preferences):
         """Trigger Sonarr/Radarr searches for prefer-debrid titles missing debrid copies.
 
         Finds episodes/movies that are local-only (no debrid copy) under a
         prefer-debrid preference and triggers a search via the arr client.
-        Skips episodes already pending (to-debrid direction) or on cooldown
-        from a recent failed search to avoid repeated API calls.
+        Skips episodes on cooldown from a recent failed search.  Episodes with
+        existing pending entries are retried after _SEARCH_RETRY_HOURS to
+        handle transient indexer failures.
         Respects a time budget to avoid blocking the scan thread too long.
         """
         if not preferences:
             return
 
-        from utils.library_prefs import get_all_pending, set_pending
+        from utils.library_prefs import get_all_pending, set_pending, touch_pending_searched
         from utils.tmdb import search_show as tmdb_search_show, search_movie as tmdb_search_movie
 
         # pending is a snapshot; set_pending calls below write new entries
@@ -1440,21 +1442,42 @@ class LibraryScanner:
                 if self._get_pref(norm, preferences) != 'prefer-debrid':
                     continue
 
-                # Skip if title has a pending entry in to-debrid or debrid-unavailable direction
+                # Check pending state — skip debrid-unavailable, allow retries for stale to-debrid
                 pending_entry = pending.get(norm)
+                pending_norm = norm  # key under which the entry lives
                 if not pending_entry:
                     for _pa in self._alias_norms.get(norm, ()):
                         pending_entry = pending.get(_pa)
                         if pending_entry:
+                            pending_norm = _pa
                             break
                 pending_entry = pending_entry or {}
                 pe_dir = pending_entry.get('direction', '')
                 if pe_dir == 'debrid-unavailable':
                     continue  # escalated — stop retrying
-                pending_keys = {
-                    (e['season'], e['episode'])
-                    for e in pending_entry.get('episodes', [])
-                } if pe_dir == 'to-debrid' else set()
+                pending_keys = set()
+                is_retry = False
+                if pe_dir == 'to-debrid':
+                    # Check if the last search attempt is recent enough to skip
+                    last_ts = pending_entry.get('last_searched') or pending_entry.get('created')
+                    stale = True
+                    if last_ts:
+                        try:
+                            ls_dt = datetime.fromisoformat(last_ts)
+                            if ls_dt.tzinfo is None:
+                                ls_dt = ls_dt.replace(tzinfo=timezone.utc)
+                            age_hours = (datetime.now(timezone.utc) - ls_dt).total_seconds() / 3600
+                            if age_hours < self._SEARCH_RETRY_HOURS:
+                                stale = False
+                        except (ValueError, TypeError):
+                            pass
+                    if stale:
+                        is_retry = True  # allow retry — pending_keys stays empty
+                    else:
+                        pending_keys = {
+                            (e['season'], e['episode'])
+                            for e in pending_entry.get('episodes', [])
+                        }
 
                 # Find local-only episodes not already pending or on cooldown
                 by_season = {}
@@ -1476,8 +1499,9 @@ class LibraryScanner:
                     continue
 
                 total = sum(len(eps) for eps in by_season.values())
+                retry_tag = ' (retry)' if is_retry else ''
                 logger.info(
-                    f"[library] Prefer-debrid search for {show['title']}: "
+                    f"[library] Prefer-debrid search{retry_tag} for {show['title']}: "
                     f"{total} episode(s) across {len(by_season)} season(s)"
                 )
 
@@ -1513,7 +1537,9 @@ class LibraryScanner:
                         self._search_cooldown[(norm, sn)] = now
 
                 if new_pending:
-                    set_pending(norm, new_pending, 'to-debrid')
+                    set_pending(pending_norm, new_pending, 'to-debrid')
+                    # Update last_searched only when search was dispatched
+                    touch_pending_searched(pending_norm)
 
         # --- Movies via Radarr ---
         try:
@@ -1532,21 +1558,40 @@ class LibraryScanner:
                 if movie.get('source') in ('debrid', 'both'):
                     continue  # already on debrid
                 pending_entry = pending.get(norm)
+                pending_norm = norm
                 if not pending_entry:
                     for _pa in self._alias_norms.get(norm, ()):
                         pending_entry = pending.get(_pa)
                         if pending_entry:
+                            pending_norm = _pa
                             break
                 pending_entry = pending_entry or {}
                 pe_dir = pending_entry.get('direction', '')
                 if pe_dir == 'debrid-unavailable':
                     continue  # escalated — stop retrying
+                movie_is_retry = False
                 if pe_dir == 'to-debrid':
-                    continue  # already searching
+                    # Allow retry if last search is stale
+                    last_ts = pending_entry.get('last_searched') or pending_entry.get('created')
+                    stale = True
+                    if last_ts:
+                        try:
+                            ls_dt = datetime.fromisoformat(last_ts)
+                            if ls_dt.tzinfo is None:
+                                ls_dt = ls_dt.replace(tzinfo=timezone.utc)
+                            age_hours = (datetime.now(timezone.utc) - ls_dt).total_seconds() / 3600
+                            if age_hours < self._SEARCH_RETRY_HOURS:
+                                stale = False
+                        except (ValueError, TypeError):
+                            pass
+                    if not stale:
+                        continue  # recent search — skip
+                    movie_is_retry = True
                 if (norm, 0) in self._search_cooldown:
                     continue  # recently attempted
 
-                logger.info(f"[library] Prefer-debrid search for movie: {movie['title']}")
+                retry_tag = ' (retry)' if movie_is_retry else ''
+                logger.info(f"[library] Prefer-debrid search{retry_tag} for movie: {movie['title']}")
                 movie_tmdb_id = None
                 if movie.get('year'):
                     try:
@@ -1561,7 +1606,8 @@ class LibraryScanner:
                     )
                     status = result.get('status', '')
                     if status in ('sent', 'pending'):
-                        set_pending(norm, [{'season': 0, 'episode': 0}], 'to-debrid')
+                        set_pending(pending_norm, [{'season': 0, 'episode': 0}], 'to-debrid')
+                        touch_pending_searched(pending_norm)
                     elif status == 'error':
                         logger.warning(
                             f"[library] Search failed for movie {movie['title']}: "

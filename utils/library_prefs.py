@@ -98,7 +98,9 @@ def set_pending(normalized_title, episodes, direction='to-debrid'):
     Args:
         normalized_title: Normalized show/movie title
         episodes: list of {season, episode} dicts
-        direction: 'to-debrid', 'to-local', 'to-local-fallback', or 'debrid-unavailable'
+        direction: 'to-debrid', 'to-local', or 'to-local-fallback'
+
+    Note: 'debrid-unavailable' is set by mark_debrid_unavailable(), not here.
     """
     if direction not in _VALID_DIRECTIONS:
         raise ValueError(f"Invalid direction: {direction!r}")
@@ -108,15 +110,19 @@ def set_pending(normalized_title, episodes, direction='to-debrid'):
         if entry.get('direction') != direction:
             # Direction change: start fresh to avoid merging episodes
             # from incompatible states
+            now_iso = datetime.now(timezone.utc).isoformat(timespec='seconds')
             entry = {
                 'direction': direction,
-                'created': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+                'created': now_iso,
+                'last_searched': now_iso,
                 'episodes': list(episodes),
             }
         else:
             # Same direction: merge new episodes into existing list
             if 'created' not in entry:
                 entry['created'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
+            if 'last_searched' not in entry:
+                entry['last_searched'] = entry['created']
             existing = entry.get('episodes', [])
             existing_keys = {(e['season'], e['episode']) for e in existing}
             for ep in episodes:
@@ -155,6 +161,22 @@ def get_all_pending():
     """Return all pending transitions."""
     with _pending_lock:
         return _load_pending()
+
+
+def touch_pending_searched(normalized_title):
+    """Update the last_searched timestamp for a pending entry. Thread-safe.
+
+    Called after a search retry so the system knows when the last attempt was
+    made, preventing excessive retries.
+    """
+    with _pending_lock:
+        pending = _load_pending()
+        entry = pending.get(normalized_title)
+        if not entry:
+            return
+        entry['last_searched'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
+        pending[normalized_title] = entry
+        _save_pending(pending)
 
 
 def mark_debrid_unavailable(normalized_title):

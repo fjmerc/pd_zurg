@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Prefer-debrid search retry**: Debrid migration searches that silently fail (e.g., all indexers down, no results) are now automatically retried every 6 hours instead of being permanently skipped. Previously, a single failed search attempt would leave the title stuck in "Migrating to Debrid" until the 3-day escalation timeout.
+- **Untagged torrent indexers invisible to debrid series**: Sonarr/Radarr v4 requires indexers to share a tag with the series — untagged indexers are no longer universal. `_fix_indexer_routing` now adds the debrid tag to untagged torrent indexers, not just those already carrying the local tag. Previously, debrid-tagged series saw "0 active indexers" and searches silently returned nothing.
 - **Season-aware TMDB show matching**: Fixed a bug where shows sharing a common title across reboots/revivals (e.g. Netflix "Marvel's Daredevil" vs Disney+ "Daredevil: Born Again") could receive the wrong poster, metadata, and Sonarr folder assignment. When the primary TMDB cache entry doesn't cover the show's season range, the system now searches for alternative cache entries with matching title words that do cover the needed season.
 - **Blocklist modal**: Replaced native browser `prompt()` dialog with a styled in-app modal for blocking torrents. Preset reasons are now clickable buttons with a custom reason input field, matching the application's dark theme.
 - **Migrating badge alignment**: Fixed vertical misalignment between source badge and "Migrating" badge in episode rows by adding `vertical-align:middle` and proper spacing.

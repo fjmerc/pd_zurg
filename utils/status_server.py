@@ -780,8 +780,8 @@ function update(){
     }
     // System — Disk
     if(d.system.disk_used_bytes!==undefined&&d.system.disk_total_bytes!==undefined){
-      document.getElementById('disk-used').textContent=fmtBytes(d.system.disk_used_bytes)+' / '+fmtBytes(d.system.disk_total_bytes);
-      document.getElementById('disk-label').textContent='Disk ('+d.system.disk_percent+'%)';
+      document.getElementById('disk-used').textContent=(d.system.disk_percent||0)+'%';
+      document.getElementById('disk-label').textContent=fmtBytes(d.system.disk_used_bytes)+' / '+fmtBytes(d.system.disk_total_bytes);
       updateRing('disk-ring-fill',d.system.disk_percent||0);
     }
     // System — Uptime
@@ -962,7 +962,7 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .ring-bg{fill:none;stroke:var(--border);stroke-width:6}
 .ring-fill{fill:none;stroke:var(--green);stroke-width:6;stroke-linecap:round;stroke-dasharray:326.73;stroke-dashoffset:326.73;transition:stroke-dashoffset var(--motion-slow) ease,stroke var(--motion-normal)}
 .stat-inner{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;pointer-events:none}
-.info-row{display:flex;gap:24px;justify-content:center;margin-top:16px;padding-top:12px;border-top:1px solid var(--border2)}
+.info-row{display:flex;gap:24px;justify-content:center;margin-top:24px;padding-top:16px;border-top:1px solid var(--border2)}
 .info-item{text-align:center;flex:1;min-width:0}
 .info-value{display:block;font-size:1em;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .info-label{display:block;font-size:.7em;color:var(--text3);margin-top:2px;text-transform:uppercase;letter-spacing:.05em}

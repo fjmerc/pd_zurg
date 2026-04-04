@@ -662,6 +662,8 @@ class LibraryScanner:
             self._debrid_unavailable_days = int(os.environ.get('DEBRID_UNAVAILABLE_THRESHOLD_DAYS', '3'))
         except (ValueError, TypeError):
             self._debrid_unavailable_days = 3
+        self._last_had_local = None    # None=unknown, True=had local content
+        self._local_drop_alerted = False
 
         if self._mount_path:
             logger.info(f"[library] Mount path: {self._mount_path}")
@@ -1815,9 +1817,25 @@ class LibraryScanner:
         has_local_movies = any(m.get('source') in ('local', 'both') for m in movies)
         has_local_shows = any(s.get('source') in ('local', 'both') for s in shows)
         if not has_local_movies and not has_local_shows:
+            if self._last_had_local is True and not self._local_drop_alerted:
+                logger.warning("[library] Local library content dropped to zero — "
+                               "network mount may have failed")
+                try:
+                    from utils.notifications import notify
+                    notify('health_error', 'Local Library Empty',
+                           'Library scan found zero local content. '
+                           'A network mount may have dropped.',
+                           level='error')
+                except Exception as exc:
+                    logger.debug(f"[library] Failed to send mount-drop notification: {exc}")
+                self._local_drop_alerted = True
             logger.info("[library] Skipping debrid symlink creation — local library appears empty "
                         "(network mount may not be ready)")
             return
+
+        # Local content present — update baseline and reset alert state
+        self._last_had_local = True
+        self._local_drop_alerted = False
 
         real_mount = os.path.realpath(rclone_mount)
         created = 0

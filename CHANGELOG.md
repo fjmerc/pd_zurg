@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## Version [2.17.1] - 2026-04-04
+
+### Added
+
+- **Local library mount health monitoring**: Mount liveness probe now checks local library paths (movies/TV) for real (non-symlink) media files. When a network mount (NFS/SMB) drops silently, the probe detects the absence of real files within ~60 seconds and sends a `health_error` notification.
+- **Library scanner mount-drop alert**: The library scanner now tracks whether local content was previously found. If local items drop to zero after being present, it logs a warning and sends a one-time `health_error` notification instead of silently skipping symlink creation.
+
 ## Version [2.17.0] - 2026-04-03
 
 ### Added

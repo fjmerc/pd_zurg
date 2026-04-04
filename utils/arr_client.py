@@ -638,7 +638,7 @@ class SonarrClient(_ArrClientBase):
                 f"[sonarr] Force-grabbed debrid release for {title or f'episode {episode_id}'}: "
                 f"{best.get('title', '?')}"
             )
-            return best.get('guid')
+            return best.get('guid') or best.get('title') or 'pushed'
         logger.warning(f"[sonarr] Failed to push release for episode {episode_id}")
         return None
 

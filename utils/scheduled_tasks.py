@@ -142,6 +142,10 @@ _SYMLINK_DELETE_THRESHOLD = 50
 
 _MEDIA_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m4v', '.webm'}
 
+# Local library mount health tracking
+_local_library_baselines = {}   # {label: True} — had real files on previous check
+_local_library_alerted = {}     # {label: True} — alert already sent for this incident
+
 
 def _cleanup_empty_parents(deleted_path, stop_at):
     """Remove parent directories that contain no media files, up to *stop_at*.
@@ -556,36 +560,122 @@ def config_backup():
 # Task: Mount Liveness Probe (Priority 3)
 # ---------------------------------------------------------------------------
 
+def _has_real_media_files(path, sample_limit=10):
+    """Quick-sample a library directory for real (non-symlink) media files.
+
+    Checks up to *sample_limit* top-level subdirectories for at least one
+    non-symlink media file.  Descends into Season subdirectories for TV
+    libraries (Show/Season XX/episode.mkv).  Returns True as soon as one
+    is found.
+    """
+    checked = 0
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                if checked >= sample_limit:
+                    break
+                checked += 1
+                try:
+                    with os.scandir(entry.path) as sub:
+                        for f in sub:
+                            ext = os.path.splitext(f.name)[1].lower()
+                            if ext in _MEDIA_EXTENSIONS and f.is_file(follow_symlinks=False):
+                                return True
+                            # Descend into Season subdirs for TV libraries
+                            if f.is_dir(follow_symlinks=False):
+                                try:
+                                    with os.scandir(f.path) as deep:
+                                        for g in deep:
+                                            if (os.path.splitext(g.name)[1].lower() in _MEDIA_EXTENSIONS
+                                                    and g.is_file(follow_symlinks=False)):
+                                                return True
+                                except OSError:
+                                    pass
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return False
+
+
+def _check_local_library_health():
+    """Quick check that local library paths still have real (non-symlink) files.
+
+    When a network mount (NFS/SMB) drops silently, the bind-mounted path
+    inside the container still exists but only contains debrid symlinks
+    that pd_zurg created locally.  Detecting the absence of real files
+    catches this early and sends a notification.
+    """
+    local_movies = os.environ.get('BLACKHOLE_LOCAL_LIBRARY_MOVIES', '').strip()
+    local_tv = os.environ.get('BLACKHOLE_LOCAL_LIBRARY_TV', '').strip()
+
+    for label, path in [('movies', local_movies), ('tv', local_tv)]:
+        if not path or not os.path.isdir(path):
+            continue
+        has_real = _has_real_media_files(path)
+        prev = _local_library_baselines.get(label)
+
+        if prev is True and not has_real and not _local_library_alerted.get(label):
+            logger.error(
+                f"[scheduler] Local {label} library has no real files — "
+                f"network mount may have dropped: {path}"
+            )
+            try:
+                from utils.notifications import notify
+                notify('health_error', f'Local Library Down: {label}',
+                       f'Local {label} library at {path} has no real media files. '
+                       f'A network mount may have dropped.',
+                       level='error')
+            except Exception as exc:
+                logger.debug(f"[scheduler] Failed to send mount-drop notification: {exc}")
+            _local_library_alerted[label] = True
+        elif has_real:
+            if _local_library_alerted.get(label):
+                logger.info(f"[scheduler] Local {label} library recovered: {path}")
+            _local_library_baselines[label] = True
+            _local_library_alerted[label] = False
+
+
 def mount_liveness_probe():
-    """Verify rclone FUSE mount is responsive, not just alive."""
+    """Verify rclone FUSE mount and local library mounts are healthy."""
     rclone_mount = os.environ.get('BLACKHOLE_RCLONE_MOUNT', '/data')
 
+    # Check rclone FUSE mount first — this is the primary health signal
+    # and must not be blocked by a stale NFS mount on the local library.
     if not os.path.isdir(rclone_mount):
-        return {'status': 'error', 'message': f'Mount path does not exist: {rclone_mount}'}
+        result = {'status': 'error', 'message': f'Mount path does not exist: {rclone_mount}'}
+    elif not os.path.ismount(rclone_mount):
+        result = {'status': 'error', 'message': f'Not a mount point: {rclone_mount}'}
+    else:
+        try:
+            start = time.time()
+            entries = os.listdir(rclone_mount)
+            elapsed = time.time() - start
+            if elapsed > 5:
+                logger.warning(f"[scheduler] Mount {rclone_mount} is slow: listdir took {elapsed:.1f}s")
+                result = {
+                    'status': 'success',
+                    'message': f'Mount responsive but slow ({elapsed:.1f}s)',
+                    'items': len(entries),
+                }
+            else:
+                result = {
+                    'status': 'success',
+                    'message': f'{len(entries)} entries, {elapsed:.2f}s',
+                    'items': len(entries),
+                }
+        except OSError as e:
+            logger.error(f"[scheduler] Mount {rclone_mount} is unresponsive: {e}")
+            result = {'status': 'error', 'message': f'Mount unresponsive: {e}'}
 
-    if not os.path.ismount(rclone_mount):
-        return {'status': 'error', 'message': f'Not a mount point: {rclone_mount}'}
+    # Check local library paths for real files (detects NFS/SMB mount drops).
+    # Runs after the rclone check so a stale NFS mount doesn't block
+    # rclone health reporting.
+    _check_local_library_health()
 
-    # Try to list the mount directory (tests filesystem responsiveness)
-    try:
-        start = time.time()
-        entries = os.listdir(rclone_mount)
-        elapsed = time.time() - start
-        if elapsed > 5:
-            logger.warning(f"[scheduler] Mount {rclone_mount} is slow: listdir took {elapsed:.1f}s")
-            return {
-                'status': 'success',
-                'message': f'Mount responsive but slow ({elapsed:.1f}s)',
-                'items': len(entries),
-            }
-        return {
-            'status': 'success',
-            'message': f'{len(entries)} entries, {elapsed:.2f}s',
-            'items': len(entries),
-        }
-    except OSError as e:
-        logger.error(f"[scheduler] Mount {rclone_mount} is unresponsive: {e}")
-        return {'status': 'error', 'message': f'Mount unresponsive: {e}'}
+    return result
 
 
 # ---------------------------------------------------------------------------

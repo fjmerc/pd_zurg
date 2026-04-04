@@ -526,6 +526,8 @@ class TestLibraryScannerScanDebrid:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
         return scanner
 
     def test_scan_debrid_movies_returns_correct_items(self, tmp_dir, monkeypatch):
@@ -596,6 +598,8 @@ class TestLibraryScannerScanDebrid:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
 
         result = scanner.scan()
         assert result["movies"] == []
@@ -781,6 +785,8 @@ class TestLibraryScannerScanLocal:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
         return scanner
 
     def test_scan_local_movies_source_is_local(self, tmp_dir):
@@ -868,6 +874,8 @@ class TestLibraryScannerScanCrossRef:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
 
         result = scanner.scan()
 
@@ -899,6 +907,8 @@ class TestLibraryScannerScanCrossRef:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
 
         result = scanner.scan()
         local_only = next(m for m in result["movies"] if m["title"] == "Local Only")
@@ -924,6 +934,8 @@ class TestLibraryScannerScanCrossRef:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
 
         result = scanner.scan()
         show = next(s for s in result["shows"] if s["title"] == "Succession")
@@ -954,6 +966,8 @@ class TestLibraryScannerScanCrossRef:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
 
         result = scanner.scan()
         arrival = next(m for m in result["movies"] if m["title"] == "Arrival")
@@ -1131,6 +1145,8 @@ class TestSeasonDataInScanResults:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
         return scanner
 
     def test_shows_have_season_data(self, tmp_dir, monkeypatch):
@@ -1231,6 +1247,8 @@ class TestEpisodeLevelCrossRef:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
         return scanner
 
     def test_same_episode_both_sources_gets_both(self, tmp_dir):
@@ -1443,6 +1461,8 @@ class TestLibraryScannerGetData:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
         return scanner
 
     def test_get_data_returns_scan_result(self):
@@ -1521,6 +1541,8 @@ class TestLibraryScannerRefresh:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
         return scanner
 
     def test_refresh_triggers_background_scan(self, mocker):

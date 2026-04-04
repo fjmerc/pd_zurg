@@ -29,6 +29,8 @@ def _make_scanner(mount_path, local_tv_path, monkeypatch, local_movies_path=None
     scanner._path_index = {}
     scanner._local_path_index = {}
     scanner._path_lock = threading.Lock()
+    scanner._last_had_local = None
+    scanner._local_drop_alerted = False
     return scanner
 
 

@@ -321,15 +321,22 @@ class SonarrClient(_ArrClientBase):
                     elif local_tag not in existing_tags:
                         logger.info(f"[sonarr] Usenet indexer '{ix_name}' has existing tags {existing_tags} — verify it excludes debrid series")
             # Ensure torrent indexers are accessible for debrid-tagged content.
-            # If a torrent indexer has tags but not the debrid tag, debrid-tagged
-            # series/episodes won't find it during search. Only auto-tag indexers
-            # whose sole tag is the local tag (set by our auto-routing); respect
-            # user-configured tags by warning instead of overriding.
+            # Sonarr v4 requires indexers to share a tag with the series —
+            # untagged indexers are NOT universal. Add the debrid tag to:
+            #   a) untagged torrent indexers (invisible to debrid series)
+            #   b) indexers whose only tags are auto-routing ones (local/usenet)
+            # Respect user-configured tags by warning instead of overriding.
             if ix.get('protocol') == 'torrent' and debrid_tag is not None:
                 existing_tags = updated.get('tags', [])
-                if existing_tags and debrid_tag not in existing_tags:
-                    if local_tag is not None and set(existing_tags) <= {t for t in (local_tag, usenet_tag) if t is not None}:
-                        updated['tags'] = list(set(existing_tags) | {debrid_tag})
+                if debrid_tag not in existing_tags:
+                    auto_tags = {t for t in (local_tag, usenet_tag) if t is not None}
+                    if not existing_tags or (local_tag is not None and set(existing_tags) <= auto_tags):
+                        # Add debrid tag; for untagged indexers also add local
+                        # tag so the indexer serves both routing paths.
+                        new_tags = set(existing_tags) | {debrid_tag}
+                        if not existing_tags and local_tag is not None:
+                            new_tags.add(local_tag)
+                        updated['tags'] = list(new_tags)
                         changed = True
                         torrent_fix_pending = True
                         logger.debug(f"[sonarr] Adding debrid tag to torrent indexer '{ix_name}' so debrid-tagged content can use it")
@@ -1087,15 +1094,19 @@ class RadarrClient(_ArrClientBase):
                     elif local_tag not in existing_tags:
                         logger.info(f"[radarr] Usenet indexer '{ix_name}' has existing tags {existing_tags} — verify it excludes debrid movies")
             # Ensure torrent indexers are accessible for debrid-tagged content.
-            # If a torrent indexer has tags but not the debrid tag, debrid-tagged
-            # movies won't find it during search. Only auto-tag indexers whose
-            # sole tag is the local tag (set by our auto-routing); respect
+            # Sonarr/Radarr v4 requires indexers to share a tag with the
+            # movie — untagged indexers are NOT universal. Add the debrid tag
+            # to untagged and auto-routing-only torrent indexers. Respect
             # user-configured tags by warning instead of overriding.
             if ix.get('protocol') == 'torrent' and debrid_tag is not None:
                 existing_tags = updated.get('tags', [])
-                if existing_tags and debrid_tag not in existing_tags:
-                    if local_tag is not None and set(existing_tags) <= {t for t in (local_tag, usenet_tag) if t is not None}:
-                        updated['tags'] = list(set(existing_tags) | {debrid_tag})
+                if debrid_tag not in existing_tags:
+                    auto_tags = {t for t in (local_tag, usenet_tag) if t is not None}
+                    if not existing_tags or (local_tag is not None and set(existing_tags) <= auto_tags):
+                        new_tags = set(existing_tags) | {debrid_tag}
+                        if not existing_tags and local_tag is not None:
+                            new_tags.add(local_tag)
+                        updated['tags'] = list(new_tags)
                         changed = True
                         torrent_fix_pending = True
                         logger.debug(f"[radarr] Adding debrid tag to torrent indexer '{ix_name}' so debrid-tagged content can use it")

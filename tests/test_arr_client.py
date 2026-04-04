@@ -387,15 +387,30 @@ class TestSonarrClient:
         assert mock_urlopen.call_count == 1  # only GET, no PUT
 
     @patch('urllib.request.urlopen')
-    def test_fix_indexer_routing_skips_untagged_torrent(self, mock_urlopen, sonarr):
-        """Untagged torrent indexer should not be modified (serves all content)."""
+    def test_fix_indexer_routing_tags_untagged_torrent(self, mock_urlopen, sonarr):
+        """Untagged torrent indexer gets debrid tag (Sonarr v4 requires shared tags)."""
         indexers = [
             {'id': 1, 'name': 'TPB', 'protocol': 'torrent', 'tags': [], 'downloadClientId': 0},
         ]
-        mock_urlopen.return_value = _mock_urlopen(indexers)
+        mock_urlopen.side_effect = [_mock_urlopen(indexers), _mock_urlopen(indexers[0])]
         result = sonarr._fix_indexer_routing(set(), None, debrid_tag=3)
-        assert result is False
-        assert mock_urlopen.call_count == 1  # only GET, no PUT
+        assert result is True
+        assert mock_urlopen.call_count == 2  # GET + PUT
+        put_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
+        assert 3 in put_body['tags']
+
+    @patch('urllib.request.urlopen')
+    def test_fix_indexer_routing_tags_untagged_torrent_with_local(self, mock_urlopen, sonarr):
+        """Untagged torrent indexer gets both debrid and local tags for dual routing."""
+        indexers = [
+            {'id': 1, 'name': 'TPB', 'protocol': 'torrent', 'tags': [], 'downloadClientId': 0},
+        ]
+        mock_urlopen.side_effect = [_mock_urlopen(indexers), _mock_urlopen(indexers[0])]
+        result = sonarr._fix_indexer_routing(set(), 5, debrid_tag=3)
+        assert result is True
+        put_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
+        assert 3 in put_body['tags']
+        assert 5 in put_body['tags']
 
     @patch('urllib.request.urlopen')
     def test_fix_indexer_routing_skips_torrent_already_tagged(self, mock_urlopen, sonarr):
@@ -742,15 +757,30 @@ class TestRadarrClient:
         assert mock_urlopen.call_count == 1  # only GET, no PUT
 
     @patch('urllib.request.urlopen')
-    def test_fix_indexer_routing_skips_untagged_torrent(self, mock_urlopen, radarr):
-        """Untagged torrent indexer should not be modified (serves all content)."""
+    def test_fix_indexer_routing_tags_untagged_torrent(self, mock_urlopen, radarr):
+        """Untagged torrent indexer gets debrid tag (Radarr v4 requires shared tags)."""
         indexers = [
             {'id': 1, 'name': 'TPB', 'protocol': 'torrent', 'tags': [], 'downloadClientId': 0},
         ]
-        mock_urlopen.return_value = _mock_urlopen(indexers)
+        mock_urlopen.side_effect = [_mock_urlopen(indexers), _mock_urlopen(indexers[0])]
         result = radarr._fix_indexer_routing(set(), None, debrid_tag=3)
-        assert result is False
-        assert mock_urlopen.call_count == 1  # only GET, no PUT
+        assert result is True
+        assert mock_urlopen.call_count == 2  # GET + PUT
+        put_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
+        assert 3 in put_body['tags']
+
+    @patch('urllib.request.urlopen')
+    def test_fix_indexer_routing_tags_untagged_torrent_with_local(self, mock_urlopen, radarr):
+        """Untagged torrent indexer gets both debrid and local tags for dual routing."""
+        indexers = [
+            {'id': 1, 'name': 'TPB', 'protocol': 'torrent', 'tags': [], 'downloadClientId': 0},
+        ]
+        mock_urlopen.side_effect = [_mock_urlopen(indexers), _mock_urlopen(indexers[0])]
+        result = radarr._fix_indexer_routing(set(), 5, debrid_tag=3)
+        assert result is True
+        put_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
+        assert 3 in put_body['tags']
+        assert 5 in put_body['tags']
 
     @patch('urllib.request.urlopen')
     def test_fix_indexer_routing_skips_torrent_already_tagged(self, mock_urlopen, radarr):

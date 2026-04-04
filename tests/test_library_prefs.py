@@ -3,6 +3,7 @@
 import json
 import os
 import threading
+from datetime import datetime, timezone, timedelta
 import pytest
 import utils.library_prefs as lp
 
@@ -15,7 +16,9 @@ import utils.library_prefs as lp
 def _isolate_prefs(tmp_dir, monkeypatch):
     """Point prefs to a temp dir and reset module state between tests."""
     prefs_path = os.path.join(tmp_dir, 'library_prefs.json')
+    pending_path = os.path.join(tmp_dir, 'library_pending.json')
     monkeypatch.setattr(lp, 'PREFS_PATH', prefs_path)
+    monkeypatch.setattr(lp, 'PENDING_PATH', pending_path)
 
 
 # ---------------------------------------------------------------------------
@@ -150,3 +153,78 @@ class TestRemoveLocalEpisodes:
 
         result = lp.remove_local_episodes([{'path': missing}], local_tv)
         assert result['removed'] == 0
+
+
+# ---------------------------------------------------------------------------
+# Pending transitions
+# ---------------------------------------------------------------------------
+
+class TestPending:
+
+    def test_set_pending_creates_entry_with_last_searched(self):
+        eps = [{'season': 1, 'episode': 1}]
+        lp.set_pending('my show', eps, 'to-debrid')
+        pending = lp.get_all_pending()
+        entry = pending['my show']
+        assert entry['direction'] == 'to-debrid'
+        assert 'created' in entry
+        assert 'last_searched' in entry
+        assert entry['last_searched'] == entry['created']
+
+    def test_set_pending_merge_preserves_last_searched(self):
+        eps1 = [{'season': 1, 'episode': 1}]
+        lp.set_pending('my show', eps1, 'to-debrid')
+        original = lp.get_all_pending()['my show']['last_searched']
+
+        # Merge additional episodes — last_searched should NOT change
+        eps2 = [{'season': 1, 'episode': 2}]
+        lp.set_pending('my show', eps2, 'to-debrid')
+        merged = lp.get_all_pending()['my show']
+        assert merged['last_searched'] == original
+        assert len(merged['episodes']) == 2
+
+    def test_set_pending_direction_change_resets_last_searched(self):
+        lp.set_pending('show', [{'season': 1, 'episode': 1}], 'to-debrid')
+        old_ts = lp.get_all_pending()['show']['last_searched']
+
+        lp.set_pending('show', [{'season': 1, 'episode': 1}], 'to-local')
+        new_entry = lp.get_all_pending()['show']
+        assert new_entry['direction'] == 'to-local'
+        assert 'last_searched' in new_entry
+
+    def test_touch_pending_searched_updates_timestamp(self):
+        lp.set_pending('show', [{'season': 1, 'episode': 1}], 'to-debrid')
+        original = lp.get_all_pending()['show']['last_searched']
+
+        # Manually set last_searched to the past to confirm touch updates it
+        with lp._pending_lock:
+            pending = lp._load_pending()
+            old_ts = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat(timespec='seconds')
+            pending['show']['last_searched'] = old_ts
+            lp._save_pending(pending)
+
+        lp.touch_pending_searched('show')
+        updated = lp.get_all_pending()['show']['last_searched']
+        assert updated != old_ts
+
+    def test_touch_pending_searched_noop_for_missing_title(self):
+        # Should not raise or create an entry
+        lp.touch_pending_searched('nonexistent')
+        assert lp.get_all_pending() == {}
+
+    def test_clear_pending_specific_episodes(self):
+        lp.set_pending('show', [
+            {'season': 1, 'episode': 1},
+            {'season': 1, 'episode': 2},
+            {'season': 1, 'episode': 3},
+        ], 'to-debrid')
+        lp.clear_pending('show', [{'season': 1, 'episode': 2}])
+        remaining = lp.get_all_pending()['show']['episodes']
+        assert len(remaining) == 2
+        keys = {(e['season'], e['episode']) for e in remaining}
+        assert (1, 2) not in keys
+
+    def test_clear_pending_all_removes_entry(self):
+        lp.set_pending('show', [{'season': 1, 'episode': 1}], 'to-debrid')
+        lp.clear_pending('show')
+        assert 'show' not in lp.get_all_pending()

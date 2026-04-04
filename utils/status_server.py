@@ -92,6 +92,57 @@ def get_system_stats():
         except ImportError:
             pass
 
+    # Disk space (/config volume, fallback to /)
+    try:
+        disk_path = '/config' if os.path.isdir('/config') else '/'
+        st = os.statvfs(disk_path)
+        disk_total = st.f_frsize * st.f_blocks
+        disk_free = st.f_frsize * st.f_bavail
+        disk_used = max(0, disk_total - disk_free)
+        if disk_total > 0:
+            stats['disk_used_bytes'] = disk_used
+            stats['disk_total_bytes'] = disk_total
+            stats['disk_percent'] = round(disk_used / disk_total * 100, 1)
+    except OSError:
+        pass
+
+    # Open file descriptors
+    try:
+        # Subtract 1: listdir() opens its own FD to /proc/self/fd
+        stats['fd_open'] = max(0, len(os.listdir('/proc/self/fd')) - 1)
+    except OSError:
+        pass
+    try:
+        with open('/proc/self/limits', 'r') as f:
+            for line in f:
+                if line.startswith('Max open files'):
+                    # fields: Max, open, files, soft_limit, hard_limit, units
+                    stats['fd_max'] = int(line.split()[3])
+                    break
+    except (OSError, ValueError, IndexError):
+        pass
+
+    # Network I/O (cumulative bytes, all interfaces except lo)
+    try:
+        with open('/proc/net/dev', 'r') as f:
+            rx_total = 0
+            tx_total = 0
+            for line in f:
+                line = line.strip()
+                if ':' not in line:
+                    continue
+                iface, data = line.split(':', 1)
+                if iface.strip() == 'lo':
+                    continue
+                fields = data.split()
+                rx_total += int(fields[0])
+                tx_total += int(fields[8])
+            if rx_total or tx_total:
+                stats['net_rx_bytes'] = rx_total
+                stats['net_tx_bytes'] = tx_total
+    except (OSError, ValueError, IndexError):
+        pass
+
     return stats
 
 
@@ -560,6 +611,12 @@ __NAV_HTML__
     <div class="stats-row">
       <div class="stat-container"><svg class="stat-ring" viewBox="0 0 120 120"><circle cx="60" cy="60" r="52" class="ring-bg"/><circle cx="60" cy="60" r="52" class="ring-fill" id="mem-ring-fill"/></svg><div class="stat-inner"><div class="stat-value" id="mem-used">-</div><div class="stat-label" id="mem-label">Memory Used</div></div></div>
       <div class="stat-container"><svg class="stat-ring" viewBox="0 0 120 120"><circle cx="60" cy="60" r="52" class="ring-bg"/><circle cx="60" cy="60" r="52" class="ring-fill" id="cpu-ring-fill"/></svg><div class="stat-inner"><div class="stat-value" id="cpu-used">-</div><div class="stat-label" id="cpu-label">CPU</div></div></div>
+      <div class="stat-container"><svg class="stat-ring" viewBox="0 0 120 120"><circle cx="60" cy="60" r="52" class="ring-bg"/><circle cx="60" cy="60" r="52" class="ring-fill" id="disk-ring-fill"/></svg><div class="stat-inner"><div class="stat-value" id="disk-used">-</div><div class="stat-label" id="disk-label">Disk</div></div></div>
+    </div>
+    <div class="info-row" id="sys-info-row">
+      <div class="info-item"><span class="info-value" id="sys-uptime">-</span><span class="info-label">Uptime</span></div>
+      <div class="info-item"><span class="info-value" id="sys-fds">-</span><span class="info-label">Open FDs</span></div>
+      <div class="info-item"><span class="info-value" id="sys-net">-</span><span class="info-label">Network I/O</span></div>
     </div>
   </div>
   <div class="card">
@@ -574,6 +631,7 @@ __THEME_TOGGLE_JS__
 var _failCount=0;
 var _statusTimer,_mtTimer;
 var _refreshSec=10;
+var _prevNet=null;
 function dot(ok){return '<span class="dot '+(ok?'green':'red')+'"></span>'+(ok?'Running':'Stopped');}
 function mdot(ok,yes,no){return '<span class="dot '+(ok?'green':'red')+'"></span>'+(ok?(yes||'Yes'):(no||'No'));}
 function sdot(s){return '<span class="dot '+(s==='ok'?'green':'red')+'"></span>';}
@@ -636,6 +694,8 @@ function updateCardStates(d){
   d.mounts.forEach(function(m){if(!m.mounted||!m.accessible)mH='crit';});
   if(d.system.memory_percent!=null){if(d.system.memory_percent>85)yH='crit';else if(d.system.memory_percent>60)yH='warn';}
   if(d.system.cpu_percent!=null){if(d.system.cpu_percent>85)yH='crit';else if(d.system.cpu_percent>60&&yH==='ok')yH='warn';}
+  if(d.system.disk_percent!=null){if(d.system.disk_percent>85)yH='crit';else if(d.system.disk_percent>60&&yH==='ok')yH='warn';}
+  if(d.system.fd_open!=null&&d.system.fd_max!=null){var fdPct=d.system.fd_open/d.system.fd_max*100;if(fdPct>85)yH='crit';else if(fdPct>60&&yH==='ok')yH='warn';}
   if(d.recent_events)d.recent_events.forEach(function(v){if(v.level==='error')eH='warn';});
   setCardHealth('Services','card-'+sH);setCardHealth('Processes','card-'+pH);setCardHealth('Mounts','card-'+mH);setCardHealth('System','card-'+yH);setCardHealth('Recent Events','card-'+eH);
   if(sH==='crit'||pH==='crit'||mH==='crit'||yH==='crit')overall='crit';else if(sH==='warn'||pH==='warn'||mH==='warn'||yH==='warn')overall='warn';
@@ -717,6 +777,36 @@ function update(){
     }else if(d.system.cpu_usage_usec!==undefined){
       document.getElementById('cpu-used').textContent=(d.system.cpu_usage_usec/1000000).toFixed(1)+'s';
       document.getElementById('cpu-label').textContent='CPU Time';
+    }
+    // System — Disk
+    if(d.system.disk_used_bytes!==undefined&&d.system.disk_total_bytes!==undefined){
+      document.getElementById('disk-used').textContent=fmtBytes(d.system.disk_used_bytes)+' / '+fmtBytes(d.system.disk_total_bytes);
+      document.getElementById('disk-label').textContent='Disk ('+d.system.disk_percent+'%)';
+      updateRing('disk-ring-fill',d.system.disk_percent||0);
+    }
+    // System — Uptime
+    if(d.uptime_seconds!==undefined){
+      document.getElementById('sys-uptime').textContent=fmt(d.uptime_seconds);
+    }
+    // System — Open FDs
+    if(d.system.fd_open!==undefined){
+      var fdText=d.system.fd_open.toLocaleString();
+      if(d.system.fd_max)fdText+=' / '+d.system.fd_max.toLocaleString();
+      document.getElementById('sys-fds').textContent=fdText;
+    }
+    // System — Network I/O (show rate between polls)
+    if(d.system.net_rx_bytes!==undefined){
+      var now=Date.now()/1000;
+      var rx=d.system.net_rx_bytes||0,tx=d.system.net_tx_bytes||0;
+      if(_prevNet){
+        var dt=now-_prevNet.t;
+        if(dt>0){
+          var rxRate=Math.max(0,(rx-_prevNet.rx)/dt);
+          var txRate=Math.max(0,(tx-_prevNet.tx)/dt);
+          document.getElementById('sys-net').textContent='\u2193 '+fmtBytes(rxRate)+'/s \u2191 '+fmtBytes(txRate)+'/s';
+        }
+      }
+      _prevNet={rx:rx,tx:tx,t:now};
     }
 
     // Events (with relative time on hover)
@@ -872,6 +962,11 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .ring-bg{fill:none;stroke:var(--border);stroke-width:6}
 .ring-fill{fill:none;stroke:var(--green);stroke-width:6;stroke-linecap:round;stroke-dasharray:326.73;stroke-dashoffset:326.73;transition:stroke-dashoffset var(--motion-slow) ease,stroke var(--motion-normal)}
 .stat-inner{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;pointer-events:none}
+.info-row{display:flex;gap:24px;justify-content:center;margin-top:16px;padding-top:12px;border-top:1px solid var(--border2)}
+.info-item{text-align:center;flex:1;min-width:0}
+.info-value{display:block;font-size:1em;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.info-label{display:block;font-size:.7em;color:var(--text3);margin-top:2px;text-transform:uppercase;letter-spacing:.05em}
+@media(max-width:600px){.stats-row{flex-wrap:wrap;gap:16px}.stats-row>div{flex:none;width:calc(33.3% - 11px)}.info-row{flex-wrap:wrap;gap:12px}.info-item{flex:none;width:calc(50% - 6px)}}
 """
 
 

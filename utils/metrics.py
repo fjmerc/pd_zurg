@@ -133,6 +133,48 @@ class MetricsRegistry:
             lines.append(f'pd_zurg_cpu_usage_percent {system["cpu_percent"]}')
             lines.append('')
 
+        if 'disk_used_bytes' in system:
+            lines.append('# HELP pd_zurg_disk_used_bytes Config volume disk used in bytes')
+            lines.append('# TYPE pd_zurg_disk_used_bytes gauge')
+            lines.append(f'pd_zurg_disk_used_bytes {system["disk_used_bytes"]}')
+            lines.append('')
+
+        if 'disk_total_bytes' in system:
+            lines.append('# HELP pd_zurg_disk_total_bytes Config volume disk total in bytes')
+            lines.append('# TYPE pd_zurg_disk_total_bytes gauge')
+            lines.append(f'pd_zurg_disk_total_bytes {system["disk_total_bytes"]}')
+            lines.append('')
+
+        if 'disk_percent' in system:
+            lines.append('# HELP pd_zurg_disk_usage_percent Config volume disk usage percentage')
+            lines.append('# TYPE pd_zurg_disk_usage_percent gauge')
+            lines.append(f'pd_zurg_disk_usage_percent {system["disk_percent"]}')
+            lines.append('')
+
+        if 'fd_open' in system:
+            lines.append('# HELP pd_zurg_fd_open Current number of open file descriptors')
+            lines.append('# TYPE pd_zurg_fd_open gauge')
+            lines.append(f'pd_zurg_fd_open {system["fd_open"]}')
+            lines.append('')
+
+        if 'fd_max' in system:
+            lines.append('# HELP pd_zurg_fd_max Maximum file descriptor limit (soft)')
+            lines.append('# TYPE pd_zurg_fd_max gauge')
+            lines.append(f'pd_zurg_fd_max {system["fd_max"]}')
+            lines.append('')
+
+        if 'net_rx_bytes' in system:
+            lines.append('# HELP pd_zurg_net_rx_bytes_total Total network bytes received')
+            lines.append('# TYPE pd_zurg_net_rx_bytes_total counter')
+            lines.append(f'pd_zurg_net_rx_bytes_total {system["net_rx_bytes"]}')
+            lines.append('')
+
+        if 'net_tx_bytes' in system:
+            lines.append('# HELP pd_zurg_net_tx_bytes_total Total network bytes transmitted')
+            lines.append('# TYPE pd_zurg_net_tx_bytes_total counter')
+            lines.append(f'pd_zurg_net_tx_bytes_total {system["net_tx_bytes"]}')
+            lines.append('')
+
         # Service health
         services = data.get('services', [])
         if services:

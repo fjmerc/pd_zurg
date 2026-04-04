@@ -287,13 +287,13 @@ class TestMovieSearchRetry:
 
 
 # ---------------------------------------------------------------------------
-# Failure-path tests: last_searched should NOT be updated when search errors
+# Failure-path tests: last_searched IS updated before search to prevent overlaps
 # ---------------------------------------------------------------------------
 
-class TestSearchFailureNoTouch:
+class TestSearchTouchBeforeSearch:
 
-    def test_show_all_errors_preserves_last_searched(self, scanner):
-        """When all season searches error, last_searched should stay stale for faster retry."""
+    def test_show_errors_still_updates_last_searched(self, scanner):
+        """last_searched is updated before search starts to prevent overlapping scans."""
         error_client = MagicMock()
         error_client.ensure_and_search.return_value = {'status': 'error', 'message': '0 active indexers'}
 
@@ -316,12 +316,12 @@ class TestSearchFailureNoTouch:
                 scanner._search_for_debrid_copies(shows, [], preferences)
 
         error_client.ensure_and_search.assert_called_once()
-        # last_searched should NOT be updated — search failed
+        # last_searched IS updated (touched before search to prevent overlaps)
         entry = lp.get_all_pending()['tulsa king']
-        assert entry['last_searched'] == old_ts
+        assert entry['last_searched'] != old_ts
 
-    def test_movie_error_preserves_last_searched(self, scanner):
-        """When movie search errors, last_searched should stay stale."""
+    def test_movie_errors_still_updates_last_searched(self, scanner):
+        """last_searched is updated before search starts for movies too."""
         error_client = MagicMock()
         error_client.ensure_and_search.return_value = {'status': 'error', 'message': 'not found'}
 
@@ -345,4 +345,4 @@ class TestSearchFailureNoTouch:
 
         error_client.ensure_and_search.assert_called_once()
         entry = lp.get_all_pending()['children of men']
-        assert entry['last_searched'] == old_ts
+        assert entry['last_searched'] != old_ts

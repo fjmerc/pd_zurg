@@ -1505,6 +1505,10 @@ class LibraryScanner:
                     f"{total} episode(s) across {len(by_season)} season(s)"
                 )
 
+                # Touch last_searched immediately so overlapping scans
+                # don't re-process the same title concurrently
+                touch_pending_searched(pending_norm)
+
                 # Resolve TMDB ID for accurate Sonarr matching (only when
                 # year is available for reliable disambiguation)
                 show_tmdb_id = None
@@ -1538,8 +1542,6 @@ class LibraryScanner:
 
                 if new_pending:
                     set_pending(pending_norm, new_pending, 'to-debrid')
-                    # Update last_searched only when search was dispatched
-                    touch_pending_searched(pending_norm)
 
         # --- Movies via Radarr ---
         try:
@@ -1592,6 +1594,10 @@ class LibraryScanner:
 
                 retry_tag = ' (retry)' if movie_is_retry else ''
                 logger.info(f"[library] Prefer-debrid search{retry_tag} for movie: {movie['title']}")
+
+                # Touch immediately to prevent overlapping scans
+                touch_pending_searched(pending_norm)
+
                 movie_tmdb_id = None
                 if movie.get('year'):
                     try:
@@ -1607,7 +1613,6 @@ class LibraryScanner:
                     status = result.get('status', '')
                     if status in ('sent', 'pending'):
                         set_pending(pending_norm, [{'season': 0, 'episode': 0}], 'to-debrid')
-                        touch_pending_searched(pending_norm)
                     elif status == 'error':
                         logger.warning(
                             f"[library] Search failed for movie {movie['title']}: "

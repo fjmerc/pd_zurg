@@ -614,14 +614,17 @@ class SonarrClient(_ArrClientBase):
         if not releases:
             logger.debug(f"[sonarr] No releases found for episode {episode_id}")
             return False
-        # Filter for torrent releases matching the correct season
+        # Filter for torrent releases matching the correct season.
+        # Accept: exact match, seasonNumber 0 (multi-season/complete packs),
+        # or missing seasonNumber (untagged releases from some indexers).
         torrents = [
             r for r in releases
             if r.get('protocol') == 'torrent'
-            and (season_number is None or r.get('seasonNumber') == season_number)
+            and (season_number is None
+                 or r.get('seasonNumber') in (season_number, 0, None))
         ]
         if not torrents:
-            logger.debug(f"[sonarr] No torrent releases for episode {episode_id} season {season_number}")
+            logger.debug(f"[sonarr] No torrent releases for episode {episode_id} S{season_number or '?'}")
             return False
         # Pick the first (Sonarr returns releases sorted by preference)
         best = torrents[0]

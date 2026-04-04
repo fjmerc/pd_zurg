@@ -479,6 +479,48 @@ class TestSonarrClient:
         result = sonarr._grab_debrid_release(100, title='Test')
         assert result is False
 
+    @patch('urllib.request.urlopen')
+    def test_grab_debrid_release_filters_by_season(self, mock_urlopen, sonarr):
+        """Only releases matching the requested season should be grabbed."""
+        responses = [
+            _mock_urlopen([
+                {'guid': 's1', 'indexerId': 1, 'protocol': 'torrent', 'title': 'S01E01', 'seasonNumber': 1},
+                {'guid': 's2', 'indexerId': 1, 'protocol': 'torrent', 'title': 'S02E01', 'seasonNumber': 2},
+            ]),
+            _mock_urlopen({'id': 10}),  # push
+        ]
+        mock_urlopen.side_effect = responses
+        result = sonarr._grab_debrid_release(200, season_number=2, title='Test')
+        assert result is True
+        push_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
+        assert push_body['guid'] == 's2'
+
+    @patch('urllib.request.urlopen')
+    def test_grab_debrid_release_accepts_multiseason_pack(self, mock_urlopen, sonarr):
+        """Multi-season packs (seasonNumber=0) should be accepted for any season."""
+        responses = [
+            _mock_urlopen([
+                {'guid': 'pack', 'indexerId': 1, 'protocol': 'torrent', 'title': 'S01-S03 Complete', 'seasonNumber': 0},
+            ]),
+            _mock_urlopen({'id': 10}),
+        ]
+        mock_urlopen.side_effect = responses
+        result = sonarr._grab_debrid_release(200, season_number=2, title='Test')
+        assert result is True
+
+    @patch('urllib.request.urlopen')
+    def test_grab_debrid_release_accepts_missing_season(self, mock_urlopen, sonarr):
+        """Releases without seasonNumber should be accepted (untagged indexer results)."""
+        responses = [
+            _mock_urlopen([
+                {'guid': 'unknown', 'indexerId': 1, 'protocol': 'torrent', 'title': 'Tulsa King'},
+            ]),
+            _mock_urlopen({'id': 10}),
+        ]
+        mock_urlopen.side_effect = responses
+        result = sonarr._grab_debrid_release(200, season_number=1, title='Test')
+        assert result is True
+
     # --- _fix_indexer_routing: torrent indexer debrid tag ---
 
     @patch('urllib.request.urlopen')

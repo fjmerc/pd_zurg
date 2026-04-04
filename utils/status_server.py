@@ -926,7 +926,7 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .svc-item{display:flex;align-items:center;padding:10px 12px;background:var(--bg);border-radius:6px;border:1px solid var(--border2)}
 .svc-item .svc-info{flex:1;margin-left:8px}
 .svc-item .svc-name{font-size:.85em;font-weight:500;color:var(--text)}
-.svc-name a{color:inherit;text-decoration:none}.svc-name a:hover{text-decoration:underline;color:var(--blue)}
+.svc-name a{color:inherit;text-decoration:none}.svc-name a:hover{color:var(--blue)}
 .svc-item .svc-detail{font-size:.75em;color:var(--text2);margin-top:2px}
 .svc-item .svc-badge{font-size:.7em;padding:2px 6px;border-radius:4px;font-weight:500;margin-left:8px}
 .svc-item .svc-badge.premium{background:#3fb9501a;color:var(--green)}

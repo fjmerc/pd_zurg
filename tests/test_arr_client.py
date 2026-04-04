@@ -358,29 +358,30 @@ class TestSonarrClient:
 
     @patch('urllib.request.urlopen')
     def test_ensure_and_search_prefer_debrid_force_grabs_when_has_file(self, mock_urlopen, sonarr):
-        """prefer_debrid=True with existing files should use interactive grab."""
+        """prefer_debrid=True with existing files should interactive-grab each episode."""
         sonarr._blackhole_tag_id = 7
         responses = [
             _mock_urlopen([{'id': 5, 'title': 'Tulsa King', 'tmdbId': 200, 'tags': [7]}]),  # find
-            _mock_urlopen([  # episodes — all have files
+            _mock_urlopen([  # episodes — both have files
                 {'id': 100, 'seasonNumber': 1, 'episodeNumber': 1, 'hasFile': True},
                 {'id': 101, 'seasonNumber': 1, 'episodeNumber': 2, 'hasFile': True},
             ]),
             _mock_urlopen({'records': []}),  # queue cleanup
-            _mock_urlopen([  # interactive search releases
-                {'guid': 'abc', 'indexerId': 1, 'protocol': 'usenet', 'title': 'NZB', 'rejected': False},
-                {'guid': 'def', 'indexerId': 2, 'protocol': 'torrent', 'title': 'Torrent.Pack', 'rejected': False},
+            # Episode 100 interactive search + push
+            _mock_urlopen([
+                {'guid': 'ep1', 'indexerId': 2, 'protocol': 'torrent', 'title': 'S01E01', 'rejected': True},
             ]),
-            _mock_urlopen({'id': 99}),  # push release response
+            _mock_urlopen({'id': 99}),
+            # Episode 101 interactive search + push
+            _mock_urlopen([
+                {'guid': 'ep2', 'indexerId': 2, 'protocol': 'torrent', 'title': 'S01E02', 'rejected': True},
+            ]),
+            _mock_urlopen({'id': 98}),
         ]
         mock_urlopen.side_effect = responses
         result = sonarr.ensure_and_search('Tulsa King', 200, 1, [1, 2], prefer_debrid=True)
         assert result['status'] == 'sent'
-        assert 'Force-grabbed' in result['message']
-        # Verify the POST /release was called with the torrent, not the usenet release
-        push_call = mock_urlopen.call_args_list[-1]
-        push_body = json.loads(push_call[0][0].data)
-        assert push_body['protocol'] == 'torrent'
+        assert 'Force-grabbed 2' in result['message']
 
     @patch('urllib.request.urlopen')
     def test_ensure_and_search_prefer_debrid_mixed_has_file_and_no_file(self, mock_urlopen, sonarr):

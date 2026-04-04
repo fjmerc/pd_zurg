@@ -1017,12 +1017,20 @@ class LibraryScanner:
 
     def scan(self, force_enforce=False):
         data = self._scan_read()
-        changed = self._scan_effects(data, force_enforce)
-        if changed:
-            # Enforcement modified files — invalidate cache so next access
-            # triggers a fresh read with correct source info
+        # Respect _effects_running to prevent concurrent _scan_effects
+        # execution when refresh() is already running effects on another thread
+        with self._lock:
+            if self._effects_running:
+                return data
+            self._effects_running = True
+        try:
+            changed = self._scan_effects(data, force_enforce)
+            if changed:
+                with self._lock:
+                    self._cache_time = 0
+        finally:
             with self._lock:
-                self._cache_time = 0
+                self._effects_running = False
         return data
 
     def get_data(self):

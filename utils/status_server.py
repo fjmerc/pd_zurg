@@ -324,6 +324,7 @@ def check_services():
                         pass
             except (ValueError, KeyError):
                 pass
+        svc['url'] = 'https://real-debrid.com'
         services.append(svc)
 
     # AllDebrid
@@ -340,6 +341,7 @@ def check_services():
                     svc['premium'] = data['data']['user'].get('isPremium', False)
             except (ValueError, KeyError):
                 pass
+        svc['url'] = 'https://alldebrid.com'
         services.append(svc)
 
     # Plex
@@ -350,6 +352,7 @@ def check_services():
             'Plex', 'media_server',
             f'{plex_addr}/identity',
             headers={'X-Plex-Token': plex_token, 'Accept': 'application/json'})
+        svc['url'] = plex_addr
         services.append(svc)
 
     # Jellyfin
@@ -360,6 +363,7 @@ def check_services():
             'Jellyfin', 'media_server',
             f'{jf_addr}/System/Info',
             headers={'X-Emby-Token': jf_key})
+        svc['url'] = jf_addr
         services.append(svc)
 
     # Overseerr / Jellyseerr
@@ -370,6 +374,7 @@ def check_services():
             'Overseerr', 'automation',
             f'{seerr_addr}/api/v1/status',
             headers={'X-Api-Key': seerr_key})
+        svc['url'] = seerr_addr
         services.append(svc)
 
     # Zurg WebDAV
@@ -644,7 +649,7 @@ function renderServices(svcs){
   svcs.forEach(s=>{
     const pk=_providerKeyMap[s.name];
     const ph=pk?_providerHealth[pk]:null;
-    h+='<div class="svc-item">'+sdot(s.status)+'<div class="svc-info"><div class="svc-name">'+esc(s.name)+'</div>';
+    h+='<div class="svc-item">'+sdot(s.status)+'<div class="svc-info"><div class="svc-name">'+(s.url?'<a href="'+esc(s.url)+'" target="_blank" rel="noopener noreferrer">'+esc(s.name)+'</a>':esc(s.name))+'</div>';
     if(s.status==='ok'){
       let det='Connected';
       if(s.username)det=esc(s.username);
@@ -921,6 +926,7 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .svc-item{display:flex;align-items:center;padding:10px 12px;background:var(--bg);border-radius:6px;border:1px solid var(--border2)}
 .svc-item .svc-info{flex:1;margin-left:8px}
 .svc-item .svc-name{font-size:.85em;font-weight:500;color:var(--text)}
+.svc-name a{color:inherit;text-decoration:none}.svc-name a:hover{text-decoration:underline;color:var(--blue)}
 .svc-item .svc-detail{font-size:.75em;color:var(--text2);margin-top:2px}
 .svc-item .svc-badge{font-size:.7em;padding:2px 6px;border-radius:4px;font-weight:500;margin-left:8px}
 .svc-item .svc-badge.premium{background:#3fb9501a;color:var(--green)}
@@ -965,7 +971,7 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .info-row{display:flex;gap:24px;justify-content:center;margin-top:24px;padding-top:16px;border-top:1px solid var(--border2)}
 .info-item{text-align:center;flex:1;min-width:0}
 .info-value{display:block;font-size:1em;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.info-label{display:block;font-size:.7em;color:var(--text3);margin-top:2px;text-transform:uppercase;letter-spacing:.05em}
+.info-label{display:block;font-size:.7em;color:var(--text3);margin-top:2px;letter-spacing:.05em}
 @media(max-width:600px){.stats-row{flex-wrap:wrap;gap:16px}.stats-row>div{flex:none;width:calc(33.3% - 11px)}.info-row{flex-wrap:wrap;gap:12px}.info-item{flex:none;width:calc(50% - 6px)}}
 """
 

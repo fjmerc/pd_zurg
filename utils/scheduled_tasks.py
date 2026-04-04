@@ -430,7 +430,7 @@ def detect_stale_grabs():
         if not client.configured:
             continue
 
-        grabs = client.get_recent_grabs(page_size=30)
+        grabs = client.get_recent_grabs(page_size=200)
         if not grabs:
             continue
 

@@ -598,15 +598,16 @@ class SonarrClient(_ArrClientBase):
         """Fetch recent 'grabbed' history events.
 
         Returns list of history records with eventType='grabbed'.
+        Filters client-side for compatibility with all Sonarr/Radarr versions.
         """
         result = self._get('/api/v3/history', {
             'pageSize': page_size,
             'sortKey': 'date',
             'sortDirection': 'descending',
-            'eventType': 'grabbed',
         })
         if result and isinstance(result, dict):
-            return result.get('records', [])
+            return [r for r in result.get('records', [])
+                    if isinstance(r, dict) and r.get('eventType') == 'grabbed']
         return []
 
     def search_episodes(self, episode_ids):
@@ -1352,15 +1353,16 @@ class RadarrClient(_ArrClientBase):
         """Fetch recent 'grabbed' history events.
 
         Returns list of history records with eventType='grabbed'.
+        Filters client-side for compatibility with all Sonarr/Radarr versions.
         """
         result = self._get('/api/v3/history', {
             'pageSize': page_size,
             'sortKey': 'date',
             'sortDirection': 'descending',
-            'eventType': 'grabbed',
         })
         if result and isinstance(result, dict):
-            return result.get('records', [])
+            return [r for r in result.get('records', [])
+                    if isinstance(r, dict) and r.get('eventType') == 'grabbed']
         return []
 
     def search_movie(self, movie_id):

@@ -595,7 +595,7 @@ class SonarrClient(_ArrClientBase):
         """
         return self._post('/api/v3/release', release)
 
-    def _grab_debrid_release(self, episode_id, title=''):
+    def _grab_debrid_release(self, episode_id, season_number=None, title=''):
         """Interactive search + force grab of a torrent release for an episode.
 
         Used when prefer_debrid=True and the episode already has a file at
@@ -604,7 +604,9 @@ class SonarrClient(_ArrClientBase):
         and manually pushing the best torrent release.
 
         Ignores Sonarr's rejected flag because the whole point is to bypass
-        the quality cutoff that causes the rejection.
+        the quality cutoff that causes the rejection.  Filters by season_number
+        because Sonarr returns releases for ALL seasons, not just the requested
+        episode's season.
 
         Returns True if a release was pushed, False otherwise.
         """
@@ -612,14 +614,14 @@ class SonarrClient(_ArrClientBase):
         if not releases:
             logger.debug(f"[sonarr] No releases found for episode {episode_id}")
             return False
-        # Filter for torrent releases — ignore rejected flag since we're
-        # deliberately bypassing the quality cutoff
+        # Filter for torrent releases matching the correct season
         torrents = [
             r for r in releases
             if r.get('protocol') == 'torrent'
+            and (season_number is None or r.get('seasonNumber') == season_number)
         ]
         if not torrents:
-            logger.debug(f"[sonarr] No torrent releases for episode {episode_id}")
+            logger.debug(f"[sonarr] No torrent releases for episode {episode_id} season {season_number}")
             return False
         # Pick the first (Sonarr returns releases sorted by preference)
         best = torrents[0]
@@ -793,7 +795,7 @@ class SonarrClient(_ArrClientBase):
         if prefer_debrid is True and has_file_ids:
             grabbed = False
             for hf_id in has_file_ids:
-                if self._grab_debrid_release(hf_id, title=f'{title} S{season_number:02d}'):
+                if self._grab_debrid_release(hf_id, season_number=season_number, title=f'{title} S{season_number:02d}'):
                     grabbed = True
                     break  # season pack likely covers remaining episodes
             # Search any episodes without files normally

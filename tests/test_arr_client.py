@@ -369,7 +369,7 @@ class TestSonarrClient:
             _mock_urlopen({'records': []}),  # queue cleanup
             # Episode 100 interactive search + push — succeeds, loop breaks
             _mock_urlopen([
-                {'guid': 'pack', 'indexerId': 2, 'protocol': 'torrent', 'title': 'Season.Pack', 'rejected': True},
+                {'guid': 'pack', 'indexerId': 2, 'protocol': 'torrent', 'title': 'Season.Pack', 'rejected': True, 'seasonNumber': 1},
             ]),
             _mock_urlopen({'id': 99}),
             # Episode 101 is NOT searched — season pack covers it
@@ -394,7 +394,7 @@ class TestSonarrClient:
             _mock_urlopen({'records': []}),  # queue cleanup
             _mock_urlopen([]),  # ep 100: no releases
             _mock_urlopen([  # ep 101: has torrent
-                {'guid': 'found', 'indexerId': 2, 'protocol': 'torrent', 'title': 'S01E02', 'rejected': True},
+                {'guid': 'found', 'indexerId': 2, 'protocol': 'torrent', 'title': 'S01E02', 'rejected': True, 'seasonNumber': 1},
             ]),
             _mock_urlopen({'id': 99}),  # push
         ]
@@ -416,7 +416,7 @@ class TestSonarrClient:
             ]),
             _mock_urlopen({'records': []}),  # queue cleanup
             _mock_urlopen([  # interactive search for ep1
-                {'guid': 'pack', 'indexerId': 2, 'protocol': 'torrent', 'title': 'Season.Pack', 'rejected': False},
+                {'guid': 'pack', 'indexerId': 2, 'protocol': 'torrent', 'title': 'Season.Pack', 'rejected': False, 'seasonNumber': 1},
             ]),
             _mock_urlopen({'id': 99}),  # push release
             _mock_urlopen({'id': 43}),  # search_episodes for no_file_ids [101, 102]

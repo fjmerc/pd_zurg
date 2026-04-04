@@ -507,7 +507,7 @@ def _enrich_with_tmdb_cache(movies, shows):
     uncached items.
     """
     try:
-        from utils.tmdb import get_cached_posters, background_populate_cache
+        from utils.tmdb import get_cached_posters, background_populate_cache, find_show_by_season
     except ImportError:
         for item in movies:
             item['poster_url'] = None
@@ -550,6 +550,19 @@ def _enrich_with_tmdb_cache(movies, shows):
         key = _normalize_title(show['title'])
         info = cached.get(key)
         if info:
+            # Season-aware validation: if the show has seasons beyond what
+            # the cached TMDB entry covers, the cache may have matched the
+            # wrong show (e.g. "Daredevil" S03 hitting "Born Again" which
+            # only has S01-S02 instead of Netflix's "Marvel's Daredevil").
+            show_max = max(
+                (s['number'] for s in show.get('season_data', []) if s.get('number')),
+                default=0,
+            )
+            cached_max = info.get('max_cached_season', 0)
+            if show_max > 0 and cached_max < show_max:
+                better = find_show_by_season(key, show_max)
+                if better and better.get('max_cached_season', 0) >= show_max:
+                    info = better
             show['poster_url'] = info['poster_url'] or None
             show['tmdb_status'] = info.get('tmdb_status') or None
             show['imdb_id'] = info.get('imdb_id') or None
@@ -1912,7 +1925,7 @@ class LibraryScanner:
             if tid:
                 sonarr_by_tmdb[tid] = info
         # Load cached TMDB IDs so we can translate pd_zurg titles → TMDB IDs
-        from utils.tmdb import get_cached_tmdb_ids
+        from utils.tmdb import get_cached_tmdb_ids, find_show_tmdb_id_by_season
         cached_tmdb_ids = get_cached_tmdb_ids()
         cached_tmdb_movies = cached_tmdb_ids.get('movies', {})
         cached_tmdb_shows = cached_tmdb_ids.get('shows', {})
@@ -2010,6 +2023,15 @@ class LibraryScanner:
                     )
 
         # --- TV Shows ---
+        # Pre-compute max season per title for season-aware TMDB fallback
+        _show_max_season = {}
+        for _s in shows:
+            sdata = _s.get('season_data', [])
+            if sdata:
+                _show_max_season[_s['title']] = max(
+                    (sd['number'] for sd in sdata if sd.get('number')), default=0,
+                )
+
         if self._local_tv_path:
             real_tv_root = os.path.realpath(self._local_tv_path)
 
@@ -2019,9 +2041,16 @@ class LibraryScanner:
                 year = show.get('year')
                 arr_info = sonarr_map.get(title.lower()) or sonarr_map_norm.get(_norm_for_matching(title))
                 if not arr_info:
+                    # Season-aware TMDB fallback: use the show's max season
+                    # to disambiguate reboots/revivals with the same title
+                    show_max_sn = _show_max_season.get(title)
                     tmdb_id = cached_tmdb_shows.get(norm)
                     if tmdb_id:
                         arr_info = sonarr_by_tmdb.get(tmdb_id)
+                    if not arr_info and show_max_sn:
+                        alt_id = find_show_tmdb_id_by_season(norm, show_max_sn)
+                        if alt_id and alt_id != tmdb_id:
+                            arr_info = sonarr_by_tmdb.get(alt_id)
                 if arr_info and arr_info['folder']:
                     show_dir = arr_info['folder']
                 else:
@@ -2142,9 +2171,16 @@ class LibraryScanner:
             for title in symlinked_shows:
                 info = sonarr_map.get(title.lower()) or sonarr_map_norm.get(_norm_for_matching(title))
                 if not info:
-                    tmdb_id = cached_tmdb_shows.get(_normalize_title(title))
+                    norm_t = _normalize_title(title)
+                    tmdb_id = cached_tmdb_shows.get(norm_t)
                     if tmdb_id:
                         info = sonarr_by_tmdb.get(tmdb_id)
+                    if not info:
+                        max_sn = _show_max_season.get(title, 0)
+                        if max_sn:
+                            alt_id = find_show_tmdb_id_by_season(norm_t, max_sn)
+                            if alt_id and alt_id != tmdb_id:
+                                info = sonarr_by_tmdb.get(alt_id)
                 if info and info.get('id') and info.get('client'):
                     try:
                         info['client'].rescan_series(info['id'])

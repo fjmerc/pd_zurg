@@ -9,6 +9,7 @@ Cache lives at /config/tmdb_cache.json with a 7-day TTL per entry.
 
 import json
 import os
+import re
 import threading
 import urllib.error
 import urllib.parse
@@ -398,11 +399,13 @@ def get_cached_posters(items):
                         ad = ep.get('air_date', '')
                         if ad and ad <= today:
                             aired_eps += 1
+                season_nums = [s['number'] for s in entry.get('seasons', [])]
                 result[key] = {
                     'poster_url': _poster_url(entry.get('poster_path', '')),
                     'tmdb_status': entry.get('status', ''),
                     'total_episodes': aired_eps,
                     'imdb_id': entry.get('imdb_id') or '',
+                    'max_cached_season': max(season_nums) if season_nums else 0,
                 }
         elif item_type == 'movie':
             entry = movies_cache.get(key)
@@ -419,6 +422,150 @@ def get_cached_posters(items):
                 }
 
     return result
+
+
+_PUNCT_STRIP = re.compile(r'[^a-z0-9\s]')
+
+# Common English stop words that should not count for title matching.
+# Without this filter, "The Flash" would match "The Office" via "the".
+_STOP_WORDS = frozenset({
+    'the', 'a', 'an', 'of', 'and', 'in', 'on', 'at', 'to', 'for',
+    'is', 'it', 'or', 'by', 'as', 'no', 'not', 'but', 'with', 'from',
+})
+
+
+def _key_words(norm_key):
+    """Split a _normalize_title cache key into content words.
+
+    Strips punctuation (apostrophes, colons) and removes stop words so
+    that matching is based on meaningful title words only.
+    """
+    return set(_PUNCT_STRIP.sub('', norm_key).split()) - _STOP_WORDS
+
+
+def _find_alt_show_entry(shows_cache, norm_key, max_season):
+    """Search the show cache for an alternative entry covering *max_season*.
+
+    Returns the best matching cache entry dict (most seasons) whose title
+    contains all content words of *norm_key*, or None.  This catches
+    reboots/revivals where a prefix was added (e.g. "Daredevil" finding
+    "Marvel's Daredevil").
+
+    Stop words are excluded to prevent "The Flash" matching "The Office".
+    The query's content words must be a subset of the candidate's content
+    words, so "Daredevil" can match "Marvel's Daredevil" but "Gordon"
+    cannot match "Flash Gordon".
+    """
+    norm_words = _key_words(norm_key)
+    if not norm_words:
+        return None  # all stop words — cannot safely match
+
+    best = None
+    best_season_count = 0
+
+    for alt_key, alt_entry in shows_cache.items():
+        if alt_key == norm_key or not _is_fresh(alt_entry):
+            continue
+        alt_seasons = {s['number'] for s in alt_entry.get('seasons', [])}
+        if max_season not in alt_seasons:
+            continue
+        alt_words = _key_words(alt_key)
+        if not alt_words:
+            continue
+        # All query content words must appear in the candidate title.
+        # {"daredevil"} ⊆ {"marvels", "daredevil"} ✓
+        if not norm_words <= alt_words:
+            continue
+        if len(alt_seasons) > best_season_count:
+            best = alt_entry
+            best_season_count = len(alt_seasons)
+
+    return best
+
+
+def find_show_by_season(norm_key, max_season):
+    """Season-aware show cache lookup.
+
+    When the primary cache entry for *norm_key* doesn't contain
+    *max_season*, searches for alternative entries whose title shares
+    at least one word with *norm_key* and whose seasons DO cover
+    *max_season*.  This handles reboots/revivals that share a common
+    title (e.g. "Daredevil" S03 → "Marvel's Daredevil" instead of
+    "Daredevil: Born Again" which only has S01-S02).
+
+    Returns a dict ``{poster_url, tmdb_status, total_episodes, imdb_id,
+    tmdb_id, max_cached_season}`` or None.
+    """
+    with _cache_lock:
+        cache = _load_cache()
+    shows_cache = cache.get('shows', {})
+
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+
+    def _format_entry(entry):
+        aired_eps = 0
+        for s in entry.get('seasons', []):
+            for ep in s.get('episodes', []):
+                ad = ep.get('air_date', '')
+                if ad and ad <= today:
+                    aired_eps += 1
+        season_nums = [s['number'] for s in entry.get('seasons', [])]
+        return {
+            'poster_url': _poster_url(entry.get('poster_path', '')),
+            'tmdb_status': entry.get('status', ''),
+            'total_episodes': aired_eps,
+            'imdb_id': entry.get('imdb_id') or '',
+            'tmdb_id': entry.get('tmdb_id'),
+            'max_cached_season': max(season_nums) if season_nums else 0,
+        }
+
+    primary = shows_cache.get(norm_key)
+    if primary and _is_fresh(primary):
+        entry_seasons = {s['number'] for s in primary.get('seasons', [])}
+        if max_season in entry_seasons:
+            return _format_entry(primary)
+    elif primary:
+        return None  # stale primary, no fallback
+
+    alt = _find_alt_show_entry(shows_cache, norm_key, max_season)
+    if alt:
+        logger.debug(
+            "[tmdb] Season-aware fallback: '%s' S%02d resolved via alternative cache entry",
+            norm_key, max_season,
+        )
+        return _format_entry(alt)
+
+    # Primary exists but doesn't cover max_season, no alternative found.
+    return None
+
+
+def find_show_tmdb_id_by_season(norm_key, max_season):
+    """Like find_show_by_season but returns just the TMDB ID (int or None).
+
+    Used by symlink and rescan code that needs a TMDB ID for Sonarr lookup.
+    """
+    with _cache_lock:
+        cache = _load_cache()
+    shows_cache = cache.get('shows', {})
+
+    primary = shows_cache.get(norm_key)
+    if primary and _is_fresh(primary):
+        entry_seasons = {s['number'] for s in primary.get('seasons', [])}
+        if max_season in entry_seasons:
+            return primary.get('tmdb_id')
+    elif primary:
+        return None  # stale primary, no fallback
+
+    alt = _find_alt_show_entry(shows_cache, norm_key, max_season)
+    if alt:
+        logger.debug(
+            "[tmdb] Season-aware TMDB ID fallback: '%s' S%02d → TMDB %s",
+            norm_key, max_season, alt.get('tmdb_id'),
+        )
+        return alt.get('tmdb_id')
+
+    # Primary exists but doesn't cover max_season, no alternative found.
+    return None
 
 
 def get_cached_tmdb_ids():

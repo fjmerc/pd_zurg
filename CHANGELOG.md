@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Season-aware TMDB show matching**: Fixed a bug where shows sharing a common title across reboots/revivals (e.g. Netflix "Marvel's Daredevil" vs Disney+ "Daredevil: Born Again") could receive the wrong poster, metadata, and Sonarr folder assignment. When the primary TMDB cache entry doesn't cover the show's season range, the system now searches for alternative cache entries with matching title words that do cover the needed season.
 - **Blocklist modal**: Replaced native browser `prompt()` dialog with a styled in-app modal for blocking torrents. Preset reasons are now clickable buttons with a custom reason input field, matching the application's dark theme.
 - **Migrating badge alignment**: Fixed vertical misalignment between source badge and "Migrating" badge in episode rows by adding `vertical-align:middle` and proper spacing.
 - **Episode table mobile responsiveness**: Hid torrent filenames and file sizes on small screens, moved air dates below episode titles, added flex-wrap to season header buttons, and tightened cell padding for a cleaner mobile layout.

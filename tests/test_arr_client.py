@@ -973,3 +973,121 @@ class TestOverseerrClient:
         mock_urlopen.return_value = _mock_urlopen({'results': []})
         result = overseerr.ensure_and_request_movie('Missing', None)
         assert result['status'] == 'error'
+
+
+# ---------------------------------------------------------------------------
+# get_recent_grabs — client-side eventType filtering
+# ---------------------------------------------------------------------------
+
+class TestGetRecentGrabs:
+    """Tests for SonarrClient.get_recent_grabs and RadarrClient.get_recent_grabs."""
+
+    @pytest.fixture(params=['sonarr', 'radarr'])
+    def client(self, request, sonarr, radarr):
+        return sonarr if request.param == 'sonarr' else radarr
+
+    @patch('urllib.request.urlopen')
+    def test_filters_grabbed_events_only(self, mock_urlopen, client):
+        mock_urlopen.return_value = _mock_urlopen({
+            'records': [
+                {'eventType': 'grabbed', 'title': 'Show A'},
+                {'eventType': 'downloadFolderImported', 'title': 'Show A'},
+                {'eventType': 'grabbed', 'title': 'Show B'},
+                {'eventType': 'episodeFileRenamed', 'title': 'Show C'},
+                {'eventType': 'episodeFileDeleted', 'title': 'Show D'},
+            ]
+        })
+        result = client.get_recent_grabs(page_size=10)
+        assert len(result) == 2
+        assert all(r['eventType'] == 'grabbed' for r in result)
+        assert result[0]['title'] == 'Show A'
+        assert result[1]['title'] == 'Show B'
+
+    @patch('urllib.request.urlopen')
+    def test_returns_empty_when_no_grabs(self, mock_urlopen, client):
+        mock_urlopen.return_value = _mock_urlopen({
+            'records': [
+                {'eventType': 'downloadFolderImported', 'title': 'Show A'},
+                {'eventType': 'episodeFileRenamed', 'title': 'Show B'},
+            ]
+        })
+        result = client.get_recent_grabs(page_size=10)
+        assert result == []
+
+    @patch('urllib.request.urlopen')
+    def test_returns_empty_on_api_error(self, mock_urlopen, client):
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            'http://test', 500, 'Server Error', {}, None
+        )
+        result = client.get_recent_grabs()
+        assert result == []
+
+    @patch('urllib.request.urlopen')
+    def test_returns_empty_on_empty_records(self, mock_urlopen, client):
+        mock_urlopen.return_value = _mock_urlopen({'records': []})
+        result = client.get_recent_grabs()
+        assert result == []
+
+    @patch('urllib.request.urlopen')
+    def test_returns_empty_on_missing_records_key(self, mock_urlopen, client):
+        mock_urlopen.return_value = _mock_urlopen({'page': 1})
+        result = client.get_recent_grabs()
+        assert result == []
+
+    @patch('urllib.request.urlopen')
+    def test_returns_empty_on_url_error(self, mock_urlopen, client):
+        mock_urlopen.side_effect = urllib.error.URLError('Connection refused')
+        result = client.get_recent_grabs()
+        assert result == []
+
+    @patch('urllib.request.urlopen')
+    def test_skips_records_missing_eventtype_key(self, mock_urlopen, client):
+        mock_urlopen.return_value = _mock_urlopen({
+            'records': [
+                {'title': 'No eventType field'},
+                {'eventType': 'grabbed', 'title': 'Good'},
+            ]
+        })
+        result = client.get_recent_grabs()
+        assert len(result) == 1
+        assert result[0]['title'] == 'Good'
+
+    @patch('urllib.request.urlopen')
+    def test_skips_non_dict_records(self, mock_urlopen, client):
+        mock_urlopen.return_value = _mock_urlopen({
+            'records': [None, 42, 'bad', {'eventType': 'grabbed', 'title': 'OK'}]
+        })
+        result = client.get_recent_grabs()
+        assert len(result) == 1
+        assert result[0]['title'] == 'OK'
+
+    @patch('urllib.request.urlopen')
+    def test_returns_empty_on_non_dict_response(self, mock_urlopen, client):
+        mock_urlopen.return_value = _mock_urlopen([{'eventType': 'grabbed'}])
+        result = client.get_recent_grabs()
+        assert result == []
+
+    @patch('urllib.request.urlopen')
+    def test_does_not_send_eventtype_param(self, mock_urlopen, client):
+        """Ensure eventType is NOT sent but sort params ARE (older arr compat)."""
+        mock_urlopen.return_value = _mock_urlopen({'records': []})
+        client.get_recent_grabs(page_size=30)
+        assert mock_urlopen.called
+        url = mock_urlopen.call_args[0][0].full_url
+        assert 'eventType' not in url
+        assert 'sortKey=date' in url
+        assert 'sortDirection=descending' in url
+
+    @patch('urllib.request.urlopen')
+    def test_respects_page_size(self, mock_urlopen, client):
+        mock_urlopen.return_value = _mock_urlopen({'records': []})
+        client.get_recent_grabs(page_size=200)
+        assert mock_urlopen.called
+        assert 'pageSize=200' in mock_urlopen.call_args[0][0].full_url
+
+    @patch('urllib.request.urlopen')
+    def test_all_grabs_returned_when_page_is_all_grabs(self, mock_urlopen, client):
+        records = [{'eventType': 'grabbed', 'title': f'Item {i}'} for i in range(30)]
+        mock_urlopen.return_value = _mock_urlopen({'records': records})
+        result = client.get_recent_grabs(page_size=30)
+        assert len(result) == 30

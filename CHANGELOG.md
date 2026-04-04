@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Multi-season torrent splitting**: Blackhole symlink mode now auto-detects multi-season packs (e.g., "Show.S01-S05.1080p") and splits them into per-season directories with Sonarr-parseable names. Supports `S01-S05`, `S01-05`, `Seasons 1-5`, `Complete Series/Collection`, and cross-season episode ranges. Falls back to single-directory behavior when files lack parseable season info.
 - **Extended system metrics**: The Status dashboard System card now displays disk space (`/config` volume) as a third ring chart alongside Memory and CPU, plus a compact info row showing container uptime, open file descriptors, and live network I/O rates. All new metrics include health indicator thresholds (>60% warn, >85% critical) and Prometheus gauge exports.
 - **Local library mount health monitoring**: Mount liveness probe now checks local library paths (movies/TV) for real (non-symlink) media files. When a network mount (NFS/SMB) drops silently, the probe detects the absence of real files within ~60 seconds and sends a `health_error` notification.
 - **Library scanner mount-drop alert**: The library scanner now tracks whether local content was previously found. If local items drop to zero after being present, it logs a warning and sends a one-time `health_error` notification instead of silently skipping symlink creation.

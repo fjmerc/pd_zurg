@@ -162,6 +162,119 @@ def parse_release_name(filename):
     return movie_name, None, False
 
 
+def _is_multi_season_pack(release_name):
+    """Detect if a release name indicates a multi-season pack.
+
+    Returns (is_multi, season_start, season_end).
+    For 'Complete Series/Collection' patterns returns (True, None, None)
+    since the range isn't known from the name alone.
+    """
+    # 1. S01E01-S05E10 (cross-season episode range)
+    m = re.search(r'S(\d{1,2})E\d+\s*[-–]\s*S(\d{1,2})E\d+', release_name, re.IGNORECASE)
+    if m:
+        s1, s2 = int(m.group(1)), int(m.group(2))
+        if s1 != s2:
+            return True, min(s1, s2), max(s1, s2)
+
+    # 2. S01-S05 (both prefixed with S)
+    m = re.search(r'S(\d{1,2})\s*[-–]\s*S(\d{1,2})', release_name, re.IGNORECASE)
+    if m:
+        s1, s2 = int(m.group(1)), int(m.group(2))
+        if s1 != s2:
+            return True, min(s1, s2), max(s1, s2)
+
+    # 3. S01-05 (first prefixed, second bare number)
+    # S\d{1,2} immediately followed by dash then digits — no E between S## and dash.
+    # (?![a-zA-Z\d]) prevents matching encoding markers like S05-10bit or S02-3D.
+    m = re.search(r'S(\d{1,2})[-–](\d{1,2})(?![a-zA-Z\d])', release_name, re.IGNORECASE)
+    if m:
+        s1, s2 = int(m.group(1)), int(m.group(2))
+        if s1 != s2:
+            return True, min(s1, s2), max(s1, s2)
+
+    # 4. Season(s) 1-5 / Seasons 1 & 2 / Seasons 1 and 2
+    m = re.search(r'Seasons?[.\s]*(\d{1,2})[.\s]*(?:[-–&+]|and)[.\s]*(\d{1,2})', release_name, re.IGNORECASE)
+    if m:
+        s1, s2 = int(m.group(1)), int(m.group(2))
+        if s1 != s2:
+            return True, min(s1, s2), max(s1, s2)
+
+    # 5. Series 1-3
+    m = re.search(r'Series[.\s]*(\d{1,2})[.\s]*[-–][.\s]*(\d{1,2})', release_name, re.IGNORECASE)
+    if m:
+        s1, s2 = int(m.group(1)), int(m.group(2))
+        if s1 != s2:
+            return True, min(s1, s2), max(s1, s2)
+
+    # 6. Complete Series / Complete Collection
+    if re.search(r'Complete[.\s](?:Series|Collection)', release_name, re.IGNORECASE):
+        return True, None, None
+
+    return False, None, None
+
+
+def _extract_file_season(filepath):
+    """Extract season number from a media file path within a release.
+
+    filepath is relative to the release root, e.g. 'Season 02/Show.S02E05.mkv'.
+    Returns season number as int, or None if unparseable.
+    """
+    parts = filepath.replace('\\', '/').split('/')
+    filename = parts[-1]
+
+    # Check filename for SxxExx pattern (most reliable)
+    m = re.search(r'[Ss](\d{1,2})[Ee]\d+', filename)
+    if m:
+        return int(m.group(1))
+
+    # Fallback: Sxx without Exx (e.g., S03.Special.mkv) — must not re-match SxxExx
+    m = re.search(r'[Ss](\d{1,2})(?=[.\s\-_]|$)(?![Ee]\d)', filename)
+    if m:
+        return int(m.group(1))
+
+    # Check parent directories for season indicators
+    for part in parts[:-1]:
+        m = re.search(r'[Ss]eason[.\s]*(\d{1,2})', part, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+        m = re.match(r'^S(\d{1,2})$', part, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+
+    return None
+
+
+def _build_season_release_name(original_name, season_num):
+    """Construct a per-season release name from a multi-season pack name.
+
+    Replaces the multi-season indicator with a single-season S{XX} pattern.
+    Example: 'Breaking.Bad.S01-S05.1080p.BluRay-GROUP'
+           → 'Breaking.Bad.S03.1080p.BluRay-GROUP'
+    """
+    sxx = f'S{season_num:02d}'
+
+    # Try each multi-season pattern and replace with single season
+    patterns = [
+        r'S\d{1,2}E\d+\s*[-–]\s*S\d{1,2}E\d+',       # S01E01-S05E10
+        r'S\d{1,2}\s*[-–]\s*S\d{1,2}',                  # S01-S05
+        r'S\d{1,2}[-–]\d{1,2}',                          # S01-05
+        r'Seasons?[.\s]*\d{1,2}[.\s]*(?:[-–&+]|and)[.\s]*\d{1,2}',  # Seasons 1-5
+        r'Series[.\s]*\d{1,2}[.\s]*[-–][.\s]*\d{1,2}',  # Series 1-3
+        r'Complete[.\s](?:Series|Collection)',             # Complete Series
+    ]
+    for pattern in patterns:
+        result = re.sub(pattern, sxx, original_name, count=1, flags=re.IGNORECASE)
+        if result != original_name:
+            # Clean up double dots from replacement
+            result = re.sub(r'\.{2,}', '.', result)
+            return result.strip('.')
+
+    # Fallback: append season
+    result = f'{original_name}.{sxx}'
+    result = re.sub(r'\.{2,}', '.', result)
+    return result.strip('.')
+
+
 class RetryMeta:
     """Tracks retry state for failed blackhole files via JSON sidecar files.
 
@@ -467,8 +580,20 @@ class BlackholeWatcher:
         Symlink targets use BLACKHOLE_SYMLINK_TARGET_BASE so they resolve
         correctly on the Sonarr/Radarr host.
 
+        For multi-season packs, splits files into per-season directories
+        with constructed release names that Sonarr can parse individually.
+
         Returns the number of symlinks created.
         """
+        is_multi, _, _ = _is_multi_season_pack(release_name)
+
+        if is_multi:
+            split_count = self._create_split_season_symlinks(release_name, category, mount_path)
+            if split_count is not None:
+                return split_count
+            logger.debug(f"[blackhole] Could not split {release_name} by season, using single dir")
+
+        # Single-dir logic (original behavior)
         completed_release_dir = os.path.join(self.completed_dir, release_name)
         os.makedirs(completed_release_dir, exist_ok=True)
         count = 0
@@ -502,6 +627,75 @@ class BlackholeWatcher:
                     count += 1
                 except OSError as e:
                     logger.error(f"[blackhole] Failed to create symlink {symlink_path}: {e}")
+
+        return count
+
+    def _create_split_season_symlinks(self, release_name, category, mount_path):
+        """Split a multi-season pack into per-season symlink directories.
+
+        Groups media files by season, creates a separate completed directory
+        for each season with a constructed release name, and returns the
+        total number of symlinks created. Returns None if fewer than 2 seasons
+        are detected (caller should fall back to single-dir).
+        """
+        season_files = {}
+
+        for root, _dirs, files in os.walk(mount_path):
+            for f in files:
+                ext = os.path.splitext(f)[1].lower()
+                if ext not in MEDIA_EXTENSIONS:
+                    continue
+                if 'sample' in f.lower():
+                    continue
+
+                rel = os.path.relpath(os.path.join(root, f), mount_path)
+                season = _extract_file_season(rel)
+                if season is None:
+                    logger.warning(f"[blackhole] Cannot determine season for '{f}' in multi-season pack {release_name}, skipping")
+                    continue
+
+                season_files.setdefault(season, []).append(rel)
+
+        if len(season_files) < 2:
+            return None
+
+        count = 0
+        completed_real = os.path.normpath(self.completed_dir)
+        logger.info(f"[blackhole] Multi-season pack: {release_name} → splitting into {len(season_files)} seasons")
+
+        for season_num, rel_list in sorted(season_files.items()):
+            season_name = _build_season_release_name(release_name, season_num)
+            season_dir = os.path.normpath(os.path.join(self.completed_dir, season_name))
+
+            # Guard against path traversal in the constructed season dir name
+            if not season_dir.startswith(completed_real + os.sep):
+                logger.warning(f"[blackhole] Skipping path traversal in season name: {season_name}")
+                continue
+
+            os.makedirs(season_dir, exist_ok=True)
+
+            for rel in rel_list:
+                symlink_path = os.path.normpath(os.path.join(season_dir, rel))
+                target = os.path.join(self.symlink_target_base, category, release_name, rel)
+
+                if not symlink_path.startswith(season_dir + os.sep):
+                    logger.warning(f"[blackhole] Skipping path traversal attempt: {rel}")
+                    continue
+
+                os.makedirs(os.path.dirname(symlink_path), exist_ok=True)
+
+                if os.path.islink(symlink_path) or os.path.exists(symlink_path):
+                    logger.debug(f"[blackhole] Symlink already exists: {symlink_path}")
+                    continue
+
+                try:
+                    os.symlink(target, symlink_path)
+                    logger.info(f"[blackhole] Symlink (S{season_num:02d}): {rel} -> {target}")
+                    count += 1
+                except OSError as e:
+                    logger.error(f"[blackhole] Failed to create symlink {symlink_path}: {e}")
+
+            logger.info(f"[blackhole]   Season {season_num:02d}: {len(rel_list)} file(s) → {season_name}")
 
         return count
 

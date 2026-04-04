@@ -756,7 +756,7 @@ class SonarrClient(_ArrClientBase):
         # Get episodes and find the ones we want
         episodes = self.get_episodes(series_id)
         target_ids = []
-        has_file_id = None  # first episode with a file (for interactive grab)
+        has_file_ids = []
         no_file_ids = []
         for ep in episodes:
             if (ep.get('seasonNumber') == season_number
@@ -765,8 +765,7 @@ class SonarrClient(_ArrClientBase):
                 if ep_id is not None:
                     target_ids.append(ep_id)
                     if ep.get('hasFile'):
-                        if has_file_id is None:
-                            has_file_id = ep_id
+                        has_file_ids.append(ep_id)
                     else:
                         no_file_ids.append(ep_id)
 
@@ -788,10 +787,11 @@ class SonarrClient(_ArrClientBase):
         # When prefer_debrid is set and episodes already have files, Sonarr's
         # automatic search won't grab because the existing files meet the
         # quality cutoff.  Use interactive search + manual push to bypass it.
-        # Season packs typically cover all episodes, so one interactive search
-        # for the first has_file episode is usually sufficient.
-        if prefer_debrid is True and has_file_id is not None:
-            grabbed = self._grab_debrid_release(has_file_id, title=f'{title} S{season_number:02d}')
+        if prefer_debrid is True and has_file_ids:
+            grabbed = 0
+            for hf_id in has_file_ids:
+                if self._grab_debrid_release(hf_id, title=f'{title} S{season_number:02d}'):
+                    grabbed += 1
             # Search any episodes without files normally
             if no_file_ids:
                 self.search_episodes(no_file_ids)
@@ -799,13 +799,11 @@ class SonarrClient(_ArrClientBase):
                 return {
                     'status': 'sent',
                     'service': 'sonarr',
-                    'message': f'Force-grabbed debrid release for {title} S{season_number:02d}',
+                    'message': f'Force-grabbed {grabbed} debrid release(s) for {title} S{season_number:02d}',
                 }
-            # Interactive grab failed — no_file_ids already searched above,
-            # only re-search has_file episodes as last resort (won't upgrade
-            # but keeps the command flow consistent for status tracking).
-            has_file_only = [eid for eid in target_ids if eid not in set(no_file_ids)]
-            cmd = self.search_episodes(has_file_only or target_ids)
+            # All interactive grabs failed — no_file_ids already searched above,
+            # only re-search has_file episodes as last resort.
+            cmd = self.search_episodes(has_file_ids or target_ids)
             return {
                 'status': 'sent',
                 'service': 'sonarr',

@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Library scanner mount-drop alert**: The library scanner now tracks whether local content was previously found. If local items drop to zero after being present, it logs a warning and sends a one-time `health_error` notification instead of silently skipping symlink creation.
 - **Symlink repair worker**: Broken debrid symlinks are now repaired before deletion. When content moves between Zurg mount categories (e.g., `movies/` → `shows/`), the symlink is automatically recreated with the correct path. When content is truly gone, an optional `SYMLINK_REPAIR_AUTO_SEARCH` setting triggers Sonarr/Radarr to re-search, sharing the existing 2-hour cooldown to prevent search storms. Repair activity is logged to history and sent via the new `symlink_repaired` notification event.
 
+### Changed
+
+- **Larger system metric rings**: Increased the Status dashboard System ring chart size from 110px to 140px so longer values (e.g., "1105.5s", "75.6G / 116.3G") fit within the rings without clipping.
+
 ### Fixed
 
 - **Prefer-debrid search retry**: Debrid migration searches that silently fail (e.g., all indexers down, no results) are now automatically retried every 6 hours instead of being permanently skipped. Previously, a single failed search attempt would leave the title stuck in "Migrating to Debrid" until the 3-day escalation timeout.

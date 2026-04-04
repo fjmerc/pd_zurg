@@ -964,7 +964,7 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .card-warn{box-shadow:inset 3px 0 0 var(--yellow)}
 .card-crit{box-shadow:inset 3px 0 0 var(--red)}
 .stat-container{position:relative;flex:1;display:flex;flex-direction:column;align-items:center}
-.stat-ring{width:110px;height:110px;transform:rotate(-90deg)}
+.stat-ring{width:140px;height:140px;transform:rotate(-90deg)}
 .ring-bg{fill:none;stroke:var(--border);stroke-width:6}
 .ring-fill{fill:none;stroke:var(--green);stroke-width:6;stroke-linecap:round;stroke-dasharray:326.73;stroke-dashoffset:326.73;transition:stroke-dashoffset var(--motion-slow) ease,stroke var(--motion-normal)}
 .stat-inner{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;pointer-events:none}

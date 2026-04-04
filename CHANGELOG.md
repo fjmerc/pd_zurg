@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Extended system metrics**: The Status dashboard System card now displays disk space (`/config` volume) as a third ring chart alongside Memory and CPU, plus a compact info row showing container uptime, open file descriptors, and live network I/O rates. All new metrics include health indicator thresholds (>60% warn, >85% critical) and Prometheus gauge exports.
 - **Local library mount health monitoring**: Mount liveness probe now checks local library paths (movies/TV) for real (non-symlink) media files. When a network mount (NFS/SMB) drops silently, the probe detects the absence of real files within ~60 seconds and sends a `health_error` notification.
 - **Library scanner mount-drop alert**: The library scanner now tracks whether local content was previously found. If local items drop to zero after being present, it logs a warning and sends a one-time `health_error` notification instead of silently skipping symlink creation.
 

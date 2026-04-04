@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Blocklist modal**: Replaced native browser `prompt()` dialog with a styled in-app modal for blocking torrents. Preset reasons are now clickable buttons with a custom reason input field, matching the application's dark theme.
+- **Migrating badge alignment**: Fixed vertical misalignment between source badge and "Migrating" badge in episode rows by adding `vertical-align:middle` and proper spacing.
+- **Episode table mobile responsiveness**: Hid torrent filenames and file sizes on small screens, moved air dates below episode titles, added flex-wrap to season header buttons, and tightened cell padding for a cleaner mobile layout.
 - **Sonarr/Radarr history API compatibility**: The `detect_stale_grabs` task no longer sends the `eventType` query parameter to `/api/v3/history`, which older Sonarr/Radarr versions reject with HTTP 400. Filtering is now done client-side for universal compatibility.
 
 ## Version [2.17.0] - 2026-04-03

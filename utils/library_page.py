@@ -128,8 +128,8 @@ __NAV_HTML__
 .card-badges{display:flex;gap:5px;flex-wrap:wrap}
 
 /* Source badges */
-.badge-local{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#3fb9500f;color:var(--green);border:1px solid #3fb95033}
-.badge-debrid{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#c084fc0f;color:#c084fc;border:1px solid #c084fc33}
+.badge-local{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#3fb9500f;color:var(--green);border:1px solid #3fb95033;vertical-align:middle}
+.badge-debrid{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#c084fc0f;color:#c084fc;border:1px solid #c084fc33;vertical-align:middle}
 .badge-local .badge-full,.badge-debrid .badge-full,.badge-missing .badge-full,.badge-pending .badge-full,.badge-migrating .badge-full,.badge-unavailable .badge-full,.badge-fallback .badge-full{display:inline}
 .badge-local .badge-mini,.badge-debrid .badge-mini,.badge-missing .badge-mini,.badge-pending .badge-mini,.badge-migrating .badge-mini,.badge-unavailable .badge-mini,.badge-fallback .badge-mini{display:none}
 @media(max-width:640px){
@@ -227,6 +227,21 @@ __NAV_HTML__
 .confirm-panel .confirm-list li{margin-bottom:2px}
 .confirm-panel .btn{font-size:.82em;padding:4px 14px}
 
+/* Blocklist modal */
+.bl-dialog{background:var(--card);border:1px solid var(--border);border-radius:10px;width:100%;max-width:420px;animation:modal-in .15s ease-out}
+.bl-dialog-hdr{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border)}
+.bl-dialog-hdr h3{margin:0;font-size:.95em;font-weight:600}
+.bl-dialog-body{padding:18px}
+.bl-reasons{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+.bl-reason-btn{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 14px;color:var(--text);font-size:.85em;cursor:pointer;text-align:left;transition:border-color .15s,background .15s}
+.bl-reason-btn:hover{border-color:var(--input-focus);background:var(--input-bg)}
+.bl-reason-btn.selected{border-color:var(--blue);background:rgba(76,154,255,.1);color:var(--blue)}
+[data-theme="light"] .bl-reason-btn.selected{background:#0969da1a}
+.bl-custom-label{font-size:.8em;color:var(--text2);margin-bottom:4px}
+.bl-custom-input{width:100%;background:var(--input-bg);border:1px solid var(--input-border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:.85em;outline:none;box-sizing:border-box}
+.bl-custom-input:focus{border-color:var(--input-focus)}
+.bl-dialog-footer{display:flex;justify-content:flex-end;gap:8px;padding:14px 18px;border-top:1px solid var(--border)}
+
 /* Detail hero with poster */
 .detail-hero{display:flex;gap:16px;margin-bottom:16px}
 .detail-poster{width:150px;min-width:150px;border-radius:8px;overflow:hidden}
@@ -244,24 +259,25 @@ __NAV_HTML__
 .ep-relative{color:var(--text3);font-size:.9em;margin-left:4px}
 .ep-filename{color:var(--text3);font-size:.75em;display:block;word-break:break-all;margin-top:2px}
 .ep-missing td{color:var(--text3)}
-.badge-missing{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#f851490f;color:var(--red);border:1px solid #f8514933}
-.badge-upcoming{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#58a6ff0f;color:var(--blue);border:1px solid #58a6ff33}
-.badge-tba{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:var(--border);color:var(--text3);border:1px solid var(--border2)}
+.badge-missing{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#f851490f;color:var(--red);border:1px solid #f8514933;vertical-align:middle}
+.badge-upcoming{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#58a6ff0f;color:var(--blue);border:1px solid #58a6ff33;vertical-align:middle}
+.badge-tba{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:var(--border);color:var(--text3);border:1px solid var(--border2);vertical-align:middle}
 [data-theme="light"] .badge-missing{background:#cf222e1a;border-color:#cf222e40}
 [data-theme="light"] .badge-upcoming{background:#0969da1a;border-color:#0969da40}
 [data-theme="light"] .badge-tba{background:#d0d7de40;border-color:#d0d7de}
-.badge-pending{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:var(--orange);border:1px solid #db6d2833;position:relative;overflow:hidden;background:linear-gradient(90deg,#db6d2818 0%,#db6d2808 50%,#db6d2818 100%);background-size:200% 100%;animation:pending-shimmer 2s ease-in-out infinite}
+.badge-pending{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:var(--orange);border:1px solid #db6d2833;position:relative;overflow:hidden;background:linear-gradient(90deg,#db6d2818 0%,#db6d2808 50%,#db6d2818 100%);background-size:200% 100%;animation:pending-shimmer 2s ease-in-out infinite;vertical-align:middle}
 .badge-pending::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--orange);margin-right:4px;vertical-align:middle;animation:pulse-dot 1s ease-in-out infinite}
 @keyframes pending-shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 [data-theme="light"] .badge-pending{background:#bc4c001a;border-color:#bc4c0040;color:#bc4c00}
 [data-theme="light"] .badge-pending::before{background:#bc4c00}
-.badge-migrating{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:#2dd4bf;border:1px solid #2dd4bf33;position:relative;overflow:hidden;background:linear-gradient(90deg,#2dd4bf18 0%,#2dd4bf08 50%,#2dd4bf18 100%);background-size:200% 100%;animation:pending-shimmer 2s ease-in-out infinite}
+.badge-migrating{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:#2dd4bf;border:1px solid #2dd4bf33;position:relative;overflow:hidden;background:linear-gradient(90deg,#2dd4bf18 0%,#2dd4bf08 50%,#2dd4bf18 100%);background-size:200% 100%;animation:pending-shimmer 2s ease-in-out infinite;vertical-align:middle}
+.ep-source .badge-migrating{margin-left:5px}
 .badge-migrating::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:#2dd4bf;margin-right:4px;vertical-align:middle;animation:pulse-dot 1s ease-in-out infinite}
 [data-theme="light"] .badge-migrating{color:#0d9488;border-color:#0d948840;background:linear-gradient(90deg,#0d94881a 0%,#0d94880a 50%,#0d94881a 100%);background-size:200% 100%}
 [data-theme="light"] .badge-migrating::before{background:#0d9488}
-.badge-unavailable{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:var(--red);border:1px solid #f8514933;background:#f851490f}
+.badge-unavailable{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:var(--red);border:1px solid #f8514933;background:#f851490f;vertical-align:middle}
 [data-theme="light"] .badge-unavailable{background:#cf222e1a;border-color:#cf222e40;color:#cf222e}
-.badge-fallback{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:var(--orange);border:1px solid #db6d2833;background:#db6d280f}
+.badge-fallback{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:var(--orange);border:1px solid #db6d2833;background:#db6d280f;vertical-align:middle}
 [data-theme="light"] .badge-fallback{background:#bc4c001a;border-color:#bc4c0040;color:#bc4c00}
 
 /* Season progress pill (Sonarr-style) */
@@ -328,6 +344,12 @@ body.has-bulk-bar{padding-bottom:60px}
   .search-wrap{min-width:120px}
   .scan-info{display:none}
   .episode-table{display:block;overflow-x:auto}
+  .episode-table td{padding:5px 8px}
+  .ep-filename{display:none}
+  .episode-table .ep-size{display:none}
+  .ep-date{display:block;margin-left:0;margin-top:2px;white-space:normal}
+  .season-header{flex-wrap:wrap}
+  .season-actions{flex-wrap:wrap}
   .detail-hero{flex-direction:column}
   .detail-poster{width:120px}
   .card-header .card-title{font-size:.78em}
@@ -2421,6 +2443,7 @@ function _renderShowDetail(show, meta) {
 }
 
 function hideDetail() {
+  _closeBlockModal();
   _inDetailView = false;
   _detailItem = null;
   _detailSeasons = [];
@@ -2838,14 +2861,73 @@ function removeEp(season, episode) {
 
 function _blockItem() {
   if (!_detailItem) return;
+  if (document.getElementById('bl-overlay')) return;
   var reasons = ['Wrong content', 'Corrupt file', 'Wrong language', 'Low quality', 'Other'];
-  var reason = prompt('Reason for blocking this torrent?\\n\\n1. Wrong content\\n2. Corrupt file\\n3. Wrong language\\n4. Low quality\\n5. Other\\n\\nEnter number or custom reason:');
-  if (reason === null) return;
-  reason = reason.trim();
-  var idx = parseInt(reason, 10);
-  if (idx >= 1 && idx <= reasons.length) reason = reasons[idx - 1];
-  if (!reason) reason = 'Blocked from library';
+  var overlay = document.createElement('div');
+  overlay.className = 'search-overlay';
+  overlay.id = 'bl-overlay';
+  var html = '<div class="bl-dialog">';
+  html += '<div class="bl-dialog-hdr"><h3>Block: ' + esc(_detailItem.title) + '</h3>';
+  html += '<button class="search-dialog-close" onclick="_closeBlockModal()" title="Close">&times;</button></div>';
+  html += '<div class="bl-dialog-body">';
+  html += '<div class="bl-reasons">';
+  for (var i = 0; i < reasons.length; i++) {
+    html += '<button class="bl-reason-btn" data-reason="' + esc(reasons[i]) + '" onclick="_selectBlockReason(this)">' + (i + 1) + '. ' + esc(reasons[i]) + '</button>';
+  }
+  html += '</div>';
+  html += '<label class="bl-custom-label" for="bl-custom-input">Or enter a custom reason:</label>';
+  html += '<input class="bl-custom-input" id="bl-custom-input" type="text" placeholder="Custom reason...">';
+  html += '</div>';
+  html += '<div class="bl-dialog-footer">';
+  html += '<button class="btn" onclick="_closeBlockModal()">Cancel</button>';
+  html += '<button class="btn btn-primary" onclick="_confirmBlock()">Confirm</button>';
+  html += '</div></div>';
+  overlay.innerHTML = html;
+  overlay.onclick = function(e) { if (e.target === overlay) _closeBlockModal(); };
+  document.body.appendChild(overlay);
+  document.body.style.overflow = 'hidden';
+  var inp = overlay.querySelector('#bl-custom-input');
+  if (inp) {
+    inp.addEventListener('keydown', function(e) { if (e.key === 'Enter') _confirmBlock(); });
+    inp.addEventListener('input', function() {
+      if (inp.value) { var btns = document.querySelectorAll('.bl-reason-btn'); for (var i = 0; i < btns.length; i++) btns[i].classList.remove('selected'); }
+    });
+  }
+  document.addEventListener('keydown', _blockModalKeyHandler);
+}
+
+function _blockModalKeyHandler(e) {
+  if (e.key === 'Escape') { e.stopImmediatePropagation(); e.preventDefault(); _closeBlockModal(); }
+}
+
+function _selectBlockReason(btn) {
+  var btns = document.querySelectorAll('.bl-reason-btn');
+  for (var i = 0; i < btns.length; i++) btns[i].classList.remove('selected');
+  btn.classList.add('selected');
+  var inp = document.getElementById('bl-custom-input');
+  if (inp) inp.value = '';
+}
+
+function _closeBlockModal() {
+  var overlay = document.getElementById('bl-overlay');
+  if (overlay) { overlay.remove(); document.body.style.overflow = ''; }
+  document.removeEventListener('keydown', _blockModalKeyHandler);
+}
+
+function _confirmBlock() {
+  if (!_detailItem) { _closeBlockModal(); return; }
+  var reason = '';
+  var selected = document.querySelector('.bl-reason-btn.selected');
+  var customVal = (document.getElementById('bl-custom-input') || {}).value || '';
+  if (customVal.trim()) {
+    reason = customVal.trim();
+  } else if (selected) {
+    reason = selected.getAttribute('data-reason');
+  } else {
+    reason = 'Blocked from library';
+  }
   var title = _detailItem.title;
+  _closeBlockModal();
   fetch('/api/blocklist', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},

@@ -142,6 +142,20 @@ _SYMLINK_DELETE_THRESHOLD = 50
 
 _MEDIA_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m4v', '.webm'}
 
+# Track recently re-triggered arr search IDs to prevent search storms.
+# Shared by verify_symlinks (repair) and detect_stale_grabs.
+# Key: ('sonarr', ep_id) or ('radarr', movie_id), Value: epoch time of last trigger.
+_retrigger_history = {}
+_RETRIGGER_COOLDOWN = 7200  # 2 hours — don't re-trigger the same item within this window
+
+
+def _prune_retrigger_history():
+    """Remove expired entries from the retrigger cooldown dict."""
+    now = time.time()
+    stale = [k for k, v in _retrigger_history.items() if now - v > _RETRIGGER_COOLDOWN]
+    for k in stale:
+        del _retrigger_history[k]
+
 # Local library mount health tracking
 _local_library_baselines = {}   # {label: True} — had real files on previous check
 _local_library_alerted = {}     # {label: True} — alert already sent for this incident
@@ -171,6 +185,125 @@ def _cleanup_empty_parents(deleted_path, stop_at):
             parent = os.path.dirname(parent)
         except OSError:
             break
+
+
+def _extract_release_info(target, debrid_prefixes):
+    """Extract release name, relative file path, and category from a symlink target.
+
+    Given a target like ``/data/movies/Release.Name/sub/file.mkv``, returns
+    ``('Release.Name', 'sub/file.mkv', 'movies')``.
+    Returns ``(None, None, None)`` if the target can't be parsed.
+    """
+    remainder = None
+    for prefix in debrid_prefixes:
+        if target.startswith(prefix):
+            remainder = target[len(prefix):]
+            break
+    if not remainder:
+        return None, None, None
+
+    parts = remainder.split('/')
+    if len(parts) < 3:
+        return None, None, None
+
+    category = parts[0]
+    release_name = parts[1]
+    rel_file = '/'.join(parts[2:])
+
+    # Reject path traversal in any component
+    if '..' in category or '..' in release_name or any(seg == '..' for seg in parts[2:]):
+        return None, None, None
+
+    return release_name, rel_file, category
+
+
+def _find_release_on_mount(release_name, rclone_mount):
+    """Search mount categories for a release folder.
+
+    Returns ``(full_path, category)`` or ``(None, None)``.
+    """
+    from utils.blackhole import MOUNT_CATEGORIES
+
+    for category in MOUNT_CATEGORIES:
+        path = os.path.join(rclone_mount, category, release_name)
+        if os.path.isdir(path):
+            return path, category
+    path = os.path.join(rclone_mount, '__all__', release_name)
+    if os.path.isdir(path):
+        return path, '__all__'
+    return None, None
+
+
+def _attempt_arr_research(release_name):
+    """Trigger Sonarr/Radarr search for a lost release.
+
+    Uses ``parse_release_name`` to identify the content, then looks it up in
+    the arr library and triggers a search.  Respects the shared retrigger
+    cooldown to prevent search storms.
+
+    Returns True if a search was actually triggered.
+    """
+    from utils.blackhole import parse_release_name
+    from utils.arr_client import SonarrClient, RadarrClient
+
+    name, season, is_tv = parse_release_name(release_name)
+    if not name:
+        return False
+
+    _prune_retrigger_history()
+    now_epoch = time.time()
+
+    if is_tv:
+        client = SonarrClient()
+        if not client.configured:
+            return False
+        series = client.find_series_in_library(title=name)
+        if not series:
+            logger.debug(f"[scheduler] Repair: series '{name}' not found in Sonarr")
+            return False
+
+        episodes = client.get_episodes(series['id'])
+        if not episodes:
+            return False
+
+        target_eps = []
+        for ep in episodes:
+            if season is not None and ep.get('seasonNumber') != season:
+                continue
+            if not ep.get('hasFile'):
+                ep_id = ep.get('id')
+                if ep_id:
+                    item_key = ('sonarr', ep_id)
+                    if item_key not in _retrigger_history:
+                        target_eps.append(ep_id)
+                        _retrigger_history[item_key] = now_epoch
+
+        if target_eps:
+            client.search_episodes(target_eps)
+            s_label = f'S{season:02d}' if season is not None else 'all'
+            logger.info(
+                f"[scheduler] Repair: triggered Sonarr search for '{name}' "
+                f"{s_label} ({len(target_eps)} episodes)"
+            )
+            return True
+        return False
+    else:
+        client = RadarrClient()
+        if not client.configured:
+            return False
+        movie = client.find_movie_in_library(title=name)
+        if not movie:
+            logger.debug(f"[scheduler] Repair: movie '{name}' not found in Radarr")
+            return False
+
+        item_key = ('radarr', movie['id'])
+        if item_key in _retrigger_history:
+            return False
+
+        _retrigger_history[item_key] = now_epoch
+        client.search_movie(movie['id'])
+        logger.info(f"[scheduler] Repair: triggered Radarr search for '{name}'")
+        return True
 
 
 def verify_symlinks():
@@ -254,28 +387,82 @@ def verify_symlinks():
             'items': 0,
         }
 
-    # Phase 3: Delete confirmed broken symlinks and clean up empty dirs
+    # Phase 3: Attempt repair, then delete confirmed broken symlinks
+    auto_search = os.environ.get('SYMLINK_REPAIR_AUTO_SEARCH', 'false').lower() == 'true'
+    repaired = 0
+    searched = 0
     deleted = 0
+
     for fpath, target, scan_dir in to_delete:
+        # Step 1: Try to re-find the release on the mount
+        release_name, rel_file, old_cat = _extract_release_info(target, debrid_prefixes)
+        if release_name and rel_file:
+            new_path, new_cat = _find_release_on_mount(release_name, rclone_mount)
+            if new_path and os.path.exists(os.path.join(new_path, rel_file)):
+                # Rebuild the symlink target using the canonical base
+                if symlink_target:
+                    new_target = os.path.join(symlink_target, new_cat, release_name, rel_file)
+                else:
+                    new_target = os.path.join(rclone_mount, new_cat, release_name, rel_file)
+                try:
+                    tmp_link = fpath + '.repair_tmp'
+                    os.symlink(new_target, tmp_link)
+                    os.rename(tmp_link, fpath)
+                    repaired += 1
+                    logger.info(
+                        f"[scheduler] Repaired symlink: {fpath} "
+                        f"({old_cat} -> {new_cat})"
+                    )
+                    continue
+                except OSError as e:
+                    try:
+                        os.remove(fpath + '.repair_tmp')
+                    except OSError:
+                        pass
+                    logger.warning(f"[scheduler] Failed to repair symlink {fpath}: {e}")
+
+        # Step 2: Content truly gone — delete
         try:
             os.remove(fpath)
             deleted += 1
             logger.info(f"[scheduler] Removed broken symlink: {fpath} -> {target}")
-            # Clean up empty parent dirs in local library paths (up to the
-            # library root) so the scanner doesn't classify them as local
             if scan_dir in (local_tv, local_movies) and scan_dir:
                 _cleanup_empty_parents(fpath, scan_dir)
         except OSError as e:
             logger.warning(f"[scheduler] Failed to remove broken symlink {fpath}: {e}")
+            continue
 
-    msg = f'Checked {checked} symlinks'
+        # Step 3: Optionally trigger arr re-search
+        if auto_search and release_name:
+            try:
+                if _attempt_arr_research(release_name):
+                    searched += 1
+            except Exception as e:
+                logger.warning(f"[scheduler] Repair re-search failed for '{release_name}': {e}")
+
+    # Build result message
+    parts = [f'Checked {checked}']
+    if repaired:
+        parts.append(f'repaired {repaired}')
+    if searched:
+        parts.append(f're-searched {searched}')
     if deleted:
-        msg += f', removed {deleted} broken'
-        if _history:
-            _history.log_event('cleanup', 'Symlink Verify', source='scheduler',
-                               detail=f'Removed {deleted} broken symlink(s) of {checked} checked')
+        parts.append(f'removed {deleted}')
+    msg = ', '.join(parts)
 
-    return {'status': 'success', 'message': msg, 'items': broken}
+    if repaired or searched or deleted:
+        if _history:
+            _history.log_event('repair' if repaired or searched else 'cleanup',
+                               'Symlink Verify', source='scheduler', detail=msg)
+        if repaired or searched:
+            try:
+                from utils.notifications import notify
+                notify('symlink_repaired', 'Symlink Repair',
+                       msg, level='info')
+            except ImportError:
+                pass
+
+    return {'status': 'success', 'message': msg, 'items': repaired + searched + deleted}
 
 
 # ---------------------------------------------------------------------------
@@ -396,12 +583,6 @@ def housekeeping():
 # Task: Detect Stale Grabs (Priority 1)
 # ---------------------------------------------------------------------------
 
-# Track recently re-triggered IDs to prevent search storms.
-# Key: ('sonarr', ep_id) or ('radarr', movie_id), Value: epoch time of last trigger.
-_retrigger_history = {}
-_RETRIGGER_COOLDOWN = 7200  # 2 hours — don't re-trigger the same item within this window
-
-
 def detect_stale_grabs():
     """Detect Sonarr/Radarr grabs that silently failed to reach the blackhole.
 
@@ -417,10 +598,7 @@ def detect_stale_grabs():
     searches_triggered = 0
     now_epoch = time.time()
 
-    # Prune old entries from retrigger history
-    stale_keys = [k for k, v in _retrigger_history.items() if now_epoch - v > _RETRIGGER_COOLDOWN]
-    for k in stale_keys:
-        del _retrigger_history[k]
+    _prune_retrigger_history()
 
     for ClientClass, name in [
         (SonarrClient, 'sonarr'),

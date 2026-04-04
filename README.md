@@ -350,6 +350,7 @@ All settings are documented in [`.env.example`](.env.example) with inline commen
 | `BLACKHOLE_MOUNT_POLL_TIMEOUT` | Max seconds to wait for content on mount | `300` |
 | `BLACKHOLE_MOUNT_POLL_INTERVAL` | Seconds between mount checks | `10` |
 | `BLACKHOLE_SYMLINK_MAX_AGE` | Hours before old symlinks are cleaned up | `72` |
+| `SYMLINK_REPAIR_AUTO_SEARCH` | When broken symlinks can't be repaired from mount, trigger Sonarr/Radarr re-search | `false` |
 | `BLACKHOLE_DEDUP_ENABLED` | Check local library before submitting to debrid | `false` |
 | `BLACKHOLE_LOCAL_LIBRARY_TV` | Container path to TV library for dedup. Required when dedup enabled | |
 | `BLACKHOLE_LOCAL_LIBRARY_MOVIES` | Container path to movie library for dedup. Required when dedup enabled | |
@@ -376,7 +377,7 @@ All settings are documented in [`.env.example`](.env.example) with inline commen
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `NOTIFICATION_URL` | [Apprise](https://github.com/caronc/apprise) URL(s), comma-separated (e.g., `discord://webhook_id/webhook_token`) | |
-| `NOTIFICATION_EVENTS` | Comma-separated events to subscribe to: `startup`, `shutdown`, `download_complete`, `download_error`, `library_refresh`, `symlink_created`, `symlink_failed`, `debrid_unavailable`, `local_fallback_triggered`, `blocklist_added`, `health_error`, `daily_digest`, `debrid_add_success`, `debrid_add_failed`. Leave empty for all | all |
+| `NOTIFICATION_EVENTS` | Comma-separated events to subscribe to: `startup`, `shutdown`, `download_complete`, `download_error`, `library_refresh`, `symlink_created`, `symlink_failed`, `debrid_unavailable`, `local_fallback_triggered`, `blocklist_added`, `health_error`, `symlink_repaired`, `daily_digest`, `debrid_add_success`, `debrid_add_failed`. Leave empty for all | all |
 | `NOTIFICATION_LEVEL` | Minimum severity: `info`, `warning`, `error` | `info` |
 | `NOTIFICATION_DIGEST_ENABLED` | Send a daily summary instead of individual notifications | `false` |
 | `NOTIFICATION_DIGEST_TIME` | When to send the daily digest (24h format) | `08:00` |

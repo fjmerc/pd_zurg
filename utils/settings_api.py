@@ -106,8 +106,8 @@ ENV_SCHEMA = [
             ('NOTIFICATION_EVENTS', 'Notification Events', 'string', False,
              'Comma-separated event types: startup, shutdown, download_complete, download_error, '
              'library_refresh, symlink_created, symlink_failed, debrid_unavailable, '
-             'local_fallback_triggered, blocklist_added, arr_deleted, health_error, daily_digest, '
-             'debrid_add_success, debrid_add_failed. '
+             'local_fallback_triggered, blocklist_added, arr_deleted, health_error, symlink_repaired, '
+             'daily_digest, debrid_add_success, debrid_add_failed. '
              'Leave empty for all events'),
             ('NOTIFICATION_LEVEL', 'Minimum Level', 'select:info,warning,error', False, 'Minimum severity to send notifications'),
             ('NOTIFICATION_DIGEST_ENABLED', 'Daily Digest', 'boolean', False, 'Send a daily summary notification'),
@@ -129,6 +129,7 @@ ENV_SCHEMA = [
             ('BLACKHOLE_MOUNT_POLL_TIMEOUT', 'Mount Poll Timeout (seconds)', 'number:30-3600', False, 'Max time to wait for content on mount (default: 300)'),
             ('BLACKHOLE_MOUNT_POLL_INTERVAL', 'Mount Poll Interval (seconds)', 'number:5-120', False, 'How often to check for content on mount (default: 10)'),
             ('BLACKHOLE_SYMLINK_MAX_AGE', 'Symlink Max Age (hours)', 'number:0-720', False, 'Remove symlink dirs older than this (0=disabled, default: 72)'),
+            ('SYMLINK_REPAIR_AUTO_SEARCH', 'Repair Auto-Search', 'boolean', False, 'When broken symlinks can\'t be repaired from mount, trigger arr re-search'),
             ('BLACKHOLE_DEDUP_ENABLED', 'Enable Local Library Dedup', 'boolean', False, 'Skip torrents that match content already in your local library'),
             ('BLACKHOLE_LOCAL_LIBRARY_TV', 'Local TV Library Path', 'string', False, 'Path to local TV library (for dedup and auto debrid symlinks)'),
             ('BLACKHOLE_LOCAL_LIBRARY_MOVIES', 'Local Movie Library Path', 'string', False, 'Path to local movie library (for dedup and auto debrid symlinks)'),

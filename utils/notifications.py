@@ -45,6 +45,8 @@ ALL_EVENTS = {
     'blocklist_added',            # Torrent added to blocklist
     'arr_deleted',                # Movie/series deleted from Sonarr/Radarr
     'health_error',               # Process crash, mount failure
+    # Repair
+    'symlink_repaired',           # Broken symlink repaired or re-search triggered
     # Debrid search
     'debrid_add_success',         # Torrent added to debrid from interactive search
     'debrid_add_failed',          # Failed to add torrent to debrid

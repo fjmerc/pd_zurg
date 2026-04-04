@@ -172,6 +172,7 @@ Add these to your `.env` file or set them directly in `docker-compose.yml`:
 | `BLACKHOLE_MOUNT_POLL_TIMEOUT` | No | `300` | Seconds to wait for debrid to process the torrent AND for content to appear on the mount |
 | `BLACKHOLE_MOUNT_POLL_INTERVAL` | No | `10` | Seconds between status/mount checks |
 | `BLACKHOLE_SYMLINK_MAX_AGE` | No | `72` | Hours before completed symlink directories are cleaned up |
+| `SYMLINK_REPAIR_AUTO_SEARCH` | No | `false` | When the verify task finds broken symlinks that can't be repaired from the mount, trigger Sonarr/Radarr to re-search. Uses a 2-hour cooldown per item. |
 | `BLACKHOLE_DEDUP_ENABLED` | No | `false` | Enable local library duplicate checking before sending torrents to debrid. When enabled, pd_zurg compares incoming torrents against your existing TV and movie libraries to avoid re-downloading content you already have. |
 | `BLACKHOLE_LOCAL_LIBRARY_TV` | Yes* | _(empty)_ | Path to your local TV library inside the container for dedup checking (e.g., `/data/media/tv`). Must be mounted read-only in the pd_zurg container. |
 | `BLACKHOLE_LOCAL_LIBRARY_MOVIES` | Yes* | _(empty)_ | Path to your local movies library inside the container for dedup checking (e.g., `/data/media/movies`). Must be mounted read-only in the pd_zurg container. |

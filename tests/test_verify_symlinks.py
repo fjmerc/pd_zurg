@@ -1,6 +1,8 @@
 """Tests for verify_symlinks in utils/scheduled_tasks.py."""
 
 import os
+import time
+from unittest.mock import MagicMock, patch
 import pytest
 
 
@@ -177,3 +179,166 @@ class TestVerifySymlinks:
         remaining = [f for f in os.listdir(symlink_env['completed']) if
                      os.path.islink(os.path.join(symlink_env['completed'], f))]
         assert len(remaining) == 60
+
+
+class TestSymlinkRepair:
+    """Tests for the repair cascade in verify_symlinks."""
+
+    def test_repairs_symlink_from_different_category(self, symlink_env):
+        """Content moved from movies/ to shows/ on mount — symlink is repaired."""
+        from utils.scheduled_tasks import verify_symlinks
+        mount = symlink_env['mount']
+
+        # Content now lives under shows/ on the mount
+        new_dir = os.path.join(mount, 'shows', 'MyRelease', 'sub')
+        os.makedirs(new_dir, exist_ok=True)
+        with open(os.path.join(new_dir, 'ep.mkv'), 'w') as f:
+            f.write('data')
+
+        # Symlink still points to old movies/ path (broken)
+        old_target = os.path.join(mount, 'movies', 'MyRelease', 'sub', 'ep.mkv')
+        link = _make_symlink(symlink_env['completed'], 'ep.mkv', old_target)
+        assert os.path.islink(link)
+        assert not os.path.exists(link)  # broken
+
+        result = verify_symlinks()
+        assert os.path.islink(link)  # still a symlink
+        new_target = os.readlink(link)
+        assert '/shows/' in new_target  # now points to shows/
+        assert 'repaired 1' in result['message']
+
+    def test_repairs_symlink_uses_target_base(self, symlink_env):
+        """Repaired symlinks use BLACKHOLE_SYMLINK_TARGET_BASE, not rclone mount."""
+        from utils.scheduled_tasks import verify_symlinks
+        mount = symlink_env['mount']
+        target_base = symlink_env['target_base']
+
+        # Content on mount under shows/
+        file_dir = os.path.join(mount, 'shows', 'Rel', 'sub')
+        os.makedirs(file_dir, exist_ok=True)
+        with open(os.path.join(file_dir, 'ep.mkv'), 'w') as f:
+            f.write('data')
+
+        # Broken symlink points to target_base/movies/ (old category)
+        old_target = os.path.join(target_base, 'movies', 'Rel', 'sub', 'ep.mkv')
+        link = _make_symlink(symlink_env['completed'], 'ep.mkv', old_target)
+
+        result = verify_symlinks()
+        assert os.path.islink(link)
+        new_target = os.readlink(link)
+        # Should use target_base, not rclone mount
+        assert new_target.startswith(target_base)
+        assert '/shows/' in new_target
+
+    def test_deletes_when_truly_gone(self, symlink_env):
+        """Content not on mount at all — symlink deleted, not repaired."""
+        from utils.scheduled_tasks import verify_symlinks
+
+        old_target = os.path.join(symlink_env['mount'], 'movies', 'Gone', 'movie.mkv')
+        link = _make_symlink(symlink_env['completed'], 'movie.mkv', old_target)
+
+        result = verify_symlinks()
+        assert not os.path.exists(link)
+        assert 'removed 1' in result['message']
+        assert 'repaired' not in result['message']
+
+    def test_repair_skips_path_traversal_in_release(self, symlink_env):
+        """Symlink target with '..' in release name is not repaired, just deleted."""
+        from utils.scheduled_tasks import verify_symlinks
+        mount = symlink_env['mount']
+
+        # Create symlink with raw target containing '..' in release name
+        link = os.path.join(symlink_env['completed'], 'bad.mkv')
+        os.symlink(f"{mount}/movies/../../../etc/passwd/file.mkv", link)
+
+        result = verify_symlinks()
+        assert not os.path.exists(link)
+
+    def test_repair_skips_path_traversal_in_relfile(self, symlink_env):
+        """Symlink target with '..' in relative file path is not repaired, just deleted."""
+        from utils.scheduled_tasks import verify_symlinks
+        mount = symlink_env['mount']
+
+        # '..' in the file portion, not the release name
+        link = os.path.join(symlink_env['completed'], 'bad2.mkv')
+        os.symlink(f"{mount}/movies/LegitRelease/../../etc/passwd", link)
+
+        result = verify_symlinks()
+        assert not os.path.exists(link)
+
+    def test_repair_checks_file_exists(self, symlink_env):
+        """Release folder found on mount but specific file missing — deleted, not repaired."""
+        from utils.scheduled_tasks import verify_symlinks
+        mount = symlink_env['mount']
+
+        # Folder exists but file doesn't
+        os.makedirs(os.path.join(mount, 'shows', 'Partial'), exist_ok=True)
+
+        old_target = os.path.join(mount, 'movies', 'Partial', 'ep.mkv')
+        link = _make_symlink(symlink_env['completed'], 'ep.mkv', old_target)
+
+        result = verify_symlinks()
+        assert not os.path.exists(link)
+        assert 'repaired' not in result['message']
+
+    def test_auto_search_disabled_by_default(self, symlink_env):
+        """With SYMLINK_REPAIR_AUTO_SEARCH unset, no arr searches are triggered."""
+        from utils.scheduled_tasks import verify_symlinks
+
+        old_target = os.path.join(symlink_env['mount'], 'movies', 'Gone.Movie.2025', 'movie.mkv')
+        _make_symlink(symlink_env['completed'], 'movie.mkv', old_target)
+
+        with patch('utils.scheduled_tasks._attempt_arr_research') as mock_search:
+            verify_symlinks()
+            mock_search.assert_not_called()
+
+    def test_auto_search_triggers_on_delete(self, symlink_env, monkeypatch):
+        """With auto-search enabled, arr research is attempted for deleted symlinks."""
+        from utils.scheduled_tasks import verify_symlinks
+        monkeypatch.setenv('SYMLINK_REPAIR_AUTO_SEARCH', 'true')
+
+        old_target = os.path.join(symlink_env['mount'], 'movies', 'Gone.Movie.2025', 'movie.mkv')
+        _make_symlink(symlink_env['completed'], 'movie.mkv', old_target)
+
+        with patch('utils.scheduled_tasks._attempt_arr_research', return_value=True) as mock_search:
+            result = verify_symlinks()
+            mock_search.assert_called_once_with('Gone.Movie.2025')
+            assert 're-searched 1' in result['message']
+
+    def test_auto_search_not_called_when_repaired(self, symlink_env, monkeypatch):
+        """When symlink is successfully repaired, no arr search is triggered."""
+        from utils.scheduled_tasks import verify_symlinks
+        monkeypatch.setenv('SYMLINK_REPAIR_AUTO_SEARCH', 'true')
+        mount = symlink_env['mount']
+
+        # Content available under shows/
+        file_dir = os.path.join(mount, 'shows', 'MyRelease')
+        os.makedirs(file_dir, exist_ok=True)
+        with open(os.path.join(file_dir, 'ep.mkv'), 'w') as f:
+            f.write('data')
+
+        old_target = os.path.join(mount, 'movies', 'MyRelease', 'ep.mkv')
+        _make_symlink(symlink_env['completed'], 'ep.mkv', old_target)
+
+        with patch('utils.scheduled_tasks._attempt_arr_research') as mock_search:
+            result = verify_symlinks()
+            mock_search.assert_not_called()
+            assert 'repaired 1' in result['message']
+
+    def test_cooldown_prevents_duplicate_search(self, symlink_env, monkeypatch):
+        """Retrigger cooldown prevents searching the same item twice."""
+        from utils.scheduled_tasks import _attempt_arr_research, _retrigger_history
+
+        # Pre-populate cooldown for a radarr movie
+        _retrigger_history[('radarr', 42)] = time.time()
+        try:
+            mock_client = MagicMock()
+            mock_client.configured = True
+            mock_client.find_movie_in_library.return_value = {'id': 42, 'title': 'Test'}
+
+            with patch('utils.arr_client.RadarrClient', return_value=mock_client):
+                result = _attempt_arr_research('Test.Movie.2025.1080p')
+                assert result is False
+                mock_client.search_movie.assert_not_called()
+        finally:
+            _retrigger_history.pop(('radarr', 42), None)

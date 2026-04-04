@@ -31,6 +31,7 @@ except ImportError:
     _history = None
 
 _TIMEOUT = 15  # seconds — Arr APIs can be slow on large libraries
+_RELEASE_TIMEOUT = 120  # seconds — interactive search queries all indexers synchronously
 _NOT_FOUND = object()  # sentinel for "looked up, not found" in tag cache
 _tag_creation_lock = threading.Lock()  # prevents duplicate tags from concurrent requests
 
@@ -51,7 +52,7 @@ class _ArrClientBase:
     def configured(self):
         return bool(self._base and self._api_key)
 
-    def _request(self, method, path, body=None, params=None):
+    def _request(self, method, path, body=None, params=None, timeout=None):
         """Make an HTTP request. Returns parsed JSON or None on error."""
         if not self.configured:
             return None
@@ -74,7 +75,7 @@ class _ArrClientBase:
         self._add_auth(req)
 
         try:
-            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+            with urllib.request.urlopen(req, timeout=timeout or _TIMEOUT) as resp:
                 raw = resp.read(50 * 1024 * 1024)
                 if not raw:
                     return {}
@@ -97,8 +98,8 @@ class _ArrClientBase:
         """Add service-specific auth header. Override in subclasses."""
         raise NotImplementedError
 
-    def _get(self, path, params=None):
-        return self._request('GET', path, params=params)
+    def _get(self, path, params=None, timeout=None):
+        return self._request('GET', path, params=params, timeout=timeout)
 
     def _post(self, path, body=None):
         return self._request('POST', path, body=body)
@@ -578,9 +579,10 @@ class SonarrClient(_ArrClientBase):
     def get_episode_releases(self, episode_id):
         """Fetch available releases for an episode from all indexers.
 
+        Uses a longer timeout because this queries all indexers synchronously.
         Returns list of release dicts, or empty list on failure.
         """
-        result = self._get('/api/v3/release', {'episodeId': episode_id})
+        result = self._get('/api/v3/release', {'episodeId': episode_id}, timeout=_RELEASE_TIMEOUT)
         return result if isinstance(result, list) else []
 
     def push_release(self, release):
@@ -1435,9 +1437,10 @@ class RadarrClient(_ArrClientBase):
     def get_movie_releases(self, movie_id):
         """Fetch available releases for a movie from all indexers.
 
+        Uses a longer timeout because this queries all indexers synchronously.
         Returns list of release dicts, or empty list on failure.
         """
-        result = self._get('/api/v3/release', {'movieId': movie_id})
+        result = self._get('/api/v3/release', {'movieId': movie_id}, timeout=_RELEASE_TIMEOUT)
         return result if isinstance(result, list) else []
 
     def push_release(self, release):

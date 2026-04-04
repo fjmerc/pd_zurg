@@ -603,20 +603,23 @@ class SonarrClient(_ArrClientBase):
         isn't an upgrade — this bypasses that by doing an interactive search
         and manually pushing the best torrent release.
 
+        Ignores Sonarr's rejected flag because the whole point is to bypass
+        the quality cutoff that causes the rejection.
+
         Returns True if a release was pushed, False otherwise.
         """
         releases = self.get_episode_releases(episode_id)
         if not releases:
             logger.debug(f"[sonarr] No releases found for episode {episode_id}")
             return False
-        # Filter for torrent releases that aren't rejected
+        # Filter for torrent releases — ignore rejected flag since we're
+        # deliberately bypassing the quality cutoff
         torrents = [
             r for r in releases
             if r.get('protocol') == 'torrent'
-            and not r.get('rejected', False)
         ]
         if not torrents:
-            logger.debug(f"[sonarr] No usable torrent releases for episode {episode_id}")
+            logger.debug(f"[sonarr] No torrent releases for episode {episode_id}")
             return False
         # Pick the first (Sonarr returns releases sorted by preference)
         best = torrents[0]
@@ -1452,6 +1455,7 @@ class RadarrClient(_ArrClientBase):
 
         Used when prefer_debrid=True and the movie already has a file at
         cutoff quality.  Bypasses quality cutoff via manual push.
+        Ignores the rejected flag since the whole point is to bypass it.
 
         Returns True if a release was pushed, False otherwise.
         """
@@ -1462,10 +1466,9 @@ class RadarrClient(_ArrClientBase):
         torrents = [
             r for r in releases
             if r.get('protocol') == 'torrent'
-            and not r.get('rejected', False)
         ]
         if not torrents:
-            logger.debug(f"[radarr] No usable torrent releases for movie {movie_id}")
+            logger.debug(f"[radarr] No torrent releases for movie {movie_id}")
             return False
         best = torrents[0]
         result = self.push_release(best)

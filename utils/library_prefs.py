@@ -166,8 +166,8 @@ def get_all_pending():
 def touch_pending_searched(normalized_title):
     """Update the last_searched timestamp for a pending entry. Thread-safe.
 
-    Called after a search retry so the system knows when the last attempt was
-    made, preventing excessive retries.
+    Called before a search attempt to prevent overlapping scans from
+    re-processing the same title.  No-op if no entry exists for the title.
     """
     with _pending_lock:
         pending = _load_pending()

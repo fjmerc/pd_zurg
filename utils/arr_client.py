@@ -595,7 +595,7 @@ class SonarrClient(_ArrClientBase):
         """
         return self._post('/api/v3/release', release)
 
-    def _grab_debrid_release(self, episode_id, season_number=None, title=''):
+    def _grab_debrid_release(self, episode_id, season_number=None, title='', seen_guids=None):
         """Interactive search + force grab of a torrent release for an episode.
 
         Used when prefer_debrid=True and the episode already has a file at
@@ -606,26 +606,30 @@ class SonarrClient(_ArrClientBase):
         Ignores Sonarr's rejected flag because the whole point is to bypass
         the quality cutoff that causes the rejection.  Filters by season_number
         because Sonarr returns releases for ALL seasons, not just the requested
-        episode's season.
+        episode's season.  Skips releases already in seen_guids to avoid
+        pushing the same season pack multiple times.
 
-        Returns True if a release was pushed, False otherwise.
+        Returns the pushed release's GUID on success, or None on failure.
         """
         releases = self.get_episode_releases(episode_id)
         if not releases:
             logger.debug(f"[sonarr] No releases found for episode {episode_id}")
-            return False
+            return None
         # Filter for torrent releases matching the correct season.
         # Accept: exact match, seasonNumber 0 (multi-season/complete packs),
         # or missing seasonNumber (untagged releases from some indexers).
+        # Skip releases already pushed (dedup by GUID).
+        _seen = seen_guids or set()
         torrents = [
             r for r in releases
             if r.get('protocol') == 'torrent'
             and (season_number is None
                  or r.get('seasonNumber') in (season_number, 0, None))
+            and r.get('guid') not in _seen
         ]
         if not torrents:
             logger.debug(f"[sonarr] No torrent releases for episode {episode_id} S{season_number or '?'}")
-            return False
+            return None
         # Pick the first (Sonarr returns releases sorted by preference)
         best = torrents[0]
         result = self.push_release(best)
@@ -634,9 +638,9 @@ class SonarrClient(_ArrClientBase):
                 f"[sonarr] Force-grabbed debrid release for {title or f'episode {episode_id}'}: "
                 f"{best.get('title', '?')}"
             )
-            return True
+            return best.get('guid')
         logger.warning(f"[sonarr] Failed to push release for episode {episode_id}")
-        return False
+        return None
 
     def get_episode_id(self, series_title, season_number, episode_number):
         """Find a Sonarr episode ID by series title and S/E numbers.
@@ -792,15 +796,19 @@ class SonarrClient(_ArrClientBase):
         # When prefer_debrid is set and episodes already have files, Sonarr's
         # automatic search won't grab because the existing files meet the
         # quality cutoff.  Use interactive search + manual push to bypass it.
-        # Try each has_file episode until one succeeds — season packs cover
-        # all episodes so one successful grab is typically sufficient.
-        # Subsequent episodes are handled on the next retry cycle.
+        # Grabs each episode individually, deduplicating by GUID so season
+        # packs are only pushed once.
         if prefer_debrid is True and has_file_ids:
-            grabbed = False
+            grabbed = 0
+            seen_guids = set()
             for hf_id in has_file_ids:
-                if self._grab_debrid_release(hf_id, season_number=season_number, title=f'{title} S{season_number:02d}'):
-                    grabbed = True
-                    break  # season pack likely covers remaining episodes
+                result_guid = self._grab_debrid_release(
+                    hf_id, season_number=season_number,
+                    title=f'{title} S{season_number:02d}', seen_guids=seen_guids,
+                )
+                if result_guid:
+                    grabbed += 1
+                    seen_guids.add(result_guid)
             # Search any episodes without files normally
             if no_file_ids:
                 self.search_episodes(no_file_ids)
@@ -808,7 +816,7 @@ class SonarrClient(_ArrClientBase):
                 return {
                     'status': 'sent',
                     'service': 'sonarr',
-                    'message': f'Force-grabbed debrid release for {title} S{season_number:02d}',
+                    'message': f'Force-grabbed {grabbed} debrid release(s) for {title} S{season_number:02d}',
                 }
             # All interactive grabs failed — no_file_ids already searched above,
             # only re-search has_file episodes as last resort.

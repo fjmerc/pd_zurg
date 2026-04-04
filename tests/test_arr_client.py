@@ -358,7 +358,7 @@ class TestSonarrClient:
 
     @patch('urllib.request.urlopen')
     def test_ensure_and_search_prefer_debrid_force_grabs_when_has_file(self, mock_urlopen, sonarr):
-        """prefer_debrid=True with existing files should interactive-grab and break on success."""
+        """prefer_debrid=True with existing files should interactive-grab each, dedup by GUID."""
         sonarr._blackhole_tag_id = 7
         responses = [
             _mock_urlopen([{'id': 5, 'title': 'Tulsa King', 'tmdbId': 200, 'tags': [7]}]),  # find
@@ -367,19 +367,21 @@ class TestSonarrClient:
                 {'id': 101, 'seasonNumber': 1, 'episodeNumber': 2, 'hasFile': True},
             ]),
             _mock_urlopen({'records': []}),  # queue cleanup
-            # Episode 100 interactive search + push — succeeds, loop breaks
+            # Episode 100: unique release → push
             _mock_urlopen([
-                {'guid': 'pack', 'indexerId': 2, 'protocol': 'torrent', 'title': 'Season.Pack', 'rejected': True, 'seasonNumber': 1},
+                {'guid': 'ep1-torrent', 'indexerId': 2, 'protocol': 'torrent', 'title': 'S01E01', 'seasonNumber': 1},
             ]),
-            _mock_urlopen({'id': 99}),
-            # Episode 101 is NOT searched — season pack covers it
+            _mock_urlopen({'id': 99}),  # push ep1
+            # Episode 101: different release → push
+            _mock_urlopen([
+                {'guid': 'ep2-torrent', 'indexerId': 2, 'protocol': 'torrent', 'title': 'S01E02', 'seasonNumber': 1},
+            ]),
+            _mock_urlopen({'id': 98}),  # push ep2
         ]
         mock_urlopen.side_effect = responses
         result = sonarr.ensure_and_search('Tulsa King', 200, 1, [1, 2], prefer_debrid=True)
         assert result['status'] == 'sent'
-        assert 'Force-grabbed' in result['message']
-        # Only 5 API calls: find + episodes + queue + release search + push
-        assert mock_urlopen.call_count == 5
+        assert 'Force-grabbed 2' in result['message']
 
     @patch('urllib.request.urlopen')
     def test_ensure_and_search_prefer_debrid_tries_next_on_failure(self, mock_urlopen, sonarr):
@@ -463,7 +465,7 @@ class TestSonarrClient:
         ]
         mock_urlopen.side_effect = responses
         result = sonarr._grab_debrid_release(100, title='Test')
-        assert result is True
+        assert result == 'first'  # returns GUID on success
         push_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
         assert push_body['guid'] == 'first'
 
@@ -477,7 +479,7 @@ class TestSonarrClient:
         ]
         mock_urlopen.side_effect = responses
         result = sonarr._grab_debrid_release(100, title='Test')
-        assert result is False
+        assert result is None
 
     @patch('urllib.request.urlopen')
     def test_grab_debrid_release_filters_by_season(self, mock_urlopen, sonarr):
@@ -491,7 +493,7 @@ class TestSonarrClient:
         ]
         mock_urlopen.side_effect = responses
         result = sonarr._grab_debrid_release(200, season_number=2, title='Test')
-        assert result is True
+        assert result == 's2'
         push_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
         assert push_body['guid'] == 's2'
 
@@ -506,7 +508,7 @@ class TestSonarrClient:
         ]
         mock_urlopen.side_effect = responses
         result = sonarr._grab_debrid_release(200, season_number=2, title='Test')
-        assert result is True
+        assert result == 'pack'
 
     @patch('urllib.request.urlopen')
     def test_grab_debrid_release_accepts_missing_season(self, mock_urlopen, sonarr):
@@ -519,7 +521,21 @@ class TestSonarrClient:
         ]
         mock_urlopen.side_effect = responses
         result = sonarr._grab_debrid_release(200, season_number=1, title='Test')
-        assert result is True
+        assert result == 'unknown'
+
+    @patch('urllib.request.urlopen')
+    def test_grab_debrid_release_deduplicates_by_guid(self, mock_urlopen, sonarr):
+        """Releases already in seen_guids should be skipped."""
+        responses = [
+            _mock_urlopen([
+                {'guid': 'already-seen', 'indexerId': 1, 'protocol': 'torrent', 'title': 'Pack', 'seasonNumber': 1},
+                {'guid': 'new-one', 'indexerId': 1, 'protocol': 'torrent', 'title': 'Ep2', 'seasonNumber': 1},
+            ]),
+            _mock_urlopen({'id': 10}),
+        ]
+        mock_urlopen.side_effect = responses
+        result = sonarr._grab_debrid_release(200, season_number=1, title='Test', seen_guids={'already-seen'})
+        assert result == 'new-one'
 
     # --- _fix_indexer_routing: torrent indexer debrid tag ---
 

@@ -7,6 +7,7 @@ import pytest
 from utils.blackhole import (
     RetryMeta, BlackholeWatcher, RETRY_SCHEDULE, MAX_RETRIES,
     MEDIA_EXTENSIONS, MOUNT_CATEGORIES, parse_release_name,
+    _is_multi_season_pack, _extract_file_season, _build_season_release_name,
 )
 
 
@@ -850,3 +851,416 @@ class TestCheckLocalLibrary:
         # Empty season dir
 
         assert watcher._check_local_library('Fargo.S05E01.1080p.WEB.torrent') is False
+
+
+class TestIsMultiSeasonPack:
+
+    def test_s01_s05(self):
+        is_multi, start, end = _is_multi_season_pack('Show.S01-S05.1080p')
+        assert is_multi is True
+        assert start == 1
+        assert end == 5
+
+    def test_s01_05_bare(self):
+        is_multi, start, end = _is_multi_season_pack('Show.S01-05.BluRay')
+        assert is_multi is True
+        assert start == 1
+        assert end == 5
+
+    def test_cross_season_episodes(self):
+        is_multi, start, end = _is_multi_season_pack('Show.S01E01-S03E12.1080p')
+        assert is_multi is True
+        assert start == 1
+        assert end == 3
+
+    def test_complete_series(self):
+        is_multi, start, end = _is_multi_season_pack('Show.Complete.Series.1080p')
+        assert is_multi is True
+        assert start is None
+        assert end is None
+
+    def test_complete_collection(self):
+        is_multi, start, end = _is_multi_season_pack('Show.Complete.Collection.BluRay')
+        assert is_multi is True
+        assert start is None
+        assert end is None
+
+    def test_seasons_range(self):
+        is_multi, start, end = _is_multi_season_pack('Show.Seasons.1-3.1080p')
+        assert is_multi is True
+        assert start == 1
+        assert end == 3
+
+    def test_season_singular_range(self):
+        is_multi, start, end = _is_multi_season_pack('Show.Season.1-5.1080p')
+        assert is_multi is True
+        assert start == 1
+        assert end == 5
+
+    def test_seasons_ampersand(self):
+        is_multi, start, end = _is_multi_season_pack('Show.Seasons.1.&.2.1080p')
+        assert is_multi is True
+        assert start == 1
+        assert end == 2
+
+    def test_seasons_and_separator(self):
+        is_multi, start, end = _is_multi_season_pack('Project Blue Book Seasons 1 and 2 Mp4 1080p')
+        assert is_multi is True
+        assert start == 1
+        assert end == 2
+
+    def test_series_range(self):
+        is_multi, start, end = _is_multi_season_pack('Show.Series.1-3.1080p')
+        assert is_multi is True
+        assert start == 1
+        assert end == 3
+
+    def test_single_season_not_multi(self):
+        is_multi, _, _ = _is_multi_season_pack('Show.S03.1080p')
+        assert is_multi is False
+
+    def test_single_episode_not_multi(self):
+        is_multi, _, _ = _is_multi_season_pack('Show.S03E01.1080p')
+        assert is_multi is False
+
+    def test_movie_not_multi(self):
+        is_multi, _, _ = _is_multi_season_pack('Movie.2024.1080p')
+        assert is_multi is False
+
+    def test_single_season_episode_range_not_multi(self):
+        """S01E01-E05 is a multi-episode single-season pack, NOT multi-season."""
+        is_multi, _, _ = _is_multi_season_pack('Show.S01E01-E05.1080p')
+        assert is_multi is False
+
+    def test_en_dash_separator(self):
+        is_multi, start, end = _is_multi_season_pack('Show.S01\u2013S05.1080p')
+        assert is_multi is True
+        assert start == 1
+        assert end == 5
+
+    def test_encoding_marker_not_multi(self):
+        """S05-10bit is an encoding marker, NOT a multi-season range."""
+        is_multi, _, _ = _is_multi_season_pack('Show.S05-10bit.HEVC.1080p')
+        assert is_multi is False
+
+    def test_3d_marker_not_multi(self):
+        is_multi, _, _ = _is_multi_season_pack('Show.S02-3D.BluRay.1080p')
+        assert is_multi is False
+
+    def test_same_season_number_not_multi(self):
+        is_multi, _, _ = _is_multi_season_pack('Show.S02-S02.1080p')
+        assert is_multi is False
+
+
+class TestExtractFileSeason:
+
+    def test_standard_sxxexx(self):
+        assert _extract_file_season('Show.S01E04.1080p.mkv') == 1
+
+    def test_high_season_number(self):
+        assert _extract_file_season('Show.S12E01.mkv') == 12
+
+    def test_lowercase(self):
+        assert _extract_file_season('show.s3e12.mkv') == 3
+
+    def test_parent_dir_season(self):
+        assert _extract_file_season('Season 2/Show.E05.mkv') == 2
+
+    def test_parent_dir_season_dot_format(self):
+        assert _extract_file_season('Season.02/Show.E05.mkv') == 2
+
+    def test_no_season_info(self):
+        assert _extract_file_season('Show.1080p.mkv') is None
+
+    def test_absolute_episode_only(self):
+        assert _extract_file_season('Show.E26.mkv') is None
+
+    def test_s_prefix_dir(self):
+        assert _extract_file_season('S03/Show.E01.mkv') == 3
+
+    def test_season_zero_specials(self):
+        assert _extract_file_season('Show.S00E01.Special.mkv') == 0
+
+    def test_sxx_without_exx(self):
+        """Sxx without episode number should still extract season."""
+        assert _extract_file_season('Show.S03.Special.mkv') == 3
+
+    def test_sxx_with_title(self):
+        assert _extract_file_season('Show.S02.The.Cats.Meow.mkv') == 2
+
+
+class TestBuildSeasonReleaseName:
+
+    def test_s_range(self):
+        result = _build_season_release_name('Breaking.Bad.S01-S05.1080p.BluRay-GROUP', 3)
+        assert result == 'Breaking.Bad.S03.1080p.BluRay-GROUP'
+
+    def test_complete_series(self):
+        result = _build_season_release_name('The.Wire.Complete.Series.1080p', 2)
+        assert result == 'The.Wire.S02.1080p'
+
+    def test_cross_season_episodes(self):
+        result = _build_season_release_name('Show.S01E01-S03E12.1080p', 1)
+        assert result == 'Show.S01.1080p'
+
+    def test_seasons_range(self):
+        result = _build_season_release_name('Show.Seasons.1-5.BluRay', 4)
+        assert result == 'Show.S04.BluRay'
+
+    def test_s_bare_range(self):
+        result = _build_season_release_name('Show.S01-05.1080p', 3)
+        assert result == 'Show.S03.1080p'
+
+    def test_preserves_group_tag(self):
+        result = _build_season_release_name('Show.S01-S03.1080p.WEB-DL-GROUP', 2)
+        assert result == 'Show.S02.1080p.WEB-DL-GROUP'
+
+    def test_complete_collection(self):
+        result = _build_season_release_name('Show.Complete.Collection.BluRay', 1)
+        assert result == 'Show.S01.BluRay'
+
+    def test_no_double_dots(self):
+        result = _build_season_release_name('Show.Complete.Series.1080p', 5)
+        assert '..' not in result
+
+    def test_fallback_appends_season(self):
+        result = _build_season_release_name('Random.Name.1080p', 3)
+        assert result == 'Random.Name.1080p.S03'
+
+
+class TestMultiSeasonSymlinks:
+
+    def _make_watcher(self, tmp_dir):
+        completed = os.path.join(tmp_dir, 'completed')
+        mount = os.path.join(tmp_dir, 'mount')
+        os.makedirs(completed)
+        os.makedirs(mount)
+        watcher = BlackholeWatcher(
+            os.path.join(tmp_dir, 'watch'), 'key', 'realdebrid',
+            symlink_enabled=True,
+            completed_dir=completed,
+            rclone_mount=mount,
+            symlink_target_base='/mnt/debrid',
+        )
+        return watcher, completed, mount
+
+    def test_splits_multi_season_pack(self, tmp_dir):
+        """Multi-season pack should create per-season directories."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        release = 'Show.S01-S03.1080p.BluRay-GROUP'
+        release_dir = os.path.join(mount, 'shows', release)
+        os.makedirs(release_dir)
+
+        for ep in ['Show.S01E01.1080p.mkv', 'Show.S01E02.1080p.mkv',
+                    'Show.S02E01.1080p.mkv', 'Show.S03E01.1080p.mkv',
+                    'Show.S03E02.1080p.mkv']:
+            with open(os.path.join(release_dir, ep), 'w') as f:
+                f.write('data')
+
+        count = watcher._create_symlinks(release, 'shows', release_dir)
+        assert count == 5
+
+        # Verify per-season directories exist
+        s1_dir = os.path.join(completed, 'Show.S01.1080p.BluRay-GROUP')
+        s2_dir = os.path.join(completed, 'Show.S02.1080p.BluRay-GROUP')
+        s3_dir = os.path.join(completed, 'Show.S03.1080p.BluRay-GROUP')
+        assert os.path.isdir(s1_dir)
+        assert os.path.isdir(s2_dir)
+        assert os.path.isdir(s3_dir)
+
+        # Verify file counts per season
+        assert len(os.listdir(s1_dir)) == 2
+        assert len(os.listdir(s2_dir)) == 1
+        assert len(os.listdir(s3_dir)) == 2
+
+        # Verify symlink targets still point to original mount path
+        link = os.path.join(s1_dir, 'Show.S01E01.1080p.mkv')
+        assert os.path.islink(link)
+        target = os.readlink(link)
+        assert target == f'/mnt/debrid/shows/{release}/Show.S01E01.1080p.mkv'
+
+    def test_single_season_unchanged(self, tmp_dir):
+        """Single-season pack should use original single-dir behavior."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        release = 'Show.S03.1080p'
+        release_dir = os.path.join(mount, 'shows', release)
+        os.makedirs(release_dir)
+        with open(os.path.join(release_dir, 'Show.S03E01.mkv'), 'w') as f:
+            f.write('data')
+
+        count = watcher._create_symlinks(release, 'shows', release_dir)
+        assert count == 1
+
+        # Should be in the original release name dir, not a constructed one
+        assert os.path.isdir(os.path.join(completed, release))
+        assert os.path.islink(os.path.join(completed, release, 'Show.S03E01.mkv'))
+
+    def test_no_original_dir_when_split(self, tmp_dir):
+        """When split succeeds, the original multi-season dir should NOT be created."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        release = 'Show.S01-S02.1080p'
+        release_dir = os.path.join(mount, 'shows', release)
+        os.makedirs(release_dir)
+        for ep in ['Show.S01E01.mkv', 'Show.S02E01.mkv']:
+            with open(os.path.join(release_dir, ep), 'w') as f:
+                f.write('data')
+
+        watcher._create_symlinks(release, 'shows', release_dir)
+        assert not os.path.exists(os.path.join(completed, release))
+
+    def test_fallback_when_no_seasons_parseable(self, tmp_dir):
+        """Multi-season name with unparseable files falls back to single dir."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        release = 'Show.Complete.Series.1080p'
+        release_dir = os.path.join(mount, 'shows', release)
+        os.makedirs(release_dir)
+        # Files without SxxExx patterns
+        with open(os.path.join(release_dir, 'episode1.mkv'), 'w') as f:
+            f.write('data')
+        with open(os.path.join(release_dir, 'episode2.mkv'), 'w') as f:
+            f.write('data')
+
+        count = watcher._create_symlinks(release, 'shows', release_dir)
+        assert count == 2
+
+        # Should fall back to original single-dir behavior
+        assert os.path.isdir(os.path.join(completed, release))
+
+    def test_fallback_when_only_one_season(self, tmp_dir):
+        """Multi-season name but all files are one season — use single dir."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        release = 'Show.S01-S05.1080p'
+        release_dir = os.path.join(mount, 'shows', release)
+        os.makedirs(release_dir)
+        # All files are season 3
+        for ep in ['Show.S03E01.mkv', 'Show.S03E02.mkv']:
+            with open(os.path.join(release_dir, ep), 'w') as f:
+                f.write('data')
+
+        count = watcher._create_symlinks(release, 'shows', release_dir)
+        assert count == 2
+
+        # Falls back to single dir since only 1 season found
+        assert os.path.isdir(os.path.join(completed, release))
+
+    def test_skips_unparseable_files_in_split(self, tmp_dir):
+        """Files without season info should be skipped during splitting."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        release = 'Show.S01-S02.1080p'
+        release_dir = os.path.join(mount, 'shows', release)
+        os.makedirs(release_dir)
+        with open(os.path.join(release_dir, 'Show.S01E01.mkv'), 'w') as f:
+            f.write('data')
+        with open(os.path.join(release_dir, 'Show.S02E01.mkv'), 'w') as f:
+            f.write('data')
+        with open(os.path.join(release_dir, 'extras.mkv'), 'w') as f:
+            f.write('data')
+
+        count = watcher._create_symlinks(release, 'shows', release_dir)
+        # Only 2 files with parseable seasons, extras skipped
+        assert count == 2
+
+    def test_season_zero_specials(self, tmp_dir):
+        """Season 0 (specials) should get their own directory."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        release = 'Show.S00-S02.1080p'
+        release_dir = os.path.join(mount, 'shows', release)
+        os.makedirs(release_dir)
+        with open(os.path.join(release_dir, 'Show.S00E01.mkv'), 'w') as f:
+            f.write('data')
+        with open(os.path.join(release_dir, 'Show.S01E01.mkv'), 'w') as f:
+            f.write('data')
+        with open(os.path.join(release_dir, 'Show.S02E01.mkv'), 'w') as f:
+            f.write('data')
+
+        count = watcher._create_symlinks(release, 'shows', release_dir)
+        assert count == 3
+        assert os.path.isdir(os.path.join(completed, 'Show.S00.1080p'))
+        assert os.path.isdir(os.path.join(completed, 'Show.S01.1080p'))
+        assert os.path.isdir(os.path.join(completed, 'Show.S02.1080p'))
+
+    def test_subdirectory_season_extraction(self, tmp_dir):
+        """Files in Season subdirs should preserve directory structure in split."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        release = 'Show.S01-S02.1080p'
+        release_dir = os.path.join(mount, 'shows', release)
+        s1_dir = os.path.join(release_dir, 'Season 01')
+        s2_dir = os.path.join(release_dir, 'Season 02')
+        os.makedirs(s1_dir)
+        os.makedirs(s2_dir)
+        with open(os.path.join(s1_dir, 'Show.S01E01.mkv'), 'w') as f:
+            f.write('data')
+        with open(os.path.join(s2_dir, 'Show.S02E01.mkv'), 'w') as f:
+            f.write('data')
+
+        count = watcher._create_symlinks(release, 'shows', release_dir)
+        assert count == 2
+
+        s1_completed = os.path.join(completed, 'Show.S01.1080p')
+        s2_completed = os.path.join(completed, 'Show.S02.1080p')
+        assert os.path.isdir(s1_completed)
+        assert os.path.isdir(s2_completed)
+
+        # Subdirectory structure should be preserved
+        symlink = os.path.join(s1_completed, 'Season 01', 'Show.S01E01.mkv')
+        assert os.path.islink(symlink)
+        target = os.readlink(symlink)
+        assert target == f'/mnt/debrid/shows/{release}/Season 01/Show.S01E01.mkv'
+
+    def test_sample_files_skipped_in_split(self, tmp_dir):
+        """Sample files should be skipped during multi-season splitting too."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        release = 'Show.S01-S02.1080p'
+        release_dir = os.path.join(mount, 'shows', release)
+        os.makedirs(release_dir)
+        with open(os.path.join(release_dir, 'Show.S01E01.mkv'), 'w') as f:
+            f.write('data')
+        with open(os.path.join(release_dir, 'Show.S02E01.mkv'), 'w') as f:
+            f.write('data')
+        with open(os.path.join(release_dir, 'Sample.S01E01.mkv'), 'w') as f:
+            f.write('data')
+
+        count = watcher._create_symlinks(release, 'shows', release_dir)
+        assert count == 2
+
+    def test_split_idempotency(self, tmp_dir):
+        """Calling _create_symlinks twice on a multi-season pack should be idempotent."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        release = 'Show.S01-S02.1080p'
+        release_dir = os.path.join(mount, 'shows', release)
+        os.makedirs(release_dir)
+        for ep in ['Show.S01E01.mkv', 'Show.S02E01.mkv']:
+            with open(os.path.join(release_dir, ep), 'w') as f:
+                f.write('data')
+
+        count1 = watcher._create_symlinks(release, 'shows', release_dir)
+        assert count1 == 2
+
+        count2 = watcher._create_symlinks(release, 'shows', release_dir)
+        assert count2 == 0
+
+    def test_fallback_does_not_create_split_dirs(self, tmp_dir):
+        """When falling back to single dir, no per-season directories should exist."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        release = 'Show.Complete.Series.1080p'
+        release_dir = os.path.join(mount, 'shows', release)
+        os.makedirs(release_dir)
+        with open(os.path.join(release_dir, 'episode1.mkv'), 'w') as f:
+            f.write('data')
+        with open(os.path.join(release_dir, 'episode2.mkv'), 'w') as f:
+            f.write('data')
+
+        watcher._create_symlinks(release, 'shows', release_dir)
+        # No per-season dirs should be created
+        assert not os.path.exists(os.path.join(completed, 'Show.S01.1080p'))

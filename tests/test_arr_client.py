@@ -356,6 +356,97 @@ class TestSonarrClient:
         result = sonarr.ensure_and_search('My Show', 123, 1, [1], prefer_debrid=True)
         assert result['status'] == 'sent'
 
+    @patch('urllib.request.urlopen')
+    def test_ensure_and_search_prefer_debrid_force_grabs_when_has_file(self, mock_urlopen, sonarr):
+        """prefer_debrid=True with existing files should use interactive grab."""
+        sonarr._blackhole_tag_id = 7
+        responses = [
+            _mock_urlopen([{'id': 5, 'title': 'Tulsa King', 'tmdbId': 200, 'tags': [7]}]),  # find
+            _mock_urlopen([  # episodes — all have files
+                {'id': 100, 'seasonNumber': 1, 'episodeNumber': 1, 'hasFile': True},
+                {'id': 101, 'seasonNumber': 1, 'episodeNumber': 2, 'hasFile': True},
+            ]),
+            _mock_urlopen({'records': []}),  # queue cleanup
+            _mock_urlopen([  # interactive search releases
+                {'guid': 'abc', 'indexerId': 1, 'protocol': 'usenet', 'title': 'NZB', 'rejected': False},
+                {'guid': 'def', 'indexerId': 2, 'protocol': 'torrent', 'title': 'Torrent.Pack', 'rejected': False},
+            ]),
+            _mock_urlopen({'id': 99}),  # push release response
+        ]
+        mock_urlopen.side_effect = responses
+        result = sonarr.ensure_and_search('Tulsa King', 200, 1, [1, 2], prefer_debrid=True)
+        assert result['status'] == 'sent'
+        assert 'Force-grabbed' in result['message']
+        # Verify the POST /release was called with the torrent, not the usenet release
+        push_call = mock_urlopen.call_args_list[-1]
+        push_body = json.loads(push_call[0][0].data)
+        assert push_body['protocol'] == 'torrent'
+
+    @patch('urllib.request.urlopen')
+    def test_ensure_and_search_prefer_debrid_mixed_has_file_and_no_file(self, mock_urlopen, sonarr):
+        """Mixed: interactive grab for has-file episodes, normal search for no-file."""
+        sonarr._blackhole_tag_id = 7
+        responses = [
+            _mock_urlopen([{'id': 5, 'title': 'Show', 'tmdbId': 200, 'tags': [7]}]),  # find
+            _mock_urlopen([  # episodes: ep1 has file, ep2+3 don't
+                {'id': 100, 'seasonNumber': 1, 'episodeNumber': 1, 'hasFile': True},
+                {'id': 101, 'seasonNumber': 1, 'episodeNumber': 2, 'hasFile': False},
+                {'id': 102, 'seasonNumber': 1, 'episodeNumber': 3, 'hasFile': False},
+            ]),
+            _mock_urlopen({'records': []}),  # queue cleanup
+            _mock_urlopen([  # interactive search for ep1
+                {'guid': 'pack', 'indexerId': 2, 'protocol': 'torrent', 'title': 'Season.Pack', 'rejected': False},
+            ]),
+            _mock_urlopen({'id': 99}),  # push release
+            _mock_urlopen({'id': 43}),  # search_episodes for no_file_ids [101, 102]
+        ]
+        mock_urlopen.side_effect = responses
+        result = sonarr.ensure_and_search('Show', 200, 1, [1, 2, 3], prefer_debrid=True)
+        assert result['status'] == 'sent'
+        assert 'Force-grabbed' in result['message']
+        # Verify no_file episodes were searched via normal EpisodeSearch
+        search_call = mock_urlopen.call_args_list[-1]
+        search_body = json.loads(search_call[0][0].data)
+        assert search_body['name'] == 'EpisodeSearch'
+        assert set(search_body['episodeIds']) == {101, 102}
+
+    @patch('urllib.request.urlopen')
+    def test_ensure_and_search_prefer_debrid_falls_through_when_no_torrents(self, mock_urlopen, sonarr):
+        """When interactive grab finds no torrents, fall through to normal search."""
+        sonarr._blackhole_tag_id = 7
+        responses = [
+            _mock_urlopen([{'id': 5, 'title': 'My Show', 'tmdbId': 123, 'tags': [7]}]),  # find
+            _mock_urlopen([  # episodes with files
+                {'id': 100, 'seasonNumber': 1, 'episodeNumber': 1, 'hasFile': True},
+            ]),
+            _mock_urlopen({'records': []}),  # queue cleanup
+            _mock_urlopen([  # interactive search — only usenet, no torrents
+                {'guid': 'abc', 'indexerId': 1, 'protocol': 'usenet', 'title': 'NZB', 'rejected': False},
+            ]),
+            _mock_urlopen({'id': 42}),  # fallback: normal EpisodeSearch
+        ]
+        mock_urlopen.side_effect = responses
+        result = sonarr.ensure_and_search('My Show', 123, 1, [1], prefer_debrid=True)
+        assert result['status'] == 'sent'
+        # Should have fallen through to normal search (message won't say Force-grabbed)
+        assert 'Force-grabbed' not in result['message']
+
+    @patch('urllib.request.urlopen')
+    def test_grab_debrid_release_skips_rejected(self, mock_urlopen, sonarr):
+        """Rejected torrent releases should be filtered out."""
+        responses = [
+            _mock_urlopen([
+                {'guid': 'bad', 'indexerId': 1, 'protocol': 'torrent', 'title': 'Bad', 'rejected': True},
+                {'guid': 'good', 'indexerId': 2, 'protocol': 'torrent', 'title': 'Good', 'rejected': False},
+            ]),
+            _mock_urlopen({'id': 1}),  # push
+        ]
+        mock_urlopen.side_effect = responses
+        result = sonarr._grab_debrid_release(100, title='Test')
+        assert result is True
+        push_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
+        assert push_body['guid'] == 'good'
+
     # --- _fix_indexer_routing: torrent indexer debrid tag ---
 
     @patch('urllib.request.urlopen')
@@ -606,7 +697,7 @@ class TestRadarrClient:
 
     @patch('urllib.request.urlopen')
     def test_ensure_and_search_existing_with_file_prefer_debrid_triggers_search(self, mock_urlopen, radarr):
-        """When prefer_debrid is set, hasFile should not block routing + search."""
+        """When prefer_debrid is set (local), hasFile should not block routing + search."""
         responses = [
             _mock_urlopen([{'id': 1, 'title': 'Inception', 'tmdbId': 27205, 'hasFile': True, 'tags': []}]),
             _mock_urlopen([]),  # download clients (no blackhole)
@@ -616,6 +707,41 @@ class TestRadarrClient:
         mock_urlopen.side_effect = responses
         result = radarr.ensure_and_search('Inception', 27205, prefer_debrid=False)
         assert result['status'] == 'sent'
+
+    @patch('urllib.request.urlopen')
+    def test_ensure_and_search_prefer_debrid_force_grabs_when_has_file(self, mock_urlopen, radarr):
+        """prefer_debrid=True with existing file should use interactive grab."""
+        radarr._blackhole_tag_id = 7
+        responses = [
+            _mock_urlopen([{'id': 1, 'title': 'Inception', 'tmdbId': 27205, 'hasFile': True, 'tags': [7]}]),
+            _mock_urlopen({'records': []}),  # queue cleanup
+            _mock_urlopen([  # interactive search releases
+                {'guid': 'abc', 'indexerId': 1, 'protocol': 'usenet', 'title': 'NZB', 'rejected': False},
+                {'guid': 'def', 'indexerId': 2, 'protocol': 'torrent', 'title': 'Torrent', 'rejected': False},
+            ]),
+            _mock_urlopen({'id': 99}),  # push release
+        ]
+        mock_urlopen.side_effect = responses
+        result = radarr.ensure_and_search('Inception', 27205, prefer_debrid=True)
+        assert result['status'] == 'sent'
+        assert 'Force-grabbed' in result['message']
+        push_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
+        assert push_body['protocol'] == 'torrent'
+
+    @patch('urllib.request.urlopen')
+    def test_ensure_and_search_prefer_debrid_falls_through_movie(self, mock_urlopen, radarr):
+        """When interactive grab finds no torrents for movie, fall through to normal search."""
+        radarr._blackhole_tag_id = 7
+        responses = [
+            _mock_urlopen([{'id': 1, 'title': 'Inception', 'tmdbId': 27205, 'hasFile': True, 'tags': [7]}]),
+            _mock_urlopen({'records': []}),  # queue cleanup
+            _mock_urlopen([]),  # interactive search — no releases at all
+            _mock_urlopen({'id': 42}),  # fallback: normal MoviesSearch
+        ]
+        mock_urlopen.side_effect = responses
+        result = radarr.ensure_and_search('Inception', 27205, prefer_debrid=True)
+        assert result['status'] == 'sent'
+        assert 'Force-grabbed' not in result['message']
 
     @patch('urllib.request.urlopen')
     def test_ensure_and_search_existing_no_file(self, mock_urlopen, radarr):

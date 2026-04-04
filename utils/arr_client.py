@@ -583,6 +583,51 @@ class SonarrClient(_ArrClientBase):
         result = self._get('/api/v3/release', {'episodeId': episode_id})
         return result if isinstance(result, list) else []
 
+    def push_release(self, release):
+        """Push a release for manual download, bypassing quality cutoff.
+
+        Args:
+            release: Release dict from get_episode_releases/get_movie_releases.
+
+        Returns the response dict or None on failure.
+        """
+        return self._post('/api/v3/release', release)
+
+    def _grab_debrid_release(self, episode_id, title=''):
+        """Interactive search + force grab of a torrent release for an episode.
+
+        Used when prefer_debrid=True and the episode already has a file at
+        cutoff quality.  Normal EpisodeSearch won't grab because the file
+        isn't an upgrade — this bypasses that by doing an interactive search
+        and manually pushing the best torrent release.
+
+        Returns True if a release was pushed, False otherwise.
+        """
+        releases = self.get_episode_releases(episode_id)
+        if not releases:
+            logger.debug(f"[sonarr] No releases found for episode {episode_id}")
+            return False
+        # Filter for torrent releases that aren't rejected
+        torrents = [
+            r for r in releases
+            if r.get('protocol') == 'torrent'
+            and not r.get('rejected', False)
+        ]
+        if not torrents:
+            logger.debug(f"[sonarr] No usable torrent releases for episode {episode_id}")
+            return False
+        # Pick the first (Sonarr returns releases sorted by preference)
+        best = torrents[0]
+        result = self.push_release(best)
+        if result is not None:
+            logger.info(
+                f"[sonarr] Force-grabbed debrid release for {title or f'episode {episode_id}'}: "
+                f"{best.get('title', '?')}"
+            )
+            return True
+        logger.warning(f"[sonarr] Failed to push release for episode {episode_id}")
+        return False
+
     def get_episode_id(self, series_title, season_number, episode_number):
         """Find a Sonarr episode ID by series title and S/E numbers.
 
@@ -706,12 +751,19 @@ class SonarrClient(_ArrClientBase):
         # Get episodes and find the ones we want
         episodes = self.get_episodes(series_id)
         target_ids = []
+        has_file_id = None  # first episode with a file (for interactive grab)
+        no_file_ids = []
         for ep in episodes:
             if (ep.get('seasonNumber') == season_number
                     and ep.get('episodeNumber') in episode_numbers):
                 ep_id = ep.get('id')
                 if ep_id is not None:
                     target_ids.append(ep_id)
+                    if ep.get('hasFile'):
+                        if has_file_id is None:
+                            has_file_id = ep_id
+                    else:
+                        no_file_ids.append(ep_id)
 
         if not target_ids:
             if just_added:
@@ -727,6 +779,34 @@ class SonarrClient(_ArrClientBase):
 
         # Clear any stale queue items for this series before searching
         self._clear_unavailable_queue_items(series_id)
+
+        # When prefer_debrid is set and episodes already have files, Sonarr's
+        # automatic search won't grab because the existing files meet the
+        # quality cutoff.  Use interactive search + manual push to bypass it.
+        # Season packs typically cover all episodes, so one interactive search
+        # for the first has_file episode is usually sufficient.
+        if prefer_debrid is True and has_file_id is not None:
+            grabbed = self._grab_debrid_release(has_file_id, title=f'{title} S{season_number:02d}')
+            # Search any episodes without files normally
+            if no_file_ids:
+                self.search_episodes(no_file_ids)
+            if grabbed:
+                return {
+                    'status': 'sent',
+                    'service': 'sonarr',
+                    'message': f'Force-grabbed debrid release for {title} S{season_number:02d}',
+                }
+            # Interactive grab failed — no_file_ids already searched above,
+            # only re-search has_file episodes as last resort (won't upgrade
+            # but keeps the command flow consistent for status tracking).
+            has_file_only = [eid for eid in target_ids if eid not in set(no_file_ids)]
+            cmd = self.search_episodes(has_file_only or target_ids)
+            return {
+                'status': 'sent',
+                'service': 'sonarr',
+                'message': f'Searching for {len(target_ids)} episode(s) of {title} S{season_number:02d}',
+                'command_id': cmd.get('id') if cmd else None,
+            }
 
         # Trigger search
         cmd = self.search_episodes(target_ids)
@@ -1360,6 +1440,41 @@ class RadarrClient(_ArrClientBase):
         result = self._get('/api/v3/release', {'movieId': movie_id})
         return result if isinstance(result, list) else []
 
+    def push_release(self, release):
+        """Push a release for manual download, bypassing quality cutoff."""
+        return self._post('/api/v3/release', release)
+
+    def _grab_debrid_release(self, movie_id, title=''):
+        """Interactive search + force grab of a torrent release for a movie.
+
+        Used when prefer_debrid=True and the movie already has a file at
+        cutoff quality.  Bypasses quality cutoff via manual push.
+
+        Returns True if a release was pushed, False otherwise.
+        """
+        releases = self.get_movie_releases(movie_id)
+        if not releases:
+            logger.debug(f"[radarr] No releases found for movie {movie_id}")
+            return False
+        torrents = [
+            r for r in releases
+            if r.get('protocol') == 'torrent'
+            and not r.get('rejected', False)
+        ]
+        if not torrents:
+            logger.debug(f"[radarr] No usable torrent releases for movie {movie_id}")
+            return False
+        best = torrents[0]
+        result = self.push_release(best)
+        if result is not None:
+            logger.info(
+                f"[radarr] Force-grabbed debrid release for {title or f'movie {movie_id}'}: "
+                f"{best.get('title', '?')}"
+            )
+            return True
+        logger.warning(f"[radarr] Failed to push release for movie {movie_id}")
+        return False
+
     def get_recent_grabs(self, page_size=50):
         """Fetch recent 'grabbed' history events.
 
@@ -1434,6 +1549,18 @@ class RadarrClient(_ArrClientBase):
 
             # Clear any stale queue items for this movie before searching
             self._clear_unavailable_queue_items(movie_id)
+
+            # When prefer_debrid is set and movie already has a file, use
+            # interactive search + manual push to bypass quality cutoff.
+            if prefer_debrid is True and movie.get('hasFile'):
+                grabbed = self._grab_debrid_release(movie_id, title=title)
+                if grabbed:
+                    return {
+                        'status': 'sent',
+                        'service': 'radarr',
+                        'message': f'Force-grabbed debrid release for {title}',
+                    }
+                # Fall through to normal search as last resort
 
             cmd = self.search_movie(movie_id)
             if cmd is None:

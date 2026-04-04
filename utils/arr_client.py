@@ -75,7 +75,7 @@ class _ArrClientBase:
         self._add_auth(req)
 
         try:
-            with urllib.request.urlopen(req, timeout=timeout or _TIMEOUT) as resp:
+            with urllib.request.urlopen(req, timeout=_TIMEOUT if timeout is None else timeout) as resp:
                 raw = resp.read(50 * 1024 * 1024)
                 if not raw:
                     return {}

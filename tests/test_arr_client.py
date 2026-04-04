@@ -358,7 +358,7 @@ class TestSonarrClient:
 
     @patch('urllib.request.urlopen')
     def test_ensure_and_search_prefer_debrid_force_grabs_when_has_file(self, mock_urlopen, sonarr):
-        """prefer_debrid=True with existing files should interactive-grab each episode."""
+        """prefer_debrid=True with existing files should interactive-grab and break on success."""
         sonarr._blackhole_tag_id = 7
         responses = [
             _mock_urlopen([{'id': 5, 'title': 'Tulsa King', 'tmdbId': 200, 'tags': [7]}]),  # find
@@ -367,21 +367,41 @@ class TestSonarrClient:
                 {'id': 101, 'seasonNumber': 1, 'episodeNumber': 2, 'hasFile': True},
             ]),
             _mock_urlopen({'records': []}),  # queue cleanup
-            # Episode 100 interactive search + push
+            # Episode 100 interactive search + push — succeeds, loop breaks
             _mock_urlopen([
-                {'guid': 'ep1', 'indexerId': 2, 'protocol': 'torrent', 'title': 'S01E01', 'rejected': True},
+                {'guid': 'pack', 'indexerId': 2, 'protocol': 'torrent', 'title': 'Season.Pack', 'rejected': True},
             ]),
             _mock_urlopen({'id': 99}),
-            # Episode 101 interactive search + push
-            _mock_urlopen([
-                {'guid': 'ep2', 'indexerId': 2, 'protocol': 'torrent', 'title': 'S01E02', 'rejected': True},
-            ]),
-            _mock_urlopen({'id': 98}),
+            # Episode 101 is NOT searched — season pack covers it
         ]
         mock_urlopen.side_effect = responses
         result = sonarr.ensure_and_search('Tulsa King', 200, 1, [1, 2], prefer_debrid=True)
         assert result['status'] == 'sent'
-        assert 'Force-grabbed 2' in result['message']
+        assert 'Force-grabbed' in result['message']
+        # Only 5 API calls: find + episodes + queue + release search + push
+        assert mock_urlopen.call_count == 5
+
+    @patch('urllib.request.urlopen')
+    def test_ensure_and_search_prefer_debrid_tries_next_on_failure(self, mock_urlopen, sonarr):
+        """If first episode grab fails, try next episode."""
+        sonarr._blackhole_tag_id = 7
+        responses = [
+            _mock_urlopen([{'id': 5, 'title': 'Show', 'tmdbId': 200, 'tags': [7]}]),
+            _mock_urlopen([
+                {'id': 100, 'seasonNumber': 1, 'episodeNumber': 1, 'hasFile': True},
+                {'id': 101, 'seasonNumber': 1, 'episodeNumber': 2, 'hasFile': True},
+            ]),
+            _mock_urlopen({'records': []}),  # queue cleanup
+            _mock_urlopen([]),  # ep 100: no releases
+            _mock_urlopen([  # ep 101: has torrent
+                {'guid': 'found', 'indexerId': 2, 'protocol': 'torrent', 'title': 'S01E02', 'rejected': True},
+            ]),
+            _mock_urlopen({'id': 99}),  # push
+        ]
+        mock_urlopen.side_effect = responses
+        result = sonarr.ensure_and_search('Show', 200, 1, [1, 2], prefer_debrid=True)
+        assert result['status'] == 'sent'
+        assert 'Force-grabbed' in result['message']
 
     @patch('urllib.request.urlopen')
     def test_ensure_and_search_prefer_debrid_mixed_has_file_and_no_file(self, mock_urlopen, sonarr):

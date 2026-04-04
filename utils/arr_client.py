@@ -787,11 +787,15 @@ class SonarrClient(_ArrClientBase):
         # When prefer_debrid is set and episodes already have files, Sonarr's
         # automatic search won't grab because the existing files meet the
         # quality cutoff.  Use interactive search + manual push to bypass it.
+        # Try each has_file episode until one succeeds — season packs cover
+        # all episodes so one successful grab is typically sufficient.
+        # Subsequent episodes are handled on the next retry cycle.
         if prefer_debrid is True and has_file_ids:
-            grabbed = 0
+            grabbed = False
             for hf_id in has_file_ids:
                 if self._grab_debrid_release(hf_id, title=f'{title} S{season_number:02d}'):
-                    grabbed += 1
+                    grabbed = True
+                    break  # season pack likely covers remaining episodes
             # Search any episodes without files normally
             if no_file_ids:
                 self.search_episodes(no_file_ids)
@@ -799,11 +803,11 @@ class SonarrClient(_ArrClientBase):
                 return {
                     'status': 'sent',
                     'service': 'sonarr',
-                    'message': f'Force-grabbed {grabbed} debrid release(s) for {title} S{season_number:02d}',
+                    'message': f'Force-grabbed debrid release for {title} S{season_number:02d}',
                 }
             # All interactive grabs failed — no_file_ids already searched above,
             # only re-search has_file episodes as last resort.
-            cmd = self.search_episodes(has_file_ids or target_ids)
+            cmd = self.search_episodes(has_file_ids)
             return {
                 'status': 'sent',
                 'service': 'sonarr',

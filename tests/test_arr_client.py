@@ -432,12 +432,11 @@ class TestSonarrClient:
         assert 'Force-grabbed' not in result['message']
 
     @patch('urllib.request.urlopen')
-    def test_grab_debrid_release_skips_rejected(self, mock_urlopen, sonarr):
-        """Rejected torrent releases should be filtered out."""
+    def test_grab_debrid_release_ignores_rejected_flag(self, mock_urlopen, sonarr):
+        """Rejected flag is ignored — force-grab bypasses quality cutoff."""
         responses = [
             _mock_urlopen([
-                {'guid': 'bad', 'indexerId': 1, 'protocol': 'torrent', 'title': 'Bad', 'rejected': True},
-                {'guid': 'good', 'indexerId': 2, 'protocol': 'torrent', 'title': 'Good', 'rejected': False},
+                {'guid': 'first', 'indexerId': 1, 'protocol': 'torrent', 'title': 'Release', 'rejected': True},
             ]),
             _mock_urlopen({'id': 1}),  # push
         ]
@@ -445,7 +444,19 @@ class TestSonarrClient:
         result = sonarr._grab_debrid_release(100, title='Test')
         assert result is True
         push_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
-        assert push_body['guid'] == 'good'
+        assert push_body['guid'] == 'first'
+
+    @patch('urllib.request.urlopen')
+    def test_grab_debrid_release_skips_usenet(self, mock_urlopen, sonarr):
+        """Only torrent releases should be grabbed, not usenet."""
+        responses = [
+            _mock_urlopen([
+                {'guid': 'nzb', 'indexerId': 1, 'protocol': 'usenet', 'title': 'NZB'},
+            ]),
+        ]
+        mock_urlopen.side_effect = responses
+        result = sonarr._grab_debrid_release(100, title='Test')
+        assert result is False
 
     # --- _fix_indexer_routing: torrent indexer debrid tag ---
 

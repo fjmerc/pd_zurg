@@ -107,7 +107,7 @@ Developer reference for pd_zurg internals. Complements [CLAUDE.md](CLAUDE.md) (r
 | `utils/processes.py` | Child process lifecycle | `ProcessHandler`, `register_process()`, `shutdown_all_processes()` |
 | `utils/blackhole.py` | Torrent submission + symlink creation | `setup()`, `stop()`, `BlackholeWatcher` class |
 | `utils/library.py` | Mount + local library scanning | `get_scanner()`, `LibraryScanner` class |
-| `utils/library_prefs.py` | Per-title source preferences | `set_preference()`, `get_all_preferences()`, `execute_pending()` |
+| `utils/library_prefs.py` | Per-title source preferences and pending state | `set_preference()`, `get_all_preferences()`, `update_pending_error()`, `set_pending_warned()` |
 | `utils/arr_client.py` | Sonarr/Radarr/Overseerr API | `SonarrClient`, `RadarrClient`, `OverseerrClient` |
 | `utils/debrid_client.py` | Debrid provider APIs (RD/AD/TB) | `RealDebridClient`, `AllDebridClient`, `TorBoxClient` |
 | `utils/search.py` | Torrentio search + debrid add | `search_torrents()`, `add_torrent_to_debrid()` |
@@ -225,6 +225,13 @@ LibraryScanner.scan() — two-phase design
   └─ Phase 2: _scan_effects()  [side effects, ~30-60 seconds]
       ├─ Enforce preferences: execute pending prefer-local/prefer-debrid transitions
       ├─ Search missing: trigger Sonarr/Radarr searches for missing episodes
+      │   (records last_error, retry_count, next_retry_at on pending entries)
+      ├─ Recover local fallback: re-route completed local-fallback downloads
+      ├─ Clear resolved: remove pending entries whose target source arrived
+      ├─ Escalate stuck: mark to-debrid → debrid-unavailable after threshold
+      │   (DEBRID_UNAVAILABLE_THRESHOLD_DAYS, default 3)
+      ├─ Warn stalled: send pending_warning notification for items pending 24h+
+      │   (PENDING_WARNING_HOURS, default 24; set 0 to disable)
       ├─ Create debrid symlinks: organized symlinks in local library dirs
       │   (uses arr's canonical folder name, NOT torrent folder name)
       └─ Trigger rescans: Sonarr rescan_series() / Radarr rescan_movie()
@@ -407,7 +414,7 @@ check_path = target.replace(BLACKHOLE_SYMLINK_TARGET_BASE, BLACKHOLE_RCLONE_MOUN
 | `/config/history.jsonl` | JSONL | `utils/history.py` | Event audit log (append-only) |
 | `/config/blocklist.json` | JSON | `utils/blocklist.py` | Blocked torrent hashes + titles |
 | `/config/library_prefs.json` | JSON | `utils/library_prefs.py` | Per-title prefer-local/prefer-debrid |
-| `/config/library_pending.json` | JSON | `utils/library_prefs.py` | Pending preference transitions |
+| `/config/library_pending.json` | JSON | `utils/library_prefs.py` | Pending preference transitions (direction, created, last_searched, episodes, last_error, retry_count, next_retry_at, warned_at) |
 | `/config/tmdb_cache.json` | JSON | `utils/tmdb.py` | TMDB metadata cache (7-day TTL) |
 | `/config/backups/{date}/` | Mixed | `scheduled_tasks.py` | Daily config backups (keep last 7) |
 | `/zurg/RD/config.yml` | YAML | `zurg/setup.py` | Zurg RealDebrid config |
@@ -465,7 +472,7 @@ All tasks registered in `scheduled_tasks.register_all()`, executed by `task_sche
 | `audit_download_routing` | 6h | 5min | Blackhole + (Sonarr or Radarr) | Modifies arr download client tags, indexer routing |
 | `clean_stale_queue` | 15min | 2min | Blackhole + (Sonarr or Radarr) | Deletes stale queue items from arr |
 | `detect_stale_grabs` | 15min | 10min | Blackhole + (Sonarr or Radarr) | Re-triggers searches for silently failed grabs |
-| `library_scan` | 1h | 2min | Status UI enabled | Creates symlinks, triggers arr rescans, TMDB API calls |
+| `library_scan` | 1h | 2min | Status UI enabled | Enforces preferences, escalates stuck pending, warns stalled (24h+), creates symlinks, triggers arr rescans, TMDB API calls |
 | `verify_symlinks` | 6h | 10min | Blackhole symlinks enabled | Deletes/repairs broken symlinks, cleans empty dirs, optionally triggers arr re-search |
 | `enforce_preferences` | 6h | 6h | Status UI + `LIBRARY_PREFERENCE_AUTO_ENFORCE` | Deletes debrid torrents or local files based on preferences |
 | `housekeeping` | 24h | 1h | Always | Cleans stale pending state, empty dirs, old .meta files |
@@ -544,6 +551,31 @@ Debrid returns terminal error (magnet_error, virus, dead, etc.):
     → blocklist.add(info_hash, title, reason)
     → Future submissions with same hash are silently skipped
     → Visible in WebUI and via /api/blocklist
+```
+
+### Pending Item Escalation and Warnings
+
+```
+_escalate_stuck_pending() runs every library_scan (default: 1h):
+  ├─ Check: to-debrid entries older than DEBRID_UNAVAILABLE_THRESHOLD_DAYS (default: 3)
+  ├─ Escalate: direction → 'debrid-unavailable' (stops automatic retries)
+  ├─ Notify: 'debrid_unavailable' event with list of escalated titles
+  └─ History: log event per title
+
+_warn_stalled_pending() runs after escalation in same scan:
+  ├─ Check: to-debrid entries older than PENDING_WARNING_HOURS (default: 24; 0=disabled)
+  ├─ Guard: skip if warned_at already set (one notification per item)
+  ├─ Notify: 'pending_warning' event with last_error context
+  └─ Track: set warned_at timestamp to prevent repeats
+```
+
+### Blackhole Alt-Exhaustion
+
+```
+_try_alternative_release() on all alternatives failed:
+  ├─ Move original file → failed/ directory
+  ├─ Notify: 'download_error' — "All Alternatives Failed"
+  └─ History: log 'failed' event with detail
 ```
 
 ### Mount Liveness Probe

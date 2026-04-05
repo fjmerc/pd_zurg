@@ -125,7 +125,11 @@ __NAV_HTML__
 .card-title{font-size:.9em;font-weight:500;color:var(--text);line-height:1.35}
 .card-year{color:var(--text2);font-weight:400}
 .card-meta{font-size:.78em;color:var(--text2)}
-.pending-detail{font-size:.68em;color:var(--orange);opacity:.85;display:block;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px}
+.badge-pending.has-error{border-color:#db6d2866}
+.badge-pending.has-error::after{content:'\26A0';margin-left:4px;font-size:.85em}
+.pending-callout{font-size:.78em;color:var(--orange);margin-top:6px;padding:6px 10px;background:#db6d280a;border-left:3px solid var(--orange);border-radius:0 4px 4px 0;line-height:1.5}
+[data-theme="light"] .pending-callout{background:#bc4c000d;border-left-color:#bc4c00;color:#bc4c00}
+.pending-callout-icon{margin-right:3px}
 .card-badges{display:flex;gap:5px;flex-wrap:wrap}
 
 /* Source badges */
@@ -271,6 +275,7 @@ __NAV_HTML__
 @keyframes pending-shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 [data-theme="light"] .badge-pending{background:#bc4c001a;border-color:#bc4c0040;color:#bc4c00}
 [data-theme="light"] .badge-pending::before{background:#bc4c00}
+[data-theme="light"] .badge-pending.has-error{border-color:#bc4c0066}
 .badge-migrating{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:#2dd4bf;border:1px solid #2dd4bf33;position:relative;overflow:hidden;background:linear-gradient(90deg,#2dd4bf18 0%,#2dd4bf08 50%,#2dd4bf18 100%);background-size:200% 100%;animation:pending-shimmer 2s ease-in-out infinite;vertical-align:middle}
 .ep-source .badge-migrating{margin-left:5px}
 .badge-migrating::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:#2dd4bf;margin-right:4px;vertical-align:middle;animation:pulse-dot 1s ease-in-out infinite}
@@ -533,6 +538,9 @@ function esc(s) {
   const d = document.createElement('div');
   d.appendChild(document.createTextNode(String(s ?? '')));
   return d.innerHTML;
+}
+function escAttr(s) {
+  return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 function relativeTime(isoStr) {
@@ -962,6 +970,26 @@ function _formatBytes(bytes) {
 }
 
 
+// Returns a plain-text string. Callers must pass through esc() before inserting into HTML.
+function formatPendingDetail(pe) {
+  if (!pe || !pe.last_error) return '';
+  var parts = [];
+  var rc = Number(pe.retry_count) || 0;
+  if (rc > 0) parts.push('failed ' + rc + (rc === 1 ? ' time' : ' times'));
+  else parts.push('first attempt failed');
+  parts.push(pe.last_error);
+  if (pe.next_retry_at) {
+    var nra = new Date(pe.next_retry_at);
+    var diffMs = nra - Date.now();
+    if (diffMs > 0) {
+      parts.push('next retry at ' + nra.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}));
+    } else {
+      parts.push('retry overdue');
+    }
+  }
+  return parts.length ? parts.join(' \u00B7 ') : '';
+}
+
 function computeProgress(item) {
   var nk = normTitle(item.title);
   var isPending = !!_pending[nk];
@@ -1067,28 +1095,16 @@ function buildCard(item, index) {
     } // end else (not debrid-unavailable/local-fallback)
   }
 
-  // Pending error context — show last_error, retry count, time to next retry
-  var pendingDetail = '';
-  if (_pending[nk] && _pending[nk].last_error) {
-    var pe2 = _pending[nk];
-    var parts = [];
-    if (pe2.retry_count > 0) parts.push(pe2.retry_count + (pe2.retry_count === 1 ? ' retry' : ' retries'));
-    if (pe2.last_error) parts.push(pe2.last_error);
-    if (pe2.next_retry_at) {
-      var nra = new Date(pe2.next_retry_at);
-      var diffMs = nra - Date.now();
-      if (diffMs > 0) {
-        var diffH = Math.floor(diffMs / 3600000);
-        var diffM = Math.ceil((diffMs % 3600000) / 60000);
-        parts.push('next retry in ' + (diffH > 0 ? diffH + 'h ' : '') + diffM + 'm');
-      }
-    }
-    if (parts.length) pendingDetail = '<span class="card-meta pending-detail">' + esc(parts.join(' \u00B7 ')) + '</span>';
+  // Add warning indicator to "Searching" badge when errors exist
+  if (_pending[nk] && _pending[nk].last_error && pendingBadge.indexOf('badge-pending') !== -1) {
+    var errTooltip = formatPendingDetail(_pending[nk]);
+    pendingBadge = pendingBadge.replace('class="badge-pending"',
+      'class="badge-pending has-error" title="' + escAttr(errTooltip) + '"');
   }
   var sourceBadges = buildBadges(item.source);
   var statusLine = '';
-  if (pendingBadge || pendingDetail || metaLine) {
-    statusLine = '<div class="card-status">' + pendingBadge + pendingDetail + metaLine + '</div>';
+  if (pendingBadge || metaLine) {
+    statusLine = '<div class="card-status">' + pendingBadge + metaLine + '</div>';
   }
   var isSelected = !!_selectedItems[nk];
   var checkboxHtml = '<div class="card-checkbox' + (isSelected ? ' checked' : '') + '" role="checkbox" aria-checked="' + (isSelected ? 'true' : 'false') + '"></div>';
@@ -1976,27 +1992,18 @@ function _renderMovieDetail(movie, meta) {
   } else if (moviePeDir === 'to-local-fallback') {
     html += ' <span class="badge-fallback">Downloading Locally</span>';
   }
-  if (moviePe && moviePe.last_error) {
-    var mParts = [];
-    if (moviePe.retry_count > 0) mParts.push(moviePe.retry_count + (moviePe.retry_count === 1 ? ' retry' : ' retries'));
-    mParts.push(moviePe.last_error);
-    if (moviePe.next_retry_at) {
-      var mNra = new Date(moviePe.next_retry_at);
-      var mDiff = mNra - Date.now();
-      if (mDiff > 0) {
-        var mH = Math.floor(mDiff / 3600000);
-        var mM = Math.ceil((mDiff % 3600000) / 60000);
-        mParts.push('next retry in ' + (mH > 0 ? mH + 'h ' : '') + mM + 'm');
-      }
-    }
-    if (mParts.length) html += '<div class="pending-detail" style="margin-top:4px;max-width:none;white-space:normal">' + esc(mParts.join(' \u00B7 ')) + '</div>';
-  }
   if (movie.quality && movie.quality.label) {
     html += ' ' + _qualityBadge(movie.quality);
     var movieSzStr = _formatBytes(movie.size_bytes);
     if (movieSzStr) html += ' <span class="ep-size">' + esc(movieSzStr) + '</span>';
   }
   html += '</div>';
+  var movieErrText = (moviePeDir === 'to-debrid' || moviePeDir === 'to-local') ? formatPendingDetail(moviePe) : '';
+  if (movieErrText) {
+    html += '<div class="pending-callout" role="note" aria-label="Search error details">'
+          + '<span class="pending-callout-icon">\u26A0</span> '
+          + esc(movieErrText) + '</div>';
+  }
   if (meta) {
     var runtimeParts = [];
     if (meta.runtime) runtimeParts.push(esc(String(meta.runtime)) + ' min');
@@ -2368,20 +2375,12 @@ function _renderShowDetail(show, meta) {
   html += '</h2>';
   html += '<div class="card-badges">' + buildBadges(show.source) + '</div>';
   var showPe = _pending[nk];
-  if (showPe && showPe.last_error) {
-    var sParts = [];
-    if (showPe.retry_count > 0) sParts.push(showPe.retry_count + (showPe.retry_count === 1 ? ' retry' : ' retries'));
-    sParts.push(showPe.last_error);
-    if (showPe.next_retry_at) {
-      var sNra = new Date(showPe.next_retry_at);
-      var sDiff = sNra - Date.now();
-      if (sDiff > 0) {
-        var sH = Math.floor(sDiff / 3600000);
-        var sM = Math.ceil((sDiff % 3600000) / 60000);
-        sParts.push('next retry in ' + (sH > 0 ? sH + 'h ' : '') + sM + 'm');
-      }
-    }
-    if (sParts.length) html += '<div class="pending-detail" style="margin-top:4px;max-width:none;white-space:normal">' + esc(sParts.join(' \u00B7 ')) + '</div>';
+  var showPeDir = showPe ? (showPe.direction || '') : '';
+  var showErrText = (showPeDir === 'to-debrid' || showPeDir === 'to-local') ? formatPendingDetail(showPe) : '';
+  if (showErrText) {
+    html += '<div class="pending-callout" role="note" aria-label="Search error details">'
+          + '<span class="pending-callout-icon">\u26A0</span> '
+          + esc(showErrText) + '</div>';
   }
   if (meta && meta.overview) html += '<div class="detail-overview" onclick="this.classList.toggle(\'expanded\')">' + esc(meta.overview) + '</div>';
   if ((show.source === 'debrid' || show.source === 'both') && !_downloadServices.show) {

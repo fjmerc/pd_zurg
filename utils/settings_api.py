@@ -56,6 +56,9 @@ ENV_SCHEMA = [
             ('RCLONE_DIR_CACHE_TIME', 'Dir Cache Time', 'string', False, 'How long to cache directory listings (e.g., 10s, 5m)'),
             ('RCLONE_VFS_READ_CHUNK_SIZE', 'VFS Read Chunk Size', 'string', False, 'Initial chunk size for streaming reads (e.g., 8M)'),
             ('RCLONE_VFS_READ_CHUNK_SIZE_LIMIT', 'VFS Read Chunk Size Limit', 'string', False, 'Max chunk size (e.g., 64M, off to disable)'),
+            ('RCLONE_VFS_CACHE_MODE', 'VFS Cache Mode', 'select:off,minimal,writes,full', False, 'VFS file caching mode (default: off for FUSE, full for NFS)'),
+            ('RCLONE_VFS_CACHE_MAX_SIZE', 'VFS Cache Max Size', 'string', False, 'Max total size of VFS cache (e.g., 10G)'),
+            ('RCLONE_VFS_CACHE_MAX_AGE', 'VFS Cache Max Age', 'string', False, 'Max age of VFS cache files (e.g., 1h, 24h)'),
             ('RCLONE_BUFFER_SIZE', 'Buffer Size', 'string', False, 'In-memory buffer per open file (e.g., 16M)'),
             ('RCLONE_TRANSFERS', 'Transfers', 'string', False, 'Number of parallel transfers'),
         ],
@@ -130,6 +133,7 @@ ENV_SCHEMA = [
             ('BLACKHOLE_MOUNT_POLL_INTERVAL', 'Mount Poll Interval (seconds)', 'number:5-120', False, 'How often to check for content on mount (default: 10)'),
             ('BLACKHOLE_SYMLINK_MAX_AGE', 'Symlink Max Age (hours)', 'number:0-720', False, 'Remove symlink dirs older than this (0=disabled, default: 72)'),
             ('SYMLINK_REPAIR_AUTO_SEARCH', 'Repair Auto-Search', 'boolean', False, 'When broken symlinks can\'t be repaired from mount, trigger arr re-search'),
+            ('BLOCKLIST_AUTO_ADD', 'Auto-Blocklist Failed Torrents', 'boolean', False, 'Automatically blocklist torrents that hit terminal debrid errors (default: true)'),
             ('BLACKHOLE_DEDUP_ENABLED', 'Enable Local Library Dedup', 'boolean', False, 'Skip torrents that match content already in your local library'),
             ('BLACKHOLE_LOCAL_LIBRARY_TV', 'Local TV Library Path', 'string', False, 'Path to local TV library (for dedup and auto debrid symlinks)'),
             ('BLACKHOLE_LOCAL_LIBRARY_MOVIES', 'Local Movie Library Path', 'string', False, 'Path to local movie library (for dedup and auto debrid symlinks)'),
@@ -442,7 +446,8 @@ def validate_env_values(values):
             )
 
     # URL format validation
-    url_fields = ['PLEX_ADDRESS', 'JF_ADDRESS', 'SEERR_ADDRESS', 'FLARESOLVERR_URL']
+    url_fields = ['PLEX_ADDRESS', 'JF_ADDRESS', 'SEERR_ADDRESS', 'FLARESOLVERR_URL',
+                  'SONARR_URL', 'RADARR_URL', 'TORRENTIO_URL']
     for key in url_fields:
         val = values.get(key, '')
         if val and not _is_valid_url(val):

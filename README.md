@@ -277,9 +277,9 @@ All settings are documented in [`.env.example`](.env.example) with inline commen
 | `TORBOX_API_KEY` | [TorBox API key](https://torbox.app/settings) (alternative to RD) | |
 | `RCLONE_MOUNT_NAME` | Name for the rclone mount | |
 | `RCLONE_LOG_LEVEL` | [Log level](https://rclone.org/docs/#log-level-level) for rclone. Set to `OFF` to suppress | `NOTICE` |
-| `RCLONE_DIR_CACHE_TIME` | [Directory cache duration](https://rclone.org/commands/rclone_mount/#vfs-directory-cache). Recommended: `10s` | `5m` |
+| `RCLONE_DIR_CACHE_TIME` | [Directory cache duration](https://rclone.org/commands/rclone_mount/#vfs-directory-cache) | `10s` |
 | `RCLONE_CACHE_DIR` | [Cache directory](https://rclone.org/docs/#cache-dir-dir) | |
-| `RCLONE_VFS_CACHE_MODE` | [VFS cache mode](https://rclone.org/commands/rclone_mount/#vfs-file-caching) | |
+| `RCLONE_VFS_CACHE_MODE` | [VFS cache mode](https://rclone.org/commands/rclone_mount/#vfs-file-caching) | `off` (FUSE) / `full` (NFS) |
 | `RCLONE_VFS_CACHE_MAX_SIZE` | Max VFS cache size | |
 | `RCLONE_VFS_CACHE_MAX_AGE` | Max VFS cache age | |
 | `RCLONE_VFS_READ_CHUNK_SIZE` | Initial read chunk size | |
@@ -405,6 +405,7 @@ All settings are documented in [`.env.example`](.env.example) with inline commen
 | `TORRENTIO_URL` | Torrentio API base URL (e.g., `https://torrentio.strem.fun`). Enables interactive torrent search in the Library detail view with debrid cache status and one-click add | |
 | `HISTORY_RETENTION_DAYS` | Days to keep activity history events | `30` |
 | `BLOCKLIST_AUTO_ADD` | Auto-blocklist torrents that hit terminal debrid errors | `true` |
+| `LIBRARY_PREFERENCE_AUTO_ENFORCE` | Automatically switch sources when content arrives matching a stored preference (prefer-local/prefer-debrid) | `false` |
 
 </details>
 

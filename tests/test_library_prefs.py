@@ -228,3 +228,97 @@ class TestPending:
         lp.set_pending('show', [{'season': 1, 'episode': 1}], 'to-debrid')
         lp.clear_pending('show')
         assert 'show' not in lp.get_all_pending()
+
+
+# ---------------------------------------------------------------------------
+# Pending error tracking
+# ---------------------------------------------------------------------------
+
+class TestUpdatePendingError:
+
+    def test_stores_error_and_increments_retry(self):
+        lp.set_pending('show', [{'season': 1, 'episode': 1}], 'to-debrid')
+        lp.update_pending_error('show', 'Sonarr: connection refused')
+        entry = lp.get_all_pending()['show']
+        assert entry['last_error'] == 'Sonarr: connection refused'
+        assert entry['retry_count'] == 1
+
+    def test_increments_retry_count_on_successive_calls(self):
+        lp.set_pending('show', [{'season': 1, 'episode': 1}], 'to-debrid')
+        lp.update_pending_error('show', 'error 1')
+        lp.update_pending_error('show', 'error 2')
+        lp.update_pending_error('show', 'error 3')
+        entry = lp.get_all_pending()['show']
+        assert entry['retry_count'] == 3
+        assert entry['last_error'] == 'error 3'
+
+    def test_no_increment_when_flag_false(self):
+        lp.set_pending('show', [{'season': 1, 'episode': 1}], 'to-debrid')
+        lp.update_pending_error('show', 'first error')
+        lp.update_pending_error('show', 'waiting status', increment_retry=False)
+        entry = lp.get_all_pending()['show']
+        assert entry['retry_count'] == 1  # not incremented
+        assert entry['last_error'] == 'waiting status'
+
+    def test_stores_next_retry_at(self):
+        lp.set_pending('show', [{'season': 1, 'episode': 1}], 'to-debrid')
+        lp.update_pending_error('show', 'waiting', next_retry_at='2026-04-05T16:00:00+00:00')
+        entry = lp.get_all_pending()['show']
+        assert entry['next_retry_at'] == '2026-04-05T16:00:00+00:00'
+
+    def test_noop_for_missing_entry(self):
+        lp.update_pending_error('nonexistent', 'some error')
+        assert lp.get_all_pending() == {}
+
+    def test_preserves_existing_fields(self):
+        lp.set_pending('show', [{'season': 1, 'episode': 1}], 'to-debrid')
+        lp.update_pending_error('show', 'some error')
+        entry = lp.get_all_pending()['show']
+        assert entry['direction'] == 'to-debrid'
+        assert len(entry['episodes']) == 1
+        assert 'created' in entry
+
+    def test_clears_stale_next_retry_at_on_real_error(self):
+        """When a real error replaces a 'waiting' status, stale next_retry_at should be cleared."""
+        lp.set_pending('show', [{'season': 1, 'episode': 1}], 'to-debrid')
+        # First: set a "waiting" status with next_retry_at
+        lp.update_pending_error('show', 'Waiting for retry',
+                                next_retry_at='2026-04-05T16:00:00+00:00',
+                                increment_retry=False)
+        entry = lp.get_all_pending()['show']
+        assert entry['next_retry_at'] == '2026-04-05T16:00:00+00:00'
+
+        # Then: a real error comes in without next_retry_at
+        lp.update_pending_error('show', 'Sonarr: connection refused')
+        entry = lp.get_all_pending()['show']
+        assert entry['last_error'] == 'Sonarr: connection refused'
+        assert 'next_retry_at' not in entry  # stale value should be cleared
+
+
+# ---------------------------------------------------------------------------
+# Pending warned_at tracking
+# ---------------------------------------------------------------------------
+
+class TestSetPendingWarned:
+
+    def test_sets_warned_at(self):
+        lp.set_pending('show', [{'season': 1, 'episode': 1}], 'to-debrid')
+        lp.set_pending_warned('show')
+        entry = lp.get_all_pending()['show']
+        assert 'warned_at' in entry
+        # Verify it's a valid ISO timestamp
+        dt = datetime.fromisoformat(entry['warned_at'])
+        assert dt.tzinfo is not None
+
+    def test_noop_for_missing_entry(self):
+        lp.set_pending_warned('nonexistent')
+        assert lp.get_all_pending() == {}
+
+    def test_preserves_other_fields(self):
+        lp.set_pending('show', [{'season': 1, 'episode': 1}], 'to-debrid')
+        lp.update_pending_error('show', 'some error')
+        lp.set_pending_warned('show')
+        entry = lp.get_all_pending()['show']
+        assert entry['last_error'] == 'some error'
+        assert entry['direction'] == 'to-debrid'
+        assert 'warned_at' in entry

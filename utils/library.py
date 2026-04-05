@@ -10,7 +10,7 @@ import re
 import threading
 import unicodedata
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote as urllib_quote
 from utils.logger import get_logger
 from utils.quality_parser import parse_quality
@@ -675,6 +675,10 @@ class LibraryScanner:
             self._debrid_unavailable_days = int(os.environ.get('DEBRID_UNAVAILABLE_THRESHOLD_DAYS', '3'))
         except (ValueError, TypeError):
             self._debrid_unavailable_days = 3
+        try:
+            self._pending_warning_hours = int(os.environ.get('PENDING_WARNING_HOURS', '24'))
+        except (ValueError, TypeError):
+            self._pending_warning_hours = 24
         self._last_had_local = None    # None=unknown, True=had local content
         self._local_drop_alerted = False
 
@@ -1012,6 +1016,7 @@ class LibraryScanner:
         self._recover_local_fallback_routing(shows, movies)
         self._clear_resolved_pending(shows, movies)
         self._escalate_stuck_pending()
+        self._warn_stalled_pending()
         self._create_debrid_symlinks(shows, movies, path_index)
         return changed
 
@@ -1417,7 +1422,7 @@ class LibraryScanner:
         if not preferences:
             return
 
-        from utils.library_prefs import get_all_pending, set_pending, touch_pending_searched
+        from utils.library_prefs import get_all_pending, set_pending, touch_pending_searched, update_pending_error
         from utils.tmdb import search_show as tmdb_search_show, search_movie as tmdb_search_movie
 
         # pending is a snapshot; set_pending calls below write new entries
@@ -1486,6 +1491,15 @@ class LibraryScanner:
                             (e['season'], e['episode'])
                             for e in pending_entry.get('episodes', [])
                         }
+                        # Record "waiting" status with next retry time
+                        remaining_h = self._SEARCH_RETRY_HOURS - age_hours
+                        retry_dt = ls_dt + timedelta(hours=self._SEARCH_RETRY_HOURS)
+                        update_pending_error(
+                            pending_norm,
+                            f"Waiting for retry ({remaining_h:.1f}h remaining)",
+                            next_retry_at=retry_dt.isoformat(timespec='seconds'),
+                            increment_retry=False,
+                        )
 
                 # Find local-only episodes not already pending or on cooldown
                 by_season = {}
@@ -1539,14 +1553,19 @@ class LibraryScanner:
                             for en in ep_nums:
                                 new_pending.append({'season': sn, 'episode': en})
                         elif status == 'error':
+                            err_msg = f"Sonarr: {result.get('message', 'unknown error')}"
                             logger.warning(
                                 f"[library] Search failed for {show['title']} S{sn:02d}: "
                                 f"{result.get('message', 'unknown error')}"
                             )
                             self._search_cooldown[(norm, sn)] = now
+                            update_pending_error(pending_norm, err_msg)
+                        else:
+                            update_pending_error(pending_norm, "No debrid results found", increment_retry=False)
                     except Exception as e:
                         logger.error(f"[library] Search error for {show['title']} S{sn:02d}: {e}")
                         self._search_cooldown[(norm, sn)] = now
+                        update_pending_error(pending_norm, f"Sonarr: {e}")
 
                 if new_pending:
                     set_pending(pending_norm, new_pending, 'to-debrid')
@@ -1595,6 +1614,15 @@ class LibraryScanner:
                         except (ValueError, TypeError):
                             pass
                     if not stale:
+                        # Record "waiting" status with next retry time
+                        remaining_h = self._SEARCH_RETRY_HOURS - age_hours
+                        retry_dt = ls_dt + timedelta(hours=self._SEARCH_RETRY_HOURS)
+                        update_pending_error(
+                            pending_norm,
+                            f"Waiting for retry ({remaining_h:.1f}h remaining)",
+                            next_retry_at=retry_dt.isoformat(timespec='seconds'),
+                            increment_retry=False,
+                        )
                         continue  # recent search — skip
                     movie_is_retry = True
                 if (norm, 0) in self._search_cooldown:
@@ -1622,14 +1650,19 @@ class LibraryScanner:
                     if status in ('sent', 'pending'):
                         set_pending(pending_norm, [{'season': 0, 'episode': 0}], 'to-debrid')
                     elif status == 'error':
+                        err_msg = f"Radarr: {result.get('message', 'unknown error')}"
                         logger.warning(
                             f"[library] Search failed for movie {movie['title']}: "
                             f"{result.get('message', 'unknown error')}"
                         )
                         self._search_cooldown[(norm, 0)] = now
+                        update_pending_error(pending_norm, err_msg)
+                    elif status not in ('sent', 'pending'):
+                        update_pending_error(pending_norm, "No debrid results found")
                 except Exception as e:
                     logger.error(f"[library] Search error for movie {movie['title']}: {e}")
                     self._search_cooldown[(norm, 0)] = now
+                    update_pending_error(pending_norm, f"Radarr: {e}")
 
     def _clear_resolved_pending(self, shows, movies):
         """Clear pending entries that are resolved or stale.
@@ -1748,6 +1781,70 @@ class LibraryScanner:
                 notify('debrid_unavailable',
                        f'Debrid Unavailable ({len(escalated)})',
                        f'Content not found on debrid after {threshold_days} days: {summary}',
+                       level='warning')
+            except Exception:
+                pass
+
+    def _warn_stalled_pending(self):
+        """Send notification for items pending > PENDING_WARNING_HOURS.
+
+        Notifies once per item (tracks via 'warned_at' field on pending entry).
+        Only warns for 'to-debrid' direction — items actively searching.
+        Runs after _escalate_stuck_pending() so newly-escalated items are
+        already direction='debrid-unavailable' and won't be warned.
+        """
+        from utils.library_prefs import get_all_pending, set_pending_warned
+
+        threshold_hours = self._pending_warning_hours
+        if threshold_hours <= 0:
+            return  # disabled
+
+        pending = get_all_pending()
+        if not pending:
+            return
+
+        now = datetime.now(timezone.utc)
+        warned = []
+
+        for norm_title, entry in list(pending.items()):
+            if entry.get('direction') != 'to-debrid':
+                continue
+            if entry.get('warned_at'):
+                continue  # already warned
+            created = entry.get('created')
+            if not created:
+                continue
+            try:
+                created_dt = datetime.fromisoformat(created)
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                age_hours = (now - created_dt).total_seconds() / 3600
+                if age_hours >= threshold_hours:
+                    set_pending_warned(norm_title)
+                    warned.append((norm_title, entry))
+                    logger.info(
+                        f"[library] Pending warning for {norm_title!r} "
+                        f"after {age_hours:.0f} hours"
+                    )
+            except (ValueError, TypeError):
+                pass
+
+        if warned:
+            try:
+                from utils.notifications import notify
+                lines = []
+                for title, entry in warned[:5]:
+                    err = entry.get('last_error', '')
+                    line = title
+                    if err:
+                        line += f' ({err})'
+                    lines.append(line)
+                summary = ', '.join(lines)
+                if len(warned) > 5:
+                    summary += f', +{len(warned) - 5} more'
+                notify('pending_warning',
+                       f'Pending Warning ({len(warned)})',
+                       f'Items stuck searching for {threshold_hours}+ hours: {summary}',
                        level='warning')
             except Exception:
                 pass

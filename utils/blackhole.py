@@ -1135,8 +1135,10 @@ class BlackholeWatcher:
             if os.path.exists(dest):
                 base, fext = os.path.splitext(filename)
                 dest = os.path.join(error_dir, f"{base}_{int(time.time())}{fext}")
+            rename_ok = False
             try:
                 os.rename(file_path, dest)
+                rename_ok = True
                 # Mark alt-exhausted in retry metadata
                 meta_path = RetryMeta.meta_path(dest)
                 try:
@@ -1147,6 +1149,18 @@ class BlackholeWatcher:
                     pass
             except OSError as e:
                 logger.warning(f"[blackhole] Could not move {filename} to failed/: {e}")
+
+            # Notify user — all alternatives exhausted, manual intervention needed
+            if _notify:
+                detail = (f'File moved to failed/ — manual intervention required.'
+                          if rename_ok else
+                          f'Could not move to failed/ — file may still be in watch dir.')
+                _notify('download_error', 'Blackhole: All Alternatives Failed',
+                        f'No working alternative releases found for {filename}. {detail}',
+                        level='warning')
+            if _history:
+                _history.log_event('failed', filename, source='blackhole',
+                                   detail='All alternative releases exhausted')
 
     def _try_alt_episode(self, series_name, season, episodes, debrid_handler, orig_filename, orig_path):
         """Try alternative releases for a TV episode via Sonarr."""

@@ -40,6 +40,7 @@ ALL_EVENTS = {
     'symlink_failed',             # Symlink creation failed (mount/path issue)
     # Debrid availability
     'debrid_unavailable',         # Content marked debrid-unavailable after threshold
+    'pending_warning',            # Items stuck in pending for 24+ hours
     'local_fallback_triggered',   # Local download started as debrid fallback
     # Safety
     'blocklist_added',            # Torrent added to blocklist

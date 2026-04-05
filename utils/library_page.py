@@ -125,6 +125,7 @@ __NAV_HTML__
 .card-title{font-size:.9em;font-weight:500;color:var(--text);line-height:1.35}
 .card-year{color:var(--text2);font-weight:400}
 .card-meta{font-size:.78em;color:var(--text2)}
+.pending-detail{font-size:.68em;color:var(--orange);opacity:.85;display:block;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px}
 .card-badges{display:flex;gap:5px;flex-wrap:wrap}
 
 /* Source badges */
@@ -1032,9 +1033,9 @@ function buildCard(item, index) {
 
   // Pending badge — distinguish migrating (available) vs searching (missing)
   var pendingBadge = '';
-  var pnk = normTitle(item.title);
-  if (_pending[pnk]) {
-    var pe = _pending[pnk];
+  var nk = normTitle(item.title);
+  if (_pending[nk]) {
+    var pe = _pending[nk];
     var dir = pe.direction || '';
     if (dir === 'debrid-unavailable') {
       pendingBadge = '<span class="badge-unavailable">Debrid N/A</span>';
@@ -1066,12 +1067,29 @@ function buildCard(item, index) {
     } // end else (not debrid-unavailable/local-fallback)
   }
 
+  // Pending error context — show last_error, retry count, time to next retry
+  var pendingDetail = '';
+  if (_pending[nk] && _pending[nk].last_error) {
+    var pe2 = _pending[nk];
+    var parts = [];
+    if (pe2.retry_count > 0) parts.push(pe2.retry_count + (pe2.retry_count === 1 ? ' retry' : ' retries'));
+    if (pe2.last_error) parts.push(pe2.last_error);
+    if (pe2.next_retry_at) {
+      var nra = new Date(pe2.next_retry_at);
+      var diffMs = nra - Date.now();
+      if (diffMs > 0) {
+        var diffH = Math.floor(diffMs / 3600000);
+        var diffM = Math.ceil((diffMs % 3600000) / 60000);
+        parts.push('next retry in ' + (diffH > 0 ? diffH + 'h ' : '') + diffM + 'm');
+      }
+    }
+    if (parts.length) pendingDetail = '<span class="card-meta pending-detail">' + esc(parts.join(' \u00B7 ')) + '</span>';
+  }
   var sourceBadges = buildBadges(item.source);
   var statusLine = '';
-  if (pendingBadge || metaLine) {
-    statusLine = '<div class="card-status">' + pendingBadge + metaLine + '</div>';
+  if (pendingBadge || pendingDetail || metaLine) {
+    statusLine = '<div class="card-status">' + pendingBadge + pendingDetail + metaLine + '</div>';
   }
-  var nk = normTitle(item.title);
   var isSelected = !!_selectedItems[nk];
   var checkboxHtml = '<div class="card-checkbox' + (isSelected ? ' checked' : '') + '" role="checkbox" aria-checked="' + (isSelected ? 'true' : 'false') + '"></div>';
   return '<div class="poster-card' + (isSelected ? ' selected' : '') + '" data-title="' + esc(item.title) + '" data-type="' + esc(item.type) + '"'
@@ -1958,6 +1976,21 @@ function _renderMovieDetail(movie, meta) {
   } else if (moviePeDir === 'to-local-fallback') {
     html += ' <span class="badge-fallback">Downloading Locally</span>';
   }
+  if (moviePe && moviePe.last_error) {
+    var mParts = [];
+    if (moviePe.retry_count > 0) mParts.push(moviePe.retry_count + (moviePe.retry_count === 1 ? ' retry' : ' retries'));
+    mParts.push(moviePe.last_error);
+    if (moviePe.next_retry_at) {
+      var mNra = new Date(moviePe.next_retry_at);
+      var mDiff = mNra - Date.now();
+      if (mDiff > 0) {
+        var mH = Math.floor(mDiff / 3600000);
+        var mM = Math.ceil((mDiff % 3600000) / 60000);
+        mParts.push('next retry in ' + (mH > 0 ? mH + 'h ' : '') + mM + 'm');
+      }
+    }
+    if (mParts.length) html += '<div class="pending-detail" style="margin-top:4px;max-width:none;white-space:normal">' + esc(mParts.join(' \u00B7 ')) + '</div>';
+  }
   if (movie.quality && movie.quality.label) {
     html += ' ' + _qualityBadge(movie.quality);
     var movieSzStr = _formatBytes(movie.size_bytes);
@@ -2334,6 +2367,22 @@ function _renderShowDetail(show, meta) {
   if (meta && meta.status) html += '<span class="detail-status">' + esc(meta.status) + '</span>';
   html += '</h2>';
   html += '<div class="card-badges">' + buildBadges(show.source) + '</div>';
+  var showPe = _pending[nk];
+  if (showPe && showPe.last_error) {
+    var sParts = [];
+    if (showPe.retry_count > 0) sParts.push(showPe.retry_count + (showPe.retry_count === 1 ? ' retry' : ' retries'));
+    sParts.push(showPe.last_error);
+    if (showPe.next_retry_at) {
+      var sNra = new Date(showPe.next_retry_at);
+      var sDiff = sNra - Date.now();
+      if (sDiff > 0) {
+        var sH = Math.floor(sDiff / 3600000);
+        var sM = Math.ceil((sDiff % 3600000) / 60000);
+        sParts.push('next retry in ' + (sH > 0 ? sH + 'h ' : '') + sM + 'm');
+      }
+    }
+    if (sParts.length) html += '<div class="pending-detail" style="margin-top:4px;max-width:none;white-space:normal">' + esc(sParts.join(' \u00B7 ')) + '</div>';
+  }
   if (meta && meta.overview) html += '<div class="detail-overview" onclick="this.classList.toggle(\'expanded\')">' + esc(meta.overview) + '</div>';
   if ((show.source === 'debrid' || show.source === 'both') && !_downloadServices.show) {
     html += '<div style="font-size:.82em;color:var(--text3);margin-top:8px">To switch episodes to local, configure <a href="/settings">Sonarr or Overseerr</a> in Settings.</div>';

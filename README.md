@@ -406,6 +406,8 @@ All settings are documented in [`.env.example`](.env.example) with inline commen
 | `HISTORY_RETENTION_DAYS` | Days to keep activity history events | `30` |
 | `BLOCKLIST_AUTO_ADD` | Auto-blocklist torrents that hit terminal debrid errors | `true` |
 | `LIBRARY_PREFERENCE_AUTO_ENFORCE` | Automatically switch sources when content arrives matching a stored preference (prefer-local/prefer-debrid) | `false` |
+| `DEBRID_UNAVAILABLE_THRESHOLD_DAYS` | Days of failed debrid searches before marking content as debrid-unavailable and stopping retries | `3` |
+| `PENDING_WARNING_HOURS` | Hours before sending a `pending_warning` notification for items stuck searching. Set to `0` to disable | `24` |
 
 </details>
 

@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Pending failure context**: Pending entries now track `last_error`, `retry_count`, and `next_retry_at` fields. The library UI shows error reasons, retry counts, and time-until-next-retry for items stuck in "Searching" state, replacing the opaque "Searching" badge with actionable context.
+- **Pending warning notifications**: New `pending_warning` notification event fires once when items are stuck searching for 24+ hours (configurable via `PENDING_WARNING_HOURS` env var, default 24), bridging the silent gap between first search and 3-day escalation.
+- **Blackhole alt-exhaustion notification**: When all alternative releases are exhausted for a blackhole item, a `download_error` notification is now sent and a history event logged. Previously the file moved to `failed/` with no user signal.
 - **Architecture guide**: Added `ARCHITECTURE.md` — a developer reference documenting module layers, data flows, cross-container path model, threading model, scheduled tasks, and error recovery patterns.
 - **Rclone VFS cache configuration**: `RCLONE_VFS_CACHE_MODE`, `RCLONE_VFS_CACHE_MAX_SIZE`, and `RCLONE_VFS_CACHE_MAX_AGE` are now configurable via environment variables and the settings UI. Previously `--vfs-cache-mode` and `--dir-cache-time` were hardcoded, ignoring user-set values.
 - **`BLOCKLIST_AUTO_ADD` in settings UI**: The auto-blocklist toggle is now configurable from the Blackhole section of the settings editor instead of requiring manual `.env` edits.

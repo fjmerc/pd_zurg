@@ -526,6 +526,10 @@ class TestLibraryScannerScanDebrid:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
         return scanner
@@ -598,6 +602,10 @@ class TestLibraryScannerScanDebrid:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
 
@@ -785,6 +793,10 @@ class TestLibraryScannerScanLocal:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
         return scanner
@@ -874,6 +886,10 @@ class TestLibraryScannerScanCrossRef:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
 
@@ -907,6 +923,10 @@ class TestLibraryScannerScanCrossRef:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
 
@@ -934,6 +954,10 @@ class TestLibraryScannerScanCrossRef:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
 
@@ -966,6 +990,10 @@ class TestLibraryScannerScanCrossRef:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
 
@@ -1145,6 +1173,10 @@ class TestSeasonDataInScanResults:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
         return scanner
@@ -1247,6 +1279,10 @@ class TestEpisodeLevelCrossRef:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
         return scanner
@@ -1461,6 +1497,10 @@ class TestLibraryScannerGetData:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
         return scanner
@@ -1541,6 +1581,10 @@ class TestLibraryScannerRefresh:
         scanner._path_index = {}
         scanner._local_path_index = {}
         scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
         return scanner

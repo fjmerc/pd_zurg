@@ -108,7 +108,7 @@ ENV_SCHEMA = [
             ('NOTIFICATION_URL', 'Notification URL(s)', 'string', False, 'Apprise notification URL(s), comma-separated'),
             ('NOTIFICATION_EVENTS', 'Notification Events', 'string', False,
              'Comma-separated event types: startup, shutdown, download_complete, download_error, '
-             'library_refresh, symlink_created, symlink_failed, debrid_unavailable, '
+             'library_refresh, symlink_created, symlink_failed, debrid_unavailable, pending_warning, '
              'local_fallback_triggered, blocklist_added, arr_deleted, health_error, symlink_repaired, '
              'daily_digest, debrid_add_success, debrid_add_failed. '
              'Leave empty for all events'),
@@ -166,6 +166,8 @@ ENV_SCHEMA = [
             ('RADARR_URL', 'Radarr URL', 'url', False, 'Radarr base URL (e.g. http://radarr:7878). Used for downloads, rescans, and folder naming'),
             ('RADARR_API_KEY', 'Radarr API Key', 'secret', False, 'Radarr API key (Settings > General in Radarr)'),
             ('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'Auto-Enforce Preferences', 'boolean', False, 'Automatically switch sources when content arrives matching a stored preference'),
+            ('DEBRID_UNAVAILABLE_THRESHOLD_DAYS', 'Debrid Unavailable After (days)', 'number:1-30', False, 'Days of failed searches before marking content as debrid-unavailable (default: 3)'),
+            ('PENDING_WARNING_HOURS', 'Pending Warning After (hours)', 'number:0-168', False, 'Hours before sending a warning notification for stuck pending items (default: 24, 0 to disable)'),
         ],
     },
     {

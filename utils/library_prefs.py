@@ -179,6 +179,49 @@ def touch_pending_searched(normalized_title):
         _save_pending(pending)
 
 
+def update_pending_error(normalized_title, error_msg, next_retry_at=None,
+                         increment_retry=True):
+    """Record search failure reason on a pending entry. Thread-safe.
+
+    Args:
+        normalized_title: Title key in pending store
+        error_msg: Human-readable error description
+        next_retry_at: ISO timestamp of next retry attempt (optional)
+        increment_retry: If True, increment retry_count (default True).
+            Set False for status-only updates (e.g., "waiting for retry").
+    """
+    with _pending_lock:
+        pending = _load_pending()
+        entry = pending.get(normalized_title)
+        if not entry:
+            return
+        entry['last_error'] = error_msg
+        if increment_retry:
+            entry['retry_count'] = entry.get('retry_count', 0) + 1
+        if next_retry_at is not None:
+            entry['next_retry_at'] = next_retry_at
+        else:
+            entry.pop('next_retry_at', None)
+        pending[normalized_title] = entry
+        _save_pending(pending)
+
+
+def set_pending_warned(normalized_title):
+    """Set warned_at timestamp on a pending entry. Thread-safe.
+
+    Used by _warn_stalled_pending() to prevent repeat notifications.
+    No-op if the entry doesn't exist.
+    """
+    with _pending_lock:
+        pending = _load_pending()
+        entry = pending.get(normalized_title)
+        if not entry:
+            return
+        entry['warned_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
+        pending[normalized_title] = entry
+        _save_pending(pending)
+
+
 def mark_debrid_unavailable(normalized_title):
     """Mark a to-debrid entry as debrid-unavailable. Thread-safe.
 

@@ -140,7 +140,7 @@ def library_scan():
 
 _SYMLINK_DELETE_THRESHOLD = 50
 
-_MEDIA_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m4v', '.webm'}
+MEDIA_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m4v', '.webm'}
 
 # Track recently re-triggered arr search IDs to prevent search storms.
 # Shared by verify_symlinks (repair) and detect_stale_grabs.
@@ -175,7 +175,7 @@ def _cleanup_empty_parents(deleted_path, stop_at):
         try:
             has_media = False
             for entry in os.scandir(parent):
-                if os.path.splitext(entry.name)[1].lower() in _MEDIA_EXTENSIONS:
+                if os.path.splitext(entry.name)[1].lower() in MEDIA_EXTENSIONS:
                     has_media = True
                     break
             if has_media:
@@ -759,14 +759,14 @@ def _has_real_media_files(path, sample_limit=10):
                     with os.scandir(entry.path) as sub:
                         for f in sub:
                             ext = os.path.splitext(f.name)[1].lower()
-                            if ext in _MEDIA_EXTENSIONS and f.is_file(follow_symlinks=False):
+                            if ext in MEDIA_EXTENSIONS and f.is_file(follow_symlinks=False):
                                 return True
                             # Descend into Season subdirs for TV libraries
                             if f.is_dir(follow_symlinks=False):
                                 try:
                                     with os.scandir(f.path) as deep:
                                         for g in deep:
-                                            if (os.path.splitext(g.name)[1].lower() in _MEDIA_EXTENSIONS
+                                            if (os.path.splitext(g.name)[1].lower() in MEDIA_EXTENSIONS
                                                     and g.is_file(follow_symlinks=False)):
                                                 return True
                                 except OSError:

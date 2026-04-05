@@ -157,9 +157,22 @@ def setup():
             if NFSMOUNT is not None and NFSMOUNT.lower() == "true":
                 port = NFSPORT if NFSPORT else find_available_port(8001, 8999)
                 logger.info(f"Setting up rclone NFS server for {mn} at 0.0.0.0:{port}")
-                rclone_command = ["rclone", "serve", "nfs", f"{mn}:", "--config", "/config/rclone.config", "--addr", f"0.0.0.0:{port}", "--vfs-cache-mode=full", "--dir-cache-time=10"]
+                vfs_cache_mode = (os.environ.get('RCLONE_VFS_CACHE_MODE') or '').strip() or 'full'
+                dir_cache_time = (os.environ.get('RCLONE_DIR_CACHE_TIME') or '').strip() or '10s'
+                rclone_command = ["rclone", "serve", "nfs", f"{mn}:", "--config", "/config/rclone.config", "--addr", f"0.0.0.0:{port}", f"--vfs-cache-mode={vfs_cache_mode}", f"--dir-cache-time={dir_cache_time}"]
             else:
-                rclone_command = ["rclone", "mount", f"{mn}:", f"/data/{mn}", "--config", "/config/rclone.config", "--allow-other", "--poll-interval=0", "--dir-cache-time=10"]
+                dir_cache_time = (os.environ.get('RCLONE_DIR_CACHE_TIME') or '').strip() or '10s'
+                rclone_command = ["rclone", "mount", f"{mn}:", f"/data/{mn}", "--config", "/config/rclone.config", "--allow-other", "--poll-interval=0", f"--dir-cache-time={dir_cache_time}"]
+
+            # Optional VFS cache flags — apply to both NFS and FUSE modes.
+            # Rclone also reads these natively from RCLONE_* env vars, but
+            # explicit flags ensure they take effect on restarts via SIGHUP.
+            for env_key, flag in [('RCLONE_VFS_CACHE_MAX_SIZE', 'vfs-cache-max-size'),
+                                  ('RCLONE_VFS_CACHE_MAX_AGE', 'vfs-cache-max-age')]:
+                val = (os.environ.get(env_key) or '').strip()
+                if val:
+                    rclone_command.append(f'--{flag}={val}')
+
             if not PLEXDEBRID or idx != len(mount_names) - 1:
                 rclone_command.append("--daemon")
 

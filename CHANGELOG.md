@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## Version [2.17.2] - 2026-04-05
+
+### Added
+
+- **Architecture guide**: Added `ARCHITECTURE.md` — a developer reference documenting module layers, data flows, cross-container path model, threading model, scheduled tasks, and error recovery patterns.
+- **Rclone VFS cache configuration**: `RCLONE_VFS_CACHE_MODE`, `RCLONE_VFS_CACHE_MAX_SIZE`, and `RCLONE_VFS_CACHE_MAX_AGE` are now configurable via environment variables and the settings UI. Previously `--vfs-cache-mode` and `--dir-cache-time` were hardcoded, ignoring user-set values.
+- **`BLOCKLIST_AUTO_ADD` in settings UI**: The auto-blocklist toggle is now configurable from the Blackhole section of the settings editor instead of requiring manual `.env` edits.
+
+### Fixed
+
+- **Version string**: Fixed the version reported at startup (was stuck at `2.11.0`).
+- **Settings URL validation**: Sonarr, Radarr, and Torrentio URLs are now validated for correct format (must start with `http://` or `https://`) when saving settings, matching the existing validation for Plex and Overseerr URLs.
+- **`MEDIA_EXTENSIONS` naming consistency**: Renamed `_MEDIA_EXTENSIONS` in `scheduled_tasks.py` to `MEDIA_EXTENSIONS` to match `library.py` and `blackhole.py`, reducing risk of the three sets drifting out of sync.
+- **`LIBRARY_PREFERENCE_AUTO_ENFORCE` undocumented**: Added to README.md configuration reference.
+
 ## Version [2.17.1] - 2026-04-04
 
 ### Added

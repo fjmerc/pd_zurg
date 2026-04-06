@@ -17,6 +17,7 @@ import shutil
 import time
 import threading
 import requests
+from utils.file_utils import atomic_write
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -774,11 +775,11 @@ class BlackholeWatcher:
             return []
 
     def _save_pending(self, entries):
-        """Save pending monitor entries to disk."""
+        """Save pending monitor entries to disk atomically."""
         try:
-            with open(self._pending_file, 'w') as f:
+            with atomic_write(self._pending_file) as f:
                 json.dump(entries, f)
-        except IOError as e:
+        except (IOError, OSError) as e:
             logger.debug(f"[blackhole] Could not write pending monitors: {e}")
 
     def _add_pending(self, torrent_id, filename):
@@ -1371,6 +1372,20 @@ class BlackholeWatcher:
             success, result = handler(file_path)
             if success:
                 logger.info(f"[blackhole] Added to {self.debrid_service}: {filename}")
+
+                # Record pending FIRST — prevents orphaned debrid torrents if
+                # we crash before reaching file cleanup or notifications.
+                # Guarded so a monitor failure doesn't block file cleanup.
+                if self.symlink_enabled:
+                    torrent_id = self._extract_torrent_id(result)
+                    if torrent_id:
+                        try:
+                            self._start_monitor(torrent_id, filename)
+                        except Exception as e:
+                            logger.error(f"[blackhole] Failed to start monitor for {filename}: {e}")
+                    else:
+                        logger.warning(f"[blackhole] Could not extract torrent ID for symlink monitoring: {filename}")
+
                 if _history:
                     _history.log_event('grabbed', filename, source='blackhole',
                                        detail=f'Submitted to {self.debrid_service}',
@@ -1384,14 +1399,6 @@ class BlackholeWatcher:
                     metrics.inc('blackhole_processed', {'status': 'success'})
                 except Exception:
                     pass
-
-                # Start symlink monitoring if enabled
-                if self.symlink_enabled:
-                    torrent_id = self._extract_torrent_id(result)
-                    if torrent_id:
-                        self._start_monitor(torrent_id, filename)
-                    else:
-                        logger.warning(f"[blackhole] Could not extract torrent ID for symlink monitoring: {filename}")
 
                 if _notify:
                     if self.symlink_enabled:

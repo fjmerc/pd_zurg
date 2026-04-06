@@ -19,6 +19,13 @@ _SHUTDOWN_TIMEOUTS = {
 }
 _DEFAULT_SHUTDOWN_TIMEOUT = 10
 
+# Dependency chain for restart ordering. If a dependency is dead, defer
+# the restart to avoid wasting retry budget (e.g., rclone against dead Zurg).
+_PROCESS_DEPENDENCIES = {
+    'rclone': ['Zurg'],
+    'plex_debrid': ['rclone'],
+}
+
 # Global registry of all tracked processes for graceful shutdown
 _process_registry = []
 _registry_lock = threading.Lock()
@@ -106,6 +113,27 @@ def _on_restart_exhausted(desc, restart_count, max_restarts):
         pass
 
 
+def _check_dependencies_alive(process_name):
+    """Check if all dependencies for a process are alive.
+
+    Returns (ok, dead_dep_name). Caller must acquire _registry_lock.
+    """
+    deps = _PROCESS_DEPENDENCIES.get(process_name, [])
+    for dep_name in deps:
+        found = False
+        for entry in _process_registry:
+            if entry['process_name'] == dep_name:
+                found = True
+                h = entry['handler']
+                if not h.process or h.process.poll() is not None:
+                    return False, dep_name
+                break
+        if not found:
+            # Dependency not registered (e.g., disabled) — treat as dead
+            return False, dep_name
+    return True, None
+
+
 def _handle_restart(entry, logger):
     """Attempt to restart a dead process according to its restart policy."""
     handler = entry['handler']
@@ -119,6 +147,28 @@ def _handle_restart(entry, logger):
     policy = handler.restart_policy
     if policy is None:
         return
+
+    # Check dependencies before consuming a restart attempt
+    with _registry_lock:
+        deps_ok, dead_dep = _check_dependencies_alive(process_name)
+        if not deps_ok:
+            # If the dependency has permanently died (exhausted its own restarts),
+            # mark this process as dead too rather than deferring forever.
+            dep_exhausted = False
+            for dep_entry in _process_registry:
+                if dep_entry['process_name'] == dead_dep:
+                    dep_h = dep_entry['handler']
+                    if (dep_h.restart_policy and
+                            dep_h._restart_count >= dep_h.restart_policy.max_restarts):
+                        dep_exhausted = True
+                    break
+            if dep_exhausted:
+                logger.error(f"{desc} cannot restart — dependency '{dead_dep}' is permanently dead")
+                _on_restart_exhausted(desc, 0, policy.max_restarts)
+                handler.restart_policy = None
+                return
+            logger.info(f"{desc} restart deferred — dependency '{dead_dep}' is not running")
+            return
 
     now = time.time()
 
@@ -144,9 +194,13 @@ def _handle_restart(entry, logger):
     if _monitor_stop_event.wait(delay):
         return  # Shutdown requested during backoff
 
-    # Re-check shutdown under lock to close TOCTOU gap
+    # Re-check shutdown and restart_policy under lock to close TOCTOU gap.
+    # restart_policy is set to None by stop_process() during config reload —
+    # if reload already restarted this process, we must not start a duplicate.
     with _registry_lock:
         if _shutting_down:
+            return
+        if handler.restart_policy is None:
             return
         handler.restart_process()
 

@@ -11,7 +11,7 @@ import re
 import threading
 import unicodedata
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from utils.file_utils import atomic_write
 from utils.logger import get_logger
 
@@ -23,15 +23,20 @@ _lock = threading.Lock()
 _entries = {}       # id -> entry dict
 _hash_index = {}    # uppercase info_hash -> id  (O(1) lookup)
 _title_index = {}   # normalized title -> id
+_expiry_days = 0    # 0 = no expiry; >0 = auto-expire auto-added entries after N days
 
 
 def init(config_dir='/config'):
     """Initialize the blocklist module. Call once at startup."""
-    global _file_path
+    global _file_path, _expiry_days
     with _lock:
         _file_path = os.path.join(config_dir, 'blocklist.json')
         _load()
-    logger.info(f"[blocklist] Initialized — {_file_path} ({len(_entries)} entries)")
+    try:
+        _expiry_days = int(os.environ.get('BLOCKLIST_EXPIRY_DAYS') or 0)
+    except (ValueError, TypeError):
+        _expiry_days = 0
+    logger.info(f"[blocklist] Initialized — {_file_path} ({len(_entries)} entries, expiry: {_expiry_days}d)")
 
 
 def add(info_hash, title, reason='', source='manual'):
@@ -139,6 +144,51 @@ def clear():
         _title_index.clear()
         _save_unlocked()
         logger.info(f"[blocklist] Cleared {count} entries")
+
+
+def expire():
+    """Remove auto-added entries older than BLOCKLIST_EXPIRY_DAYS.
+
+    Only expires entries with source='auto'. Manual entries are kept forever.
+    No-op if BLOCKLIST_EXPIRY_DAYS is 0 or unset.
+    """
+    if _file_path is None or _expiry_days <= 0:
+        return 0
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=_expiry_days)).isoformat(timespec='seconds')
+    expired_ids = []
+
+    with _lock:
+        for entry_id, entry in _entries.items():
+            if entry.get('source') != 'auto':
+                continue
+            if entry.get('date', '') < cutoff:
+                expired_ids.append(entry_id)
+
+        if not expired_ids:
+            return 0
+
+        for entry_id in expired_ids:
+            entry = _entries.pop(entry_id)
+            h = (entry.get('info_hash') or '').upper()
+            if h and _hash_index.get(h) == entry_id:
+                del _hash_index[h]
+            norm = _norm_title(entry.get('title', ''))
+            if norm and _title_index.get(norm) == entry_id:
+                replacement = None
+                for eid, e in _entries.items():
+                    if _norm_title(e.get('title', '')) == norm:
+                        replacement = eid
+                        break
+                if replacement:
+                    _title_index[norm] = replacement
+                else:
+                    del _title_index[norm]
+
+        _save_unlocked()
+
+    logger.info(f"[blocklist] Expired {len(expired_ids)} auto-added entries older than {_expiry_days} days")
+    return len(expired_ids)
 
 
 def is_blocked(info_hash):

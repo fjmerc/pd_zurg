@@ -134,6 +134,7 @@ ENV_SCHEMA = [
             ('BLACKHOLE_SYMLINK_MAX_AGE', 'Symlink Max Age (hours)', 'number:0-720', False, 'Remove symlink dirs older than this (0=disabled, default: 72)'),
             ('SYMLINK_REPAIR_AUTO_SEARCH', 'Repair Auto-Search', 'boolean', False, 'When broken symlinks can\'t be repaired from mount, trigger arr re-search'),
             ('BLOCKLIST_AUTO_ADD', 'Auto-Blocklist Failed Torrents', 'boolean', False, 'Automatically blocklist torrents that hit terminal debrid errors (default: true)'),
+            ('BLOCKLIST_EXPIRY_DAYS', 'Blocklist Expiry (days)', 'number:0-365', False, 'Auto-expire auto-added blocklist entries after N days (0=never, default: 0). Manual entries are kept forever.'),
             ('BLACKHOLE_DEDUP_ENABLED', 'Enable Local Library Dedup', 'boolean', False, 'Skip torrents that match content already in your local library'),
             ('BLACKHOLE_LOCAL_LIBRARY_TV', 'Local TV Library Path', 'string', False, 'Path to local TV library (for dedup and auto debrid symlinks)'),
             ('BLACKHOLE_LOCAL_LIBRARY_MOVIES', 'Local Movie Library Path', 'string', False, 'Path to local movie library (for dedup and auto debrid symlinks)'),

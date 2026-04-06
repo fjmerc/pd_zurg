@@ -48,7 +48,8 @@ Developer reference for pd_zurg internals. Complements [CLAUDE.md](CLAUDE.md) (r
 12. Settings watcher   settings_watcher.py — poll settings.json for changes
 13. Register tasks     scheduled_tasks.py — register all periodic tasks
 14. Start scheduler    task_scheduler.py — begin periodic execution
-15. signal.pause()     Block forever, handle signals
+15. while True:        Block in signal.pause() loop, handle signals
+      signal.pause()
 ```
 
 ### Shutdown Sequence
@@ -149,7 +150,7 @@ Developer reference for pd_zurg internals. Complements [CLAUDE.md](CLAUDE.md) (r
 | Status HTTP Server | `status_server.py` | Yes | `setup()` | Shutdown |
 | ffprobe Monitor | `ffprobe_monitor.py` | Yes | `setup()` | Shutdown |
 | Duplicate Cleanup | `duplicate_cleanup.py` | Yes | `setup()` | Shutdown |
-| Notification Workers | `notifications.py` | Yes | Per `notify()` call | Single-shot |
+| Notification Dispatch | `notifications.py` | — | Synchronous in caller's thread | — |
 | Config Reload | `config_reload.py` | Yes | Per SIGHUP | Single-shot |
 
 ### Signal Handling
@@ -160,6 +161,11 @@ Developer reference for pd_zurg internals. Complements [CLAUDE.md](CLAUDE.md) (r
 | `SIGINT` | `shutdown()` | Same as SIGTERM |
 | `SIGHUP` | `handle_sighup()` | Reload .env, diff changes, restart affected services |
 | `SIGCHLD` | `SIG_IGN` | Auto-reap zombie children (no handler conflicts with Popen) |
+
+### Authentication & Health
+
+- **HTTP dashboard**: Protected by `STATUS_UI_AUTH` (Basic Auth, `user:password` format). Settings editor requires auth; read-only dashboard endpoints are accessible without it.
+- **Docker HEALTHCHECK**: `Dockerfile` defines a `HEALTHCHECK` running `healthcheck.py` every 60s. Checks child process liveness (regex on cmdline), FUSE mount health (`os.path.ismount`), and status server responsiveness.
 
 ---
 
@@ -392,9 +398,11 @@ When **verifying** symlinks exist (scheduled_tasks.py, blackhole.py):
 ```
 # Symlink target: /mnt/debrid/movies/Movie.Name/file.mkv
 # Can't check that path — it doesn't exist in pd_zurg container!
-# Translate back:
-check_path = target.replace(BLACKHOLE_SYMLINK_TARGET_BASE, BLACKHOLE_RCLONE_MOUNT)
-           = /data/pd_zurg/movies/Movie.Name/file.mkv
+# Translate back using anchored prefix check (NOT .replace()):
+symlink_target_real = os.path.realpath(BLACKHOLE_SYMLINK_TARGET_BASE) + '/'
+if target.startswith(symlink_target_real):
+    check_path = BLACKHOLE_RCLONE_MOUNT + '/' + target[len(symlink_target_real):]
+# = /data/pd_zurg/movies/Movie.Name/file.mkv
 # Now check: os.path.exists(check_path)
 ```
 
@@ -475,8 +483,8 @@ All tasks registered in `scheduled_tasks.register_all()`, executed by `task_sche
 | `library_scan` | 1h | 2min | Status UI enabled | Enforces preferences, escalates stuck pending, warns stalled (24h+), creates symlinks, triggers arr rescans, TMDB API calls |
 | `verify_symlinks` | 6h | 10min | Blackhole symlinks enabled | Deletes/repairs broken symlinks, cleans empty dirs, optionally triggers arr re-search |
 | `enforce_preferences` | 6h | 6h | Status UI + `LIBRARY_PREFERENCE_AUTO_ENFORCE` | Deletes debrid torrents or local files based on preferences |
-| `housekeeping` | 24h | 1h | Always | Cleans stale pending state, empty dirs, old .meta files |
-| `config_backup` | 24h | 5min | Always | Copies .env + settings.json to /config/backups/, prunes >7 |
+| `housekeeping` | 24h | 1h | Always | Cleans stale pending state, empty dirs, old .meta files, rotates history.jsonl |
+| `config_backup` | 24h | 5min | Always | Copies .env, settings, preferences, blocklist, history to /config/backups/, prunes >7 |
 | `mount_liveness` | 1min | 1min | rclone configured | Probes FUSE mount; logs warnings on slow response; alerts on local library mount drops |
 | `notification_digest` | 24h | Until configured time | Digest enabled + notification URL | Sends daily summary notification |
 
@@ -501,7 +509,8 @@ enforce_preferences
 housekeeping
   ├─ cleans → library_pending.json stale entries
   ├─ cleans → empty dirs in COMPLETED_DIR
-  └─ cleans → old .meta.json in BLACKHOLE_DIR
+  ├─ cleans → old .meta.json in BLACKHOLE_DIR
+  └─ rotates → history.jsonl (prunes events older than HISTORY_RETENTION_DAYS)
 ```
 
 ---

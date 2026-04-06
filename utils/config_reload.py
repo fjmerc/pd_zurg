@@ -116,6 +116,11 @@ def _determine_restarts(changed_vars):
 def _do_reload():
     """Perform the actual reload work. Runs in a separate thread."""
     try:
+        import utils.processes as _proc_mod
+        if _proc_mod._shutting_down:
+            logger.info("[reload] Aborting — shutdown in progress")
+            return
+
         changed = _reload_env()
 
         if not changed:
@@ -199,8 +204,16 @@ def _do_reload():
                 except Exception as e:
                     logger.error(f"[reload] Failed to rewrite Trakt .env: {e}")
 
+            # Re-check shutdown before starting new processes
+            if _proc_mod._shutting_down:
+                logger.info("[reload] Aborting restart — shutdown in progress")
+                return
+
             # Start affected services (forward dependency order)
             for svc_name in reversed(stop_order):
+                if _proc_mod._shutting_down:
+                    logger.info("[reload] Aborting restart — shutdown in progress")
+                    return
                 if svc_name not in process_services:
                     continue
                 for entry in start_entries:

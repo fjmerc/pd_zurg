@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## Version [2.17.3] - 2026-04-06
+
+### Added
+
+- **Blocklist expiry**: New `BLOCKLIST_EXPIRY_DAYS` setting auto-expires auto-added blocklist entries after N days (default: 0/disabled). Manual entries are kept forever. Runs during daily housekeeping.
+- **Expanded config backup**: Daily backup now includes `blocklist.json` and `history.jsonl` alongside `.env`, `settings.json`, and `preferences.json`.
+
+### Fixed
+
+- **Shutdown/reload race condition**: SIGHUP config reload now checks the `_shutting_down` flag before restarting services, preventing a race where reload could spawn new processes after shutdown cleanup.
+- **Dependency-aware process restarts**: The process monitor now defers rclone restarts when Zurg is down (and plex_debrid when rclone is down) instead of consuming retry budget against a dead dependency.
+- **Orphaned debrid torrents on crash**: Blackhole pipeline now writes to `pending_monitors.json` immediately after debrid submission, before file cleanup. Previously a crash between submission and pending write would leave an untracked torrent in the debrid account.
+- **ARCHITECTURE.md accuracy**: Fixed misleading `.replace()` pseudocode (actual code uses `startswith` + slice), corrected notification threading description (synchronous, not per-call threads), added missing history rotation to housekeeping docs, documented `STATUS_UI_AUTH`, Docker `HEALTHCHECK`, and `while True` signal loop.
+
 ## Version [2.17.2] - 2026-04-05
 
 ### Added

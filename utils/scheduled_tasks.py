@@ -572,6 +572,15 @@ def housekeeping():
     except Exception as e:
         logger.error(f"[scheduler] Error rotating history: {e}")
 
+    # 5. Expire old auto-added blocklist entries
+    try:
+        from utils import blocklist as _blocklist_mod
+        expired = _blocklist_mod.expire()
+        if expired:
+            cleaned += expired
+    except Exception as e:
+        logger.error(f"[scheduler] Error expiring blocklist entries: {e}")
+
     if cleaned and _history:
         _history.log_event('task_completed', 'Housekeeping', source='scheduler',
                            detail=f'Cleaned {cleaned} item(s)')
@@ -702,6 +711,8 @@ def config_backup():
         ('/config/.env', '.env'),
         ('/config/settings.json', 'settings.json'),
         ('/config/preferences.json', 'preferences.json'),
+        ('/config/blocklist.json', 'blocklist.json'),
+        ('/config/history.jsonl', 'history.jsonl'),
     ]
 
     backed_up = 0

@@ -1035,7 +1035,7 @@ function buildCard(item, index) {
   var posterHtml;
   var phBg = _placeholderBg(item.title);
   if (item.poster_url) {
-    posterHtml = '<img class="poster-img" src="' + esc(item.poster_url) + '" loading="lazy" decoding="async" alt="" onload="this.classList.add(\'loaded\')" onerror="this.style.display=\'none\';var p=this.parentElement.querySelector(\'.poster-placeholder\');if(p)p.style.display=\'flex\'">'
+    posterHtml = '<img class="poster-img" src="' + escAttr(item.poster_url) + '" loading="lazy" decoding="async" alt="" onload="this.classList.add(\'loaded\')" onerror="this.style.display=\'none\';var p=this.parentElement.querySelector(\'.poster-placeholder\');if(p)p.style.display=\'flex\'">'
       + '<div class="poster-placeholder" style="display:none;' + phBg + '">'
       + '<span class="pp-initial">' + esc((item.title || '?').charAt(0).toUpperCase()) + '</span>'
       + '<span class="pp-title">' + esc(item.title) + '</span></div>';
@@ -1051,7 +1051,7 @@ function buildCard(item, index) {
 
   // Progress bar
   var prog = computeProgress(item);
-  var progressHtml = '<div class="progress-bar"><div class="progress-fill" style="width:' + prog.width + ';background:' + prog.color + '" title="' + esc(prog.tooltip) + '"></div></div>';
+  var progressHtml = '<div class="progress-bar"><div class="progress-fill" style="width:' + prog.width + ';background:' + prog.color + '" title="' + escAttr(prog.tooltip) + '"></div></div>';
 
   // Meta line
   var metaLine = '';
@@ -1108,8 +1108,8 @@ function buildCard(item, index) {
   }
   var isSelected = !!_selectedItems[nk];
   var checkboxHtml = '<div class="card-checkbox' + (isSelected ? ' checked' : '') + '" role="checkbox" aria-checked="' + (isSelected ? 'true' : 'false') + '"></div>';
-  return '<div class="poster-card' + (isSelected ? ' selected' : '') + '" data-title="' + esc(item.title) + '" data-type="' + esc(item.type) + '"'
-    + (item.year ? ' data-year="' + esc(String(item.year)) + '"' : '')
+  return '<div class="poster-card' + (isSelected ? ' selected' : '') + '" data-title="' + escAttr(item.title) + '" data-type="' + escAttr(item.type) + '"'
+    + (item.year ? ' data-year="' + escAttr(String(item.year)) + '"' : '')
     + ' data-index="' + index + '"'
     + ' onclick="onCardClick(' + index + ',event)" tabindex="0" role="button"'
     + ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();onCardClick(' + index + ',event)}">'
@@ -1976,7 +1976,7 @@ function _renderMovieDetail(movie, meta) {
 
   html += '<div class="detail-hero">';
   if (meta && meta.poster_url) {
-    html += '<div class="detail-poster"><img src="' + esc(meta.poster_url) + '" alt="Poster for ' + esc(movie.title) + '"></div>';
+    html += '<div class="detail-poster"><img src="' + escAttr(meta.poster_url) + '" alt="' + escAttr('Poster for ' + movie.title) + '"></div>';
   }
   html += '<div class="detail-info">';
   html += '<h2>' + esc(movie.title);
@@ -2052,7 +2052,7 @@ function _renderMovieDetail(movie, meta) {
     movieActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" title="Delete from Radarr" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'movie\')})">&#128465; Delete</button>');
   }
   if (_searchEnabled && movie.imdb_id) {
-    movieActionBtns.push('<button class="btn btn-ghost btn-sm" data-imdb="' + esc(movie.imdb_id) + '" data-mtype="movie" data-label="' + esc(movie.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button>');
+    movieActionBtns.push('<button class="btn btn-ghost btn-sm" data-imdb="' + escAttr(movie.imdb_id) + '" data-mtype="movie" data-label="' + escAttr(movie.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button>');
   }
   if (movieActionBtns.length) {
     html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">' + movieActionBtns.join('') + '</div>';
@@ -2243,7 +2243,7 @@ function _renderSeasonEpisodes(season, si) {
       html += '<button class="btn btn-ghost btn-icon" title="Block this torrent file" aria-label="Block ' + epLabel + '" onclick="event.stopPropagation();_blockItem()">&#128683;</button>';
     }
     if (_searchEnabled && _detailItem && _detailItem.imdb_id) {
-      html += ' <button class="btn btn-ghost btn-sm" title="Search torrents for ' + epLabel + '" data-imdb="' + esc(_detailItem.imdb_id) + '" data-mtype="series" data-season="' + season.number + '" data-episode="' + ep.number + '" data-label="' + esc(_detailItem.title + ' ' + epLabel) + '" onclick="event.stopPropagation();openSearchFromBtn(this)">&#128269;</button>';
+      html += ' <button class="btn btn-ghost btn-sm" title="Search torrents for ' + escAttr(epLabel) + '" data-imdb="' + escAttr(_detailItem.imdb_id) + '" data-mtype="series" data-season="' + season.number + '" data-episode="' + ep.number + '" data-label="' + escAttr(_detailItem.title + ' ' + epLabel) + '" onclick="event.stopPropagation();openSearchFromBtn(this)">&#128269;</button>';
     }
     html += '</td>';
     html += '</tr>';
@@ -2366,7 +2366,7 @@ function _renderShowDetail(show, meta) {
 
   html += '<div class="detail-hero">';
   if (meta && meta.poster_url) {
-    html += '<div class="detail-poster"><img src="' + esc(meta.poster_url) + '" alt="Poster for ' + esc(show.title) + '"></div>';
+    html += '<div class="detail-poster"><img src="' + escAttr(meta.poster_url) + '" alt="' + escAttr('Poster for ' + show.title) + '"></div>';
   }
   html += '<div class="detail-info">';
   html += '<h2>' + esc(show.title);
@@ -2403,7 +2403,7 @@ function _renderShowDetail(show, meta) {
     showActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" title="Delete from Sonarr" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'show\')})">&#128465; Delete</button>');
   }
   if (_searchEnabled && show.imdb_id) {
-    showActionBtns.push('<button class="btn btn-ghost btn-sm" data-imdb="' + esc(show.imdb_id) + '" data-mtype="series" data-label="' + esc(show.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button>');
+    showActionBtns.push('<button class="btn btn-ghost btn-sm" data-imdb="' + escAttr(show.imdb_id) + '" data-mtype="series" data-label="' + escAttr(show.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button>');
   }
   if (showActionBtns.length) {
     html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">' + showActionBtns.join('') + '</div>';
@@ -2445,7 +2445,7 @@ function _renderShowDetail(show, meta) {
     }
     var progressPill = _seasonProgressPill(season, seasonPending);
     html += '<div class="season-section">';
-    html += '<div class="season-header' + (expanded ? ' expanded' : '') + '" data-season="' + esc(String(season.number)) + '" tabindex="0" role="button" aria-expanded="' + expanded + '" onclick="toggleSeason(this)" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();toggleSeason(this)}">';
+    html += '<div class="season-header' + (expanded ? ' expanded' : '') + '" data-season="' + escAttr(String(season.number)) + '" tabindex="0" role="button" aria-expanded="' + expanded + '" onclick="toggleSeason(this)" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();toggleSeason(this)}">';
     html += '<span class="season-chevron">&#9654;</span>';
     html += 'Season ' + esc(String(season.number)) + ' &mdash; ' + esc(String(season.episode_count)) + ' episode' + (season.episode_count !== 1 ? 's' : '') + progressPill;
     if (seasonPending) html += '<span class="ping-dot"></span>';
@@ -2536,7 +2536,7 @@ function toggleShowHistory(btn) {
         var e = events[i];
         var ts = e.ts ? _timeAgoHistory(e.ts) : '';
         h += '<div class="history-evt"><span class="history-time">' + esc(ts) + '</span>';
-        h += '<span class="history-type ht-' + esc(e.type) + '">' + esc(e.type.replace(/_/g, ' ')) + '</span>';
+        h += '<span class="history-type ht-' + escAttr(e.type) + '">' + esc(e.type.replace(/_/g, ' ')) + '</span>';
         h += '<span class="history-detail">' + esc(e.detail || '') + (e.episode ? ' <span style="color:var(--text3)">' + esc(e.episode) + '</span>' : '') + '</span></div>';
       }
       list.innerHTML = h;
@@ -2920,7 +2920,7 @@ function _blockItem() {
   html += '<div class="bl-dialog-body">';
   html += '<div class="bl-reasons">';
   for (var i = 0; i < reasons.length; i++) {
-    html += '<button class="bl-reason-btn" data-reason="' + esc(reasons[i]) + '" onclick="_selectBlockReason(this)">' + (i + 1) + '. ' + esc(reasons[i]) + '</button>';
+    html += '<button class="bl-reason-btn" data-reason="' + escAttr(reasons[i]) + '" onclick="_selectBlockReason(this)">' + (i + 1) + '. ' + esc(reasons[i]) + '</button>';
   }
   html += '</div>';
   html += '<label class="bl-custom-label" for="bl-custom-input">Or enter a custom reason:</label>';
@@ -3625,9 +3625,9 @@ function _renderSearchResults() {
     var r = filtered[ri];
     var addedClass = r._added ? ' added-row' : '';
     html += '<tr class="' + addedClass + '">';
-    html += '<td class="sr-title" title="' + esc(r.title) + '">' + esc(r.title) + '</td>';
-    html += '<td class="sr-indexer" title="' + esc(r.source_name || '') + '">' + esc(r.source_name || '') + '</td>';
-    var qCls = 'q-' + r.quality.label.replace(/\s/g, '');
+    html += '<td class="sr-title" title="' + escAttr(r.title) + '">' + esc(r.title) + '</td>';
+    html += '<td class="sr-indexer" title="' + escAttr(r.source_name || '') + '">' + esc(r.source_name || '') + '</td>';
+    var qCls = 'q-' + escAttr(r.quality.label.replace(/\s/g, ''));
     html += '<td><span class="badge-quality ' + qCls + '">' + esc(r.quality.label) + '</span></td>';
     html += '<td>' + _formatBytes(r.size_bytes) + '</td>';
     html += '<td>' + (r.seeds || 0) + '</td>';
@@ -3635,7 +3635,7 @@ function _renderSearchResults() {
     if (r._added) {
       html += '<span style="color:var(--green);font-size:.82em">&#10003; Added</span>';
     } else {
-      html += '<button class="btn-add-debrid" data-hash="' + esc(r.info_hash) + '" onclick="addSearchResult(this)">Add</button>';
+      html += '<button class="btn-add-debrid" data-hash="' + escAttr(r.info_hash) + '" onclick="addSearchResult(this)">Add</button>';
     }
     html += '</td></tr>';
   }

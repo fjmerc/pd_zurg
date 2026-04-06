@@ -1657,8 +1657,8 @@ class LibraryScanner:
                         )
                         self._search_cooldown[(norm, 0)] = now
                         update_pending_error(pending_norm, err_msg)
-                    elif status not in ('sent', 'pending'):
-                        update_pending_error(pending_norm, "No debrid results found")
+                    else:
+                        update_pending_error(pending_norm, "No debrid results found", increment_retry=False)
                 except Exception as e:
                     logger.error(f"[library] Search error for movie {movie['title']}: {e}")
                     self._search_cooldown[(norm, 0)] = now
@@ -1782,8 +1782,8 @@ class LibraryScanner:
                        f'Debrid Unavailable ({len(escalated)})',
                        f'Content not found on debrid after {threshold_days} days: {summary}',
                        level='warning')
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[library] Could not send debrid_unavailable notification: {e}")
 
     def _warn_stalled_pending(self):
         """Send notification for items pending > PENDING_WARNING_HOURS.
@@ -1820,7 +1820,6 @@ class LibraryScanner:
                     created_dt = created_dt.replace(tzinfo=timezone.utc)
                 age_hours = (now - created_dt).total_seconds() / 3600
                 if age_hours >= threshold_hours:
-                    set_pending_warned(norm_title)
                     warned.append((norm_title, entry))
                     logger.info(
                         f"[library] Pending warning for {norm_title!r} "
@@ -1846,8 +1845,10 @@ class LibraryScanner:
                        f'Pending Warning ({len(warned)})',
                        f'Items stuck searching for {threshold_hours}+ hours: {summary}',
                        level='warning')
-            except Exception:
-                pass
+                for norm_title, _ in warned:
+                    set_pending_warned(norm_title)
+            except Exception as e:
+                logger.warning(f"[library] Could not send pending_warning notification: {e}")
 
     def _recover_local_fallback_routing(self, shows, movies):
         """Re-route series/movies back to debrid after local-fallback downloads complete.

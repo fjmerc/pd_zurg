@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Radarr retry count inflation**: Fixed "No debrid results found" on the Radarr path incorrectly incrementing `retry_count` on every scan cycle, causing misleadingly high failure counts in the UI. Now matches the Sonarr path (`increment_retry=False`).
+- **Pending warning notification reliability**: `warned_at` is now persisted only after the notification is successfully sent. Previously, a failed notification would permanently mark the item as warned, silently skipping the alert with no retry.
+- **Attribute XSS in library UI**: Replaced all `esc()` calls in HTML attribute contexts with `escAttr()` (which also escapes `"` and `'`). The previous `esc()` function only escaped `<`, `>`, and `&`, leaving attribute breakout possible via crafted titles — especially in the torrent search results table where data is attacker-controlled.
 - **Version string**: Fixed the version reported at startup (was stuck at `2.11.0`).
 - **Settings URL validation**: Sonarr, Radarr, and Torrentio URLs are now validated for correct format (must start with `http://` or `https://`) when saving settings, matching the existing validation for Plex and Overseerr URLs.
 - **`MEDIA_EXTENSIONS` naming consistency**: Renamed `_MEDIA_EXTENSIONS` in `scheduled_tasks.py` to `MEDIA_EXTENSIONS` to match `library.py` and `blackhole.py`, reducing risk of the three sets drifting out of sync.

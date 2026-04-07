@@ -279,7 +279,7 @@ def _attempt_arr_research(release_name):
                         _retrigger_history[item_key] = now_epoch
 
         if target_eps:
-            client.search_episodes(target_eps)
+            client.search_episodes(target_eps, media_title=name)
             s_label = f'S{season:02d}' if season is not None else 'all'
             logger.info(
                 f"[scheduler] Repair: triggered Sonarr search for '{name}' "
@@ -301,7 +301,7 @@ def _attempt_arr_research(release_name):
             return False
 
         _retrigger_history[item_key] = now_epoch
-        client.search_movie(movie['id'])
+        client.search_movie(movie['id'], media_title=name)
         logger.info(f"[scheduler] Repair: triggered Radarr search for '{name}'")
         return True
 
@@ -677,13 +677,13 @@ def detect_stale_grabs():
                     f"[scheduler] Stale grab detected: {source_title} "
                     f"(S{sn:02d}E{en:02d}, grabbed {int(age_minutes)}m ago) — re-triggering search"
                 )
-                client.search_episodes([ep_id])
+                client.search_episodes([ep_id], media_title=source_title)
             else:
                 logger.info(
                     f"[scheduler] Stale grab detected: {source_title} "
                     f"(grabbed {int(age_minutes)}m ago) — re-triggering search"
                 )
-                client.search_movie(movie_id)
+                client.search_movie(movie_id, media_title=source_title)
 
             _retrigger_history[item_key] = now_epoch
             searches_triggered += 1

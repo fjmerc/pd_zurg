@@ -676,7 +676,7 @@ class SonarrClient(_ArrClientBase):
                     if isinstance(r, dict) and r.get('eventType') == 'grabbed']
         return []
 
-    def search_episodes(self, episode_ids):
+    def search_episodes(self, episode_ids, media_title=None):
         """Trigger a search for specific episodes by their Sonarr episode IDs.
 
         Returns the command dict or None.
@@ -689,10 +689,11 @@ class SonarrClient(_ArrClientBase):
         })
         if result and _history:
             _history.log_event('search_triggered', f'Sonarr episodes {episode_ids}',
-                               source='arr', detail=f'EpisodeSearch for {len(episode_ids)} episode(s)')
+                               source='arr', detail=f'EpisodeSearch for {len(episode_ids)} episode(s)',
+                               media_title=media_title)
         return result
 
-    def rescan_series(self, series_id):
+    def rescan_series(self, series_id, media_title=None):
         """Trigger a disk rescan for a series so Sonarr picks up new files."""
         result = self._post('/api/v3/command', {
             'name': 'RescanSeries',
@@ -700,7 +701,8 @@ class SonarrClient(_ArrClientBase):
         })
         if result and _history:
             _history.log_event('rescan_triggered', f'Sonarr series {series_id}',
-                               source='arr', detail='RescanSeries')
+                               source='arr', detail='RescanSeries',
+                               media_title=media_title)
         return result
 
     def ensure_and_search(self, title, tmdb_id, season_number, episode_numbers, prefer_debrid=None):
@@ -811,7 +813,7 @@ class SonarrClient(_ArrClientBase):
                     seen_guids.add(result_guid)
             # Search any episodes without files normally
             if no_file_ids:
-                self.search_episodes(no_file_ids)
+                self.search_episodes(no_file_ids, media_title=title)
             if grabbed:
                 return {
                     'status': 'sent',
@@ -820,7 +822,7 @@ class SonarrClient(_ArrClientBase):
                 }
             # All interactive grabs failed — no_file_ids already searched above,
             # only re-search has_file episodes as last resort.
-            cmd = self.search_episodes(has_file_ids)
+            cmd = self.search_episodes(has_file_ids, media_title=title)
             return {
                 'status': 'sent',
                 'service': 'sonarr',
@@ -829,7 +831,7 @@ class SonarrClient(_ArrClientBase):
             }
 
         # Trigger search
-        cmd = self.search_episodes(target_ids)
+        cmd = self.search_episodes(target_ids, media_title=title)
         if cmd is None:
             return {'status': 'error', 'message': 'Failed to trigger episode search'}
 
@@ -1512,7 +1514,7 @@ class RadarrClient(_ArrClientBase):
                     if isinstance(r, dict) and r.get('eventType') == 'grabbed']
         return []
 
-    def search_movie(self, movie_id):
+    def search_movie(self, movie_id, media_title=None):
         """Trigger a search for a specific movie.
 
         Returns the command dict or None.
@@ -1523,10 +1525,11 @@ class RadarrClient(_ArrClientBase):
         })
         if result and _history:
             _history.log_event('search_triggered', f'Radarr movie {movie_id}',
-                               source='arr', detail='MoviesSearch')
+                               source='arr', detail='MoviesSearch',
+                               media_title=media_title)
         return result
 
-    def rescan_movie(self, movie_id):
+    def rescan_movie(self, movie_id, media_title=None):
         """Trigger a disk rescan for a movie so Radarr picks up new files."""
         result = self._post('/api/v3/command', {
             'name': 'RescanMovie',
@@ -1534,7 +1537,8 @@ class RadarrClient(_ArrClientBase):
         })
         if result and _history:
             _history.log_event('rescan_triggered', f'Radarr movie {movie_id}',
-                               source='arr', detail='RescanMovie')
+                               source='arr', detail='RescanMovie',
+                               media_title=media_title)
         return result
 
     def ensure_and_search(self, title, tmdb_id, prefer_debrid=None):
@@ -1583,7 +1587,7 @@ class RadarrClient(_ArrClientBase):
                     }
                 # Fall through to normal search as last resort
 
-            cmd = self.search_movie(movie_id)
+            cmd = self.search_movie(movie_id, media_title=title)
             if cmd is None:
                 return {'status': 'error', 'message': 'Failed to trigger movie search'}
             return {

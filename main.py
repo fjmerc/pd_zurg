@@ -46,7 +46,7 @@ def shutdown(signum, frame):
 def main():
     logger = get_logger()
 
-    version = '2.17.3'
+    version = '2.17.4'
 
     ascii_art = f'''
 

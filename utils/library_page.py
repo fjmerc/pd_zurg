@@ -175,26 +175,41 @@ __NAV_HTML__
 .state-panel.error-state{color:var(--red)}
 
 /* Detail view */
-.detail-view{max-width:900px}
+.detail-view{max-width:1200px}
 .detail-back{display:inline-block;background:none;border:none;color:var(--blue);cursor:pointer;font-size:.85em;margin-bottom:12px;user-select:none;padding:0;font-family:inherit}
 .detail-back:hover{text-decoration:underline}
 .detail-header{margin-bottom:16px}
 .detail-header h2{font-size:1.3em;font-weight:600;margin-bottom:6px}
 
-/* Show history (collapsible) */
-.history-section{margin-top:16px;border:1px solid var(--border);border-radius:8px;overflow:hidden}
-.history-toggle{display:flex;align-items:center;gap:6px;width:100%;background:var(--card);border:none;padding:10px 14px;cursor:pointer;font-size:.85em;font-weight:500;color:var(--text2);text-align:left}
-.history-toggle:hover{background:var(--border2)}
-.history-toggle .chevron{font-size:.7em;transition:transform .15s;width:14px;text-align:center}
-.history-toggle.open .chevron{transform:rotate(90deg)}
-.history-list{padding:0 14px 10px;display:none}
-.history-toggle.open+.history-list{display:block}
-.history-evt{display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border2);font-size:.8em;align-items:baseline}
-.history-evt:last-child{border-bottom:none}
-.history-time{color:var(--text3);min-width:70px;white-space:nowrap;font-family:monospace;font-size:.85em}
-.history-type{padding:1px 6px;border-radius:3px;font-size:.8em;font-weight:500;white-space:nowrap}
-.ht-grabbed{background:#58a6ff1a;color:var(--blue)}.ht-cached{background:#3fb9501a;color:var(--green)}.ht-symlink_created{background:#bc8cff1a;color:#bc8cff}.ht-failed{background:#f851491a;color:var(--red)}.ht-cleanup{background:#d299221a;color:var(--yellow)}.ht-switched_source{background:#db6d281a;color:var(--orange)}.ht-search_triggered{background:#58a6ff1a;color:var(--blue)}.ht-rescan_triggered{background:#3fb9501a;color:var(--green)}.ht-task_completed{background:var(--border);color:var(--text2)}
-.history-detail{color:var(--text2);flex:1}
+/* Two-column detail body */
+.detail-body{display:flex;gap:20px;align-items:flex-start}
+.detail-main{flex:1;min-width:0}
+.detail-sidebar{width:320px;min-width:280px;position:sticky;top:16px;max-height:calc(100vh - 32px);overflow-y:auto}
+/* History sidebar */
+.history-sidebar{border:1px solid var(--border);border-radius:8px;background:var(--card);padding:12px 14px}
+.history-sidebar h3{font-size:.85em;font-weight:600;margin:0 0 10px;color:var(--text)}
+.hs-empty{font-size:.82em;color:var(--text3);padding:8px 0}
+/* Timeline rail */
+.hs-timeline{position:relative;padding-left:20px}
+.hs-timeline::before{content:'';position:absolute;left:6px;top:4px;bottom:4px;width:2px;background:var(--border2);border-radius:1px}
+.hs-day-group{margin-bottom:12px}
+.hs-day-group:last-child{margin-bottom:0}
+.hs-day-label{font-size:.72em;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+/* Event items */
+.hs-event{position:relative;padding:4px 0;font-size:.8em}
+.hs-event::before{content:'';position:absolute;left:-17px;top:9px;width:8px;height:8px;border-radius:50%;border:2px solid var(--border2);background:var(--bg)}
+.hs-event.hs-cat-acquisition::before{border-color:var(--green);background:var(--green)}
+.hs-event.hs-cat-failure::before{border-color:var(--red);background:var(--red)}
+.hs-event.hs-cat-action::before{border-color:var(--blue);background:var(--blue)}
+.hs-event.hs-cat-management::before{border-color:var(--yellow);background:var(--yellow)}
+.hs-event.hs-cat-failure{border-left:2px solid var(--red);padding-left:6px;margin-left:-8px}
+.hs-event-icon{display:inline-block;width:16px;text-align:center;margin-right:2px;font-size:.9em}
+.hs-event-type{font-weight:500;color:var(--text)}
+.hs-event-episode{display:inline-block;padding:1px 5px;border-radius:3px;font-size:.78em;font-weight:600;background:var(--border);color:var(--text2);margin-left:4px}
+.hs-event-detail{color:var(--text2);font-size:.92em;margin-top:1px;word-break:break-word}
+.hs-event-time{color:var(--text3);font-size:.82em;font-family:monospace}
+/* Mobile: collapse to single column */
+@media(max-width:768px){.detail-body{flex-direction:column}.detail-sidebar{width:100%;max-width:100%;position:static;max-height:none;overflow-y:visible}}
 
 /* Season accordion */
 .season-section{border:1px solid var(--border);border-radius:8px;margin-bottom:8px;overflow:hidden}
@@ -267,9 +282,11 @@ __NAV_HTML__
 .badge-missing{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#f851490f;color:var(--red);border:1px solid #f8514933;vertical-align:middle}
 .badge-upcoming{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#58a6ff0f;color:var(--blue);border:1px solid #58a6ff33;vertical-align:middle}
 .badge-tba{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:var(--border);color:var(--text3);border:1px solid var(--border2);vertical-align:middle}
+.badge-airing-today{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#d299220f;color:var(--yellow);border:1px solid #d2992233;vertical-align:middle}
 [data-theme="light"] .badge-missing{background:#cf222e1a;border-color:#cf222e40}
 [data-theme="light"] .badge-upcoming{background:#0969da1a;border-color:#0969da40}
 [data-theme="light"] .badge-tba{background:#d0d7de40;border-color:#d0d7de}
+[data-theme="light"] .badge-airing-today{background:#9a67000a;border-color:#9a670040;color:#9a6700}
 .badge-pending{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:var(--orange);border:1px solid #db6d2833;position:relative;overflow:hidden;background:linear-gradient(90deg,#db6d2818 0%,#db6d2808 50%,#db6d2818 100%);background-size:200% 100%;animation:pending-shimmer 2s ease-in-out infinite;vertical-align:middle}
 .badge-pending::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--orange);margin-right:4px;vertical-align:middle;animation:pulse-dot 1s ease-in-out infinite}
 @keyframes pending-shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
@@ -1909,6 +1926,7 @@ function normTitle(title) {
 
 var _detailItem = null;
 var _detailMeta = null;
+var _historySidebarGen = 0;
 
 function showDetail(index) {
   var item = _displayedItems[index];
@@ -2058,10 +2076,14 @@ function _renderMovieDetail(movie, meta) {
     html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">' + movieActionBtns.join('') + '</div>';
   }
   html += '</div></div>';
-  html += '<div class="history-section"><button class="history-toggle" onclick="toggleShowHistory(this)"><span class="chevron">&#9654;</span> History</button><div class="history-list history-list-content"><div style="color:var(--text3);font-size:.8em;padding:4px 0">Loading...</div></div></div>';
+  html += '<div class="detail-body"><div class="detail-main">';
   html += '<div id="transfer-msg" aria-live="polite"></div>';
   html += '</div>';
+  html += '<div class="detail-sidebar"><div class="history-sidebar" id="history-sidebar-content"><h3>Activity</h3><div class="hs-empty">Loading\u2026</div></div></div>';
+  html += '</div>';
+  html += '</div>';
   area.innerHTML = html;
+  _loadHistorySidebar();
 }
 
 function _mergeShowMeta(show, meta) {
@@ -2147,6 +2169,8 @@ function _seasonProgressPill(season, hasPending) {
 
 function _renderSeasonEpisodes(season, si) {
   var html = '<table class="episode-table"><tbody>';
+  var _now = new Date();
+  var _todayStr = _now.getFullYear()+'-'+String(_now.getMonth()+1).padStart(2,'0')+'-'+String(_now.getDate()).padStart(2,'0');
   var eps = season.episodes || [];
   for (var ei = 0; ei < eps.length; ei++) {
     var ep = eps[ei];
@@ -2206,7 +2230,11 @@ function _renderSeasonEpisodes(season, si) {
         if (!isNaN(airMs) && airMs > Date.now()) {
           html += '<span class="badge-upcoming">Upcoming</span>';
         } else {
-          html += '<span class="badge-missing"><span class="badge-full">Missing</span><span class="badge-mini">!</span></span>';
+          if (ep.air_date === _todayStr) {
+            html += '<span class="badge-airing-today">Airing Today</span>';
+          } else {
+            html += '<span class="badge-missing"><span class="badge-full">Missing</span><span class="badge-mini">!</span></span>';
+          }
         }
       }
     } else {
@@ -2410,6 +2438,7 @@ function _renderShowDetail(show, meta) {
   }
   html += '</div></div>';
 
+  html += '<div class="detail-body"><div class="detail-main">';
   if (seasons.length > 1) {
     var allExpanded = hasPrev && seasons.every(function(s) { return !!expandedNums[String(s.number)]; });
     html += '<div class="expand-all-row"><button class="btn btn-ghost btn-sm" onclick="toggleAllSeasons(this)">' + (allExpanded ? 'Collapse All' : 'Expand All') + '</button></div>';
@@ -2484,16 +2513,20 @@ function _renderShowDetail(show, meta) {
     html += '</div></div>';
   }
 
-  html += '<div class="history-section"><button class="history-toggle" onclick="toggleShowHistory(this)"><span class="chevron">&#9654;</span> History</button><div class="history-list history-list-content"><div style="color:var(--text3);font-size:.8em;padding:4px 0">Loading...</div></div></div>';
   html += '<div id="transfer-msg" aria-live="polite"></div>';
   html += '</div>';
+  html += '<div class="detail-sidebar"><div class="history-sidebar" id="history-sidebar-content"><h3>Activity</h3><div class="hs-empty">Loading\u2026</div></div></div>';
+  html += '</div>';
+  html += '</div>';
   area.innerHTML = html;
+  _loadHistorySidebar();
 }
 
 function hideDetail() {
   _closeBlockModal();
   _inDetailView = false;
   _detailItem = null;
+  _historySidebarGen = 0;
   _detailSeasons = [];
   _actionInFlight = false;
   _stopSmartPoll();
@@ -2519,35 +2552,106 @@ function hideDetail() {
   document.getElementById('search-input').focus();
 }
 
-function toggleShowHistory(btn) {
-  var isOpen = btn.classList.toggle('open');
-  var list = btn.nextElementSibling;
-  list.style.display = isOpen ? 'block' : 'none';
-  if (isOpen && !list.getAttribute('data-loaded') && _detailItem) {
-    list.setAttribute('data-loaded', '1');
-    var title = encodeURIComponent(_detailItem.title);
-    fetch('/api/history/show/' + title + '?limit=20').then(function(r) { return r.json(); }).then(function(events) {
-      if (!events || !events.length) {
-        list.innerHTML = '<div style="color:var(--text3);font-size:.8em;padding:4px 0">No history for this title</div>';
-        return;
-      }
-      var h = '';
-      for (var i = 0; i < events.length; i++) {
-        var e = events[i];
-        var ts = e.ts ? _timeAgoHistory(e.ts) : '';
-        h += '<div class="history-evt"><span class="history-time">' + esc(ts) + '</span>';
-        h += '<span class="history-type ht-' + escAttr(e.type) + '">' + esc(e.type.replace(/_/g, ' ')) + '</span>';
-        h += '<span class="history-detail">' + esc(e.detail || '') + (e.episode ? ' <span style="color:var(--text3)">' + esc(e.episode) + '</span>' : '') + '</span></div>';
-      }
-      list.innerHTML = h;
-    }).catch(function() {
-      list.innerHTML = '<div style="color:var(--red);font-size:.8em;padding:4px 0">Failed to load history</div>';
+// Excluded from detail sidebar: system-level events, startup-skip events
+var _HS_EXCLUDE = {task_completed:1, cleanup:1, repair:1, blocklisted:1};
+var _HS_CATEGORIES = {
+  grabbed:'acquisition', cached:'acquisition', symlink_created:'acquisition', debrid_add:'acquisition',
+  failed:'failure', debrid_add_failed:'failure', symlink_failed:'failure', debrid_unavailable:'failure',
+  search_triggered:'action', rescan_triggered:'action', local_fallback_triggered:'action',
+  switched_source:'management', arr_deleted:'management', blocklist_added:'management',
+  task_completed:'management', cleanup:'management', repair:'action', blocklisted:'management'
+};
+var _HS_ICONS = {
+  grabbed:'\u2B07', cached:'\u2705', symlink_created:'\uD83D\uDD17', debrid_add:'\u2601',
+  failed:'\u274C', debrid_add_failed:'\u274C', symlink_failed:'\u274C', debrid_unavailable:'\u26A0',
+  search_triggered:'\uD83D\uDD0D', rescan_triggered:'\uD83D\uDD04', local_fallback_triggered:'\u21B3',
+  switched_source:'\u21C4', arr_deleted:'\uD83D\uDDD1', blocklist_added:'\uD83D\uDEAB',
+  task_completed:'\u2699', cleanup:'\uD83D\uDDD1', repair:'\uD83D\uDD27', blocklisted:'\uD83D\uDEAB'
+};
+var _HS_LABELS = {
+  grabbed:'Grabbed', cached:'Cached', symlink_created:'Symlinked', debrid_add:'Added to Debrid',
+  failed:'Failed', debrid_add_failed:'Add Failed', symlink_failed:'Symlink Failed', debrid_unavailable:'Debrid N/A',
+  search_triggered:'Search', rescan_triggered:'Rescan', local_fallback_triggered:'Local Fallback',
+  switched_source:'Source Switch', arr_deleted:'Deleted', blocklist_added:'Blocklisted',
+  task_completed:'Task Done', cleanup:'Cleanup', repair:'Repair', blocklisted:'Skipped'
+};
+
+function _loadHistorySidebar() {
+  var container = document.getElementById('history-sidebar-content');
+  if (!container || !_detailItem) return;
+  if (container.querySelector('.hs-timeline')) return;
+  var gen = ++_historySidebarGen;
+  var title = encodeURIComponent(_detailItem.title);
+  fetch('/api/history/show/' + title + '?limit=30')
+    .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(function(events) {
+      if (gen !== _historySidebarGen) return;
+      var c = document.getElementById('history-sidebar-content');
+      if (c) _renderHistorySidebar(c, events);
+    })
+    .catch(function() {
+      if (gen !== _historySidebarGen) return;
+      var c = document.getElementById('history-sidebar-content');
+      if (c) c.innerHTML = '<h3>Activity</h3><div class="hs-empty" style="color:var(--red)">Failed to load</div>';
     });
+}
+
+function _renderHistorySidebar(container, events) {
+  var filtered = [];
+  for (var i = 0; i < events.length; i++) {
+    if (!_HS_EXCLUDE[events[i].type]) filtered.push(events[i]);
   }
+  if (!filtered.length) {
+    container.innerHTML = '<h3>Activity</h3><div class="hs-empty">No activity recorded yet</div>';
+    return;
+  }
+  var groups = [];
+  var currentDay = null;
+  for (var i = 0; i < filtered.length; i++) {
+    var day = _historyDayLabel(filtered[i].ts);
+    if (day !== currentDay) {
+      groups.push({label: day, events: []});
+      currentDay = day;
+    }
+    groups[groups.length - 1].events.push(filtered[i]);
+  }
+  var h = '<h3>Activity</h3><div class="hs-timeline">';
+  for (var g = 0; g < groups.length; g++) {
+    h += '<div class="hs-day-group"><div class="hs-day-label">' + esc(groups[g].label) + '</div>';
+    for (var j = 0; j < groups[g].events.length; j++) {
+      var ev = groups[g].events[j];
+      var cat = _HS_CATEGORIES[ev.type] || 'management';
+      var icon = _HS_ICONS[ev.type] || '\u2022';
+      var label = _HS_LABELS[ev.type] || ev.type.replace(/_/g, ' ');
+      h += '<div class="hs-event hs-cat-' + escAttr(cat) + '">';
+      h += '<span class="hs-event-icon">' + esc(icon) + '</span>';
+      h += '<span class="hs-event-type">' + esc(label) + '</span>';
+      if (ev.episode) h += '<span class="hs-event-episode">' + esc(ev.episode) + '</span>';
+      h += ' <span class="hs-event-time">' + esc(_timeAgoHistory(ev.ts)) + '</span>';
+      if (ev.detail) h += '<div class="hs-event-detail">' + esc(ev.detail) + '</div>';
+      h += '</div>';
+    }
+    h += '</div>';
+  }
+  h += '</div>';
+  container.innerHTML = h;
+}
+
+function _historyDayLabel(ts) {
+  var d = new Date(ts);
+  var now = new Date();
+  var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  var eventDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  var diff = Math.floor((today - eventDay) / 86400000);
+  if (diff <= 0) return 'Today';
+  if (diff === 1) return 'Yesterday';
+  if (diff < 7) return diff + ' days ago';
+  return d.toLocaleDateString(undefined, {month: 'short', day: 'numeric', year: 'numeric'});
 }
 
 function _timeAgoHistory(ts) {
-  var sec = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
+  var sec = Math.max(0, Math.floor((Date.now() - new Date(ts).getTime()) / 1000));
+  if (isNaN(sec)) return '';
   if (sec < 60) return sec + 's ago';
   if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
   if (sec < 86400) return Math.floor(sec / 3600) + 'h ago';

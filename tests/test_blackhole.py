@@ -8,6 +8,7 @@ from utils.blackhole import (
     RetryMeta, BlackholeWatcher, RETRY_SCHEDULE, MAX_RETRIES,
     MEDIA_EXTENSIONS, MOUNT_CATEGORIES, parse_release_name,
     _is_multi_season_pack, _extract_file_season, _build_season_release_name,
+    _enrich_for_history,
 )
 
 
@@ -1264,3 +1265,36 @@ class TestMultiSeasonSymlinks:
         watcher._create_symlinks(release, 'shows', release_dir)
         # No per-season dirs should be created
         assert not os.path.exists(os.path.join(completed, 'Show.S01.1080p'))
+
+
+class TestEnrichForHistory:
+    """Tests for _enrich_for_history helper that extracts media_title and episode."""
+
+    def test_tv_single_episode(self):
+        name, ep = _enrich_for_history('Breaking.Bad.S01E05.1080p.WEB.mkv.torrent')
+        assert name == 'Breaking Bad'
+        assert ep == 'S01E05'
+
+    def test_tv_multi_episode(self):
+        name, ep = _enrich_for_history('Show.Name.S02E03E04.720p.torrent')
+        assert name == 'Show Name'
+        assert ep == 'S02E03E04'
+
+    def test_tv_season_pack(self):
+        name, ep = _enrich_for_history('Show.S03.Complete.1080p.torrent')
+        assert name == 'Show'
+        assert ep == 'S03'
+
+    def test_movie(self):
+        name, ep = _enrich_for_history('The.Dark.Knight.2008.BluRay.1080p.torrent')
+        assert name == 'The Dark Knight'
+        assert ep is None
+
+    def test_movie_no_year(self):
+        name, ep = _enrich_for_history('SomeMovie.1080p.WEB.torrent')
+        assert name == 'SomeMovie'
+        assert ep is None
+
+    def test_empty_name_returns_none(self):
+        name, ep = _enrich_for_history('.torrent')
+        assert name is None

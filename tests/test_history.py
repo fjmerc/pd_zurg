@@ -221,3 +221,68 @@ class TestQueryTitleFilter:
         titles = [e['title'] for e in result['events']]
         assert 'Breaking Bad' in titles
         assert 'Bad Boys' in titles
+
+
+class TestMediaTitle:
+    """Tests for media_title field — canonical show/movie name for detail page matching."""
+
+    def test_log_event_media_title_written(self, tmp_dir):
+        """media_title should be written to JSONL when provided."""
+        history.init(tmp_dir)
+        history.log_event('grabbed', 'breaking.bad.s01e01.1080p.web.mkv',
+                          source='blackhole', media_title='Breaking Bad')
+
+        fpath = os.path.join(tmp_dir, 'history.jsonl')
+        with open(fpath, 'r') as f:
+            event = json.loads(f.readline())
+
+        assert event['media_title'] == 'Breaking Bad'
+        assert event['title'] == 'breaking.bad.s01e01.1080p.web.mkv'
+
+    def test_log_event_media_title_omitted(self, tmp_dir):
+        """No media_title key should exist when not provided (backward compat)."""
+        history.init(tmp_dir)
+        history.log_event('grabbed', 'Show A', source='blackhole')
+
+        fpath = os.path.join(tmp_dir, 'history.jsonl')
+        with open(fpath, 'r') as f:
+            event = json.loads(f.readline())
+
+        assert 'media_title' not in event
+
+    def test_query_by_show_matches_media_title(self, tmp_dir):
+        """query_by_show should match events by media_title field."""
+        history.init(tmp_dir)
+        history.log_event('grabbed', 'breaking.bad.s01e01.1080p.web.mkv',
+                          source='blackhole', media_title='Breaking Bad')
+        history.log_event('cached', 'breaking.bad.s01e01.1080p.web.mkv',
+                          source='blackhole', media_title='Breaking Bad')
+        history.log_event('grabbed', 'the.office.s02e03.mkv',
+                          source='blackhole', media_title='The Office')
+
+        result = history.query_by_show('Breaking Bad')
+        assert len(result) == 2
+        for e in result:
+            assert e['media_title'] == 'Breaking Bad'
+
+    def test_query_by_show_matches_both_fields(self, tmp_dir):
+        """query_by_show should match on title OR media_title."""
+        history.init(tmp_dir)
+        # Old-style event without media_title (uses canonical title directly)
+        history.log_event('switched_source', 'Breaking Bad', source='library')
+        # New-style event with media_title
+        history.log_event('grabbed', 'breaking.bad.s01e01.mkv',
+                          source='blackhole', media_title='Breaking Bad')
+
+        result = history.query_by_show('Breaking Bad')
+        assert len(result) == 2
+
+    def test_query_title_filter_matches_media_title(self, tmp_dir):
+        """query() title substring filter should also search media_title."""
+        history.init(tmp_dir)
+        history.log_event('grabbed', 'some.torrent.filename.mkv',
+                          source='blackhole', media_title='The Office')
+
+        result = history.query(title='office')
+        assert result['total'] == 1
+        assert result['events'][0]['media_title'] == 'The Office'

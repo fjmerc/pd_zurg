@@ -2340,7 +2340,7 @@ class LibraryScanner:
                                 info = sonarr_by_tmdb.get(alt_id)
                 if info and info.get('id') and info.get('client'):
                     try:
-                        info['client'].rescan_series(info['id'])
+                        info['client'].rescan_series(info['id'], media_title=title)
                         logger.info(f"[library] Triggered Sonarr rescan for {title}")
                     except Exception as e:
                         logger.warning(f"[library] Sonarr rescan failed for {title}: {e}")
@@ -2371,7 +2371,7 @@ class LibraryScanner:
                         info = radarr_by_tmdb.get(tmdb_id)
                 if info and info.get('id') and info.get('client'):
                     try:
-                        info['client'].rescan_movie(info['id'])
+                        info['client'].rescan_movie(info['id'], media_title=title)
                         logger.info(f"[library] Triggered Radarr rescan for {title}")
                     except Exception as e:
                         logger.warning(f"[library] Radarr rescan failed for {title}: {e}")

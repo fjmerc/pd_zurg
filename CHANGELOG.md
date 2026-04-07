@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## Version [2.17.4] - 2026-04-07
+
+### Added
+
+- **"Airing Today" episode badge**: Episodes with an air date matching today now show an amber "Airing Today" badge instead of the misleading red "Missing" badge. Tomorrow's episodes remain "Upcoming" (blue) and past-date episodes remain "Missing" (red).
+- **History data enrichment**: History events from the blackhole (grabbed, cached, failed, symlinked) and arr client (search/rescan triggered) now include canonical media titles via a new `media_title` field. Previously these events used torrent filenames or technical IDs, making them invisible on show/movie detail pages.
+- **Activity timeline sidebar**: The detail page now features a sticky sidebar on the right with a timeline-style activity feed. Events are grouped by day ("Today", "Yesterday", etc.) with colored dots by category (acquisition/failure/action/management), Unicode icons, and episode badges. Replaces the old collapsed history section at the bottom of the page.
+
+### Changed
+
+- **Detail page layout**: Widened from 900px to 1200px max-width. Content below the hero is now a two-column layout: main content (seasons/actions) on the left, activity sidebar on the right. Collapses to single column on mobile (<768px).
+- **History sidebar auto-loads**: Activity timeline loads automatically when opening a detail page instead of requiring a click to expand.
+- **System events filtered**: Scheduler events (Library Scan, Housekeeping, Stale Grab Detection) and startup blocklist-skip events are excluded from the detail page timeline to reduce noise.
+
 ## Version [2.17.3] - 2026-04-06
 
 ### Added

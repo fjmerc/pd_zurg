@@ -108,10 +108,22 @@ def _parse_episodes(filename):
     nums = [int(x) for x in re.findall(r'\d+', ep_str)]
     if len(nums) == 2 and '-' in ep_str:
         lo, hi = nums
-        if lo <= hi:
+        if lo <= hi and (hi - lo) < 100:
             return set(range(lo, hi + 1))
         return {lo, hi}
     return set(nums)
+
+
+def _enrich_for_history(filename):
+    """Extract media_title and episode string from a torrent filename for history logging."""
+    name, season, is_tv = parse_release_name(filename)
+    eps = _parse_episodes(filename)
+    ep_str = None
+    if is_tv and season is not None and eps:
+        ep_str = f"S{season:02d}" + "".join(f"E{e:02d}" for e in sorted(eps))
+    elif is_tv and season is not None:
+        ep_str = f"S{season:02d}"
+    return name or None, ep_str
 
 
 def _local_episodes(season_dir):
@@ -872,26 +884,31 @@ class BlackholeWatcher:
                 release_name = self._extract_release_name(info)
                 logger.info(f"[blackhole] Torrent ready: {filename} (release: {release_name})")
                 if _history:
-                    _history.log_event('cached', filename, source='blackhole',
+                    _mt, _ep = _enrich_for_history(filename)
+                    _history.log_event('cached', filename, episode=_ep, source='blackhole',
                                        detail=f'Ready on {self.debrid_service}',
-                                       meta={'provider': self.debrid_service, 'torrent_id': torrent_id})
+                                       meta={'provider': self.debrid_service, 'torrent_id': torrent_id},
+                                       media_title=_mt)
                 break
 
             if self._is_terminal_error(status):
                 logger.error(f"[blackhole] Torrent {torrent_id} hit terminal error: {status}")
+                _mt, _ep = _enrich_for_history(filename) if _history else (None, None)
                 if _history:
-                    _history.log_event('failed', filename, source='blackhole',
+                    _history.log_event('failed', filename, episode=_ep, source='blackhole',
                                        detail=f'Terminal error: {status}',
-                                       meta={'provider': self.debrid_service, 'torrent_id': torrent_id})
+                                       meta={'provider': self.debrid_service, 'torrent_id': torrent_id},
+                                       media_title=_mt)
                 # Auto-blocklist on terminal failure
                 if _blocklist and str(os.environ.get('BLOCKLIST_AUTO_ADD', 'true')).lower() == 'true':
                     bl_hash = self._extract_hash_from_info(info)
                     if bl_hash:
                         _blocklist.add(bl_hash, filename, reason=f'Terminal error: {status}', source='auto')
                         if _history:
-                            _history.log_event('blocklist_added', filename, source='blackhole',
+                            _history.log_event('blocklist_added', filename, episode=_ep, source='blackhole',
                                                detail=f'Auto-blocklisted: {status}',
-                                               meta={'info_hash': bl_hash})
+                                               meta={'info_hash': bl_hash},
+                                               media_title=_mt)
                 try:
                     from utils.metrics import metrics
                     metrics.inc('blackhole_symlink_failed')
@@ -955,9 +972,11 @@ class BlackholeWatcher:
             if count > 0:
                 logger.info(f"[blackhole] Created {count} symlink(s) for {release_name}")
                 if _history:
-                    _history.log_event('symlink_created', filename, source='blackhole',
+                    _mt, _ep = _enrich_for_history(filename)
+                    _history.log_event('symlink_created', filename, episode=_ep, source='blackhole',
                                        detail=f'{count} symlink(s) for {release_name}',
-                                       meta={'provider': self.debrid_service, 'count': count})
+                                       meta={'provider': self.debrid_service, 'count': count},
+                                       media_title=_mt)
                 try:
                     from utils.metrics import metrics
                     metrics.inc('blackhole_symlink_created')
@@ -1160,8 +1179,10 @@ class BlackholeWatcher:
                         f'No working alternative releases found for {filename}. {detail}',
                         level='warning')
             if _history:
-                _history.log_event('failed', filename, source='blackhole',
-                                   detail='All alternative releases exhausted')
+                _mt, _ep = _enrich_for_history(filename)
+                _history.log_event('failed', filename, episode=_ep, source='blackhole',
+                                   detail='All alternative releases exhausted',
+                                   media_title=_mt)
 
     def _try_alt_episode(self, series_name, season, episodes, debrid_handler, orig_filename, orig_path):
         """Try alternative releases for a TV episode via Sonarr."""
@@ -1348,9 +1369,11 @@ class BlackholeWatcher:
             if info_hash and _blocklist.is_blocked(info_hash):
                 logger.info(f"[blackhole] Skipping blocklisted torrent: {filename} ({info_hash[:16]}...)")
                 if _history:
-                    _history.log_event('blocklisted', filename, source='blackhole',
+                    _mt, _ep = _enrich_for_history(filename)
+                    _history.log_event('blocklisted', filename, episode=_ep, source='blackhole',
                                        detail=f'Skipped — info hash is blocklisted',
-                                       meta={'info_hash': info_hash})
+                                       meta={'info_hash': info_hash},
+                                       media_title=_mt)
                 try:
                     os.remove(file_path)
                 except OSError as e:
@@ -1387,9 +1410,11 @@ class BlackholeWatcher:
                         logger.warning(f"[blackhole] Could not extract torrent ID for symlink monitoring: {filename}")
 
                 if _history:
-                    _history.log_event('grabbed', filename, source='blackhole',
+                    _mt, _ep = _enrich_for_history(filename)
+                    _history.log_event('grabbed', filename, episode=_ep, source='blackhole',
                                        detail=f'Submitted to {self.debrid_service}',
-                                       meta={'provider': self.debrid_service})
+                                       meta={'provider': self.debrid_service},
+                                       media_title=_mt)
                 try:
                     os.remove(file_path)
                 except OSError as e:

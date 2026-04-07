@@ -32,16 +32,17 @@ def init(config_dir='/config'):
     logger.info(f"[history] Initialized — {_file_path} (retention: {_retention_days} days)")
 
 
-def log_event(type, title, episode=None, detail='', source='', meta=None):
+def log_event(type, title, episode=None, detail='', source='', meta=None, media_title=None):
     """Append a single event to the history JSONL file.
 
     Args:
         type: Event type (grabbed, cached, failed, symlink_created, cleanup, etc.)
-        title: Media title
+        title: Media title or technical identifier (e.g. torrent filename)
         episode: Episode identifier (e.g. "S01E05") or None for movies
         detail: Human-readable detail string
         source: Origin of the event (blackhole, library, arr, scheduler)
         meta: Optional dict of extra structured data
+        media_title: Canonical show/movie name for matching on detail pages
     """
     if _file_path is None:
         return
@@ -60,6 +61,8 @@ def log_event(type, title, episode=None, detail='', source='', meta=None):
         event['source'] = source
     if meta:
         event['meta'] = meta
+    if media_title:
+        event['media_title'] = media_title
 
     line = json.dumps(event, separators=(',', ':')) + '\n'
 
@@ -98,7 +101,7 @@ def query(type=None, title=None, start=None, end=None, page=1, limit=50):
         events = [e for e in events if e.get('type') == type]
     if title:
         title_lower = title.lower()
-        events = [e for e in events if title_lower in e.get('title', '').lower()]
+        events = [e for e in events if title_lower in e.get('title', '').lower() or title_lower in e.get('media_title', '').lower()]
     if start:
         events = [e for e in events if e.get('ts', '') >= start]
     if end:
@@ -136,7 +139,7 @@ def query_by_show(title, limit=20):
 
     matched = []
     for e in events:
-        if e.get('title', '').lower() == title_lower:
+        if e.get('title', '').lower() == title_lower or e.get('media_title', '').lower() == title_lower:
             matched.append(e)
             if len(matched) >= limit:
                 break

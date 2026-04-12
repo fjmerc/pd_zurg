@@ -262,17 +262,41 @@ def _poster_url(path, size='w300'):
     return _IMAGE_BASE + size + path
 
 
+def _cache_key(norm, year=None):
+    """Build a year-qualified cache key to disambiguate same-title entries.
+
+    Returns ``"title (year)"`` when a valid 4-digit year is available,
+    otherwise just ``"title"``.  The input *norm* should already be
+    lowercase with any trailing parenthesized year stripped.
+    """
+    if year and re.fullmatch(r'\d{4}', str(year)):
+        return f"{norm} ({year})"
+    return norm
+
+
+def _cache_lookup(section, norm, year=None):
+    """Look up a cache entry, trying year-qualified key first then yearless."""
+    if year is not None:
+        qualified = _cache_key(norm, year)
+        if qualified != norm:
+            entry = section.get(qualified)
+            if entry:
+                return entry
+    return section.get(norm)
+
+
 def get_show_info(title, year=None):
     """Get show metadata with caching. Returns dict or None."""
     if not _get_api_key():
         return None
 
     from utils.library import _normalize_title
-    key = _normalize_title(title)
+    norm = _normalize_title(title)
+    store_key = _cache_key(norm, year)
 
     with _cache_lock:
         cache = _load_cache()
-        entry = cache.get('shows', {}).get(key)
+        entry = _cache_lookup(cache.get('shows', {}), norm, year)
         if entry and _is_fresh(entry):
             return _format_show(entry)
 
@@ -290,7 +314,7 @@ def get_show_info(title, year=None):
 
     with _cache_lock:
         cache = _load_cache()
-        cache.setdefault('shows', {})[key] = metadata
+        cache.setdefault('shows', {})[store_key] = metadata
         _save_cache(cache)
 
     return _format_show(metadata)
@@ -302,11 +326,12 @@ def get_movie_info(title, year=None):
         return None
 
     from utils.library import _normalize_title
-    key = _normalize_title(title)
+    norm = _normalize_title(title)
+    store_key = _cache_key(norm, year)
 
     with _cache_lock:
         cache = _load_cache()
-        entry = cache.get('movies', {}).get(key)
+        entry = _cache_lookup(cache.get('movies', {}), norm, year)
         if entry and _is_fresh(entry):
             return _format_movie(entry)
 
@@ -322,7 +347,7 @@ def get_movie_info(title, year=None):
 
     with _cache_lock:
         cache = _load_cache()
-        cache.setdefault('movies', {})[key] = metadata
+        cache.setdefault('movies', {})[store_key] = metadata
         _save_cache(cache)
 
     return _format_movie(metadata)
@@ -386,10 +411,14 @@ def get_cached_posters(items):
         key = _normalize_title(item.get('title', ''))
         if not key:
             continue
+        year = item.get('year')
+        # Use year-qualified result key so same-title-different-year items
+        # don't overwrite each other (e.g. "The Bridge" 2011 vs 2013)
+        result_key = _cache_key(key, year)
 
         item_type = item.get('type', '')
         if item_type == 'show':
-            entry = shows_cache.get(key)
+            entry = _cache_lookup(shows_cache, key, year)
             if entry and _is_fresh(entry):
                 # Only count aired episodes (air_date non-empty and <= today)
                 # to match Sonarr behavior — unaired episodes are not "missing"
@@ -400,26 +429,33 @@ def get_cached_posters(items):
                         if ad and ad <= today:
                             aired_eps += 1
                 season_nums = [s['number'] for s in entry.get('seasons', [])]
-                result[key] = {
+                info = {
                     'poster_url': _poster_url(entry.get('poster_path', '')),
                     'tmdb_status': entry.get('status', ''),
                     'total_episodes': aired_eps,
                     'imdb_id': entry.get('imdb_id') or '',
                     'max_cached_season': max(season_nums) if season_nums else 0,
                 }
+                result[result_key] = info
+                # Also store under yearless key if no collision
+                if key != result_key and key not in result:
+                    result[key] = info
         elif item_type == 'movie':
-            entry = movies_cache.get(key)
+            entry = _cache_lookup(movies_cache, key, year)
             if entry and _is_fresh(entry):
                 # Movies don't have a status field in the cache; use
                 # release_date presence to infer "Released" vs empty.
                 rd = entry.get('release_date', '')
                 status = 'Released' if rd else ''
-                result[key] = {
+                info = {
                     'poster_url': _poster_url(entry.get('poster_path', '')),
                     'tmdb_status': status,
                     'runtime': entry.get('runtime', 0),
                     'imdb_id': entry.get('imdb_id') or '',
                 }
+                result[result_key] = info
+                if key != result_key and key not in result:
+                    result[key] = info
 
     return result
 
@@ -483,7 +519,7 @@ def _find_alt_show_entry(shows_cache, norm_key, max_season):
     return best
 
 
-def find_show_by_season(norm_key, max_season):
+def find_show_by_season(norm_key, max_season, year=None):
     """Season-aware show cache lookup.
 
     When the primary cache entry for *norm_key* doesn't contain
@@ -519,7 +555,7 @@ def find_show_by_season(norm_key, max_season):
             'max_cached_season': max(season_nums) if season_nums else 0,
         }
 
-    primary = shows_cache.get(norm_key)
+    primary = _cache_lookup(shows_cache, norm_key, year)
     if primary and _is_fresh(primary):
         entry_seasons = {s['number'] for s in primary.get('seasons', [])}
         if max_season in entry_seasons:
@@ -539,7 +575,7 @@ def find_show_by_season(norm_key, max_season):
     return None
 
 
-def find_show_tmdb_id_by_season(norm_key, max_season):
+def find_show_tmdb_id_by_season(norm_key, max_season, year=None):
     """Like find_show_by_season but returns just the TMDB ID (int or None).
 
     Used by symlink and rescan code that needs a TMDB ID for Sonarr lookup.
@@ -548,7 +584,7 @@ def find_show_tmdb_id_by_season(norm_key, max_season):
         cache = _load_cache()
     shows_cache = cache.get('shows', {})
 
-    primary = shows_cache.get(norm_key)
+    primary = _cache_lookup(shows_cache, norm_key, year)
     if primary and _is_fresh(primary):
         entry_seasons = {s['number'] for s in primary.get('seasons', [])}
         if max_season in entry_seasons:
@@ -575,18 +611,43 @@ def get_cached_tmdb_ids():
     items that share a TMDB ID can be merged.
 
     Returns: {'shows': {norm_title: tmdb_id, ...}, 'movies': {norm_title: tmdb_id, ...}}
+
+    Keys include both the stored key (which may be year-qualified like
+    ``"the bridge (2013)"``) and a yearless alias when unambiguous, so
+    callers using plain ``_normalize_title()`` lookups still match.
     """
+    from utils.library import _normalize_title
     with _cache_lock:
         cache = _load_cache()
+
+    _year_re = re.compile(r'^(.+)\s+\(\d{4}\)$')
 
     result = {}
     for section in ('shows', 'movies'):
         entries = {}
+        # Track yearless bases to detect collisions
+        yearless_seen = {}  # base -> tmdb_id
+        yearless_collisions = set()
         for norm_title, entry in cache.get(section, {}).items():
-            if _is_fresh(entry):
-                tmdb_id = entry.get('tmdb_id')
-                if tmdb_id:
-                    entries[norm_title] = tmdb_id
+            if not _is_fresh(entry):
+                continue
+            tmdb_id = entry.get('tmdb_id')
+            if not tmdb_id:
+                continue
+            entries[norm_title] = tmdb_id
+            # Extract yearless base for alias
+            m = _year_re.match(norm_title)
+            base = m.group(1) if m else norm_title
+            if base in yearless_seen and yearless_seen[base] != tmdb_id:
+                yearless_collisions.add(base)
+            yearless_seen[base] = tmdb_id
+        # Add yearless aliases for non-colliding entries
+        for norm_title, tmdb_id in list(entries.items()):
+            m = _year_re.match(norm_title)
+            if m:
+                base = m.group(1)
+                if base not in yearless_collisions and base not in entries:
+                    entries[base] = tmdb_id
         result[section] = entries
     return result
 
@@ -635,11 +696,11 @@ def background_populate_cache(items):
                     continue
 
                 # Skip if already cached by another path
-                key = _normalize_title(title)
+                norm = _normalize_title(title)
                 with _cache_lock:
                     c = _load_cache()
                     section = 'shows' if item_type == 'show' else 'movies'
-                    entry = c.get(section, {}).get(key)
+                    entry = _cache_lookup(c.get(section, {}), norm, year)
                     if entry and _is_fresh(entry):
                         continue
 

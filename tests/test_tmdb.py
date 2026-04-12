@@ -454,7 +454,7 @@ class TestCaching:
         # Expire the cache entry
         cache = tmdb._load_cache()
         from utils.library import _normalize_title
-        key = _normalize_title('Test Show')
+        key = tmdb._cache_key(_normalize_title('Test Show'), 2020)
         cache['shows'][key]['cached_at'] = '2020-01-01T00:00:00+00:00'
         tmdb._save_cache(cache)
 
@@ -660,12 +660,12 @@ class TestBackgroundPopulate:
         deadline = time.time() + 5
         while time.time() < deadline:
             cache = tmdb._load_cache()
-            if 'new show' in cache.get('shows', {}):
+            if 'new show (2024)' in cache.get('shows', {}):
                 break
             time.sleep(0.05)
         else:
             pytest.fail("background thread did not populate cache within 5s")
-        assert 'new show' in tmdb._load_cache().get('shows', {})
+        assert 'new show (2024)' in tmdb._load_cache().get('shows', {})
 
     def test_skips_already_cached(self, monkeypatch):
         from datetime import datetime, timezone

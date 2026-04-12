@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Year-aware debrid symlink matching**: Torrents with year-disambiguated titles (e.g. "The Bridge 2013") now correctly match the right Sonarr/Radarr series when multiple same-title entries exist (e.g. "The Bridge (2011)" vs "The Bridge (2013)"). Previously, the parsed year was discarded during arr lookup, causing symlinks to land in whichever series was indexed first.
+- **Year-aware TMDB cache keys**: Same-title-different-year shows/movies now get distinct TMDB cache entries (e.g. "the bridge (2011)" vs "the bridge (2013)") instead of colliding on a yearless key. Fixes wrong posters and metadata for year-disambiguated titles. Existing yearless cache entries are still found via fallback and expire naturally after 7 days.
 
 ## Version [2.17.4] - 2026-04-07
 

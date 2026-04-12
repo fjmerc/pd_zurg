@@ -535,7 +535,8 @@ def _enrich_with_tmdb_cache(movies, shows):
 
     for movie in movies:
         key = _normalize_title(movie['title'])
-        info = cached.get(key)
+        yr = movie.get('year')
+        info = cached.get(f"{key} ({yr})" if yr else key) or cached.get(key)
         if info:
             movie['poster_url'] = info['poster_url'] or None
             movie['tmdb_status'] = info.get('tmdb_status') or None
@@ -548,7 +549,8 @@ def _enrich_with_tmdb_cache(movies, shows):
 
     for show in shows:
         key = _normalize_title(show['title'])
-        info = cached.get(key)
+        yr = show.get('year')
+        info = cached.get(f"{key} ({yr})" if yr else key) or cached.get(key)
         if info:
             # Season-aware validation: if the show has seasons beyond what
             # the cached TMDB entry covers, the cache may have matched the
@@ -560,7 +562,7 @@ def _enrich_with_tmdb_cache(movies, shows):
             )
             cached_max = info.get('max_cached_season', 0)
             if show_max > 0 and cached_max < show_max:
-                better = find_show_by_season(key, show_max)
+                better = find_show_by_season(key, show_max, yr)
                 if better and better.get('max_cached_season', 0) >= show_max:
                     info = better
             show['poster_url'] = info['poster_url'] or None
@@ -2116,7 +2118,8 @@ class LibraryScanner:
                     arr_info = radarr_map.get(title.lower()) or radarr_map_norm.get(_norm_for_matching(title))
                 # Fallback: match via TMDB ID when title differs
                 if not arr_info:
-                    tmdb_id = cached_tmdb_movies.get(_normalize_title(title))
+                    _norm = _normalize_title(title)
+                    tmdb_id = (cached_tmdb_movies.get(f"{_norm} ({year})") if year else None) or cached_tmdb_movies.get(_norm)
                     if tmdb_id:
                         arr_info = radarr_by_tmdb.get(tmdb_id)
                 if arr_info and arr_info['folder']:
@@ -2216,11 +2219,11 @@ class LibraryScanner:
                     # Season-aware TMDB fallback: use the show's max season
                     # to disambiguate reboots/revivals with the same title
                     show_max_sn = _show_max_season.get(title)
-                    tmdb_id = cached_tmdb_shows.get(norm)
+                    tmdb_id = (cached_tmdb_shows.get(f"{norm} ({year})") if year else None) or cached_tmdb_shows.get(norm)
                     if tmdb_id:
                         arr_info = sonarr_by_tmdb.get(tmdb_id)
                     if not arr_info and show_max_sn:
-                        alt_id = find_show_tmdb_id_by_season(norm, show_max_sn)
+                        alt_id = find_show_tmdb_id_by_season(norm, show_max_sn, year)
                         if alt_id and alt_id != tmdb_id:
                             arr_info = sonarr_by_tmdb.get(alt_id)
                 if arr_info and arr_info['folder']:
@@ -2352,13 +2355,13 @@ class LibraryScanner:
                     info = sonarr_map.get(title.lower()) or sonarr_map_norm.get(_norm_for_matching(title))
                 if not info:
                     norm_t = _normalize_title(title)
-                    tmdb_id = cached_tmdb_shows.get(norm_t)
+                    tmdb_id = (cached_tmdb_shows.get(f"{norm_t} ({_yr})") if _yr else None) or cached_tmdb_shows.get(norm_t)
                     if tmdb_id:
                         info = sonarr_by_tmdb.get(tmdb_id)
                     if not info:
                         max_sn = _show_max_season.get(title, 0)
                         if max_sn:
-                            alt_id = find_show_tmdb_id_by_season(norm_t, max_sn)
+                            alt_id = find_show_tmdb_id_by_season(norm_t, max_sn, _yr)
                             if alt_id and alt_id != tmdb_id:
                                 info = sonarr_by_tmdb.get(alt_id)
                 if info and info.get('id') and info.get('client'):
@@ -2395,7 +2398,8 @@ class LibraryScanner:
                 if not info:
                     info = radarr_map.get(title.lower()) or radarr_map_norm.get(_norm_for_matching(title))
                 if not info:
-                    tmdb_id = cached_tmdb_movies.get(_normalize_title(title))
+                    _norm_t = _normalize_title(title)
+                    tmdb_id = (cached_tmdb_movies.get(f"{_norm_t} ({_yr})") if _yr else None) or cached_tmdb_movies.get(_norm_t)
                     if tmdb_id:
                         info = radarr_by_tmdb.get(tmdb_id)
                 if info and info.get('id') and info.get('client'):

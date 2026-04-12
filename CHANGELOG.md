@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## Version [2.17.5] - 2026-04-12
+
+### Fixed
+
+- **Year-aware debrid symlink matching**: Torrents with year-disambiguated titles (e.g. "The Bridge 2013") now correctly match the right Sonarr/Radarr series when multiple same-title entries exist (e.g. "The Bridge (2011)" vs "The Bridge (2013)"). Previously, the parsed year was discarded during arr lookup, causing symlinks to land in whichever series was indexed first.
+
 ## Version [2.17.4] - 2026-04-07
 
 ### Added

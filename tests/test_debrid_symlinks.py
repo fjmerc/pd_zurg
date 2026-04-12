@@ -2,6 +2,7 @@
 
 import os
 import threading
+from unittest.mock import MagicMock, patch
 import pytest
 import utils.library as library
 from utils.library import LibraryScanner
@@ -741,3 +742,156 @@ class TestCreateDebridSymlinksMovies:
 
         assert not os.path.exists(os.path.join(tmp_dir, 'etc'))
         assert os.listdir(local_movies) == []
+
+
+class TestYearQualifiedMatching:
+    """Year-qualified matching disambiguates same-title different-year series.
+
+    Regression test for: torrent "The Bridge 2013 S02E04" was symlinked into
+    Sonarr's "The Bridge (2011)" folder because the parsed title "The Bridge"
+    matched whichever series was indexed first in sonarr_map_norm.
+    """
+
+    def _mock_sonarr_client(self, series_list):
+        """Return a mock arr client that returns the given series."""
+        client = MagicMock()
+        client.get_all_series.return_value = series_list
+        return client
+
+    def _mock_radarr_client(self, movie_list):
+        """Return a mock arr client that returns the given movies."""
+        client = MagicMock()
+        client.get_all_movies.return_value = movie_list
+        return client
+
+    def test_show_symlink_uses_year_to_pick_correct_sonarr_series(self, tmp_dir, monkeypatch):
+        """A torrent with year 2013 should match Sonarr's '(2013)' series, not '(2011)'."""
+        mount = os.path.join(tmp_dir, 'mount')
+        local_tv = os.path.join(tmp_dir, 'tv')
+        os.makedirs(local_tv)
+
+        ep_path = os.path.join(mount, 'shows', 'The.Bridge.2013.S02E04', 'The.Bridge.2013.S02E04.mkv')
+        _touch(ep_path)
+
+        _setup_env(monkeypatch, mount, '/mnt/debrid')
+        scanner = _make_scanner(mount, local_tv, monkeypatch)
+
+        # Sonarr has both Bridge series — 2011 indexed first
+        sonarr_client = self._mock_sonarr_client([
+            {'title': 'The Bridge (2011)', 'path': '/data/media/tv/The Bridge (2011)',
+             'id': 140, 'tvdbId': 252019, 'tmdbId': None},
+            {'title': 'The Bridge (2013)', 'path': '/data/media/tv/The Bridge (2013)',
+             'id': 197, 'tvdbId': 264085, 'tmdbId': None},
+        ])
+
+        def mock_get_download_service(media_type):
+            if media_type == 'show':
+                return sonarr_client, 'sonarr'
+            return None, None
+
+        shows = [{
+            'title': 'The Bridge',
+            'year': 2013,
+            'source': 'debrid',
+            'season_data': [{
+                'number': 2,
+                'episode_count': 1,
+                'episodes': [{'number': 4, 'file': 'The.Bridge.2013.S02E04.mkv', 'source': 'debrid'}],
+            }],
+        }]
+        path_index = {('the bridge', 2, 4): ep_path}
+
+        with patch('utils.arr_client.get_download_service', mock_get_download_service), \
+             patch('utils.tmdb.get_cached_tmdb_ids', return_value={'movies': {}, 'shows': {}}), \
+             patch('utils.tmdb.find_show_tmdb_id_by_season', return_value=None):
+            scanner._create_debrid_symlinks(shows, [_LOCAL_MOVIE], path_index)
+
+        # Should be in the 2013 folder, NOT the 2011 folder
+        correct = os.path.join(local_tv, 'The Bridge (2013)', 'Season 02', 'The.Bridge.2013.S02E04.mkv')
+        wrong = os.path.join(local_tv, 'The Bridge (2011)', 'Season 02', 'The.Bridge.2013.S02E04.mkv')
+        assert os.path.islink(correct), f"Expected symlink at {correct}"
+        assert not os.path.exists(wrong), f"Should NOT have created symlink in 2011 folder"
+
+    def test_show_without_year_still_matches_via_norm(self, tmp_dir, monkeypatch):
+        """A torrent without a year still falls through to norm matching."""
+        mount = os.path.join(tmp_dir, 'mount')
+        local_tv = os.path.join(tmp_dir, 'tv')
+        os.makedirs(local_tv)
+
+        ep_path = os.path.join(mount, 'shows', 'Unique.Show.S01E01', 'Unique.Show.S01E01.mkv')
+        _touch(ep_path)
+
+        _setup_env(monkeypatch, mount, '/mnt/debrid')
+        scanner = _make_scanner(mount, local_tv, monkeypatch)
+
+        sonarr_client = self._mock_sonarr_client([
+            {'title': 'Unique Show', 'path': '/data/media/tv/Unique Show',
+             'id': 1, 'tvdbId': 1, 'tmdbId': None},
+        ])
+
+        def mock_get_download_service(media_type):
+            if media_type == 'show':
+                return sonarr_client, 'sonarr'
+            return None, None
+
+        shows = [{
+            'title': 'Unique Show',
+            'year': None,
+            'source': 'debrid',
+            'season_data': [{
+                'number': 1,
+                'episode_count': 1,
+                'episodes': [{'number': 1, 'file': 'Unique.Show.S01E01.mkv', 'source': 'debrid'}],
+            }],
+        }]
+        path_index = {('unique show', 1, 1): ep_path}
+
+        with patch('utils.arr_client.get_download_service', mock_get_download_service), \
+             patch('utils.tmdb.get_cached_tmdb_ids', return_value={'movies': {}, 'shows': {}}), \
+             patch('utils.tmdb.find_show_tmdb_id_by_season', return_value=None):
+            scanner._create_debrid_symlinks(shows, [_LOCAL_MOVIE], path_index)
+
+        expected = os.path.join(local_tv, 'Unique Show', 'Season 01', 'Unique.Show.S01E01.mkv')
+        assert os.path.islink(expected)
+
+    def test_movie_symlink_uses_year_to_pick_correct_radarr_entry(self, tmp_dir, monkeypatch):
+        """A movie torrent with year should match the correct Radarr entry."""
+        mount = os.path.join(tmp_dir, 'mount')
+        local_movies = os.path.join(tmp_dir, 'movies')
+        os.makedirs(local_movies)
+
+        movie_dir = os.path.join(mount, 'movies', 'The.Grudge.2020')
+        _touch(os.path.join(movie_dir, 'The.Grudge.2020.mkv'))
+
+        _setup_env(monkeypatch, mount, '/mnt/debrid')
+        scanner = _make_scanner(mount, None, monkeypatch, local_movies_path=local_movies)
+
+        radarr_client = self._mock_radarr_client([
+            {'title': 'The Grudge (2004)', 'path': '/data/media/movies/The Grudge (2004)',
+             'id': 10, 'tmdbId': None},
+            {'title': 'The Grudge (2020)', 'path': '/data/media/movies/The Grudge (2020)',
+             'id': 20, 'tmdbId': None},
+        ])
+
+        def mock_get_download_service(media_type):
+            if media_type == 'movie':
+                return radarr_client, 'radarr'
+            return None, None
+
+        movies = [{
+            'title': 'The Grudge',
+            'year': 2020,
+            'source': 'debrid',
+            'type': 'movie',
+            'path': movie_dir,
+        }]
+
+        with patch('utils.arr_client.get_download_service', mock_get_download_service), \
+             patch('utils.tmdb.get_cached_tmdb_ids', return_value={'movies': {}, 'shows': {}}), \
+             patch('utils.tmdb.find_show_tmdb_id_by_season', return_value=None):
+            scanner._create_debrid_symlinks([_LOCAL_SHOW], movies, {})
+
+        correct = os.path.join(local_movies, 'The Grudge (2020)', 'The.Grudge.2020.mkv')
+        wrong = os.path.join(local_movies, 'The Grudge (2004)', 'The.Grudge.2020.mkv')
+        assert os.path.islink(correct), f"Expected symlink at {correct}"
+        assert not os.path.exists(wrong), f"Should NOT have created symlink in 2004 folder"

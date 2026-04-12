@@ -2011,6 +2011,7 @@ class LibraryScanner:
         created = 0
         symlinked_shows = set()   # titles that got new symlinks
         symlinked_movies = set()  # titles that got new symlinks
+        _symlink_years = {}       # title -> parsed year (for year-aware rescan matching)
         failed_titles = {}        # title -> last error string
 
         # Fetch arr libraries for canonical folder names and rescan IDs.
@@ -2106,7 +2107,13 @@ class LibraryScanner:
                     if _blocklist.is_blocked_title(mount_folder) or _blocklist.is_blocked_title(title):
                         continue
 
-                arr_info = radarr_map.get(title.lower()) or radarr_map_norm.get(_norm_for_matching(title))
+                # Year-qualified exact match first to disambiguate same-title
+                # different-year entries (e.g. "The Bridge" 2011 vs 2013)
+                arr_info = None
+                if year:
+                    arr_info = radarr_map.get(f"{title} ({year})".lower())
+                if not arr_info:
+                    arr_info = radarr_map.get(title.lower()) or radarr_map_norm.get(_norm_for_matching(title))
                 # Fallback: match via TMDB ID when title differs
                 if not arr_info:
                     tmdb_id = cached_tmdb_movies.get(_normalize_title(title))
@@ -2170,6 +2177,8 @@ class LibraryScanner:
                     os.symlink(symlink_target, local_path)
                     created += 1
                     symlinked_movies.add(title)
+                    if year:
+                        _symlink_years[title] = year
                 except FileExistsError:
                     pass
                 except OSError as e:
@@ -2196,7 +2205,13 @@ class LibraryScanner:
                 norm = _normalize_title(show['title'])
                 title = show['title']
                 year = show.get('year')
-                arr_info = sonarr_map.get(title.lower()) or sonarr_map_norm.get(_norm_for_matching(title))
+                # Year-qualified exact match first to disambiguate same-title
+                # different-year entries (e.g. "The Bridge" 2011 vs 2013)
+                arr_info = None
+                if year:
+                    arr_info = sonarr_map.get(f"{title} ({year})".lower())
+                if not arr_info:
+                    arr_info = sonarr_map.get(title.lower()) or sonarr_map_norm.get(_norm_for_matching(title))
                 if not arr_info:
                     # Season-aware TMDB fallback: use the show's max season
                     # to disambiguate reboots/revivals with the same title
@@ -2257,6 +2272,8 @@ class LibraryScanner:
                             os.symlink(symlink_target, local_path)
                             created += 1
                             symlinked_shows.add(title)
+                            if year:
+                                _symlink_years[title] = year
                         except FileExistsError:
                             pass
                         except OSError as e:
@@ -2326,7 +2343,13 @@ class LibraryScanner:
                         "Set SONARR_URL and SONARR_API_KEY for automatic rescans."
                     )
             for title in symlinked_shows:
-                info = sonarr_map.get(title.lower()) or sonarr_map_norm.get(_norm_for_matching(title))
+                # Year-qualified exact match first (symmetric with show dir selection)
+                info = None
+                _yr = _symlink_years.get(title)
+                if _yr:
+                    info = sonarr_map.get(f"{title} ({_yr})".lower())
+                if not info:
+                    info = sonarr_map.get(title.lower()) or sonarr_map_norm.get(_norm_for_matching(title))
                 if not info:
                     norm_t = _normalize_title(title)
                     tmdb_id = cached_tmdb_shows.get(norm_t)
@@ -2364,7 +2387,13 @@ class LibraryScanner:
                         "Set RADARR_URL and RADARR_API_KEY for automatic rescans."
                     )
             for title in symlinked_movies:
-                info = radarr_map.get(title.lower()) or radarr_map_norm.get(_norm_for_matching(title))
+                # Year-qualified exact match first (symmetric with movie dir selection)
+                info = None
+                _yr = _symlink_years.get(title)
+                if _yr:
+                    info = radarr_map.get(f"{title} ({_yr})".lower())
+                if not info:
+                    info = radarr_map.get(title.lower()) or radarr_map_norm.get(_norm_for_matching(title))
                 if not info:
                     tmdb_id = cached_tmdb_movies.get(_normalize_title(title))
                     if tmdb_id:

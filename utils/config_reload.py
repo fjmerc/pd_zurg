@@ -60,8 +60,19 @@ SOFT_RELOAD = {
 }
 
 
+# Snapshot of .env keys from the last load — used to detect removals.
+# Only keys that were previously IN the .env file should be cleared on
+# removal.  Keys set via docker-compose environment: (which are in
+# os.environ but NOT in .env) must never be touched.
+# Initialized from the current .env at import time so the first SIGHUP
+# can correctly detect removals.
+_last_env_keys = set(dotenv_values(ENV_FILE).keys()) if os.path.exists(ENV_FILE) else set()
+
+
 def _reload_env():
     """Reload .env file and return set of changed variable names."""
+    global _last_env_keys
+
     if not os.path.exists(ENV_FILE):
         logger.warning(f"[reload] No .env file found at {ENV_FILE}")
         return set()
@@ -73,23 +84,22 @@ def _reload_env():
         old_val = os.environ.get(key)
         if old_val != new_val:
             # Mask sensitive values in logs
-            if any(s in key.upper() for s in ('KEY', 'TOKEN', 'PASS', 'SECRET')):
+            if any(s in key.upper() for s in ('KEY', 'TOKEN', 'PASS', 'SECRET', 'AUTH')):
                 logger.info(f"[reload] {key} changed: *** -> ***")
             else:
                 logger.info(f"[reload] {key} changed: '{old_val}' -> '{new_val}'")
             os.environ[key] = new_val if new_val is not None else ''
             changed.add(key)
 
-    # Detect keys removed from .env (present in os.environ but absent from file)
-    try:
-        from utils.settings_api import _ALL_KEYS
-        for key in _ALL_KEYS:
-            if key not in new_values and os.environ.get(key, ''):
-                logger.info(f"[reload] {key} removed from .env")
-                os.environ[key] = ''
-                changed.add(key)
-    except ImportError:
-        pass
+    # Detect keys removed from .env — only clear keys that were in the
+    # PREVIOUS .env snapshot, not keys from docker-compose or other sources.
+    for key in _last_env_keys:
+        if key not in new_values and os.environ.get(key, ''):
+            logger.info(f"[reload] {key} removed from .env")
+            os.environ[key] = ''
+            changed.add(key)
+
+    _last_env_keys = set(new_values.keys())
 
     return changed
 
@@ -113,8 +123,14 @@ def _determine_restarts(changed_vars):
     return services
 
 
+_reload_lock = threading.Lock()
+
+
 def _do_reload():
     """Perform the actual reload work. Runs in a separate thread."""
+    if not _reload_lock.acquire(blocking=False):
+        logger.info("[reload] Reload already in progress, skipping")
+        return
     try:
         import utils.processes as _proc_mod
         if _proc_mod._shutting_down:
@@ -265,6 +281,8 @@ def _do_reload():
 
     except Exception as e:
         logger.error(f"[reload] Reload failed: {e}")
+    finally:
+        _reload_lock.release()
 
 
 def _notify_reload(changed, services):

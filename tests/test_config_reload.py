@@ -2,7 +2,10 @@
 
 import os
 import pytest
-from utils.config_reload import _determine_restarts, SOFT_RELOAD, SERVICE_DEPENDENCIES
+from utils.config_reload import (
+    _determine_restarts, _reload_env, SOFT_RELOAD, SERVICE_DEPENDENCIES,
+    ENV_FILE,
+)
 
 
 class TestDetermineRestarts:
@@ -165,3 +168,69 @@ class TestRefreshGlobals:
             else:
                 os.environ.pop('SEERR_ADDRESS', None)
             config.load()
+
+
+class TestReloadEnvDoesNotClobberDockerCompose:
+    """SIGHUP reload must not clear env vars set by docker-compose.
+
+    Regression test: vars like BLACKHOLE_COMPLETED_DIR set in
+    docker-compose.yml's environment: section (not in .env) were being
+    blanked on reload because the removal logic compared against os.environ
+    instead of the previous .env snapshot.
+    """
+
+    def test_docker_compose_vars_not_cleared(self, tmp_dir, monkeypatch):
+        """Vars only in docker-compose (not in .env) survive reload."""
+        import utils.config_reload as cr
+
+        env_file = os.path.join(tmp_dir, '.env')
+        monkeypatch.setattr(cr, 'ENV_FILE', env_file)
+
+        # .env only has FOO
+        with open(env_file, 'w') as f:
+            f.write('FOO=bar\n')
+
+        # Simulate docker-compose var already in os.environ
+        monkeypatch.setenv('BLACKHOLE_COMPLETED_DIR', '/completed')
+        monkeypatch.setenv('RCLONE_VFS_CACHE_MODE', 'full')
+        monkeypatch.setenv('FOO', 'bar')
+
+        # Initialize snapshot from current .env
+        monkeypatch.setattr(cr, '_last_env_keys', set(cr.dotenv_values(env_file).keys()))
+
+        # Reload — .env still has FOO, docker-compose vars are NOT in .env
+        changed = cr._reload_env()
+
+        # Docker-compose vars must NOT be cleared
+        assert os.environ['BLACKHOLE_COMPLETED_DIR'] == '/completed'
+        assert os.environ['RCLONE_VFS_CACHE_MODE'] == 'full'
+        assert 'BLACKHOLE_COMPLETED_DIR' not in changed
+        assert 'RCLONE_VFS_CACHE_MODE' not in changed
+        # Unchanged .env var should not be reported as changed either
+        assert 'FOO' not in changed
+
+    def test_env_file_removal_detected(self, tmp_dir, monkeypatch):
+        """Vars removed from .env ARE cleared."""
+        import utils.config_reload as cr
+
+        env_file = os.path.join(tmp_dir, '.env')
+        monkeypatch.setattr(cr, 'ENV_FILE', env_file)
+
+        # .env has FOO and BAR
+        with open(env_file, 'w') as f:
+            f.write('FOO=bar\nBAR=baz\n')
+        monkeypatch.setenv('FOO', 'bar')
+        monkeypatch.setenv('BAR', 'baz')
+
+        monkeypatch.setattr(cr, '_last_env_keys', set(cr.dotenv_values(env_file).keys()))
+
+        # Remove BAR from .env
+        with open(env_file, 'w') as f:
+            f.write('FOO=bar\n')
+
+        changed = cr._reload_env()
+
+        assert os.environ.get('BAR') == ''
+        assert 'BAR' in changed
+        assert os.environ['FOO'] == 'bar'
+        assert 'FOO' not in changed

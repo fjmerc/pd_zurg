@@ -7,6 +7,7 @@ in both sources.
 
 import os
 import re
+import shutil
 import threading
 import unicodedata
 import time
@@ -2993,6 +2994,97 @@ class LibraryScanner:
         except (PermissionError, OSError) as e:
             logger.warning(f"[library] Cannot scan local TV: {e}")
         return items
+
+
+def remove_title_symlinks(title, media_type, year=None):
+    """Remove local library symlinks for a deleted title.
+
+    Walks the appropriate local library directory (TV or movies), finds
+    the folder whose parsed title matches *title* (normalized comparison),
+    and removes it only if every file inside is a symlink (no real files).
+
+    Also checks BLACKHOLE_COMPLETED_DIR for leftover release symlinks.
+
+    Matching uses ``_normalize_title`` only (no ``_norm_for_matching`` or
+    TMDB ID fallback) for safety — titles that only match via TMDB alias
+    (e.g. debrid name differs from arr name) may leave orphaned dirs.
+
+    Returns list of directory paths that were removed.
+    """
+    norm_target = _normalize_title(title)
+    removed = []
+
+    if media_type == 'show':
+        lib_path = os.environ.get('BLACKHOLE_LOCAL_LIBRARY_TV', '').strip()
+    else:
+        lib_path = os.environ.get('BLACKHOLE_LOCAL_LIBRARY_MOVIES', '').strip()
+
+    # Remove from local library
+    if lib_path and os.path.isdir(lib_path):
+        try:
+            with os.scandir(lib_path) as it:
+                for entry in it:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    parsed_title, parsed_year = _parse_folder_name(entry.name)
+                    if not parsed_title:
+                        continue
+                    if _normalize_title(parsed_title) != norm_target:
+                        continue
+                    # Year guard: if both sides have a year, they must agree
+                    if year is not None and parsed_year is not None and year != parsed_year:
+                        continue
+                    # Safety: only remove if non-empty and all files are symlinks
+                    if _dir_contains_only_symlinks(entry.path):
+                        try:
+                            shutil.rmtree(entry.path)
+                            logger.info(f"[cleanup] Removed symlink directory: {entry.path}")
+                            removed.append(entry.path)
+                        except OSError as e:
+                            logger.warning(f"[cleanup] Failed to remove {entry.path}: {e}")
+                    else:
+                        logger.info(f"[cleanup] Skipping {entry.path} — contains real files or is empty")
+        except (PermissionError, OSError) as e:
+            logger.warning(f"[cleanup] Cannot scan {lib_path}: {e}")
+
+    # Remove from completed dir
+    completed_dir = os.environ.get('BLACKHOLE_COMPLETED_DIR', '').strip()
+    if completed_dir and os.path.isdir(completed_dir):
+        try:
+            with os.scandir(completed_dir) as it:
+                for entry in it:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    parsed_title, parsed_year = _parse_folder_name(entry.name)
+                    if not parsed_title:
+                        continue
+                    if _normalize_title(parsed_title) != norm_target:
+                        continue
+                    if year is not None and parsed_year is not None and year != parsed_year:
+                        continue
+                    if _dir_contains_only_symlinks(entry.path):
+                        try:
+                            shutil.rmtree(entry.path)
+                            logger.info(f"[cleanup] Removed completed symlink directory: {entry.path}")
+                            removed.append(entry.path)
+                        except OSError as e:
+                            logger.warning(f"[cleanup] Failed to remove {entry.path}: {e}")
+        except (PermissionError, OSError) as e:
+            logger.warning(f"[cleanup] Cannot scan {completed_dir}: {e}")
+
+    return removed
+
+
+def _dir_contains_only_symlinks(dirpath):
+    """Return True if *dirpath* is non-empty and every file is a symlink."""
+    has_files = False
+    for root, dirs, files in os.walk(dirpath):
+        for f in files:
+            has_files = True
+            fpath = os.path.join(root, f)
+            if not os.path.islink(fpath):
+                return False
+    return has_files
 
 
 _scanner = None

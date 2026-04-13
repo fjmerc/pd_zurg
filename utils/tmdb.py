@@ -285,6 +285,32 @@ def _cache_lookup(section, norm, year=None):
     return section.get(norm)
 
 
+def remove_cached_entry(normalized_title, media_type, year=None):
+    """Remove a TMDB cache entry for a deleted title.
+
+    Tries both year-qualified and plain keys. Returns True if anything
+    was removed.  Thread-safe (acquires _cache_lock).
+    """
+    with _cache_lock:
+        cache = _load_cache()
+        section_key = 'shows' if media_type == 'show' else 'movies'
+        section = cache.get(section_key, {})
+        removed = False
+        keys_to_try = [normalized_title]
+        if year is not None:
+            qualified = _cache_key(normalized_title, year)
+            if qualified != normalized_title:
+                keys_to_try.insert(0, qualified)
+        for key in keys_to_try:
+            if key in section:
+                del section[key]
+                removed = True
+        if removed:
+            cache[section_key] = section
+            _save_cache(cache)
+        return removed
+
+
 def get_show_info(title, year=None):
     """Get show metadata with caching. Returns dict or None."""
     if not _get_api_key():

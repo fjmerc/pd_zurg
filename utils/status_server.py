@@ -1905,16 +1905,78 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     return
 
                 if result.get('status') == 'deleted':
-                    from utils.library import get_scanner
-                    scanner = get_scanner()
-                    if scanner:
-                        scanner.refresh()
+                    # --- Cleanup pd_zurg artifacts for the deleted title ---
+                    from utils.library import normalize_title, remove_title_symlinks
+                    norm = normalize_title(title)
+                    cleanup = {}
+
+                    # Parse optional year for year-aware matching
+                    year = values.get('year')
+                    if year is not None:
+                        try:
+                            year = int(year)
+                        except (ValueError, TypeError):
+                            year = None
+
+                    # 1. Remove debrid torrents (opt-out via delete_debrid=false)
+                    delete_debrid = values.get('delete_debrid', True)
+                    if str(delete_debrid).lower() in ('true', '1', 'yes'):
+                        try:
+                            from utils.debrid_client import get_debrid_client
+                            dclient, dservice = get_debrid_client()
+                            if dclient:
+                                matches = dclient.find_torrents_by_title(norm, target_year=year)
+                                deleted_count = 0
+                                for m in matches:
+                                    if dclient.delete_torrent(str(m['id'])):
+                                        deleted_count += 1
+                                if deleted_count:
+                                    cleanup['debrid_torrents_removed'] = deleted_count
+                                    logger.info(f"[delete] Removed {deleted_count} debrid torrent(s) for '{title}'")
+                        except Exception as e:
+                            logger.warning(f"[delete] Debrid cleanup failed for '{title}': {e}")
+                            cleanup['debrid_error'] = str(e)
+
+                    # 2. Remove local library symlinks
+                    try:
+                        removed_dirs = remove_title_symlinks(title, media_type, year=year)
+                        if removed_dirs:
+                            cleanup['symlinks_removed'] = len(removed_dirs)
+                    except Exception as e:
+                        logger.warning(f"[delete] Symlink cleanup failed for '{title}': {e}")
+
+                    # 3. Clean up preferences and pending state
+                    try:
+                        from utils.library_prefs import remove_preference, clear_pending
+                        remove_preference(norm)
+                        clear_pending(norm)
+                    except Exception as e:
+                        logger.warning(f"[delete] Prefs/pending cleanup failed for '{title}': {e}")
+
+                    # 4. Remove TMDB cache entry
+                    try:
+                        from utils.tmdb import remove_cached_entry
+                        remove_cached_entry(norm, media_type, year=year)
+                    except Exception as e:
+                        logger.warning(f"[delete] TMDB cache cleanup failed for '{title}': {e}")
+
+                    # 5. Refresh library scanner (after all cleanup)
+                    try:
+                        from utils.library import get_scanner
+                        scanner = get_scanner()
+                        if scanner:
+                            scanner.refresh()
+                    except Exception as e:
+                        logger.warning(f"[delete] Scanner refresh failed: {e}")
+
                     try:
                         from utils import history as _hist
                         _hist.log_event('arr_deleted', title, source='library',
                                         detail=f'Deleted from {service_name}')
                     except Exception:
                         pass
+                    if cleanup:
+                        result['cleanup'] = cleanup
                     self._send_json_response(200, json.dumps(result))
                 else:
                     self._send_json_response(400, json.dumps(result))

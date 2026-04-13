@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## Version [2.17.6] - 2026-04-13
+
+### Fixed
+
+- **Delete now fully cleans up all artifacts**: Deleting a show/movie from the library now also removes debrid torrents, local library symlinks, preferences, pending state, and TMDB cache entries. Previously, only the Sonarr/Radarr entry was deleted, leaving orphaned symlinks and debrid content that caused the title to reappear on the next library scan.
+
 ## Version [2.17.5] - 2026-04-12
 
 ### Fixed

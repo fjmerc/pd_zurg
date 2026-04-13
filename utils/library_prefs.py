@@ -66,6 +66,17 @@ def get_all_preferences():
     return load_preferences()
 
 
+def remove_preference(normalized_title):
+    """Remove a preference entry for a deleted title. Thread-safe."""
+    with _prefs_lock:
+        prefs = load_preferences()
+        if normalized_title in prefs:
+            del prefs[normalized_title]
+            save_preferences(prefs)
+            return True
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Pending transitions
 # ---------------------------------------------------------------------------

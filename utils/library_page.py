@@ -3102,18 +3102,22 @@ function deleteItem(mediaType) {
   }
   _actionInFlight = true;
   _setActionsDisabled(true);
-  _showMsgHtml('<span class="scanning-dot"></span>Deleting from ' + svc + '...');
+  _showMsgHtml('<span class="scanning-dot"></span>Deleting from ' + svc + ' and cleaning up...');
   var titleCopy = _detailItem.title;
   fetch('/api/library/delete', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({title: titleCopy, type: mediaType, tmdb_id: _detailMeta.tmdb_id})
+    body: JSON.stringify({title: titleCopy, type: mediaType, tmdb_id: _detailMeta.tmdb_id, delete_debrid: true, year: _detailItem.year || null})
   }).then(function(r) {
     return r.json().then(function(d) { return {ok: r.ok, d: d}; });
   }).then(function(res) {
     if (res.ok && res.d.status === 'deleted') {
       hideDetail();
-      _showMsg('Deleted ' + titleCopy + ' from ' + svc, 'success');
+      var parts = ['Deleted ' + titleCopy + ' from ' + svc];
+      var c = res.d.cleanup || {};
+      if (c.debrid_torrents_removed) parts.push(c.debrid_torrents_removed + ' debrid torrent(s) removed');
+      if (c.symlinks_removed) parts.push(c.symlinks_removed + ' symlink dir(s) cleaned');
+      _showMsg(parts.join(' \u2014 '), 'success');
       fetchLibrary();
     } else {
       _showMsg('Failed: ' + (res.d.error || res.d.message || 'Unknown error'), 'error');

@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Show detail no longer auto-expands most recent season**: The show detail page previously force-expanded the first (most recent) season regardless of state. Seasons now only auto-expand when they have active state — pending searches, incomplete episode counts, or episodes airing within 30 days.
 - **BluRay disc rips miscategorized as shows**: Zurg's `has_episodes` filter incorrectly matches BluRay disc rips (numbered `.m2ts` files) as TV shows, placing them in `shows/` instead of `movies/`. pd_zurg now reclassifies items in the shows category as movies when they contain no recognizable media files (extensions not in `MEDIA_EXTENSIONS`). Items with valid media files but non-standard naming (e.g. anime) still respect Zurg's category hint. This fixes cross-source matching — previously, a local movie copy couldn't merge with its debrid counterpart because they were in different type lists (movie vs phantom show with 0 episodes), causing the title to stay stuck on "Local" source.
 
 ## Version [2.17.6] - 2026-04-13

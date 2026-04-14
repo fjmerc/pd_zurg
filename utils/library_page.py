@@ -2446,7 +2446,7 @@ function _renderShowDetail(show, meta) {
 
   for (var si = 0; si < seasons.length; si++) {
     var season = seasons[si];
-    var expanded = hasPrev ? !!expandedNums[String(season.number)] : _shouldAutoExpand(season, show.title) || si === 0;
+    var expanded = hasPrev ? !!expandedNums[String(season.number)] : _shouldAutoExpand(season, show.title);
     var hasDebrid = false, hasLocal = false, hasMissing = false, debridCount = 0, missingCount = 0;
     for (var ci = 0; ci < (season.episodes || []).length; ci++) {
       if (season.episodes[ci].source === 'debrid') { hasDebrid = true; debridCount++; }

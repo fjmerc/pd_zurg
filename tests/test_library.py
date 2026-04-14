@@ -2020,3 +2020,63 @@ class TestCleanupDiscRips:
         assert cleaned == 1
         assert len(movies) == 1
         assert movies[0]['title'] == 'NoMatch'  # Only un-actioned item remains
+
+
+class TestRemoveTitleSymlinksLabeled:
+    """remove_title_symlinks must scan both flat and labeled completed_dir layouts."""
+
+    @staticmethod
+    def _make_symlink_release(release_path, target_base):
+        """Create a release dir containing one symlink pointing into *target_base*."""
+        os.makedirs(release_path)
+        os.makedirs(target_base, exist_ok=True)
+        target_file = os.path.join(target_base, os.path.basename(release_path) + '.mkv')
+        with open(target_file, 'w') as f:
+            f.write('data')
+        os.symlink(target_file, os.path.join(release_path, 'ep.mkv'))
+
+    def test_remove_title_symlinks_scans_labels(self, tmp_dir, monkeypatch):
+        from utils.library import remove_title_symlinks
+        completed = os.path.join(tmp_dir, 'completed')
+        targets = os.path.join(tmp_dir, 'targets')
+        sonarr_release = os.path.join(completed, 'sonarr', 'Fargo.S05E01')
+        self._make_symlink_release(sonarr_release, targets)
+
+        monkeypatch.setenv('BLACKHOLE_COMPLETED_DIR', completed)
+        monkeypatch.setenv('BLACKHOLE_LOCAL_LIBRARY_TV', '')
+
+        removed = remove_title_symlinks('Fargo', 'show')
+        assert sonarr_release in removed
+        assert not os.path.exists(sonarr_release)
+
+    def test_remove_title_symlinks_flat_compat(self, tmp_dir, monkeypatch):
+        """Legacy flat layout must keep working."""
+        from utils.library import remove_title_symlinks
+        completed = os.path.join(tmp_dir, 'completed')
+        targets = os.path.join(tmp_dir, 'targets')
+        flat = os.path.join(completed, 'Fargo.S05E01')
+        self._make_symlink_release(flat, targets)
+
+        monkeypatch.setenv('BLACKHOLE_COMPLETED_DIR', completed)
+        monkeypatch.setenv('BLACKHOLE_LOCAL_LIBRARY_TV', '')
+
+        removed = remove_title_symlinks('Fargo', 'show')
+        assert flat in removed
+        assert not os.path.exists(flat)
+
+    def test_remove_title_symlinks_across_labels(self, tmp_dir, monkeypatch):
+        """A title that exists under multiple labels must be removed from all of them."""
+        from utils.library import remove_title_symlinks
+        completed = os.path.join(tmp_dir, 'completed')
+        targets = os.path.join(tmp_dir, 'targets')
+        sonarr_release = os.path.join(completed, 'sonarr', 'Fargo.S05E01')
+        radarr_release = os.path.join(completed, 'radarr', 'Fargo.S05E01')
+        self._make_symlink_release(sonarr_release, targets)
+        self._make_symlink_release(radarr_release, targets)
+
+        monkeypatch.setenv('BLACKHOLE_COMPLETED_DIR', completed)
+        monkeypatch.setenv('BLACKHOLE_LOCAL_LIBRARY_TV', '')
+
+        removed = remove_title_symlinks('Fargo', 'show')
+        assert sonarr_release in removed
+        assert radarr_release in removed

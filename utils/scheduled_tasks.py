@@ -529,39 +529,48 @@ def housekeeping():
         logger.error(f"[scheduler] Error cleaning pending state: {e}")
 
     # 2. Clean empty directories in completed folder
+    # Under labeled mode, the tree is completed_dir/<label>/<release>/... so
+    # we walk bottom-up and re-check emptiness at each level (os.walk's
+    # `dirs` list goes stale once we remove children). The top-level
+    # completed_dir itself is never removed.
     completed_dir = os.environ.get('BLACKHOLE_COMPLETED_DIR', '/completed')
     try:
         if os.path.isdir(completed_dir):
-            for root, dirs, files in os.walk(completed_dir, topdown=False):
+            for root, _dirs, _files in os.walk(completed_dir, topdown=False):
                 if root == completed_dir:
                     continue
-                if not files and not dirs:
-                    try:
+                try:
+                    if not os.listdir(root):
                         os.rmdir(root)
                         cleaned += 1
                         logger.debug(f"[scheduler] Removed empty directory: {root}")
-                    except OSError:
-                        pass
+                except OSError:
+                    pass
     except Exception as e:
         logger.error(f"[scheduler] Error cleaning empty dirs: {e}")
 
-    # 3. Clean old blackhole retry metadata (.meta.json files older than 7 days)
+    # 3. Clean old blackhole retry metadata (.meta files older than 7 days).
+    # RetryMeta sidecars sit next to their torrent files in watch_dir/failed/
+    # (flat mode) or watch_dir/failed/<label>/ (labeled mode). Walk the
+    # failed/ tree recursively — nothing ever had meta files at watch_dir root.
     now = time.time()
     watch_dir = os.environ.get('BLACKHOLE_DIR', '/watch')
     try:
-        if os.path.isdir(watch_dir):
-            for fname in os.listdir(watch_dir):
-                if not fname.endswith('.meta.json'):
-                    continue
-                fpath = os.path.join(watch_dir, fname)
-                try:
-                    age_days = (now - os.path.getmtime(fpath)) / 86400
-                    if age_days > 7:
-                        os.remove(fpath)
-                        cleaned += 1
-                        logger.debug(f"[scheduler] Removed stale metadata: {fname}")
-                except OSError:
-                    pass
+        failed_root = os.path.join(watch_dir, 'failed')
+        if os.path.isdir(failed_root):
+            for root, _dirs, files in os.walk(failed_root):
+                for fname in files:
+                    if not fname.endswith('.meta'):
+                        continue
+                    fpath = os.path.join(root, fname)
+                    try:
+                        age_days = (now - os.path.getmtime(fpath)) / 86400
+                        if age_days > 7:
+                            os.remove(fpath)
+                            cleaned += 1
+                            logger.debug(f"[scheduler] Removed stale metadata: {fpath}")
+                    except OSError:
+                        pass
     except Exception as e:
         logger.error(f"[scheduler] Error cleaning metadata: {e}")
 

@@ -51,6 +51,102 @@ MEDIA_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m4v
 # Zurg mount category directories (checked in order; __all__ is fallback)
 MOUNT_CATEGORIES = ['shows', 'movies', 'anime']
 
+# Label routing: subdir names in watch_dir that are NOT labels
+# (retry staging and alt-retry staging — handled by dedicated logic)
+_RESERVED_LABELS = {'failed', '.alt_pending'}
+
+# Label validation: alphanumeric plus hyphen/underscore, max 64 chars
+_LABEL_MAX_LEN = 64
+_LABEL_RE = re.compile(r'^[A-Za-z0-9_-]+$')
+
+
+def _is_valid_label(name):
+    """Return True if *name* is a valid per-arr routing label.
+
+    Labels must be alphanumeric plus hyphen/underscore, max 64 chars,
+    and cannot match any reserved name (case-insensitive).
+    """
+    if not name or not isinstance(name, str):
+        return False
+    if len(name) > _LABEL_MAX_LEN:
+        return False
+    if name.lower() in _RESERVED_LABELS:
+        return False
+    if not _LABEL_RE.match(name):
+        return False
+    return True
+
+
+def iter_release_dirs(completed_dir):
+    """Yield ``(label, release_name, release_path)`` for each release dir under *completed_dir*.
+
+    Handles three layouts:
+      - Flat: ``completed_dir/<release_name>/`` (contains files) → label=None
+      - Labeled: ``completed_dir/<label>/<release_name>/`` → label=<label>
+      - Mixed: both coexist (users mid-migration)
+
+    Heuristic for distinguishing a label parent dir from a flat-mode release
+    dir:
+      1. The name must match the label whitelist (``_is_valid_label``).
+      2. The dir is EITHER empty (a label subdir awaiting its first release)
+         OR contains only subdirectories (no loose files, which would imply
+         a release dir that happens to have a label-compatible name).
+    Anything else is treated as a flat-mode release dir with label=None.
+
+    Known caveat: a flat-mode release dir whose name matches the label
+    whitelist and whose contents are exclusively subdirectories (e.g. a
+    `Season 01/` subdir containing files) is misclassified as a label
+    parent. In practice release names almost always include dots/spaces
+    or bracket tags, so the whitelist rejects them. If a user runs into
+    this, rename the release dir or switch to the `strict`/`off` modes
+    (planned follow-up).
+
+    Consumers of ``BLACKHOLE_COMPLETED_DIR`` (cleanup, empty-dir sweep,
+    symlink verification, title removal) should use this helper instead
+    of ``os.listdir(completed_dir)``.
+    """
+    if not completed_dir or not os.path.isdir(completed_dir):
+        return
+
+    try:
+        top_entries = os.listdir(completed_dir)
+    except OSError:
+        return
+
+    for entry in top_entries:
+        entry_path = os.path.join(completed_dir, entry)
+        if not os.path.isdir(entry_path):
+            continue
+
+        # Decide whether this is a label dir or a flat-mode release dir.
+        # A label dir has a valid label name AND either:
+        #   - is empty (the user just created /completed/sonarr/), OR
+        #   - contains at least one subdirectory (a release).
+        # Stray loose files inside a label dir (e.g. .DS_Store, Thumbs.db,
+        # arr lockfiles) are ignored rather than demoting the whole dir to
+        # flat-mode — demotion would cause _cleanup_symlinks to wipe the
+        # entire label tree when it aged out.
+        is_label = False
+        if _is_valid_label(entry):
+            try:
+                children = list(os.scandir(entry_path))
+            except OSError:
+                children = []
+            has_subdir = any(c.is_dir(follow_symlinks=False) for c in children)
+            if has_subdir or not children:
+                is_label = True
+
+        if is_label:
+            try:
+                for sub in os.listdir(entry_path):
+                    sub_path = os.path.join(entry_path, sub)
+                    if os.path.isdir(sub_path):
+                        yield (entry, sub, sub_path)
+            except OSError:
+                continue
+        else:
+            yield (None, entry, entry_path)
+
 # Terminal debrid statuses that mean the torrent will never complete
 RD_TERMINAL_ERRORS = {'magnet_error', 'error', 'virus', 'dead'}
 AD_TERMINAL_ERRORS = {'Error'}
@@ -649,7 +745,31 @@ class BlackholeWatcher:
 
     # ── Symlink creation ─────────────────────────────────────────────
 
-    def _create_symlinks(self, release_name, category, mount_path):
+    def _completed_base(self, label):
+        """Return the base output directory, prefixed by *label* when set.
+
+        With label="sonarr" → /completed/sonarr
+        With label=None     → /completed  (flat-mode, backward compatible)
+        """
+        if label:
+            return os.path.join(self.completed_dir, label)
+        return self.completed_dir
+
+    def _failed_dir(self, label):
+        """Return the failed/ staging dir for *label* (or flat failed/ if None)."""
+        base = os.path.join(self.watch_dir, 'failed')
+        if label:
+            return os.path.join(base, label)
+        return base
+
+    def _alt_pending_dir(self, label):
+        """Return the .alt_pending/ staging dir for *label* (or flat if None)."""
+        base = os.path.join(self.watch_dir, '.alt_pending')
+        if label:
+            return os.path.join(base, label)
+        return base
+
+    def _create_symlinks(self, release_name, category, mount_path, label=None):
         """Create symlinks in the completed directory for media files.
 
         Symlink targets use BLACKHOLE_SYMLINK_TARGET_BASE so they resolve
@@ -658,18 +778,22 @@ class BlackholeWatcher:
         For multi-season packs, splits files into per-season directories
         with constructed release names that Sonarr can parse individually.
 
+        When *label* is set, output is nested under ``completed_dir/<label>/``
+        so each arr only sees its own items (see ``.plans/31-blackhole-per-arr-routing.md``).
+
         Returns the number of symlinks created.
         """
         is_multi, _, _ = _is_multi_season_pack(release_name)
 
         if is_multi:
-            split_count = self._create_split_season_symlinks(release_name, category, mount_path)
+            split_count = self._create_split_season_symlinks(release_name, category, mount_path, label=label)
             if split_count is not None:
                 return split_count
             logger.debug(f"[blackhole] Could not split {release_name} by season, using single dir")
 
-        # Single-dir logic (original behavior)
-        completed_release_dir = os.path.join(self.completed_dir, release_name)
+        # Single-dir logic (original behavior, now label-aware)
+        completed_base = self._completed_base(label)
+        completed_release_dir = os.path.join(completed_base, release_name)
         os.makedirs(completed_release_dir, exist_ok=True)
         count = 0
 
@@ -705,13 +829,15 @@ class BlackholeWatcher:
 
         return count
 
-    def _create_split_season_symlinks(self, release_name, category, mount_path):
+    def _create_split_season_symlinks(self, release_name, category, mount_path, label=None):
         """Split a multi-season pack into per-season symlink directories.
 
         Groups media files by season, creates a separate completed directory
         for each season with a constructed release name, and returns the
         total number of symlinks created. Returns None if fewer than 2 seasons
         are detected (caller should fall back to single-dir).
+
+        When *label* is set, season dirs are nested under ``completed_dir/<label>/``.
         """
         season_files = {}
 
@@ -735,12 +861,13 @@ class BlackholeWatcher:
             return None
 
         count = 0
-        completed_real = os.path.normpath(self.completed_dir)
+        completed_base = self._completed_base(label)
+        completed_real = os.path.normpath(completed_base)
         logger.info(f"[blackhole] Multi-season pack: {release_name} → splitting into {len(season_files)} seasons")
 
         for season_num, rel_list in sorted(season_files.items()):
             season_name = _build_season_release_name(release_name, season_num)
-            season_dir = os.path.normpath(os.path.join(self.completed_dir, season_name))
+            season_dir = os.path.normpath(os.path.join(completed_base, season_name))
 
             # Guard against path traversal in the constructed season dir name
             if not season_dir.startswith(completed_real + os.sep):
@@ -777,7 +904,14 @@ class BlackholeWatcher:
     # ── Symlink cleanup ──────────────────────────────────────────────
 
     def _cleanup_symlinks(self):
-        """Remove broken symlinks and aged-out directories from the completed dir."""
+        """Remove broken symlinks and aged-out directories from the completed dir.
+
+        Handles both flat (``completed_dir/<release>``) and labeled
+        (``completed_dir/<label>/<release>``) layouts via ``iter_release_dirs``.
+        Empty label dirs left behind after all their releases are cleaned up
+        are removed as well, but the top-level ``completed_dir`` itself is
+        never removed.
+        """
         if not self.symlink_enabled or not self.completed_dir:
             return
         if not os.path.exists(self.completed_dir):
@@ -786,19 +920,19 @@ class BlackholeWatcher:
         now = time.time()
         max_age_secs = self.symlink_max_age * 3600
 
-        for entry in os.listdir(self.completed_dir):
-            entry_path = os.path.join(self.completed_dir, entry)
-            if not os.path.isdir(entry_path):
-                continue
+        # Pre-compute once — both are stable across the loop
+        rclone_real = os.path.realpath(self.rclone_mount)
+        target_base_real = ''
+        if self.symlink_target_base:
+            target_base_real = os.path.realpath(self.symlink_target_base) + '/'
 
+        cleaned_label_parents = set()
+
+        for label, release_name, entry_path in iter_release_dirs(self.completed_dir):
             # Remove broken symlinks within this release dir.
             # Symlinks point to SYMLINK_TARGET_BASE which only exists in
             # Sonarr/Radarr's container — translate to the rclone mount
             # before checking existence.
-            rclone_real = os.path.realpath(self.rclone_mount)
-            target_base_real = ''
-            if self.symlink_target_base:
-                target_base_real = os.path.realpath(self.symlink_target_base) + '/'
             has_valid = False
             for root, _dirs, files in os.walk(entry_path):
                 for f in files:
@@ -832,9 +966,22 @@ class BlackholeWatcher:
             if should_remove:
                 try:
                     shutil.rmtree(entry_path, ignore_errors=True)
-                    logger.info(f"[blackhole] Cleaned up completed dir: {entry}")
+                    display = f"{label}/{release_name}" if label else release_name
+                    logger.info(f"[blackhole] Cleaned up completed dir: {display}")
+                    if label:
+                        cleaned_label_parents.add(os.path.join(self.completed_dir, label))
                 except Exception as e:
-                    logger.debug(f"[blackhole] Failed to clean up {entry}: {e}")
+                    logger.debug(f"[blackhole] Failed to clean up {entry_path}: {e}")
+
+        # Remove now-empty label dirs. The top-level completed_dir is never
+        # in cleaned_label_parents by construction.
+        for parent in cleaned_label_parents:
+            try:
+                if os.path.isdir(parent) and not os.listdir(parent):
+                    os.rmdir(parent)
+                    logger.debug(f"[blackhole] Removed empty label dir: {parent}")
+            except OSError:
+                pass
 
     # ── Pending monitor persistence ──────────────────────────────────
 
@@ -856,18 +1003,22 @@ class BlackholeWatcher:
         except (IOError, OSError) as e:
             logger.debug(f"[blackhole] Could not write pending monitors: {e}")
 
-    def _add_pending(self, torrent_id, filename):
+    def _add_pending(self, torrent_id, filename, label=None):
         """Add a torrent to the pending monitors file."""
         with self._monitors_lock:
             entries = self._load_pending()
             if any(e['torrent_id'] == torrent_id for e in entries):
                 return
-            entries.append({
+            entry = {
                 'torrent_id': torrent_id,
                 'filename': filename,
                 'service': self.debrid_service,
                 'timestamp': time.time(),
-            })
+            }
+            # Persist label alongside the torrent so restart/resume keeps routing
+            if label is not None:
+                entry['label'] = label
+            entries.append(entry)
             self._save_pending(entries)
 
     def _remove_pending(self, torrent_id):
@@ -880,7 +1031,7 @@ class BlackholeWatcher:
 
     # ── Monitor orchestration ────────────────────────────────────────
 
-    def _start_monitor(self, torrent_id, filename):
+    def _start_monitor(self, torrent_id, filename, label=None):
         """Spawn a background thread to monitor a torrent and create symlinks."""
         with self._monitors_lock:
             if torrent_id in self._active_monitors:
@@ -888,19 +1039,21 @@ class BlackholeWatcher:
                 return
             self._active_monitors.add(torrent_id)
 
-        self._add_pending(torrent_id, filename)
+        self._add_pending(torrent_id, filename, label=label)
         t = threading.Thread(
             target=self._monitor_and_symlink,
-            args=(torrent_id, filename),
+            args=(torrent_id, filename, label),
             daemon=True,
         )
         t.start()
-        logger.info(f"[blackhole] Monitoring torrent {torrent_id} for {filename}")
+        tag = f" [label={label}]" if label else ""
+        logger.info(f"[blackhole] Monitoring torrent {torrent_id} for {filename}{tag}")
 
-    def _monitor_and_symlink(self, torrent_id, filename):
+    def _monitor_and_symlink(self, torrent_id, filename, label=None):
         """Background thread: poll debrid status, wait for mount, create symlinks.
 
         This method runs in its own thread and must not block the main scan loop.
+        *label* is the per-arr routing label (e.g. "sonarr"); None means flat mode.
         """
         status_dispatch = {
             'realdebrid': self._check_realdebrid_status,
@@ -1075,7 +1228,7 @@ class BlackholeWatcher:
 
         # Phase 3: Create symlinks
         try:
-            count = self._create_symlinks(matched_name, category, mount_path)
+            count = self._create_symlinks(matched_name, category, mount_path, label=label)
             if count > 0:
                 logger.info(f"[blackhole] Created {count} symlink(s) for {release_name}")
                 if _history:
@@ -1112,17 +1265,40 @@ class BlackholeWatcher:
         self._remove_pending(torrent_id)
 
     def _resume_pending_monitors(self):
-        """Resume monitoring for any torrents that were pending before a restart."""
+        """Resume monitoring for any torrents that were pending before a restart.
+
+        Each entry is validated independently — a malformed or tampered entry
+        (e.g. non-dict, label with path-traversal characters) is dropped with
+        a warning rather than aborting the whole resume loop. This matters
+        because the worker thread calling _resume_pending_monitors has only
+        a top-level scan guard, not a resume guard.
+        """
         entries = self._load_pending()
         if not entries:
             return
 
         logger.info(f"[blackhole] Resuming {len(entries)} pending torrent monitor(s)")
         for entry in entries:
-            torrent_id = entry.get('torrent_id')
-            filename = entry.get('filename', 'unknown')
-            if torrent_id:
-                self._start_monitor(torrent_id, filename)
+            try:
+                if not isinstance(entry, dict):
+                    logger.warning(f"[blackhole] Skipping non-dict pending entry: {entry!r}")
+                    continue
+                torrent_id = entry.get('torrent_id')
+                filename = entry.get('filename', 'unknown')
+                # Legacy entries (pre-label-routing) have no 'label' field → None.
+                # Validate because pending_monitors.json is trust-boundary state:
+                # a tampered label would be piped into os.path.join downstream
+                # and could create directories outside completed_dir.
+                label = entry.get('label')
+                if label is not None and not (isinstance(label, str) and _is_valid_label(label)):
+                    logger.warning(
+                        f"[blackhole] Dropping invalid label on pending entry {torrent_id!r}: {label!r}"
+                    )
+                    label = None
+                if torrent_id:
+                    self._start_monitor(torrent_id, filename, label=label)
+            except Exception as e:
+                logger.warning(f"[blackhole] Skipping bad pending entry {entry!r}: {e}")
 
     # ── Local library dedup ─────────────────────────────────────────
 
@@ -1226,7 +1402,7 @@ class BlackholeWatcher:
             for c in cls._REJECTION_CODES
         )
 
-    def _try_alternative_release(self, filename, file_path, debrid_handler):
+    def _try_alternative_release(self, filename, file_path, debrid_handler, label=None):
         """On debrid rejection, query Sonarr/Radarr for an alternative release.
 
         Parses the episode/movie info from the filename, fetches available
@@ -1235,6 +1411,9 @@ class BlackholeWatcher:
 
         Runs in a background thread. On failure, moves the original file
         to the failed/ directory (same as the normal failure path).
+
+        *label* preserves per-arr routing — if the file was staged from
+        ``/watch/sonarr/.alt_pending/``, failures land in ``/watch/sonarr/failed/``.
         """
         alt_ok = False
         try:
@@ -1245,9 +1424,9 @@ class BlackholeWatcher:
                 logger.debug(f"[blackhole] Cannot parse release name for alt-retry: {filename}")
             elif is_tv and season is not None and _parse_episodes(filename):
                 alt_ok = self._try_alt_episode(name, season, _parse_episodes(filename),
-                                               debrid_handler, filename, file_path)
+                                               debrid_handler, filename, file_path, label=label)
             elif not is_tv:
-                alt_ok = self._try_alt_movie(name, debrid_handler, filename, file_path)
+                alt_ok = self._try_alt_movie(name, debrid_handler, filename, file_path, label=label)
             else:
                 logger.debug(f"[blackhole] Cannot determine content type for alt-retry: {filename}")
         except Exception as e:
@@ -1256,7 +1435,7 @@ class BlackholeWatcher:
         if not alt_ok and os.path.exists(file_path):
             # No alternative worked — move to failed/ and mark alts exhausted
             # so retries don't repeat the same alt-release search
-            error_dir = os.path.join(self.watch_dir, 'failed')
+            error_dir = self._failed_dir(label)
             os.makedirs(error_dir, exist_ok=True)
             dest = os.path.join(error_dir, filename)
             if os.path.exists(dest):
@@ -1291,7 +1470,7 @@ class BlackholeWatcher:
                                    detail='All alternative releases exhausted',
                                    media_title=_mt)
 
-    def _try_alt_episode(self, series_name, season, episodes, debrid_handler, orig_filename, orig_path):
+    def _try_alt_episode(self, series_name, season, episodes, debrid_handler, orig_filename, orig_path, label=None):
         """Try alternative releases for a TV episode via Sonarr."""
         from utils.arr_client import SonarrClient
 
@@ -1310,9 +1489,9 @@ class BlackholeWatcher:
             logger.debug(f"[blackhole] No alternative releases found for {series_name} S{season:02d}E{ep_num:02d}")
             return False
 
-        return self._try_releases(releases, debrid_handler, orig_filename, orig_path)
+        return self._try_releases(releases, debrid_handler, orig_filename, orig_path, label=label)
 
-    def _try_alt_movie(self, movie_name, debrid_handler, orig_filename, orig_path):
+    def _try_alt_movie(self, movie_name, debrid_handler, orig_filename, orig_path, label=None):
         """Try alternative releases for a movie via Radarr."""
         from utils.arr_client import RadarrClient
 
@@ -1330,9 +1509,9 @@ class BlackholeWatcher:
             logger.debug(f"[blackhole] No alternative releases found for '{movie_name}'")
             return False
 
-        return self._try_releases(releases, debrid_handler, orig_filename, orig_path)
+        return self._try_releases(releases, debrid_handler, orig_filename, orig_path, label=label)
 
-    def _try_releases(self, releases, debrid_handler, orig_filename, orig_path):
+    def _try_releases(self, releases, debrid_handler, orig_filename, orig_path, label=None):
         """Try magnet releases one by one until one succeeds on the debrid service.
 
         Only tries releases with magnet links (direct hashes) to avoid
@@ -1392,7 +1571,7 @@ class BlackholeWatcher:
                     if self.symlink_enabled:
                         torrent_id = self._extract_torrent_id(result)
                         if torrent_id:
-                            self._start_monitor(torrent_id, orig_filename)
+                            self._start_monitor(torrent_id, orig_filename, label=label)
                     if _notify:
                         _notify('download_complete', 'Blackhole: Alt Release Found',
                                 f'Original rejected, using: {alt_title[:60]}')
@@ -1451,10 +1630,17 @@ class BlackholeWatcher:
 
     # ── File processing ──────────────────────────────────────────────
 
-    def _process_file(self, file_path):
-        """Process a single torrent/magnet file."""
+    def _process_file(self, file_path, label=None):
+        """Process a single torrent/magnet file.
+
+        *label* is the per-arr routing label derived from the subdir of
+        ``watch_dir`` containing the file, or None for flat-mode files.
+        """
         filename = os.path.basename(file_path)
-        logger.info(f"[blackhole] Processing: {filename}")
+        if label:
+            logger.info(f"[blackhole] Processing: {filename} [label={label}]")
+        else:
+            logger.info(f"[blackhole] Processing: {filename}")
 
         # Check local library before submitting to debrid
         if self._check_local_library(filename):
@@ -1510,7 +1696,7 @@ class BlackholeWatcher:
                     torrent_id = self._extract_torrent_id(result)
                     if torrent_id:
                         try:
-                            self._start_monitor(torrent_id, filename)
+                            self._start_monitor(torrent_id, filename, label=label)
                         except Exception as e:
                             logger.error(f"[blackhole] Failed to start monitor for {filename}: {e}")
                     else:
@@ -1548,7 +1734,7 @@ class BlackholeWatcher:
                 if self._is_debrid_rejection(result) and not self._alt_exhausted(file_path):
                     # Move file out of watch_dir BEFORE launching the thread
                     # to prevent the next scan cycle from picking it up again
-                    staging_dir = os.path.join(self.watch_dir, '.alt_pending')
+                    staging_dir = self._alt_pending_dir(label)
                     os.makedirs(staging_dir, exist_ok=True)
                     staged_path = os.path.join(staging_dir, filename)
                     try:
@@ -1562,13 +1748,13 @@ class BlackholeWatcher:
                     else:
                         threading.Thread(
                             target=self._try_alternative_release,
-                            args=(filename, staged_path, handler),
+                            args=(filename, staged_path, handler, label),
                             daemon=True,
                             name=f'alt-retry-{filename[:30]}',
                         ).start()
                         return  # Alt-retry thread handles cleanup
 
-                error_dir = os.path.join(self.watch_dir, 'failed')
+                error_dir = self._failed_dir(label)
                 os.makedirs(error_dir, exist_ok=True)
                 dest = os.path.join(error_dir, filename)
                 if os.path.exists(dest):
@@ -1593,18 +1779,37 @@ class BlackholeWatcher:
             logger.error(f"[blackhole] Error processing {filename}: {e}")
 
     def _retry_failed(self):
-        """Scan failed/ directory and retry eligible files."""
-        failed_dir = os.path.join(self.watch_dir, 'failed')
-        if not os.path.exists(failed_dir):
+        """Scan failed/ directory and retry eligible files.
+
+        Supports both flat layout (watch_dir/failed/<file>) and labeled
+        layout (watch_dir/failed/<label>/<file>). Labeled files are moved
+        back to watch_dir/<label>/ so the next scan re-detects the label.
+        """
+        failed_root = os.path.join(self.watch_dir, 'failed')
+        if not os.path.exists(failed_root):
             return
 
-        for filename in os.listdir(failed_dir):
-            file_path = os.path.join(failed_dir, filename)
-            if not os.path.isfile(file_path):
-                continue
+        # (label, file_path, filename) triples to retry
+        candidates = []
+        try:
+            for entry in os.listdir(failed_root):
+                ep = os.path.join(failed_root, entry)
+                if os.path.isfile(ep):
+                    candidates.append((None, ep, entry))
+                elif os.path.isdir(ep) and _is_valid_label(entry):
+                    try:
+                        for sub in os.listdir(ep):
+                            sp = os.path.join(ep, sub)
+                            if os.path.isfile(sp):
+                                candidates.append((entry, sp, sub))
+                    except OSError:
+                        continue
+        except OSError:
+            return
 
+        for label, file_path, filename in candidates:
             ext = os.path.splitext(filename)[1].lower()
-            if ext == '.meta' or ext not in self.SUPPORTED_EXTENSIONS:
+            if ext not in self.SUPPORTED_EXTENSIONS:
                 continue
 
             retries, last_attempt = RetryMeta.read(file_path)
@@ -1624,15 +1829,30 @@ class BlackholeWatcher:
             if time.time() - last_attempt < delay:
                 continue
 
-            logger.info(f"[blackhole] Retrying failed file: {filename} (attempt {retries + 1}/{MAX_RETRIES})")
+            logger.info(f"[blackhole] Retrying failed file: {filename} (attempt {retries + 1}/{MAX_RETRIES})"
+                        f"{f' [label={label}]' if label else ''}")
             try:
                 from utils.metrics import metrics
                 metrics.inc('blackhole_retry')
             except Exception:
                 pass
 
-            # Move back to watch dir for reprocessing
-            retry_path = os.path.join(self.watch_dir, filename)
+            # Move back to watch dir (or label subdir) for reprocessing.
+            # Preserving the label subdir keeps per-arr routing intact.
+            if label:
+                retry_dir = os.path.join(self.watch_dir, label)
+                os.makedirs(retry_dir, exist_ok=True)
+                retry_path = os.path.join(retry_dir, filename)
+            else:
+                retry_path = os.path.join(self.watch_dir, filename)
+            # Refuse to clobber a fresh drop with the same filename — POSIX
+            # os.rename silently overwrites. Leave the failed file in place
+            # and try again next tick; the arr's re-grab wins.
+            if os.path.exists(retry_path):
+                logger.debug(
+                    f"[blackhole] Skipping retry of {filename}: a newer file is already at {retry_path}"
+                )
+                continue
             try:
                 RetryMeta.remove(file_path)
                 os.rename(file_path, retry_path)
@@ -1640,49 +1860,105 @@ class BlackholeWatcher:
                 logger.error(f"[blackhole] Failed to move {filename} for retry: {e}")
 
     def _scan(self):
-        """Scan watch directory for new files."""
+        """Scan watch directory for new files.
+
+        Supports two layouts:
+          - Flat: .torrent/.magnet files sit directly in watch_dir → label=None
+          - Labeled: one level of subdirectories, each subdir name becomes
+            the routing label (e.g. /watch/sonarr/x.torrent → label="sonarr")
+        Both layouts coexist. Invalid label names are logged and skipped.
+        """
         if not os.path.exists(self.watch_dir):
             return
 
         now = time.time()
         watch_realpath = os.path.realpath(self.watch_dir)
 
-        for filename in os.listdir(self.watch_dir):
-            file_path = os.path.join(self.watch_dir, filename)
+        for entry in os.listdir(self.watch_dir):
+            entry_path = os.path.join(self.watch_dir, entry)
 
             # Guard against symlink escapes
-            real_path = os.path.realpath(file_path)
+            real_path = os.path.realpath(entry_path)
             if not real_path.startswith(watch_realpath + os.sep) and real_path != watch_realpath:
                 continue
 
-            if not os.path.isfile(file_path):
+            if os.path.isfile(entry_path):
+                self._maybe_process_watch_file(entry_path, entry, now, label=None)
                 continue
 
-            # Skip files still being written (modified within last 2 seconds)
+            if not os.path.isdir(entry_path):
+                continue
+
+            # Skip reserved subdirs (failed/, .alt_pending/) — handled separately
+            if entry.lower() in _RESERVED_LABELS:
+                continue
+
+            # Validate label name. Invalid names are skipped (not processed as
+            # unlabeled — that would defeat the purpose and surprise the user).
+            if not _is_valid_label(entry):
+                logger.warning(f"[blackhole] Ignoring invalid label subdir: {entry!r} "
+                               f"(labels must be [A-Za-z0-9_-], max {_LABEL_MAX_LEN} chars)")
+                continue
+
             try:
-                if now - os.path.getmtime(file_path) < 2.0:
-                    continue
-            except OSError:
+                sub_entries = os.listdir(entry_path)
+            except OSError as e:
+                logger.debug(f"[blackhole] Cannot list label subdir {entry}: {e}")
                 continue
 
-            ext = os.path.splitext(filename)[1].lower()
-            if ext in self.SUPPORTED_EXTENSIONS:
-                self._process_file(file_path)
+            for fname in sub_entries:
+                fpath = os.path.join(entry_path, fname)
+                # Symlink-escape guard (file must remain under watch_dir)
+                fp_real = os.path.realpath(fpath)
+                if not fp_real.startswith(watch_realpath + os.sep):
+                    continue
+                if not os.path.isfile(fpath):
+                    continue
+                self._maybe_process_watch_file(fpath, fname, now, label=entry)
+
+    def _maybe_process_watch_file(self, file_path, filename, now, label):
+        """Shared pre-processing: skip in-flight writes, dispatch on extension."""
+        try:
+            if now - os.path.getmtime(file_path) < 2.0:
+                return
+        except OSError:
+            return
+        ext = os.path.splitext(filename)[1].lower()
+        if ext in self.SUPPORTED_EXTENSIONS:
+            self._process_file(file_path, label=label)
 
     def _recover_alt_pending(self):
         """On startup, move stranded .alt_pending files to failed/.
 
         If the container was killed while an alt-retry thread was running,
         files in .alt_pending/ would be orphaned with no recovery path.
+        Walks both flat layout (.alt_pending/*) and labeled layout
+        (.alt_pending/<label>/*), preserving the label in the failed/ move.
         """
-        staging_dir = os.path.join(self.watch_dir, '.alt_pending')
-        if not os.path.isdir(staging_dir):
+        staging_root = os.path.join(self.watch_dir, '.alt_pending')
+        if not os.path.isdir(staging_root):
             return
-        error_dir = os.path.join(self.watch_dir, 'failed')
-        for filename in os.listdir(staging_dir):
-            src = os.path.join(staging_dir, filename)
-            if not os.path.isfile(src):
-                continue
+
+        # (label, src_path, filename) triples
+        stranded = []
+        try:
+            for entry in os.listdir(staging_root):
+                ep = os.path.join(staging_root, entry)
+                if os.path.isfile(ep):
+                    stranded.append((None, ep, entry))
+                elif os.path.isdir(ep) and _is_valid_label(entry):
+                    try:
+                        for sub in os.listdir(ep):
+                            sp = os.path.join(ep, sub)
+                            if os.path.isfile(sp):
+                                stranded.append((entry, sp, sub))
+                    except OSError:
+                        continue
+        except OSError:
+            return
+
+        for label, src, filename in stranded:
+            error_dir = self._failed_dir(label)
             os.makedirs(error_dir, exist_ok=True)
             dest = os.path.join(error_dir, filename)
             if os.path.exists(dest):
@@ -1697,20 +1973,29 @@ class BlackholeWatcher:
                                    'alt_exhausted': True}, f)
                 except IOError:
                     pass
-                logger.warning(f"[blackhole] Recovered stranded alt-pending file: {filename}")
+                tag = f" [label={label}]" if label else ""
+                logger.warning(f"[blackhole] Recovered stranded alt-pending file: {filename}{tag}")
             except OSError as e:
                 logger.warning(f"[blackhole] Could not recover {filename} from alt_pending: {e}")
 
     def run(self):
         """Main loop - scan at poll_interval."""
         logger.info(f"[blackhole] Watching {self.watch_dir} (poll: {self.poll_interval}s, service: {self.debrid_service})")
-        self._recover_alt_pending()
+        try:
+            self._recover_alt_pending()
+        except Exception as e:
+            logger.error(f"[blackhole] _recover_alt_pending failed at startup: {e}")
         if self.symlink_enabled:
             logger.info(f"[blackhole] Symlink mode enabled: completed={self.completed_dir}, "
                         f"mount={self.rclone_mount}, target_base={self.symlink_target_base}, "
                         f"timeout={self.mount_poll_timeout}s, interval={self.mount_poll_interval}s, "
                         f"max_age={self.symlink_max_age}h")
-            self._resume_pending_monitors()
+            try:
+                self._resume_pending_monitors()
+            except Exception as e:
+                # Even a catastrophic load failure must not kill the worker
+                # thread — the main scan loop will still handle new drops.
+                logger.error(f"[blackhole] _resume_pending_monitors failed at startup: {e}")
 
         while not self._stop_event.is_set():
             try:

@@ -8,14 +8,17 @@ This guide explains how to use pd_zurg's blackhole feature with symlink mode to 
 - [How It Works](#how-it-works)
 - [Auto-Symlinks for Debrid-Only Content](#auto-symlinks-for-debrid-only-content)
 - [Prerequisites](#prerequisites)
+- [Directory Layout: Labeled vs Flat](#directory-layout-labeled-vs-flat)
 - [Architecture](#architecture)
-  - [Single-Host Setup](#single-host-setup)
+  - [Single-Host Setup (Labeled)](#single-host-setup-labeled)
+  - [Single-Arr Quick Start (Flat)](#single-arr-quick-start-flat)
   - [Multi-Host Setup](#multi-host-setup)
 - [Configuration](#configuration)
   - [pd_zurg Environment Variables](#pd_zurg-environment-variables)
   - [Docker Compose](#docker-compose)
   - [Sonarr Setup](#sonarr-setup)
   - [Radarr Setup](#radarr-setup)
+- [Migration from Flat Layout](#migration-from-flat-layout)
 - [Verification](#verification)
 - [Troubleshooting](#troubleshooting)
 - [FAQ](#faq)
@@ -81,36 +84,86 @@ Sonarr/Radarr see the symlinks as completed downloads and import them into their
 - A **debrid API key** (Real-Debrid, AllDebrid, or TorBox)
 - Torrent **indexers** configured in Sonarr/Radarr (Jackett, Prowlarr, or direct Torznab)
 
+## Directory Layout: Labeled vs Flat
+
+pd_zurg supports two directory layouts. **Labeled mode is the recommended pattern** whenever you run more than one arr against pd_zurg. Flat mode is retained for simple single-arr installs.
+
+### Labeled mode (recommended)
+
+Each arr gets its own subdirectory under `BLACKHOLE_DIR` and `BLACKHOLE_COMPLETED_DIR`. pd_zurg auto-detects the layout — no new environment variable is required. You just reshape your folders and mount each arr's subdir into its container.
+
+```
+/opt/blackhole/                ← mounted as /watch inside pd_zurg
+├── sonarr/                    ← Sonarr writes here; pd_zurg picks up with label="sonarr"
+├── radarr/                    ← Radarr writes here; pd_zurg picks up with label="radarr"
+├── failed/                    ← shared retry staging (managed by pd_zurg)
+└── .alt_pending/              ← shared alt-retry staging (managed by pd_zurg)
+
+/opt/completed/                ← mounted as /completed inside pd_zurg
+├── sonarr/                    ← Sonarr Watch Folder; contains only Sonarr's releases
+├── radarr/                    ← Radarr Watch Folder; contains only Radarr's releases
+└── pending_monitors.json      ← internal state; safe to leave alone
+```
+
+pd_zurg mounts the **parents** (`/opt/blackhole`, `/opt/completed`). Each arr container mounts only its **own label subdir**, so Sonarr physically cannot see Radarr's items (and vice versa). This eliminates the "Directory not empty" orphan warnings that appear when two arrs share the same folder.
+
+Label name rules: alphanumeric plus `-` / `_`, max 64 characters. The names `failed` and `.alt_pending` are reserved for staging. `sonarr`, `radarr`, `readarr`, `lidarr`, `sonarr-4k`, `sonarr-hd`, etc. are all fine.
+
+### Flat mode (single-arr installs)
+
+If you run only one arr against pd_zurg, you can drop `.torrent` / `.magnet` files directly in the root of `BLACKHOLE_DIR` and symlinks land directly in `BLACKHOLE_COMPLETED_DIR`. This is the original behavior and continues to work unchanged:
+
+```
+/opt/blackhole/Release.torrent         → picked up by pd_zurg
+/opt/completed/Release.Name/file.mkv   → symlink created here
+```
+
+Mixed mode also works: loose files in the root are treated as unlabeled, while subdirs are treated as labels. This is useful during migration from flat to labeled layout.
+
 ## Architecture
 
-### Single-Host Setup
+### Single-Host Setup (Labeled)
 
-If pd_zurg, Sonarr, and Radarr all run on the **same Docker host**, the setup is straightforward — all containers share directories via Docker bind mounts.
+If pd_zurg, Sonarr, and Radarr all run on the **same Docker host**, the setup is straightforward — all containers share directories via Docker bind mounts, and each arr sees only its own label subdir.
 
 ```
 Docker Host
 ├── pd_zurg container
-│   ├── /watch       ← blackhole input (shared with Sonarr/Radarr)
-│   ├── /completed   ← symlink output (shared with Sonarr/Radarr)
+│   ├── /watch       ← /opt/blackhole  (parent — sees all labels)
+│   ├── /completed   ← /opt/completed  (parent — writes each label subdir)
 │   └── /data        ← rclone mount (Zurg WebDAV)
 │
 ├── Sonarr container
-│   ├── /watch       ← same directory, Sonarr writes .torrent files here
-│   ├── /completed   ← same directory, Sonarr reads symlinks from here
+│   ├── /watch       ← /opt/blackhole/sonarr   (label subdir only)
+│   ├── /completed   ← /opt/completed/sonarr   (label subdir only)
 │   └── /mnt/debrid  ← rclone mount (needed so symlink targets resolve)
 │
 └── Radarr container
-    ├── /watch       ← same directory
-    ├── /completed   ← same directory
+    ├── /watch       ← /opt/blackhole/radarr   (label subdir only)
+    ├── /completed   ← /opt/completed/radarr   (label subdir only)
     └── /mnt/debrid  ← rclone mount
 ```
 
 **Host directory layout:**
 ```bash
-/opt/blackhole/    # Shared blackhole watch directory
-/opt/completed/    # Shared completed symlinks directory
-/mnt/debrid/       # rclone FUSE mount to Zurg WebDAV
+/opt/blackhole/sonarr/     # Sonarr's outbound blackhole
+/opt/blackhole/radarr/     # Radarr's outbound blackhole
+/opt/completed/sonarr/     # Sonarr's Watch Folder
+/opt/completed/radarr/     # Radarr's Watch Folder
+/mnt/debrid/               # rclone FUSE mount to Zurg WebDAV
 ```
+
+### Single-Arr Quick Start (Flat)
+
+If you're only wiring up one arr (e.g., just Sonarr), you can skip the label subdirs and share one directory:
+
+```bash
+/opt/blackhole/    # shared watch dir
+/opt/completed/    # shared completed dir
+/mnt/debrid/       # rclone mount
+```
+
+This is identical to the pre-label-routing behavior. Each container mounts the same host path into `/watch` and `/completed`. If you later want to add a second arr, follow [Migration from Flat Layout](#migration-from-flat-layout).
 
 ### Multi-Host Setup
 
@@ -235,6 +288,8 @@ BLACKHOLE_LOCAL_LIBRARY_MOVIES=/data/media/movies
 
 ### Docker Compose
 
+These snippets show the **labeled layout** (recommended). For flat-mode single-arr installs, drop the label subdirs from the volume paths — everything else is identical.
+
 #### pd_zurg
 
 ```yaml
@@ -248,8 +303,8 @@ services:
       - log:/log
       - rd:/zurg/RD
       - /mnt/remote/realdebrid:/data:shared      # rclone mount
-      - /opt/blackhole:/watch                      # blackhole input (or NFS mount)
-      - /opt/completed:/completed                  # symlink output (or NFS mount)
+      - /opt/blackhole:/watch                      # PARENT dir — pd_zurg sees all labels
+      - /opt/completed:/completed                  # PARENT dir — pd_zurg writes all labels
       # Local library for dedup (read-only)
       - /mnt/truenas/data/media/tv:/data/media/tv:ro
       - /mnt/truenas/data/media/movies:/data/media/movies:ro
@@ -280,8 +335,8 @@ services:
       - sonarr_config:/config
       - /mnt/truenas/data/media/tv:/data/media/tv   # your local media library
       - /mnt/debrid:/mnt/debrid:rslave               # debrid mount (rslave for FUSE propagation)
-      - /opt/blackhole:/watch                         # blackhole — Sonarr writes .torrent here
-      - /opt/completed:/completed                     # completed — Sonarr reads symlinks from here
+      - /opt/blackhole/sonarr:/watch                 # label SUBDIR — Sonarr sees only its own items
+      - /opt/completed/sonarr:/completed             # label SUBDIR — Sonarr imports only its own items
     environment:
       - PUID=1000
       - PGID=1000
@@ -300,19 +355,27 @@ services:
       - radarr_config:/config
       - /mnt/truenas/data/media/movies:/data/media/movies
       - /mnt/debrid:/mnt/debrid:rslave
-      - /opt/blackhole:/watch
-      - /opt/completed:/completed
+      - /opt/blackhole/radarr:/watch                 # label SUBDIR
+      - /opt/completed/radarr:/completed             # label SUBDIR
     environment:
       - PUID=1000
       - PGID=1000
       - TZ=Your/Timezone
 ```
 
+Create the host directories ahead of time so the bind mounts succeed on first start:
+
+```bash
+sudo mkdir -p /opt/blackhole/sonarr /opt/blackhole/radarr
+sudo mkdir -p /opt/completed/sonarr /opt/completed/radarr
+sudo chmod 777 /opt/blackhole /opt/completed  # adjust to your PUID/PGID
+```
+
 ### Sonarr Setup
 
 1. Go to **Settings → Download Clients → Add → Torrent Blackhole**
 
-2. Configure the download client:
+2. Configure the download client (paths are container-internal — the labeled layout means Sonarr still sees them as `/watch` and `/completed`):
 
    | Setting | Value | Notes |
    |---------|-------|-------|
@@ -335,7 +398,36 @@ services:
 
 ### Radarr Setup
 
-Same as Sonarr — go to **Settings → Download Clients → Add → Torrent Blackhole** and use the same settings.
+Same as Sonarr — go to **Settings → Download Clients → Add → Torrent Blackhole** and use the same settings. The label routing is entirely a function of the host directory layout; the arr itself doesn't need to know.
+
+## Migration from Flat Layout
+
+If you're upgrading from a pre-label-routing setup where Sonarr and Radarr shared `/opt/blackhole` and `/opt/completed`, follow these steps once. Existing in-flight torrents and symlinks keep working throughout.
+
+1. **Stop pd_zurg and all arrs** so nothing writes new files during the reshape.
+   ```bash
+   docker stop pd_zurg sonarr radarr
+   ```
+
+2. **Create label subdirs on the host**:
+   ```bash
+   sudo mkdir -p /opt/blackhole/sonarr /opt/blackhole/radarr
+   sudo mkdir -p /opt/completed/sonarr /opt/completed/radarr
+   ```
+
+3. **(Optional) Move any in-flight files** into the correct label dir. Anything left at the root of `/opt/blackhole` keeps working in flat mode — only new drops from the arrs need to land in the label subdirs.
+
+4. **Update each arr's docker-compose volume mounts** to point at the label subdir (see the Sonarr/Radarr snippets above). pd_zurg keeps mounting the parents.
+
+5. **Start pd_zurg first, then the arrs**:
+   ```bash
+   docker start pd_zurg
+   docker start sonarr radarr
+   ```
+
+Existing release folders under `/opt/completed/` root (from before the migration) are still valid — pd_zurg's cleanup task will expire them on the normal schedule (`BLACKHOLE_SYMLINK_MAX_AGE`, default 72h). You don't need to move them.
+
+If you prefer to stay on flat layout with a single arr, no change is required. The code treats both layouts as first-class.
 
 ## Verification
 

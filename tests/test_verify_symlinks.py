@@ -342,3 +342,126 @@ class TestSymlinkRepair:
                 mock_client.search_movie.assert_not_called()
         finally:
             _retrigger_history.pop(('radarr', 42), None)
+
+
+# ─── Label-aware consumer tests ─────────────────────────────────────────
+
+class TestVerifySymlinksLabeled:
+    """verify_symlinks must also walk labeled completed/ layouts."""
+
+    def test_walks_labeled_completed_dir(self, symlink_env):
+        from utils.scheduled_tasks import verify_symlinks
+        # Broken symlink under /completed/sonarr/Show/
+        sonarr_release = os.path.join(symlink_env['completed'], 'sonarr', 'Show.S01')
+        os.makedirs(sonarr_release)
+        link = os.path.join(sonarr_release, 'ep.mkv')
+        os.symlink(
+            os.path.join(symlink_env['mount'], 'shows', 'gone', 'ep.mkv'),
+            link,
+        )
+
+        result = verify_symlinks()
+        assert result['items'] == 1
+        assert not os.path.exists(link)
+
+
+class TestHousekeepingEmptyDirSweep:
+    """The empty-dir sweep in housekeeping must handle label subdirs."""
+
+    def test_removes_empty_label_dirs(self, tmp_dir, monkeypatch):
+        from utils.scheduled_tasks import housekeeping
+        completed = os.path.join(tmp_dir, 'completed')
+        sonarr = os.path.join(completed, 'sonarr')
+        release = os.path.join(sonarr, 'Empty.Release')
+        os.makedirs(release)
+
+        monkeypatch.setenv('BLACKHOLE_COMPLETED_DIR', completed)
+        monkeypatch.setenv('BLACKHOLE_DIR', os.path.join(tmp_dir, 'watch'))
+        os.makedirs(os.path.join(tmp_dir, 'watch'))
+
+        housekeeping()
+
+        # All empty dirs below completed_dir are removed
+        assert not os.path.exists(release)
+        assert not os.path.exists(sonarr)
+        # Top-level completed_dir must be preserved
+        assert os.path.isdir(completed)
+
+    def test_preserves_completed_root(self, tmp_dir, monkeypatch):
+        """Regression guard: housekeeping must never remove completed_dir itself."""
+        from utils.scheduled_tasks import housekeeping
+        completed = os.path.join(tmp_dir, 'completed')
+        os.makedirs(completed)
+
+        monkeypatch.setenv('BLACKHOLE_COMPLETED_DIR', completed)
+        monkeypatch.setenv('BLACKHOLE_DIR', os.path.join(tmp_dir, 'watch'))
+        os.makedirs(os.path.join(tmp_dir, 'watch'))
+
+        housekeeping()
+        assert os.path.isdir(completed)
+
+
+class TestHousekeepingMetadataCleanup:
+    """Previously this step was a silent no-op (filtered `.meta.json` while
+    RetryMeta writes `.meta`, and scanned watch_dir root while meta files
+    live in watch_dir/failed/)."""
+
+    def _setup(self, tmp_dir, monkeypatch):
+        watch = os.path.join(tmp_dir, 'watch')
+        completed = os.path.join(tmp_dir, 'completed')
+        os.makedirs(os.path.join(watch, 'failed'))
+        os.makedirs(completed)
+        monkeypatch.setenv('BLACKHOLE_DIR', watch)
+        monkeypatch.setenv('BLACKHOLE_COMPLETED_DIR', completed)
+        return watch
+
+    def test_removes_stale_meta_in_failed_flat(self, tmp_dir, monkeypatch):
+        from utils.scheduled_tasks import housekeeping
+        watch = self._setup(tmp_dir, monkeypatch)
+        meta = os.path.join(watch, 'failed', 'x.torrent.meta')
+        with open(meta, 'w') as f:
+            f.write('{}')
+        old = time.time() - 8 * 86400
+        os.utime(meta, (old, old))
+
+        housekeeping()
+        assert not os.path.exists(meta)
+
+    def test_removes_stale_meta_in_failed_labeled(self, tmp_dir, monkeypatch):
+        from utils.scheduled_tasks import housekeeping
+        watch = self._setup(tmp_dir, monkeypatch)
+        label_dir = os.path.join(watch, 'failed', 'sonarr')
+        os.makedirs(label_dir)
+        meta = os.path.join(label_dir, 'x.torrent.meta')
+        with open(meta, 'w') as f:
+            f.write('{}')
+        old = time.time() - 8 * 86400
+        os.utime(meta, (old, old))
+
+        housekeeping()
+        assert not os.path.exists(meta)
+
+    def test_preserves_fresh_meta(self, tmp_dir, monkeypatch):
+        from utils.scheduled_tasks import housekeeping
+        watch = self._setup(tmp_dir, monkeypatch)
+        meta = os.path.join(watch, 'failed', 'x.torrent.meta')
+        with open(meta, 'w') as f:
+            f.write('{}')
+        # mtime is fresh → keep
+
+        housekeeping()
+        assert os.path.exists(meta)
+
+    def test_leaves_torrent_files_alone(self, tmp_dir, monkeypatch):
+        """The sweep must target .meta only — never the torrent files themselves,
+        even when they're old. Retry eligibility is separate from cleanup."""
+        from utils.scheduled_tasks import housekeeping
+        watch = self._setup(tmp_dir, monkeypatch)
+        torrent = os.path.join(watch, 'failed', 'x.torrent')
+        with open(torrent, 'w') as f:
+            f.write('data')
+        old = time.time() - 100 * 86400
+        os.utime(torrent, (old, old))
+
+        housekeeping()
+        assert os.path.exists(torrent)

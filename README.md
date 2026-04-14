@@ -18,7 +18,7 @@ pd_zurg packages three tools into a single Docker container: **[Zurg](https://gi
 **What this fork adds:**
 
 - **Process auto-restart** — crashed services restart with exponential backoff (5s → 300s), resets after 1 hour of stability
-- **Blackhole watch folder** — Sonarr/Radarr drop `.torrent`/`.magnet` files, pd_zurg sends them to debrid and creates symlinks when ready. See the [Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md)
+- **Blackhole watch folder** — Sonarr/Radarr drop `.torrent`/`.magnet` files, pd_zurg sends them to debrid and creates symlinks when ready. Supports **per-arr label routing** so Sonarr and Radarr never see each other's items. See the [Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md)
 - **Local library dedup** — checks your existing library before submitting to debrid to avoid duplicates
 - **Notifications** — 90+ services via [Apprise](https://github.com/caronc/apprise) (Discord, Telegram, Slack, email, etc.)
 - **Status dashboard** — process health, mount status, system resources, and a browser-based settings editor
@@ -340,11 +340,11 @@ All settings are documented in [`.env.example`](.env.example) with inline commen
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `BLACKHOLE_ENABLED` | Enable blackhole watch folder | `false` |
-| `BLACKHOLE_DIR` | Watch directory for `.torrent`/`.magnet` files | `/watch` |
+| `BLACKHOLE_DIR` | Watch directory for `.torrent`/`.magnet` files. Supports **per-arr label subdirs** (e.g. `BLACKHOLE_DIR/sonarr/…`, `BLACKHOLE_DIR/radarr/…`) so each arr sees only its own items — see the [Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md) | `/watch` |
 | `BLACKHOLE_POLL_INTERVAL` | Seconds between folder scans | `5` |
 | `BLACKHOLE_DEBRID` | Debrid service: `realdebrid`, `alldebrid`, `torbox`. Auto-detected if not set | auto |
 | `BLACKHOLE_SYMLINK_ENABLED` | Enable symlink creation after download. See [Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md) | `false` |
-| `BLACKHOLE_COMPLETED_DIR` | Directory for completed symlinks | `/completed` |
+| `BLACKHOLE_COMPLETED_DIR` | Directory for completed symlinks. Under the per-arr label layout, symlinks are nested one level deeper (`BLACKHOLE_COMPLETED_DIR/sonarr/…`). Flat layout still works when no label subdirs are present | `/completed` |
 | `BLACKHOLE_RCLONE_MOUNT` | rclone mount path inside container. Append mount name if set (e.g., `/data/pd_zurg`) | `/data` |
 | `BLACKHOLE_SYMLINK_TARGET_BASE` | Mount path as seen by Plex/Sonarr/Radarr host(s). Must resolve on every host that reads symlinks. **Required** for symlink mode | |
 | `BLACKHOLE_MOUNT_POLL_TIMEOUT` | Max seconds to wait for content on mount | `300` |

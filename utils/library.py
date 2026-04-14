@@ -3224,28 +3224,29 @@ def remove_title_symlinks(title, media_type, year=None):
         except (PermissionError, OSError) as e:
             logger.warning(f"[cleanup] Cannot scan {lib_path}: {e}")
 
-    # Remove from completed dir
+    # Remove from completed dir — handles both flat and labeled layouts
+    # via iter_release_dirs. Under labeled mode, the same release title
+    # may exist under multiple labels (e.g. sonarr/ and radarr/); we
+    # remove it everywhere it matches.
     completed_dir = os.environ.get('BLACKHOLE_COMPLETED_DIR', '').strip()
     if completed_dir and os.path.isdir(completed_dir):
         try:
-            with os.scandir(completed_dir) as it:
-                for entry in it:
-                    if not entry.is_dir(follow_symlinks=False):
-                        continue
-                    parsed_title, parsed_year = _parse_folder_name(entry.name)
-                    if not parsed_title:
-                        continue
-                    if _normalize_title(parsed_title) != norm_target:
-                        continue
-                    if year is not None and parsed_year is not None and year != parsed_year:
-                        continue
-                    if _dir_contains_only_symlinks(entry.path):
-                        try:
-                            shutil.rmtree(entry.path)
-                            logger.info(f"[cleanup] Removed completed symlink directory: {entry.path}")
-                            removed.append(entry.path)
-                        except OSError as e:
-                            logger.warning(f"[cleanup] Failed to remove {entry.path}: {e}")
+            from utils.blackhole import iter_release_dirs
+            for _label, release_name, release_path in iter_release_dirs(completed_dir):
+                parsed_title, parsed_year = _parse_folder_name(release_name)
+                if not parsed_title:
+                    continue
+                if _normalize_title(parsed_title) != norm_target:
+                    continue
+                if year is not None and parsed_year is not None and year != parsed_year:
+                    continue
+                if _dir_contains_only_symlinks(release_path):
+                    try:
+                        shutil.rmtree(release_path)
+                        logger.info(f"[cleanup] Removed completed symlink directory: {release_path}")
+                        removed.append(release_path)
+                    except OSError as e:
+                        logger.warning(f"[cleanup] Failed to remove {release_path}: {e}")
         except (PermissionError, OSError) as e:
             logger.warning(f"[cleanup] Cannot scan {completed_dir}: {e}")
 

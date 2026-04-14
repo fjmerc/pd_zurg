@@ -174,16 +174,22 @@ Developer reference for pd_zurg internals. Complements [CLAUDE.md](CLAUDE.md) (r
 ### 4.1 Blackhole Pipeline
 
 ```
-Sonarr/Radarr drops .torrent/.magnet into /watch
+Sonarr/Radarr drops .torrent/.magnet into /watch           (flat mode)
+Sonarr drops into /watch/sonarr/, Radarr into /watch/radarr/ (labeled mode)
          │
          ▼
-BlackholeWatcher._process_file()
+BlackholeWatcher._scan()
+  ├─ Root files → label=None (flat mode)
+  └─ Files in validated subdir → label=<subdir_name>  (see _is_valid_label)
+         │
+         ▼
+BlackholeWatcher._process_file(file, label=…)
   ├─ Parse torrent: extract info_hash, name, file list
   ├─ Check blocklist: blocklist.is_blocked(hash) → skip if blocked
   ├─ Dedup check: scan local library if BLACKHOLE_DEDUP_ENABLED
   ├─ Submit to debrid API: _add_to_realdebrid() / _add_to_alldebrid() / _add_to_torbox()
   ├─ Record: history.log_event('grabbed', title)
-  └─ Start pending monitor (persisted to pending_monitors.json)
+  └─ Start pending monitor (label persisted in pending_monitors.json)
          │
          ▼
 BlackholeWatcher._check_*_status() — poll loop
@@ -192,20 +198,24 @@ BlackholeWatcher._check_*_status() — poll loop
   └─ On "downloaded" → trigger symlink creation
          │
          ▼
-BlackholeWatcher._create_symlinks()
+BlackholeWatcher._create_symlinks(label=…)
   ├─ Poll mount: wait for files at /data/{mount}/category/release/
   │   (up to BLACKHOLE_MOUNT_POLL_TIMEOUT, default 300s)
-  ├─ Create symlinks: {COMPLETED_DIR}/release/ → BLACKHOLE_SYMLINK_TARGET_BASE/...
+  ├─ flat:    {COMPLETED_DIR}/release/file.mkv          → SYMLINK_TARGET_BASE/…
+  ├─ labeled: {COMPLETED_DIR}/<label>/release/file.mkv  → SYMLINK_TARGET_BASE/…
   │   NOTE: Target path resolves in arr/Plex containers, NOT in pd_zurg
   ├─ Record: history.log_event('symlink_created')
   └─ Notify: notifications.notify('symlink_created')
          │
          ▼
-Sonarr/Radarr imports from /completed (configured as blackhole download client)
+Sonarr imports from /completed/sonarr/ (labeled) or /completed/ (flat)
+Radarr imports from /completed/radarr/ (labeled) — each arr sees only its own items
   ├─ Moves/hardlinks to library folder
   ├─ Triggers: Plex library scan
   └─ Updates: episode/movie status in database
 ```
+
+**Label routing invariant.** When the host directory layout includes label subdirs under `BLACKHOLE_DIR` (e.g. `sonarr/`, `radarr/`), pd_zurg routes each completed symlink into the same-named subdir under `BLACKHOLE_COMPLETED_DIR`. Each arr mounts only its own label subdir. Flat layout (no subdirs) remains fully supported. Any new consumer of `BLACKHOLE_COMPLETED_DIR` must use `utils.blackhole.iter_release_dirs()` rather than assuming top-level entries are release dirs.
 
 ### 4.2 Library Scan Cycle
 
@@ -288,7 +298,9 @@ CREATION (two separate systems):
   Blackhole symlinks (blackhole.py:_create_symlinks)
   ├─ Target: original torrent/release folder name
   ├─ Purpose: arr import (Sonarr/Radarr pick up from /completed)
-  ├─ Location: {COMPLETED_DIR}/release-name/file.mkv
+  ├─ Location (flat):    {COMPLETED_DIR}/release-name/file.mkv
+  ├─ Location (labeled): {COMPLETED_DIR}/<label>/release-name/file.mkv
+  │   Label scopes symlinks to one arr; enumerate via iter_release_dirs()
   └─ Cleanup: BLACKHOLE_SYMLINK_MAX_AGE (default 72h)
 
   Library debrid symlinks (library.py:_create_debrid_symlinks)
@@ -427,7 +439,7 @@ if target.startswith(symlink_target_real):
 | `/config/backups/{date}/` | Mixed | `scheduled_tasks.py` | Daily config backups (keep last 7) |
 | `/zurg/RD/config.yml` | YAML | `zurg/setup.py` | Zurg RealDebrid config |
 | `/zurg/AD/config.yml` | YAML | `zurg/setup.py` | Zurg AllDebrid config |
-| `{COMPLETED_DIR}/pending_monitors.json` | JSON | `utils/blackhole.py` | Active torrent monitors (survives restart) |
+| `{COMPLETED_DIR}/pending_monitors.json` | JSON | `utils/blackhole.py` | Active torrent monitors (survives restart). Entries: `{torrent_id, filename, service, timestamp, label?}` — `label` is present when the torrent was submitted via a per-arr label subdir; legacy entries without `label` are treated as flat-mode |
 | `{BLACKHOLE_DIR}/*.meta.json` | JSON | `utils/blackhole.py` | Per-torrent retry metadata |
 
 ### In-Memory Singletons (lost on restart)

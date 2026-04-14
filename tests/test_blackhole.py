@@ -9,6 +9,7 @@ from utils.blackhole import (
     MEDIA_EXTENSIONS, MOUNT_CATEGORIES, parse_release_name,
     _is_multi_season_pack, _extract_file_season, _build_season_release_name,
     _enrich_for_history,
+    _is_valid_label, iter_release_dirs,
 )
 
 
@@ -1454,3 +1455,572 @@ class TestDiscRipDetection:
             watcher = BlackholeWatcher('/tmp', 'key', provider)
             names = watcher._extract_filenames_from_info({})
             assert names == [], f"Expected empty list for {provider} with empty info"
+
+
+# ─── Per-arr label routing ──────────────────────────────────────────────
+
+class TestIsValidLabel:
+
+    def test_accepts_simple_name(self):
+        assert _is_valid_label('sonarr') is True
+        assert _is_valid_label('radarr') is True
+        assert _is_valid_label('sonarr-4k') is True
+        assert _is_valid_label('sonarr_hd') is True
+        assert _is_valid_label('Readarr') is True
+        assert _is_valid_label('arr1') is True
+
+    def test_rejects_reserved(self):
+        assert _is_valid_label('failed') is False
+        assert _is_valid_label('.alt_pending') is False
+        # Case-insensitive reserved match
+        assert _is_valid_label('Failed') is False
+        assert _is_valid_label('FAILED') is False
+
+    def test_rejects_invalid_chars(self):
+        assert _is_valid_label('sonarr; rm -rf /') is False
+        assert _is_valid_label('sonarr/radarr') is False
+        assert _is_valid_label('sonarr radarr') is False
+        assert _is_valid_label('sonarr.arr') is False
+        assert _is_valid_label('..') is False
+
+    def test_rejects_path_traversal(self):
+        assert _is_valid_label('../../etc') is False
+        assert _is_valid_label('..') is False
+        assert _is_valid_label('.') is False
+        assert _is_valid_label('a/..') is False
+
+    def test_rejects_empty_and_long(self):
+        assert _is_valid_label('') is False
+        assert _is_valid_label(None) is False
+        assert _is_valid_label('a' * 64) is True
+        assert _is_valid_label('a' * 65) is False
+
+
+class TestScanLabelDiscovery:
+
+    def _make_watcher(self, tmp_dir):
+        watch = os.path.join(tmp_dir, 'watch')
+        os.makedirs(watch)
+        return BlackholeWatcher(watch, 'key', 'realdebrid'), watch
+
+    def _old_file(self, path):
+        """Backdate mtime so _scan doesn't skip file as in-flight."""
+        t = time.time() - 10
+        os.utime(path, (t, t))
+
+    def test_scan_discovers_label_from_subdir(self, tmp_dir, monkeypatch):
+        """Subdir name should be passed as label to _process_file."""
+        watcher, watch = self._make_watcher(tmp_dir)
+        sub = os.path.join(watch, 'sonarr')
+        os.makedirs(sub)
+        f = os.path.join(sub, 'Show.S01E01.torrent')
+        with open(f, 'w') as h:
+            h.write('x')
+        self._old_file(f)
+
+        calls = []
+        monkeypatch.setattr(
+            watcher, '_process_file',
+            lambda fp, label=None: calls.append((fp, label)),
+        )
+        watcher._scan()
+        assert len(calls) == 1
+        assert calls[0][1] == 'sonarr'
+        assert calls[0][0] == f
+
+    def test_scan_root_file_has_no_label(self, tmp_dir, monkeypatch):
+        """Files in watch_dir root should pass label=None (flat mode)."""
+        watcher, watch = self._make_watcher(tmp_dir)
+        f = os.path.join(watch, 'Movie.2024.torrent')
+        with open(f, 'w') as h:
+            h.write('x')
+        self._old_file(f)
+
+        calls = []
+        monkeypatch.setattr(
+            watcher, '_process_file',
+            lambda fp, label=None: calls.append((fp, label)),
+        )
+        watcher._scan()
+        assert calls == [(f, None)]
+
+    def test_scan_mixed_flat_and_labeled(self, tmp_dir, monkeypatch):
+        watcher, watch = self._make_watcher(tmp_dir)
+        root_file = os.path.join(watch, 'Flat.torrent')
+        with open(root_file, 'w') as h:
+            h.write('x')
+        self._old_file(root_file)
+
+        sub = os.path.join(watch, 'radarr')
+        os.makedirs(sub)
+        sub_file = os.path.join(sub, 'Movie.magnet')
+        with open(sub_file, 'w') as h:
+            h.write('magnet:?xt=x')
+        self._old_file(sub_file)
+
+        seen = {}
+        monkeypatch.setattr(
+            watcher, '_process_file',
+            lambda fp, label=None: seen.update({os.path.basename(fp): label}),
+        )
+        watcher._scan()
+        assert seen == {'Flat.torrent': None, 'Movie.magnet': 'radarr'}
+
+    def test_scan_rejects_invalid_label_characters(self, tmp_dir, monkeypatch):
+        """Subdirs with invalid label names should be skipped entirely."""
+        watcher, watch = self._make_watcher(tmp_dir)
+        # '.' in name is not in the whitelist
+        sub = os.path.join(watch, 'evil.path')
+        os.makedirs(sub)
+        f = os.path.join(sub, 'x.torrent')
+        with open(f, 'w') as h:
+            h.write('x')
+        self._old_file(f)
+
+        calls = []
+        monkeypatch.setattr(
+            watcher, '_process_file',
+            lambda fp, label=None: calls.append((fp, label)),
+        )
+        watcher._scan()
+        assert calls == []
+
+    def test_scan_reserved_labels_skipped(self, tmp_dir, monkeypatch):
+        """failed/ and .alt_pending/ must never be treated as labels."""
+        watcher, watch = self._make_watcher(tmp_dir)
+        for name in ('failed', '.alt_pending'):
+            sub = os.path.join(watch, name)
+            os.makedirs(sub)
+            f = os.path.join(sub, 'x.torrent')
+            with open(f, 'w') as h:
+                h.write('x')
+            self._old_file(f)
+
+        calls = []
+        monkeypatch.setattr(
+            watcher, '_process_file',
+            lambda fp, label=None: calls.append((fp, label)),
+        )
+        watcher._scan()
+        assert calls == []
+
+    def test_path_traversal_via_label_rejected(self, tmp_dir, monkeypatch):
+        """A crafted '..' subdir must not be accepted as a label."""
+        watcher, watch = self._make_watcher(tmp_dir)
+        # Can't literally create '..' but invalid chars path is covered by _is_valid_label
+        # Create a dir whose name would escape if not validated (uses chars outside whitelist)
+        sub = os.path.join(watch, '../escape-attempt')
+        try:
+            os.makedirs(os.path.normpath(sub))
+        except (OSError, FileExistsError):
+            pass
+        # Also create a dir with a bogus name in the watch tree
+        weird = os.path.join(watch, 'sonarr..evil')
+        os.makedirs(weird)
+        with open(os.path.join(weird, 'x.torrent'), 'w') as h:
+            h.write('x')
+        self._old_file(os.path.join(weird, 'x.torrent'))
+
+        calls = []
+        monkeypatch.setattr(
+            watcher, '_process_file',
+            lambda fp, label=None: calls.append((fp, label)),
+        )
+        watcher._scan()
+        assert calls == []
+
+
+class TestCreateSymlinksWithLabel:
+
+    def _make_watcher(self, tmp_dir):
+        completed = os.path.join(tmp_dir, 'completed')
+        mount = os.path.join(tmp_dir, 'mount')
+        os.makedirs(completed)
+        os.makedirs(mount)
+        watcher = BlackholeWatcher(
+            os.path.join(tmp_dir, 'watch'), 'key', 'realdebrid',
+            symlink_enabled=True,
+            completed_dir=completed,
+            rclone_mount=mount,
+            symlink_target_base='/mnt/debrid',
+        )
+        return watcher, completed, mount
+
+    def test_create_symlinks_with_label_writes_to_label_subdir(self, tmp_dir):
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+        release = 'My.Show.S01E01'
+        release_dir = os.path.join(mount, 'shows', release)
+        os.makedirs(release_dir)
+        with open(os.path.join(release_dir, 'ep.mkv'), 'w') as f:
+            f.write('data')
+
+        count = watcher._create_symlinks(release, 'shows', release_dir, label='sonarr')
+        assert count == 1
+        link = os.path.join(completed, 'sonarr', release, 'ep.mkv')
+        assert os.path.islink(link)
+        # Flat path must NOT have been created
+        assert not os.path.exists(os.path.join(completed, release))
+
+    def test_create_symlinks_without_label_writes_flat(self, tmp_dir):
+        """Regression guard: label=None falls through to legacy flat output."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+        release = 'My.Show.S01E01'
+        release_dir = os.path.join(mount, 'shows', release)
+        os.makedirs(release_dir)
+        with open(os.path.join(release_dir, 'ep.mkv'), 'w') as f:
+            f.write('data')
+
+        count = watcher._create_symlinks(release, 'shows', release_dir)
+        assert count == 1
+        assert os.path.islink(os.path.join(completed, release, 'ep.mkv'))
+
+    def test_create_split_season_symlinks_with_label(self, tmp_dir):
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+        release = 'Show.S01-S02.1080p'
+        release_dir = os.path.join(mount, 'shows', release)
+        os.makedirs(release_dir)
+        for ep in ('Show.S01E01.mkv', 'Show.S02E01.mkv'):
+            with open(os.path.join(release_dir, ep), 'w') as f:
+                f.write('data')
+
+        count = watcher._create_symlinks(release, 'shows', release_dir, label='sonarr')
+        assert count == 2
+        assert os.path.isdir(os.path.join(completed, 'sonarr', 'Show.S01.1080p'))
+        assert os.path.isdir(os.path.join(completed, 'sonarr', 'Show.S02.1080p'))
+        # Make sure flat-mode dirs were NOT created
+        assert not os.path.exists(os.path.join(completed, 'Show.S01.1080p'))
+
+
+class TestPendingMonitorsWithLabel:
+
+    def _make_watcher(self, tmp_dir):
+        completed = os.path.join(tmp_dir, 'completed')
+        os.makedirs(completed)
+        return BlackholeWatcher(
+            tmp_dir, 'key', 'realdebrid',
+            symlink_enabled=True, completed_dir=completed,
+        )
+
+    def test_pending_monitors_persist_label(self, tmp_dir):
+        w = self._make_watcher(tmp_dir)
+        w._add_pending('torrent1', 'sonarr.torrent', label='sonarr')
+        w._add_pending('torrent2', 'radarr.magnet', label='radarr')
+        w._add_pending('torrent3', 'flat.torrent')
+
+        entries = {e['torrent_id']: e for e in w._load_pending()}
+        assert entries['torrent1']['label'] == 'sonarr'
+        assert entries['torrent2']['label'] == 'radarr'
+        # label=None should not be persisted, keeping JSON compact
+        assert 'label' not in entries['torrent3']
+
+    def test_pending_monitors_load_legacy_without_label(self, tmp_dir):
+        """Existing in-flight entries from before the upgrade have no label field."""
+        w = self._make_watcher(tmp_dir)
+        legacy = [
+            {'torrent_id': 't1', 'filename': 'old.torrent',
+             'service': 'realdebrid', 'timestamp': time.time()}
+        ]
+        with open(w._pending_file, 'w') as f:
+            json.dump(legacy, f)
+
+        entries = w._load_pending()
+        assert len(entries) == 1
+        assert entries[0].get('label') is None
+
+    def test_resume_pending_validates_label(self, tmp_dir, monkeypatch):
+        """A tampered label value in the JSON must be dropped on resume,
+        not piped into os.path.join (directory escape primitive)."""
+        w = self._make_watcher(tmp_dir)
+        tampered = [
+            {'torrent_id': 't1', 'filename': 'x.torrent',
+             'service': 'realdebrid', 'timestamp': time.time(),
+             'label': '../../etc'},  # path traversal attempt
+            {'torrent_id': 't2', 'filename': 'y.torrent',
+             'service': 'realdebrid', 'timestamp': time.time(),
+             'label': '/etc/cron.d'},  # absolute path attempt
+            {'torrent_id': 't3', 'filename': 'z.torrent',
+             'service': 'realdebrid', 'timestamp': time.time(),
+             'label': ['not', 'a', 'string']},  # wrong type
+            {'torrent_id': 't4', 'filename': 'ok.torrent',
+             'service': 'realdebrid', 'timestamp': time.time(),
+             'label': 'sonarr'},  # valid
+        ]
+        with open(w._pending_file, 'w') as f:
+            json.dump(tampered, f)
+
+        captured = []
+        monkeypatch.setattr(
+            w, '_start_monitor',
+            lambda tid, fn, label=None: captured.append((tid, label)),
+        )
+        w._resume_pending_monitors()
+        by_id = dict(captured)
+        assert by_id['t1'] is None  # traversal → sanitized
+        assert by_id['t2'] is None  # absolute path → sanitized
+        assert by_id['t3'] is None  # wrong type → sanitized
+        assert by_id['t4'] == 'sonarr'  # valid passes through
+
+    def test_resume_pending_skips_bad_entries(self, tmp_dir, monkeypatch):
+        """A non-dict entry must not crash the resume loop and kill the worker."""
+        w = self._make_watcher(tmp_dir)
+        bad = [
+            'banana',  # not a dict
+            42,        # not a dict
+            {'torrent_id': 't_ok', 'filename': 'x.torrent',
+             'service': 'realdebrid', 'timestamp': time.time()},
+        ]
+        with open(w._pending_file, 'w') as f:
+            json.dump(bad, f)
+
+        captured = []
+        monkeypatch.setattr(
+            w, '_start_monitor',
+            lambda tid, fn, label=None: captured.append(tid),
+        )
+        w._resume_pending_monitors()  # must not raise
+        assert captured == ['t_ok']
+
+
+class TestFailedRetryPreservesLabel:
+
+    def test_failed_retry_preserves_label(self, tmp_dir):
+        """A labeled failed file moves back to /watch/<label>/ for retry."""
+        watch = os.path.join(tmp_dir, 'watch')
+        os.makedirs(watch)
+        watcher = BlackholeWatcher(watch, 'key', 'realdebrid')
+        label_dir = os.path.join(watch, 'failed', 'sonarr')
+        os.makedirs(label_dir)
+        failed_path = os.path.join(label_dir, 'x.torrent')
+        with open(failed_path, 'w') as f:
+            f.write('data')
+        # Write retry meta with old timestamp so backoff has elapsed
+        with open(failed_path + '.meta', 'w') as f:
+            json.dump({'retries': 0, 'last_attempt': 0}, f)
+
+        watcher._retry_failed()
+        assert not os.path.exists(failed_path)
+        assert os.path.exists(os.path.join(watch, 'sonarr', 'x.torrent'))
+
+    def test_flat_retry_still_works(self, tmp_dir):
+        """Legacy flat failed/ layout must still be retried to watch_dir root."""
+        watch = os.path.join(tmp_dir, 'watch')
+        os.makedirs(watch)
+        watcher = BlackholeWatcher(watch, 'key', 'realdebrid')
+        failed_dir = os.path.join(watch, 'failed')
+        os.makedirs(failed_dir)
+        failed_path = os.path.join(failed_dir, 'y.magnet')
+        with open(failed_path, 'w') as f:
+            f.write('magnet:?xt=x')
+        with open(failed_path + '.meta', 'w') as f:
+            json.dump({'retries': 0, 'last_attempt': 0}, f)
+
+        watcher._retry_failed()
+        assert not os.path.exists(failed_path)
+        assert os.path.exists(os.path.join(watch, 'y.magnet'))
+
+    def test_retry_does_not_clobber_fresh_drop(self, tmp_dir):
+        """If the arr has just dropped a same-filename file in the label dir,
+        the retry must leave the failed file in place rather than silently
+        overwriting the fresh drop."""
+        watch = os.path.join(tmp_dir, 'watch')
+        os.makedirs(watch)
+        watcher = BlackholeWatcher(watch, 'key', 'realdebrid')
+        label_dir = os.path.join(watch, 'sonarr')
+        os.makedirs(label_dir)
+
+        # Fresh drop from the arr
+        fresh = os.path.join(label_dir, 'x.torrent')
+        with open(fresh, 'w') as f:
+            f.write('FRESH_CONTENT')
+
+        # Failed file from a prior attempt
+        failed_dir = os.path.join(watch, 'failed', 'sonarr')
+        os.makedirs(failed_dir)
+        failed_path = os.path.join(failed_dir, 'x.torrent')
+        with open(failed_path, 'w') as f:
+            f.write('OLD_CONTENT')
+        with open(failed_path + '.meta', 'w') as f:
+            json.dump({'retries': 0, 'last_attempt': 0}, f)
+
+        watcher._retry_failed()
+        # Fresh drop is preserved, failed file stays in place
+        with open(fresh) as f:
+            assert f.read() == 'FRESH_CONTENT'
+        assert os.path.exists(failed_path)
+
+
+class TestAltPendingRecoveryPreservesLabel:
+
+    def test_alt_pending_recovery_preserves_label(self, tmp_dir):
+        watch = os.path.join(tmp_dir, 'watch')
+        os.makedirs(watch)
+        watcher = BlackholeWatcher(watch, 'key', 'realdebrid')
+        staged_dir = os.path.join(watch, '.alt_pending', 'sonarr')
+        os.makedirs(staged_dir)
+        stranded = os.path.join(staged_dir, 'stranded.torrent')
+        with open(stranded, 'w') as f:
+            f.write('data')
+
+        watcher._recover_alt_pending()
+        assert not os.path.exists(stranded)
+        recovered = os.path.join(watch, 'failed', 'sonarr', 'stranded.torrent')
+        assert os.path.exists(recovered)
+        # alt_exhausted marked so retry doesn't loop through alts again
+        meta = recovered + '.meta'
+        assert os.path.exists(meta)
+        with open(meta) as f:
+            data = json.load(f)
+        assert data.get('alt_exhausted') is True
+
+    def test_alt_pending_flat_recovery(self, tmp_dir):
+        """Legacy flat .alt_pending/ layout must still be recovered."""
+        watch = os.path.join(tmp_dir, 'watch')
+        os.makedirs(watch)
+        watcher = BlackholeWatcher(watch, 'key', 'realdebrid')
+        staged = os.path.join(watch, '.alt_pending')
+        os.makedirs(staged)
+        stranded = os.path.join(staged, 'flat.torrent')
+        with open(stranded, 'w') as f:
+            f.write('data')
+
+        watcher._recover_alt_pending()
+        assert not os.path.exists(stranded)
+        assert os.path.exists(os.path.join(watch, 'failed', 'flat.torrent'))
+
+
+class TestIterReleaseDirs:
+
+    def test_empty_dir(self, tmp_dir):
+        assert list(iter_release_dirs(tmp_dir)) == []
+
+    def test_missing_dir(self, tmp_dir):
+        assert list(iter_release_dirs(os.path.join(tmp_dir, 'missing'))) == []
+
+    def test_flat_layout(self, tmp_dir):
+        # Release dir containing a file (typical flat release)
+        r1 = os.path.join(tmp_dir, 'Show.S01E01')
+        os.makedirs(r1)
+        with open(os.path.join(r1, 'ep.mkv'), 'w') as f:
+            f.write('x')
+
+        got = list(iter_release_dirs(tmp_dir))
+        assert len(got) == 1
+        label, name, path = got[0]
+        assert label is None
+        assert name == 'Show.S01E01'
+        assert path == r1
+
+    def test_labeled_layout(self, tmp_dir):
+        sonarr = os.path.join(tmp_dir, 'sonarr')
+        os.makedirs(os.path.join(sonarr, 'Show.S01E01'))
+        os.makedirs(os.path.join(sonarr, 'Show.S01E02'))
+
+        radarr = os.path.join(tmp_dir, 'radarr')
+        os.makedirs(os.path.join(radarr, 'Movie.2024'))
+
+        got = {(label, name) for label, name, _ in iter_release_dirs(tmp_dir)}
+        assert got == {
+            ('sonarr', 'Show.S01E01'),
+            ('sonarr', 'Show.S01E02'),
+            ('radarr', 'Movie.2024'),
+        }
+
+    def test_mixed_layout(self, tmp_dir):
+        """Flat release dirs and labeled parents coexisting."""
+        # Labeled parent (only subdirs, no files)
+        sonarr = os.path.join(tmp_dir, 'sonarr')
+        os.makedirs(os.path.join(sonarr, 'Show.S01E01'))
+
+        # Flat release dir (has files directly)
+        flat = os.path.join(tmp_dir, 'Legacy.Release')
+        os.makedirs(flat)
+        with open(os.path.join(flat, 'file.mkv'), 'w') as f:
+            f.write('x')
+
+        got = {(label, name) for label, name, _ in iter_release_dirs(tmp_dir)}
+        assert got == {
+            ('sonarr', 'Show.S01E01'),
+            (None, 'Legacy.Release'),
+        }
+
+    def test_ignores_pending_monitors_file(self, tmp_dir):
+        """pending_monitors.json is a file at the top level — must be ignored."""
+        pending = os.path.join(tmp_dir, 'pending_monitors.json')
+        with open(pending, 'w') as f:
+            f.write('[]')
+        assert list(iter_release_dirs(tmp_dir)) == []
+
+    def test_empty_label_dir_yields_nothing_and_is_not_flat_release(self, tmp_dir):
+        """An empty dir with a label-compatible name must not be treated as a flat release.
+
+        Misclassification would cause _cleanup_symlinks to shutil.rmtree the
+        user's label subdir (via 'no valid files' → should_remove=True).
+        """
+        os.makedirs(os.path.join(tmp_dir, 'sonarr'))  # label-compatible, empty
+        assert list(iter_release_dirs(tmp_dir)) == []
+
+    def test_label_dir_with_stray_loose_file_still_classified_as_label(self, tmp_dir):
+        """A stray file (e.g. .DS_Store, arr lockfile) inside a label dir must not
+        demote the dir to a flat release — that would cause _cleanup_symlinks to
+        wipe the entire label tree."""
+        sonarr = os.path.join(tmp_dir, 'sonarr')
+        os.makedirs(os.path.join(sonarr, 'Show.S01E01'))
+        # Loose file alongside the release dir
+        with open(os.path.join(sonarr, '.DS_Store'), 'w') as f:
+            f.write('noise')
+
+        got = {(label, name) for label, name, _ in iter_release_dirs(tmp_dir)}
+        assert got == {('sonarr', 'Show.S01E01')}
+
+
+class TestCleanupSymlinksLabeled:
+
+    def test_removes_empty_label_dir_after_cleanup(self, tmp_dir):
+        """After every release under a label is removed, the label dir itself goes."""
+        completed = os.path.join(tmp_dir, 'completed')
+        sonarr_dir = os.path.join(completed, 'sonarr')
+        release_dir = os.path.join(sonarr_dir, 'Old.Release')
+        os.makedirs(release_dir)
+        # Broken symlink → release gets removed by _cleanup_symlinks
+        os.symlink('/nonexistent/path.mkv', os.path.join(release_dir, 'ep.mkv'))
+
+        watcher = BlackholeWatcher(
+            tmp_dir, 'key', 'realdebrid',
+            symlink_enabled=True, completed_dir=completed,
+        )
+        watcher._cleanup_symlinks()
+
+        assert not os.path.exists(release_dir)
+        # Empty label parent is also removed
+        assert not os.path.exists(sonarr_dir)
+        # Top-level completed_dir is preserved
+        assert os.path.isdir(completed)
+
+    def test_labeled_broken_symlink_removed(self, tmp_dir):
+        completed = os.path.join(tmp_dir, 'completed')
+        sonarr_dir = os.path.join(completed, 'sonarr')
+        release_dir = os.path.join(sonarr_dir, 'Show.S01E01')
+        os.makedirs(release_dir)
+        os.symlink('/nonexistent/gone.mkv', os.path.join(release_dir, 'ep.mkv'))
+
+        watcher = BlackholeWatcher(
+            tmp_dir, 'key', 'realdebrid',
+            symlink_enabled=True, completed_dir=completed,
+        )
+        watcher._cleanup_symlinks()
+        assert not os.path.exists(release_dir)
+
+    def test_empty_label_dir_not_removed_by_cleanup(self, tmp_dir):
+        """Regression: cleanup must not misclassify an empty label dir as a
+        flat release with no valid files, which would trigger shutil.rmtree."""
+        completed = os.path.join(tmp_dir, 'completed')
+        sonarr_dir = os.path.join(completed, 'sonarr')
+        os.makedirs(sonarr_dir)  # Empty — no releases yet
+
+        watcher = BlackholeWatcher(
+            tmp_dir, 'key', 'realdebrid',
+            symlink_enabled=True, completed_dir=completed,
+        )
+        watcher._cleanup_symlinks()
+        # Empty label dir must survive cleanup (the user created it for a reason)
+        assert os.path.isdir(sonarr_dir)

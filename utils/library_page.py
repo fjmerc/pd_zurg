@@ -999,7 +999,7 @@ function formatPendingDetail(pe) {
     var nra = new Date(pe.next_retry_at);
     var diffMs = nra - Date.now();
     if (diffMs > 0) {
-      parts.push('next retry at ' + nra.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}));
+      parts.push('next retry at ' + nra.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'}));
     } else {
       parts.push('retry overdue');
     }

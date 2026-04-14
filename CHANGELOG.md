@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Rclone dir cache flush on demand**: Rclone's RC API is now enabled automatically. The blackhole flushes the dir cache before waiting for new files on the mount, and the library scanner flushes before FUSE fallback scans. This eliminates the 30-minute wait for `RCLONE_DIR_CACHE_TIME` expiry when Zurg adds or removes torrents.
+- **Early detection of BluRay disc rips**: The blackhole now inspects the debrid file list immediately after a torrent is ready, before the 300-second mount wait. Torrents containing only non-media files (e.g. `.m2ts` BluRay rips) are auto-blocklisted and deleted from debrid, allowing the arr to grab a different release. Works across all three debrid providers (RealDebrid, AllDebrid, TorBox).
 
 ### Fixed
 

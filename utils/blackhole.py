@@ -558,6 +558,68 @@ class BlackholeWatcher:
             pass
         return ''
 
+    def _has_usable_media_files(self, info):
+        """Check if the debrid torrent contains any files with recognized media extensions.
+
+        Returns True if at least one file matches MEDIA_EXTENSIONS.
+        Returns True (assume usable) if file info is unavailable — never reject
+        what we can't verify.
+        """
+        try:
+            filenames = self._extract_filenames_from_info(info)
+        except Exception:
+            return True  # Can't verify — assume usable
+        if not filenames:
+            return True  # No file info available — assume usable
+        return any(
+            os.path.splitext(f)[1].lower() in MEDIA_EXTENSIONS
+            for f in filenames
+        )
+
+    def _extract_filenames_from_info(self, info):
+        """Extract flat list of filenames from a debrid torrent info response.
+
+        Provider-specific extraction; returns empty list if structure is unexpected.
+        """
+        if self.debrid_service == 'realdebrid':
+            files = info.get('files')
+            if not isinstance(files, list):
+                return []
+            return [
+                os.path.basename(f['path'])
+                for f in files
+                if f.get('selected') == 1 and f.get('path')
+            ]
+        elif self.debrid_service == 'alldebrid':
+            try:
+                files = info['data']['magnets']['files']
+            except (KeyError, TypeError):
+                return []
+            if not isinstance(files, list):
+                return []
+            # AD uses nested structure: 'n' = name, 'e' = children
+            result = []
+            stack = list(files)
+            while stack:
+                node = stack.pop()
+                if not isinstance(node, dict):
+                    continue
+                children = node.get('e')
+                if isinstance(children, list):
+                    stack.extend(children)
+                elif node.get('n'):
+                    result.append(node['n'])
+            return result
+        elif self.debrid_service == 'torbox':
+            try:
+                files = info['data']['files']
+            except (KeyError, TypeError):
+                return []
+            if not isinstance(files, list):
+                return []
+            return [f['name'] for f in files if f.get('name')]
+        return []
+
     # ── Mount scanning ───────────────────────────────────────────────
 
     def _find_on_mount(self, release_name):
@@ -883,6 +945,44 @@ class BlackholeWatcher:
             if self._is_torrent_ready(status):
                 release_name = self._extract_release_name(info)
                 logger.info(f"[blackhole] Torrent ready: {filename} (release: {release_name})")
+                # Disc rip detection: check debrid file list before mount wait
+                if not self._has_usable_media_files(info):
+                    logger.warning(f"[blackhole] No recognized media files in {filename} — "
+                                   f"auto-blocklisting and removing from debrid.")
+                    _mt, _ep = _enrich_for_history(filename) if _history else (None, None)
+                    if _blocklist and str(os.environ.get('BLOCKLIST_AUTO_ADD', 'true')).lower() == 'true':
+                        bl_hash = self._extract_hash_from_info(info)
+                        if bl_hash:
+                            _blocklist.add(bl_hash, filename, reason='disc rip (no usable media files)', source='auto')
+                            if _history:
+                                _history.log_event('blocklist_added', filename, episode=_ep, source='blackhole',
+                                                   detail='Auto-blocklisted: disc rip',
+                                                   meta={'info_hash': bl_hash},
+                                                   media_title=_mt)
+                    try:
+                        from utils.debrid_client import get_debrid_client
+                        client, _svc = get_debrid_client()
+                        if client:
+                            client.delete_torrent(str(torrent_id))
+                    except Exception as e:
+                        logger.debug(f"[blackhole] Failed to delete disc rip from debrid: {e}")
+                    if _history:
+                        _history.log_event('failed', filename, episode=_ep, source='blackhole',
+                                           detail='Rejected: no usable media files',
+                                           meta={'provider': self.debrid_service, 'torrent_id': torrent_id},
+                                           media_title=_mt)
+                    try:
+                        from utils.metrics import metrics
+                        metrics.inc('blackhole_disc_rip_rejected')
+                    except Exception:
+                        pass
+                    if _notify:
+                        _notify('download_error', 'Blackhole: No Media Files',
+                                f'{filename} contains no recognized media files. '
+                                f'Auto-blocklisted and removed from debrid.',
+                                level='warning')
+                    self._remove_pending(torrent_id)
+                    return
                 if _history:
                     _mt, _ep = _enrich_for_history(filename)
                     _history.log_event('cached', filename, episode=_ep, source='blackhole',

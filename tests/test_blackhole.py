@@ -1298,3 +1298,159 @@ class TestEnrichForHistory:
     def test_empty_name_returns_none(self):
         name, ep = _enrich_for_history('.torrent')
         assert name is None
+
+
+class TestDiscRipDetection:
+    """Tests for _has_usable_media_files and _extract_filenames_from_info."""
+
+    # ── RealDebrid ────────────────────────────────────────────────────
+
+    def test_rd_mkv_files_usable(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid')
+        info = {'files': [
+            {'path': '/Movie/Movie.mkv', 'bytes': 5000000, 'selected': 1},
+            {'path': '/Movie/Sample.mkv', 'bytes': 50000, 'selected': 1},
+        ]}
+        assert watcher._has_usable_media_files(info) is True
+
+    def test_rd_m2ts_only_not_usable(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid')
+        info = {'files': [
+            {'path': '/BDMV/STREAM/00001.m2ts', 'bytes': 30000000000, 'selected': 1},
+            {'path': '/BDMV/STREAM/00002.m2ts', 'bytes': 500000000, 'selected': 1},
+            {'path': '/BDMV/index.bdmv', 'bytes': 1000, 'selected': 1},
+        ]}
+        assert watcher._has_usable_media_files(info) is False
+
+    def test_rd_mixed_m2ts_and_mkv_usable(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid')
+        info = {'files': [
+            {'path': '/BDMV/STREAM/00001.m2ts', 'bytes': 30000000000, 'selected': 1},
+            {'path': '/Movie.mkv', 'bytes': 5000000000, 'selected': 1},
+        ]}
+        assert watcher._has_usable_media_files(info) is True
+
+    def test_rd_only_unselected_files(self):
+        """Unselected files should be ignored; no selected files means assume usable."""
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid')
+        info = {'files': [
+            {'path': '/Movie.mkv', 'bytes': 5000000000, 'selected': 0},
+        ]}
+        # No selected files → empty filenames → assume usable
+        assert watcher._has_usable_media_files(info) is True
+
+    def test_rd_no_files_key(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid')
+        info = {'status': 'downloaded', 'id': '123'}
+        assert watcher._has_usable_media_files(info) is True
+
+    def test_rd_empty_files_list(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid')
+        info = {'files': []}
+        assert watcher._has_usable_media_files(info) is True
+
+    # ── AllDebrid ─────────────────────────────────────────────────────
+
+    def test_ad_mkv_in_nested_dirs(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'alldebrid')
+        info = {'data': {'magnets': {'files': [
+            {'n': 'Movie', 'e': [
+                {'n': 'Movie.mkv', 's': 5000000000},
+                {'n': 'Movie.srt', 's': 50000},
+            ]},
+        ]}}}
+        assert watcher._has_usable_media_files(info) is True
+
+    def test_ad_m2ts_only_not_usable(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'alldebrid')
+        info = {'data': {'magnets': {'files': [
+            {'n': 'BDMV', 'e': [
+                {'n': 'STREAM', 'e': [
+                    {'n': '00001.m2ts', 's': 30000000000},
+                    {'n': '00002.m2ts', 's': 500000000},
+                ]},
+                {'n': 'index.bdmv', 's': 1000},
+            ]},
+        ]}}}
+        assert watcher._has_usable_media_files(info) is False
+
+    def test_ad_missing_structure(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'alldebrid')
+        info = {'data': {'magnets': {}}}
+        assert watcher._has_usable_media_files(info) is True
+
+    def test_ad_flat_files(self):
+        """AD response with no nesting (single-file torrent)."""
+        watcher = BlackholeWatcher('/tmp', 'key', 'alldebrid')
+        info = {'data': {'magnets': {'files': [
+            {'n': 'Movie.mp4', 's': 5000000000},
+        ]}}}
+        assert watcher._has_usable_media_files(info) is True
+
+    # ── TorBox ────────────────────────────────────────────────────────
+
+    def test_tb_mp4_usable(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        info = {'data': {'files': [
+            {'name': 'Movie.mp4', 'size': 5000000000},
+        ]}}
+        assert watcher._has_usable_media_files(info) is True
+
+    def test_tb_m2ts_only_not_usable(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        info = {'data': {'files': [
+            {'name': '00001.m2ts', 'size': 30000000000},
+            {'name': '00002.m2ts', 'size': 500000000},
+        ]}}
+        assert watcher._has_usable_media_files(info) is False
+
+    def test_tb_missing_files(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        info = {'data': {}}
+        assert watcher._has_usable_media_files(info) is True
+
+    # ── _extract_filenames_from_info ──────────────────────────────────
+
+    def test_extract_rd_filenames(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid')
+        info = {'files': [
+            {'path': '/Movie/Movie.mkv', 'bytes': 5000, 'selected': 1},
+            {'path': '/Movie/Extras.mkv', 'bytes': 1000, 'selected': 0},
+            {'path': '/Movie/Subs.srt', 'bytes': 100, 'selected': 1},
+        ]}
+        names = watcher._extract_filenames_from_info(info)
+        assert names == ['Movie.mkv', 'Subs.srt']
+
+    def test_extract_ad_filenames_nested(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'alldebrid')
+        info = {'data': {'magnets': {'files': [
+            {'n': 'BDMV', 'e': [
+                {'n': 'STREAM', 'e': [
+                    {'n': '00001.m2ts', 's': 30000},
+                ]},
+            ]},
+            {'n': 'readme.txt', 's': 100},
+        ]}}}
+        names = watcher._extract_filenames_from_info(info)
+        assert set(names) == {'00001.m2ts', 'readme.txt'}
+
+    def test_extract_tb_filenames(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        info = {'data': {'files': [
+            {'name': 'Movie.avi', 'size': 5000},
+            {'name': 'info.nfo', 'size': 100},
+        ]}}
+        names = watcher._extract_filenames_from_info(info)
+        assert names == ['Movie.avi', 'info.nfo']
+
+    def test_extract_unknown_provider(self):
+        watcher = BlackholeWatcher('/tmp', 'key', 'unknown_service')
+        names = watcher._extract_filenames_from_info({'files': []})
+        assert names == []
+
+    def test_empty_info_dict(self):
+        """Empty info dict should return empty list (provider can't extract)."""
+        for provider in ('realdebrid', 'alldebrid', 'torbox'):
+            watcher = BlackholeWatcher('/tmp', 'key', provider)
+            names = watcher._extract_filenames_from_info({})
+            assert names == [], f"Expected empty list for {provider} with empty info"

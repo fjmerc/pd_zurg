@@ -93,6 +93,7 @@ class DebridClientBase:
             matches.append({
                 'id': t['id'],
                 'filename': filename,
+                'hash': t.get('hash', ''),
                 'parsed_title': parsed_title,
                 'year': parsed_year,
             })
@@ -135,6 +136,7 @@ class RealDebridClient(DebridClientBase):
             {
                 'id': str(t.get('id', '')),
                 'filename': t.get('filename', ''),
+                'hash': (t.get('hash') or '').upper(),
                 'status': t.get('status', ''),
                 'bytes': t.get('bytes', 0),
             }
@@ -190,6 +192,7 @@ class AllDebridClient(DebridClientBase):
             {
                 'id': str(m.get('id', '')),
                 'filename': m.get('filename', ''),
+                'hash': (m.get('hash') or '').upper(),
                 'status': m.get('statusCode', ''),
                 'bytes': m.get('size', 0),
             }
@@ -249,6 +252,7 @@ class TorBoxClient(DebridClientBase):
             {
                 'id': str(t.get('id', '')),
                 'filename': t.get('name', ''),
+                'hash': (t.get('hash') or '').upper(),
                 'status': t.get('download_state', ''),
                 'bytes': t.get('size', 0),
             }

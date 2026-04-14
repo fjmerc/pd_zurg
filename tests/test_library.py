@@ -1859,3 +1859,164 @@ class TestGetWantedCounts:
         counts = get_wanted_counts(data, pending)
         assert counts['fallback'] == 1
         assert counts['pending'] == 1
+
+
+class TestCleanupDiscRips:
+    """Tests for LibraryScanner._cleanup_disc_rips()."""
+
+    @pytest.fixture
+    def scanner(self, monkeypatch, tmp_dir):
+        monkeypatch.setenv('RCLONE_MOUNT_NAME', 'test')
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', tmp_dir)
+        monkeypatch.delenv('BLACKHOLE_LOCAL_LIBRARY_MOVIES', raising=False)
+        monkeypatch.delenv('BLACKHOLE_LOCAL_LIBRARY_TV', raising=False)
+        return LibraryScanner()
+
+    def _make_disc_rip_folder(self, tmp_dir, name):
+        """Create a folder with .m2ts files (disc rip) and return its path."""
+        path = os.path.join(tmp_dir, name)
+        os.makedirs(path, exist_ok=True)
+        for f in ['00001.m2ts', '00002.m2ts', 'index.bdmv']:
+            with open(os.path.join(path, f), 'w') as fh:
+                fh.write('fake')
+        return path
+
+    def _make_media_folder(self, tmp_dir, name):
+        """Create a folder with a real media file and return its path."""
+        path = os.path.join(tmp_dir, name)
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, 'movie.mkv'), 'w') as fh:
+            fh.write('fake')
+        return path
+
+    def test_disc_rip_detected_and_cleaned(self, scanner, tmp_dir, monkeypatch):
+        """Disc rip movie (size=0, .m2ts only) should be blocklisted and deleted."""
+        rip_path = self._make_disc_rip_folder(tmp_dir, 'Why.Him.2016')
+        movies = [
+            {'title': 'Why Him', 'year': 2016, 'source': 'debrid', 'size_bytes': 0,
+             'path': rip_path, 'quality': {}},
+        ]
+        mock_client = type('MockClient', (), {
+            'find_torrents_by_title': lambda self, n, target_year=None: [
+                {'id': 'T1', 'filename': 'Why.Him.2016.BluRay', 'hash': 'AABBCCDD', 'year': 2016}
+            ],
+            'delete_torrent': lambda self, tid: True,
+        })()
+        monkeypatch.setattr('utils.debrid_client.get_debrid_client',
+                            lambda: (mock_client, 'realdebrid'))
+        import utils.library as _lib
+        monkeypatch.setattr(_lib, '_blocklist', type('MockBL', (), {
+            'add': lambda self, *a, **kw: 'id1',
+        })())
+        monkeypatch.setenv('BLOCKLIST_AUTO_ADD', 'true')
+        monkeypatch.setattr(_lib, '_history', None)
+
+        cleaned = scanner._cleanup_disc_rips(movies)
+        assert cleaned == 1
+        assert len(movies) == 0  # Removed from list
+
+    def test_normal_movie_not_cleaned(self, scanner, tmp_dir, monkeypatch):
+        """Movie with real media files should not be touched."""
+        media_path = self._make_media_folder(tmp_dir, 'Good.Movie.2024')
+        movies = [
+            {'title': 'Good Movie', 'year': 2024, 'source': 'debrid', 'size_bytes': 5000000,
+             'path': media_path, 'quality': {'resolution': '1080p'}},
+        ]
+        cleaned = scanner._cleanup_disc_rips(movies)
+        assert cleaned == 0
+        assert len(movies) == 1
+
+    def test_empty_folder_not_treated_as_disc_rip(self, scanner, tmp_dir, monkeypatch):
+        """Empty mount folder (possible mount issue) should not be cleaned."""
+        empty_path = os.path.join(tmp_dir, 'Empty.Movie.2024')
+        os.makedirs(empty_path, exist_ok=True)
+        movies = [
+            {'title': 'Empty Movie', 'year': 2024, 'source': 'debrid', 'size_bytes': 0,
+             'path': empty_path, 'quality': {}},
+        ]
+        cleaned = scanner._cleanup_disc_rips(movies)
+        assert cleaned == 0
+        assert len(movies) == 1
+
+    def test_local_movies_skipped(self, scanner, tmp_dir, monkeypatch):
+        """Local-source movies should never be considered for disc rip cleanup."""
+        rip_path = self._make_disc_rip_folder(tmp_dir, 'Local.Rip.2024')
+        movies = [
+            {'title': 'Local Rip', 'year': 2024, 'source': 'local', 'size_bytes': 0,
+             'path': rip_path, 'quality': {}},
+        ]
+        cleaned = scanner._cleanup_disc_rips(movies)
+        assert cleaned == 0
+        assert len(movies) == 1
+
+    def test_no_debrid_client_still_safe(self, scanner, tmp_dir, monkeypatch):
+        """If debrid client is unavailable, cleanup should not crash."""
+        rip_path = self._make_disc_rip_folder(tmp_dir, 'NoCli.2024')
+        movies = [
+            {'title': 'NoCli', 'year': 2024, 'source': 'debrid', 'size_bytes': 0,
+             'path': rip_path, 'quality': {}},
+        ]
+        import utils.library as _lib
+        monkeypatch.setattr(_lib, '_blocklist', None)
+        monkeypatch.setattr(_lib, '_history', None)
+        # get_debrid_client raises
+        monkeypatch.setattr('utils.debrid_client.get_debrid_client',
+                            lambda: (_ for _ in ()).throw(ImportError('no client')))
+        cleaned = scanner._cleanup_disc_rips(movies)
+        # Can't blocklist or delete without client, but shouldn't crash
+        assert cleaned == 0
+
+    def test_nonexistent_path_skipped(self, scanner, tmp_dir, monkeypatch):
+        """Movie pointing to nonexistent path should be skipped, not crash."""
+        movies = [
+            {'title': 'Gone Movie', 'year': 2024, 'source': 'debrid', 'size_bytes': 0,
+             'path': '/nonexistent/path/movie', 'quality': {}},
+        ]
+        cleaned = scanner._cleanup_disc_rips(movies)
+        assert cleaned == 0
+
+    def test_media_in_subdirectory_not_treated_as_disc_rip(self, scanner, tmp_dir, monkeypatch):
+        """Movie with .mkv nested in a subdirectory should not be cleaned."""
+        path = os.path.join(tmp_dir, 'Nested.Movie.2024')
+        subdir = os.path.join(path, 'Movie')
+        os.makedirs(subdir, exist_ok=True)
+        with open(os.path.join(subdir, 'movie.mkv'), 'w') as fh:
+            fh.write('fake')
+        movies = [
+            {'title': 'Nested Movie', 'year': 2024, 'source': 'debrid', 'size_bytes': 0,
+             'path': path, 'quality': {}},
+        ]
+        cleaned = scanner._cleanup_disc_rips(movies)
+        assert cleaned == 0
+        assert len(movies) == 1
+
+    def test_only_cleaned_items_removed_from_list(self, scanner, tmp_dir, monkeypatch):
+        """Only disc rips that were actually actioned should be removed from the list."""
+        rip_path = self._make_disc_rip_folder(tmp_dir, 'Actioned.2024')
+        norip_path = self._make_disc_rip_folder(tmp_dir, 'NoMatch.2024')
+        movies = [
+            {'title': 'Actioned', 'year': 2024, 'source': 'debrid', 'size_bytes': 0,
+             'path': rip_path, 'quality': {}},
+            {'title': 'NoMatch', 'year': 2024, 'source': 'debrid', 'size_bytes': 0,
+             'path': norip_path, 'quality': {}},
+        ]
+        # Client returns matches only for "Actioned", not "NoMatch"
+        mock_client = type('MockClient', (), {
+            'find_torrents_by_title': lambda self, n, target_year=None:
+                [{'id': 'T1', 'filename': 'Actioned.2024', 'hash': 'AABB', 'year': 2024}]
+                if 'actioned' in n else [],
+            'delete_torrent': lambda self, tid: True,
+        })()
+        monkeypatch.setattr('utils.debrid_client.get_debrid_client',
+                            lambda: (mock_client, 'realdebrid'))
+        import utils.library as _lib
+        monkeypatch.setattr(_lib, '_blocklist', type('MockBL', (), {
+            'add': lambda self, *a, **kw: 'id1',
+        })())
+        monkeypatch.setenv('BLOCKLIST_AUTO_ADD', 'true')
+        monkeypatch.setattr(_lib, '_history', None)
+
+        cleaned = scanner._cleanup_disc_rips(movies)
+        assert cleaned == 1
+        assert len(movies) == 1
+        assert movies[0]['title'] == 'NoMatch'  # Only un-actioned item remains

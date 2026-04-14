@@ -1018,6 +1018,7 @@ class LibraryScanner:
         with self._path_lock:
             path_index = dict(self._path_index)
             local_path_index = dict(self._local_path_index)
+        self._cleanup_disc_rips(movies)
         changed = self._enforce_preferences(shows, movies, preferences, path_index,
                                               local_path_index, force=force_enforce)
         self._search_for_debrid_copies(shows, movies, preferences)
@@ -1149,6 +1150,127 @@ class LibraryScanner:
                     if result:
                         break
             return result
+
+    def _cleanup_disc_rips(self, movies):
+        """Remove disc rips from debrid: blocklist hash, delete torrent, drop from list.
+
+        Disc rips have mount folders with files but none matching MEDIA_EXTENSIONS,
+        so the quality parser returns size_bytes == 0 (key must be present and
+        explicitly zero; missing key is ignored).  Runs during _scan_effects()
+        before preference enforcement so downstream effects don't process them.
+        """
+        if not movies:
+            return 0
+        # Quick filter: only debrid movies with no media files (size_bytes == 0)
+        candidates = [
+            m for m in movies
+            if m.get('source') == 'debrid' and m.get('size_bytes', -1) == 0 and m.get('path')
+        ]
+        if not candidates:
+            return 0
+
+        # Verify each candidate has files but none in MEDIA_EXTENSIONS.
+        # Check top-level AND one subdirectory deep (matches the show-demotion
+        # pattern at _scan_mount line ~2486) to avoid false positives on releases
+        # that nest the movie file inside a subdirectory.
+        confirmed = []
+        for m in candidates:
+            try:
+                entries = list(os.scandir(m['path']))
+            except (OSError, PermissionError):
+                continue
+            if not entries:
+                continue  # Empty folder — mount issue, not disc rip
+            has_any_file = any(e.is_file(follow_symlinks=True) for e in entries)
+            if not has_any_file:
+                # No files at top level — check if subdirs exist (disc rips have BDMV/ etc.)
+                if not any(e.is_dir() for e in entries):
+                    continue
+            has_media = any(
+                os.path.splitext(e.name)[1].lower() in MEDIA_EXTENSIONS
+                for e in entries if e.is_file(follow_symlinks=True)
+            )
+            if not has_media:
+                # Check one level of subdirectories
+                for e in entries:
+                    if e.is_dir(follow_symlinks=False):
+                        try:
+                            with os.scandir(e.path) as sub_it:
+                                for sf in sub_it:
+                                    if sf.is_file(follow_symlinks=True):
+                                        ext = os.path.splitext(sf.name)[1].lower()
+                                        if ext in MEDIA_EXTENSIONS:
+                                            has_media = True
+                                            break
+                        except OSError:
+                            pass
+                    if has_media:
+                        break
+            if not has_media:
+                confirmed.append(m)
+
+        if not confirmed:
+            return 0
+
+        cleaned = 0
+        cleaned_paths = set()
+        try:
+            from utils.debrid_client import get_debrid_client
+            client, _svc = get_debrid_client()
+        except Exception as e:
+            logger.warning(f"[library] Disc rip cleanup: debrid client unavailable: {e}")
+            client = None
+
+        for m in confirmed:
+            title = m['title']
+            year = m.get('year')
+            norm = _normalize_title(title)
+            bl_hash = ''
+            deleted = 0
+
+            # Find matching debrid torrent(s) and extract hash
+            if client:
+                try:
+                    matches = client.find_torrents_by_title(norm, target_year=year)
+                except Exception as e:
+                    logger.debug(f"[library] Disc rip lookup failed for {title}: {e}")
+                    matches = []
+                for match in matches:
+                    if not bl_hash and match.get('hash'):
+                        bl_hash = match['hash']
+                    if client.delete_torrent(str(match['id'])):
+                        deleted += 1
+
+            # Auto-blocklist
+            if bl_hash and _blocklist and str(os.environ.get('BLOCKLIST_AUTO_ADD', 'true')).lower() == 'true':
+                _blocklist.add(bl_hash, title, reason='disc rip (no usable media files)', source='auto')
+                if _history:
+                    _history.log_event('blocklist_added', title, source='library',
+                                       detail='Auto-blocklisted: disc rip',
+                                       meta={'info_hash': bl_hash})
+
+            if deleted or bl_hash:
+                logger.info(f"[library] Disc rip cleaned: {title} — "
+                            f"deleted {deleted} torrent(s), blocklisted {'yes' if bl_hash else 'no'}")
+                if _history:
+                    _history.log_event('failed', title, source='library',
+                                       detail=f'Disc rip removed ({deleted} torrent(s) deleted)',
+                                       meta={'info_hash': bl_hash})
+                try:
+                    from utils.notifications import notify
+                    notify('download_error', 'Library: Disc Rip Removed',
+                           f'{title} contains no recognized media files. '
+                           f'Blocklisted and removed from debrid.')
+                except Exception:
+                    pass
+                cleaned += 1
+                cleaned_paths.add(m['path'])
+
+        # Remove only successfully cleaned disc rips from the movies list
+        if cleaned_paths:
+            movies[:] = [m for m in movies if m.get('path') not in cleaned_paths]
+
+        return cleaned
 
     def _enforce_preferences(self, shows, movies, preferences, path_index, local_path_index,
                               force=False):

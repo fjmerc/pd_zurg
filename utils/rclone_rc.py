@@ -65,7 +65,10 @@ def refresh_dir(dir_path='', recursive=False):
         logger.debug("[rclone-rc] No RC URLs registered, skipping refresh")
         return False
 
-    payload = {'recursive': bool(recursive)}
+    # rclone's RC API for vfs/refresh requires recursive as a string, not a
+    # JSON bool — passing {"recursive": true} raises
+    # `value must be string "recursive"=true` (confirmed rclone 1.73.2).
+    payload = {'recursive': 'true' if recursive else 'false'}
     if dir_path:
         payload['dir'] = dir_path
 

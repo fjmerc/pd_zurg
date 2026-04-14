@@ -133,9 +133,15 @@ class TestSafeID:
 class TestTitleMatching:
     """Tests for find_torrents_by_title using RealDebridClient."""
 
-    def _make_torrents(self, filenames):
+    def _make_torrents(self, filenames, hashes=None):
         return [
-            {'id': str(i), 'filename': f, 'status': 'downloaded', 'bytes': 1000}
+            {
+                'id': str(i),
+                'filename': f,
+                'hash': (hashes[i] if hashes else f'HASH{i}').upper(),
+                'status': 'downloaded',
+                'bytes': 1000,
+            }
             for i, f in enumerate(filenames)
         ]
 
@@ -252,6 +258,17 @@ class TestTitleMatching:
         with pytest.raises(requests.ConnectionError):
             rd.find_torrents_by_title('the eternaut')
 
+    @patch.object(RealDebridClient, 'list_torrents')
+    def test_hash_propagated(self, mock_list, rd):
+        """find_torrents_by_title should include the hash from list_torrents."""
+        mock_list.return_value = self._make_torrents(
+            ['Why.Him.2016.2160p.BluRay.HEVC.DTS-HD.MA.7.1-COASTER'],
+            hashes=['7f6beaa275ecad714e5dbd57b236e2c4ed2a93aa'],
+        )
+        matches = rd.find_torrents_by_title('why him', target_year=2016)
+        assert len(matches) == 1
+        assert matches[0]['hash'] == '7F6BEAA275ECAD714E5DBD57B236E2C4ED2A93AA'
+
 
 # ---------------------------------------------------------------------------
 # RealDebrid operations
@@ -262,12 +279,13 @@ class TestRealDebrid:
     @patch('utils.debrid_client.requests.get')
     def test_list_torrents_success(self, mock_get, rd):
         mock_get.return_value = _mock_response([
-            {'id': 'ABC123', 'filename': 'Test.mkv', 'status': 'downloaded', 'bytes': 1000},
+            {'id': 'ABC123', 'filename': 'Test.mkv', 'hash': 'abc123def', 'status': 'downloaded', 'bytes': 1000},
         ])
         result = rd.list_torrents()
         assert len(result) == 1
         assert result[0]['id'] == 'ABC123'
         assert result[0]['filename'] == 'Test.mkv'
+        assert result[0]['hash'] == 'ABC123DEF'
 
     @patch('utils.debrid_client.requests.get')
     def test_list_torrents_api_error(self, mock_get, rd):
@@ -320,12 +338,13 @@ class TestAllDebrid:
         mock_get.return_value = _mock_response({
             'status': 'success',
             'data': {'magnets': [
-                {'id': 123, 'filename': 'Test.mkv', 'statusCode': 4, 'size': 1000},
+                {'id': 123, 'filename': 'Test.mkv', 'hash': 'deadbeef', 'statusCode': 4, 'size': 1000},
             ]}
         })
         result = ad.list_torrents()
         assert len(result) == 1
         assert result[0]['id'] == '123'
+        assert result[0]['hash'] == 'DEADBEEF'
 
     @patch('utils.debrid_client.requests.get')
     def test_delete_success(self, mock_get, ad):
@@ -360,13 +379,14 @@ class TestTorBox:
         mock_get.return_value = _mock_response({
             'success': True,
             'data': [
-                {'id': 456, 'name': 'Test.mkv', 'download_state': 'completed', 'size': 1000},
+                {'id': 456, 'name': 'Test.mkv', 'hash': 'cafebabe', 'download_state': 'completed', 'size': 1000},
             ]
         })
         result = tb.list_torrents()
         assert len(result) == 1
         assert result[0]['id'] == '456'
         assert result[0]['filename'] == 'Test.mkv'
+        assert result[0]['hash'] == 'CAFEBABE'
 
     @patch('utils.debrid_client.requests.post')
     def test_delete_success(self, mock_post, tb):

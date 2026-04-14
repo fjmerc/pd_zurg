@@ -938,6 +938,13 @@ class BlackholeWatcher:
         mount_path = None
         category = None
 
+        # Flush rclone dir cache so new content appears immediately
+        try:
+            from utils.rclone_rc import forget_dir_cache
+            forget_dir_cache()
+        except Exception:
+            pass
+
         while not self._stop_event.is_set():
             elapsed_mount = time.time() - mount_start
             if elapsed_mount > self.mount_poll_timeout:

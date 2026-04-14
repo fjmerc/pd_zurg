@@ -820,6 +820,11 @@ class LibraryScanner:
                 logger.debug("[library] WebDAV scan succeeded")
             except Exception as e:
                 logger.info(f"[library] WebDAV scan unavailable, using FUSE: {e}")
+                try:
+                    from utils.rclone_rc import forget_dir_cache
+                    forget_dir_cache()
+                except Exception:
+                    pass
                 debrid_movies, debrid_shows = self._scan_mount(self._mount_path, deadline)
 
         # TMDB-based alias maps: when different sources (or different

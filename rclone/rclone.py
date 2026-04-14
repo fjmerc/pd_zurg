@@ -7,6 +7,22 @@ from utils.file_utils import atomic_write
 
 logger = get_logger()
 
+# RC (remote control) base port for rclone instances.
+# Each mount gets its own RC port: base, base+1, etc.
+_RC_BASE_PORT = 5572
+# Populated at setup time: {mount_name: rc_url, ...}
+_rc_urls = {}
+
+def get_rc_url(mount_name=None):
+    """Return the RC URL for a given mount, or the first one if unspecified."""
+    if mount_name and mount_name in _rc_urls:
+        return _rc_urls[mount_name]
+    return next(iter(_rc_urls.values()), None)
+
+def get_all_rc_urls():
+    """Return all registered RC URLs."""
+    return list(_rc_urls.values())
+
 def get_port_from_config(config_file_path, key_type):
     try:
         with open(config_file_path, 'r') as file:
@@ -86,6 +102,7 @@ def regenerate_config():
 
 def setup():
     refresh_globals(globals())
+    _rc_urls.clear()
     logger.info("Checking rclone flags")
 
     try:
@@ -154,6 +171,8 @@ def setup():
             subprocess.run(["umount", f"/data/{mn}"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             os.makedirs(f"/data/{mn}", exist_ok=True)
 
+            rc_port = _RC_BASE_PORT + idx
+
             if NFSMOUNT is not None and NFSMOUNT.lower() == "true":
                 port = NFSPORT if NFSPORT else find_available_port(8001, 8999)
                 logger.info(f"Setting up rclone NFS server for {mn} at 0.0.0.0:{port}")
@@ -164,6 +183,13 @@ def setup():
                 dir_cache_time = (os.environ.get('RCLONE_DIR_CACHE_TIME') or '').strip() or '10s'
                 rclone_command = ["rclone", "mount", f"{mn}:", f"/data/{mn}", "--config", "/config/rclone.config", "--allow-other", "--poll-interval=0", f"--dir-cache-time={dir_cache_time}"]
 
+            # Enable RC API so pd_zurg can flush dir cache on demand.
+            # --daemon is intentionally omitted: it forks rclone into a new
+            # process that discards the RC server.  ProcessHandler manages the
+            # lifecycle instead, keeping the RC port alive for vfs/forget calls.
+            rclone_command.extend(["--rc", f"--rc-addr=localhost:{rc_port}", "--rc-no-auth"])
+            _rc_urls[mn] = f"http://localhost:{rc_port}"
+
             # Optional VFS cache flags — apply to both NFS and FUSE modes.
             # Rclone also reads these natively from RCLONE_* env vars, but
             # explicit flags ensure they take effect on restarts via SIGHUP.
@@ -173,16 +199,13 @@ def setup():
                 if val:
                     rclone_command.append(f'--{flag}={val}')
 
-            if not PLEXDEBRID or idx != len(mount_names) - 1:
-                rclone_command.append("--daemon")
-
             url = f"http://localhost:{rd_port if mn == RCLONEMN_RD else ad_port}"
             zurg_auth = (ZURGUSER, ZURGPASS) if ZURGUSER and ZURGPASS else None
             if os.path.exists(f"/healthcheck/{mn}"):
                 os.rmdir(f"/healthcheck/{mn}")
             if wait_for_url(url, endpoint="/dav/", auth=zurg_auth, description=f"Zurg WebDAV ({mn})"):
                 os.makedirs(f"/healthcheck/{mn}") # makdir for healthcheck. Don't like it, but it works for now...
-                logger.info(f"The Zurg WebDAV URL {url}/dav is accessible. Starting rclone{' daemon' if '--daemon' in rclone_command else ''} for {mn}")
+                logger.info(f"The Zurg WebDAV URL {url}/dav is accessible. Starting rclone for {mn} (RC on port {rc_port})")
                 process_name = "rclone"
                 suppress_logging=False
                 if str(RCLONELOGLEVEL).lower()=='off':

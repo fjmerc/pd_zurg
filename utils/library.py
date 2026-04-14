@@ -821,8 +821,8 @@ class LibraryScanner:
             except Exception as e:
                 logger.info(f"[library] WebDAV scan unavailable, using FUSE: {e}")
                 try:
-                    from utils.rclone_rc import forget_dir_cache
-                    forget_dir_cache()
+                    from utils.rclone_rc import refresh_dir
+                    refresh_dir('', recursive=True)
                 except Exception:
                     pass
                 debrid_movies, debrid_shows = self._scan_mount(self._mount_path, deadline)

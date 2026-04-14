@@ -1191,10 +1191,13 @@ class BlackholeWatcher:
         mount_path = None
         category = None
 
-        # Flush rclone dir cache so new content appears immediately
+        # Kick rclone to re-list the top-level category dirs immediately so
+        # we don't have to wait for its next --poll-interval tick. Belt and
+        # suspenders: rclone's active polling handles subsequent ticks, so
+        # we only call this once at the start.
         try:
-            from utils.rclone_rc import forget_dir_cache
-            forget_dir_cache()
+            from utils.rclone_rc import refresh_dir
+            refresh_dir('')
         except Exception:
             pass
 

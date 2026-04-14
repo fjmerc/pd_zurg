@@ -181,12 +181,18 @@ def setup():
                 rclone_command = ["rclone", "serve", "nfs", f"{mn}:", "--config", "/config/rclone.config", "--addr", f"0.0.0.0:{port}", f"--vfs-cache-mode={vfs_cache_mode}", f"--dir-cache-time={dir_cache_time}"]
             else:
                 dir_cache_time = (os.environ.get('RCLONE_DIR_CACHE_TIME') or '').strip() or '10s'
-                rclone_command = ["rclone", "mount", f"{mn}:", f"/data/{mn}", "--config", "/config/rclone.config", "--allow-other", "--poll-interval=0", f"--dir-cache-time={dir_cache_time}"]
+                # poll-interval makes rclone actively diff the backend on a
+                # schedule and emit FUSE_NOTIFY_INVAL_ENTRY for any entries
+                # that changed. Without it, rclone only ever re-reads when
+                # dir-cache-time expires or RC refresh is called, and the
+                # kernel dentry cache holds ghost entries in between.
+                poll_interval = (os.environ.get('RCLONE_POLL_INTERVAL') or '').strip() or '15s'
+                rclone_command = ["rclone", "mount", f"{mn}:", f"/data/{mn}", "--config", "/config/rclone.config", "--allow-other", f"--poll-interval={poll_interval}", f"--dir-cache-time={dir_cache_time}"]
 
-            # Enable RC API so pd_zurg can flush dir cache on demand.
+            # Enable RC API so pd_zurg can refresh dir cache on demand.
             # --daemon is intentionally omitted: it forks rclone into a new
             # process that discards the RC server.  ProcessHandler manages the
-            # lifecycle instead, keeping the RC port alive for vfs/forget calls.
+            # lifecycle instead, keeping the RC port alive for vfs/refresh calls.
             rclone_command.extend(["--rc", f"--rc-addr=localhost:{rc_port}", "--rc-no-auth"])
             _rc_urls[mn] = f"http://localhost:{rc_port}"
 

@@ -477,16 +477,17 @@ class StatusData:
                 return
             seen_paths.add(path)
             try:
-                mounted = os.path.ismount(path)
-                accessible = os.access(path, os.R_OK)
+                exists = os.path.exists(path)
+                mounted = os.path.ismount(path) if exists else False
+                accessible = os.access(path, os.R_OK) if exists else False
             except OSError:
-                mounted, accessible = False, False
+                exists, mounted, accessible = False, False, False
             mounts.append({
                 'path': path,
                 'role': role,
                 'mounted': mounted,
                 'accessible': accessible,
-                'exists': os.path.exists(path),
+                'exists': exists,
             })
             mount_history.record(path, mounted, accessible)
 
@@ -725,7 +726,11 @@ function updateCardStates(d){
   var sH='ok',pH='ok',mH='ok',yH='ok',eH='ok',overall='ok';
   if(d.services){d.services.forEach(function(s){if(s.status!=='ok')sH='crit';if(s.days_remaining!=null){if(s.days_remaining<=3)sH='crit';else if(s.days_remaining<=7&&sH==='ok')sH='warn';}});for(var pk in _providerHealth){var ph=_providerHealth[pk];if(ph.rate_limit_remaining!=null&&ph.rate_limit_limit!=null&&ph.rate_limit_limit>0){var u=Math.round(((ph.rate_limit_limit-ph.rate_limit_remaining)/ph.rate_limit_limit)*100);if(u>=80&&sH==='ok')sH='warn';}}}
   d.processes.forEach(function(p){if(!p.running)pH='crit';});
-  d.mounts.forEach(function(m){if(!m.mounted||!m.accessible)mH='crit';});
+  d.mounts.forEach(function(m){
+    if(m.exists===false)mH='crit';
+    else if(m.role==='Debrid'&&!m.mounted)mH='crit';
+    else if(!m.accessible)mH='crit';
+  });
   if(d.system.memory_percent!=null){if(d.system.memory_percent>85)yH='crit';else if(d.system.memory_percent>60)yH='warn';}
   if(d.system.cpu_percent!=null){if(d.system.cpu_percent>85)yH='crit';else if(d.system.cpu_percent>60&&yH==='ok')yH='warn';}
   if(d.system.disk_percent!=null){if(d.system.disk_percent>85)yH='crit';else if(d.system.disk_percent>60&&yH==='ok')yH='warn';}

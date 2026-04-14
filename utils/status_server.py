@@ -490,11 +490,19 @@ class StatusData:
             })
             mount_history.record(path, mounted, accessible)
 
-        # Debrid mounts exposed by rclone under /data
+        # Debrid mounts exposed by rclone under /data. Filter to actual
+        # mountpoints — stray host directories under /data (e.g. a bare
+        # parent dir whose children are mounted separately) would otherwise
+        # surface as permanently-red "Not mounted" Debrid rows.
         try:
             if os.path.exists('/data'):
                 for entry_name in sorted(os.listdir('/data')):
-                    _probe(os.path.join('/data', entry_name), 'Debrid')
+                    path = os.path.join('/data', entry_name)
+                    try:
+                        if os.path.ismount(path):
+                            _probe(path, 'Debrid')
+                    except OSError:
+                        pass
         except OSError:
             pass
 

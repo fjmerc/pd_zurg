@@ -464,24 +464,45 @@ class StatusData:
                 processes.append(proc_info)
 
         mounts = []
+        seen_paths = set()
+
+        def _probe(path, role):
+            """Stat *path* and append a mount row tagged with *role*.
+
+            Bind-mounted host paths (blackhole, local library) usually don't
+            show up as ``mountpoint``s inside the container — we still report
+            ``accessible`` so users can spot a misconfigured volume.
+            """
+            if not path or path in seen_paths:
+                return
+            seen_paths.add(path)
+            try:
+                mounted = os.path.ismount(path)
+                accessible = os.access(path, os.R_OK)
+            except OSError:
+                mounted, accessible = False, False
+            mounts.append({
+                'path': path,
+                'role': role,
+                'mounted': mounted,
+                'accessible': accessible,
+                'exists': os.path.exists(path),
+            })
+            mount_history.record(path, mounted, accessible)
+
+        # Debrid mounts exposed by rclone under /data
         try:
             if os.path.exists('/data'):
-                for entry_name in os.listdir('/data'):
-                    path = os.path.join('/data', entry_name)
-                    try:
-                        mounted = os.path.ismount(path)
-                        accessible = os.access(path, os.R_OK)
-                        mounts.append({
-                            'path': path,
-                            'mounted': mounted,
-                            'accessible': accessible,
-                        })
-                        mount_history.record(path, mounted, accessible)
-                    except OSError:
-                        mounts.append({'path': path, 'mounted': False, 'accessible': False})
-                        mount_history.record(path, False, False)
+                for entry_name in sorted(os.listdir('/data')):
+                    _probe(os.path.join('/data', entry_name), 'Debrid')
         except OSError:
             pass
+
+        # Blackhole + local library paths from env (bind mounts from the host)
+        _probe(os.environ.get('BLACKHOLE_DIR'), 'Blackhole')
+        _probe(os.environ.get('BLACKHOLE_COMPLETED_DIR'), 'Blackhole')
+        _probe(os.environ.get('BLACKHOLE_LOCAL_LIBRARY_MOVIES'), 'Local Library')
+        _probe(os.environ.get('BLACKHOLE_LOCAL_LIBRARY_TV'), 'Local Library')
 
         with self._lock:
             events = list(self.recent_events)
@@ -605,7 +626,7 @@ __NAV_HTML__
   </div>
   <div class="card">
     <h2>Mounts</h2>
-    <table><thead><tr><th>Path</th><th>Mounted</th><th>Accessible</th></tr></thead>
+    <table><thead><tr><th>Role</th><th>Path</th><th>Status</th></tr></thead>
     <tbody id="mounts"></tbody></table>
     <div class="mount-timeline" id="mount-timeline"></div>
   </div>
@@ -759,8 +780,25 @@ function update(){
     document.getElementById('procs').innerHTML=p||'<tr><td colspan="5" style="color:var(--text2)">No processes</td></tr>';
     document.getElementById('actions-hdr').textContent=hasAuth?'Actions':'';
 
-    // Mounts
-    let m='';d.mounts.forEach(x=>{m+='<tr><td>'+esc(x.path)+'</td><td>'+mdot(x.mounted,'Yes','No')+'</td><td>'+mdot(x.accessible,'Yes','No')+'</td></tr>';});
+    // Mounts — group by role, show a single status signal per row
+    let m='';
+    const roleOrder=['Debrid','Blackhole','Local Library'];
+    const byRole={};
+    d.mounts.forEach(x=>{const r=x.role||'Other';(byRole[r]=byRole[r]||[]).push(x);});
+    roleOrder.concat(Object.keys(byRole).filter(r=>!roleOrder.includes(r))).forEach(role=>{
+      const rows=byRole[role];if(!rows)return;
+      rows.forEach((x,i)=>{
+        // Status: green if accessible, yellow if exists-but-not-accessible,
+        // red if missing entirely. Debrid mounts additionally need ismount=true.
+        let ok,label;
+        if(x.exists===false){ok=false;label='Missing';}
+        else if(x.role==='Debrid'&&!x.mounted){ok=false;label='Not mounted';}
+        else if(!x.accessible){ok=false;label='Not accessible';}
+        else{ok=true;label='OK';}
+        const roleCell=i===0?'<td rowspan="'+rows.length+'" style="vertical-align:top;color:var(--text2);font-size:.85em">'+esc(role)+'</td>':'';
+        m+='<tr>'+roleCell+'<td style="font-family:monospace;font-size:.88em">'+esc(x.path)+'</td><td>'+mdot(ok,label,label)+'</td></tr>';
+      });
+    });
     document.getElementById('mounts').innerHTML=m||'<tr><td colspan="3" style="color:var(--text2)">No mounts</td></tr>';
 
     // System — Memory

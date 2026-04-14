@@ -2468,7 +2468,42 @@ class LibraryScanner:
                         if not title:
                             continue
                         episodes = _collect_episodes(entry.path)
-                        is_show = len(episodes) > 0 or category_is_shows
+                        is_show = len(episodes) > 0
+                        if not is_show and category_is_shows:
+                            # Zurg says show but no S##E## episodes found.
+                            # Check top level AND immediate subdirs for
+                            # recognized media extensions (.mkv, .mp4, etc.).
+                            # Present → trust Zurg (anime/non-standard naming).
+                            # Absent → demote to movie (BluRay disc rips have
+                            # only .m2ts under BDMV/STREAM/, not in MEDIA_EXTENSIONS).
+                            has_media = False
+                            try:
+                                with os.scandir(entry.path) as _it:
+                                    for _f in _it:
+                                        ext = os.path.splitext(_f.name)[1].lower()
+                                        if ext in MEDIA_EXTENSIONS and (_f.is_file() or _f.is_symlink()):
+                                            has_media = True
+                                            break
+                                        if not has_media and _f.is_dir(follow_symlinks=False):
+                                            try:
+                                                with os.scandir(_f.path) as _sub:
+                                                    for _sf in _sub:
+                                                        ext = os.path.splitext(_sf.name)[1].lower()
+                                                        if ext in MEDIA_EXTENSIONS and (_sf.is_file() or _sf.is_symlink()):
+                                                            has_media = True
+                                                            break
+                                            except OSError:
+                                                pass
+                                        if has_media:
+                                            break
+                            except OSError:
+                                pass
+                            if has_media:
+                                is_show = True
+                            else:
+                                logger.debug("[library] Reclassifying '%s' as movie "
+                                             "(Zurg shows/ but no recognizable media files)",
+                                             entry.name)
 
                         if is_show:
                             # Tag episodes with per-season episode count so
@@ -2680,7 +2715,22 @@ class LibraryScanner:
                     continue
 
                 episodes = self._collect_episodes_from_webdav(contents)
-                is_show = len(episodes) > 0 or cat_is_shows
+                is_show = len(episodes) > 0
+                if not is_show and cat_is_shows:
+                    has_media = any(
+                        os.path.splitext(fn)[1].lower() in MEDIA_EXTENSIONS
+                        for fn, _sz, _p in contents.get('files', [])
+                    ) or any(
+                        os.path.splitext(fn)[1].lower() in MEDIA_EXTENSIONS
+                        for files in contents.get('season_files', {}).values()
+                        for fn, _sz, _p in files
+                    )
+                    if has_media:
+                        is_show = True
+                    else:
+                        logger.debug("[library] Reclassifying '%s' as movie "
+                                     "(Zurg shows/ but no recognizable media files)",
+                                     folder_name)
 
                 if is_show:
                     season_counts = {}

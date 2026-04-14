@@ -673,16 +673,49 @@ class TestLibraryScannerScanDebrid:
         assert result["shows"][0]["episodes"] == 2
         assert len(result["movies"]) == 0
 
-    def test_anime_category_classifies_as_show(self, tmp_dir, monkeypatch):
+    def test_anime_category_with_media_files_classifies_as_show(self, tmp_dir, monkeypatch):
         anime_dir = os.path.join(tmp_dir, "anime")
-        os.makedirs(os.path.join(anime_dir, "Spirited.Away.2001.1080p"))
+        folder = os.path.join(anime_dir, "[SubGroup] Spirited Away [1080p][ABCD1234]")
+        os.makedirs(folder)
+        # Anime with media files but no S##E## pattern — trust category hint
+        open(os.path.join(folder, "[SubGroup] Spirited Away [1080p][ABCD1234].mkv"), "w").close()
 
         scanner = self._make_scanner(tmp_dir, monkeypatch)
         result = scanner.scan()
 
-        # anime category hint → classified as show even with no episodes
         assert len(result["shows"]) == 1
-        assert result["shows"][0]["title"] == "Spirited Away"
+        assert "Spirited Away" in result["shows"][0]["title"]
+        assert len(result["movies"]) == 0
+
+    def test_anime_category_with_media_in_subdir_classifies_as_show(self, tmp_dir, monkeypatch):
+        """Anime with media files in a non-Season subdir still stays a show."""
+        anime_dir = os.path.join(tmp_dir, "anime")
+        folder = os.path.join(anime_dir, "Spirited.Away.2001.1080p")
+        arc_dir = os.path.join(folder, "Part 1")
+        os.makedirs(arc_dir)
+        open(os.path.join(arc_dir, "01.mkv"), "w").close()
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        result = scanner.scan()
+
+        assert len(result["shows"]) == 1
+        assert len(result["movies"]) == 0
+
+    def test_bluray_rip_no_media_files_demoted_to_movie(self, tmp_dir, monkeypatch):
+        """BluRay disc rip with .m2ts in BDMV/STREAM/ (not in MEDIA_EXTENSIONS) → movie."""
+        shows_dir = os.path.join(tmp_dir, "shows")
+        folder = os.path.join(shows_dir, "21.Jump.Street.2012.2160p.BluRay.HEVC.TrueHD.7.1.Atmos-EATDIK")
+        bdmv = os.path.join(folder, "BDMV", "STREAM")
+        os.makedirs(bdmv)
+        open(os.path.join(bdmv, "00100.m2ts"), "w").close()
+        open(os.path.join(bdmv, "00101.m2ts"), "w").close()
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        result = scanner.scan()
+
+        assert len(result["shows"]) == 0
+        assert len(result["movies"]) == 1
+        assert result["movies"][0]["title"] == "21 Jump Street"
 
     def test_scan_skips_unplayable_category(self, tmp_dir, monkeypatch):
         movies_dir = os.path.join(tmp_dir, "movies")

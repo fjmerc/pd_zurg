@@ -224,4 +224,32 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .type-grabbed{background:#58a6ff1a;color:var(--blue)}.type-cached{background:#3fb9501a;color:var(--green)}.type-symlink_created{background:#bc8cff1a;color:#bc8cff}.type-failed{background:#f851491a;color:var(--red)}.type-cleanup{background:#d299221a;color:var(--yellow)}.type-switched_source{background:#db6d281a;color:var(--orange)}.type-search_triggered{background:#58a6ff1a;color:var(--blue)}.type-rescan_triggered{background:#3fb9501a;color:var(--green)}.type-task_completed{background:var(--border);color:var(--text2)}.type-blocklisted{background:#f851491a;color:var(--red)}.type-blocklist_added{background:#db6d281a;color:var(--orange)}
 #activity-search:focus{border-color:var(--input-focus)}
 .footer{display:flex;justify-content:flex-end;align-items:center;gap:8px;color:var(--text3);font-size:.78em}
+
+@media (max-width:600px){
+  /* Card-stacked layout for Activity tables. Uses flex `order` to reshuffle
+     cells visually without touching DOM order (History/Blocklist JS renders
+     in schema order; cards need a different visual sequence). */
+  #panel-history table,#panel-blocklist table{display:block}
+  #panel-history thead,#panel-blocklist thead{display:none}
+  #panel-history tbody,#panel-blocklist tbody{display:block}
+  #activity-body tr,#blocklist-body tr{display:flex;flex-wrap:wrap;align-items:baseline;border:1px solid var(--border2);border-radius:6px;padding:10px 12px;margin-bottom:8px}
+  #activity-body td,#blocklist-body td{border:none;padding:2px 0;width:auto !important;text-align:left !important}
+  /* Empty-state row: single td with colspan. Strip card look, center message. */
+  #activity-body tr:has(td[colspan]),#blocklist-body tr:has(td[colspan]){display:block;border:none;padding:0;margin-bottom:0}
+  #activity-body tr td[colspan],#blocklist-body tr td[colspan]{display:block;text-align:center !important;padding:16px 0 !important}
+  /* History card: row1 = Time + Type + Source, row2 = Title, row3 = Detail. */
+  #activity-body td:nth-child(1){order:1;margin-right:8px;font-size:.75em}
+  #activity-body td:nth-child(2){order:2;margin-right:8px}
+  #activity-body td:nth-child(5){order:3;margin-left:auto;color:var(--text3);font-size:.7em}
+  #activity-body td:nth-child(3){order:4;flex-basis:100%;margin-top:6px;font-size:.95em}
+  #activity-body td:nth-child(4){order:5;flex-basis:100%;color:var(--text2);font-size:.8em}
+  /* Blocklist card: row1 = Title, row2 = Reason, row3 = Hash + Date + Source, row4 = Remove. */
+  #blocklist-body td:nth-child(1){order:1;flex-basis:100%;font-size:.95em;margin-bottom:2px}
+  #blocklist-body td:nth-child(3){order:2;flex-basis:100%;color:var(--text2);font-size:.8em;margin-bottom:4px}
+  #blocklist-body td:nth-child(2){order:3;margin-right:10px;font-size:.75em}
+  #blocklist-body td:nth-child(4){order:4;margin-right:10px;font-size:.75em;color:var(--text3)}
+  #blocklist-body td:nth-child(5){order:5}
+  #blocklist-body td:nth-child(6){order:6;flex-basis:100%;text-align:right !important;margin-top:6px}
+  #blocklist-body .bl-remove{font-size:.8em !important;padding:6px 12px !important}
+}
 """

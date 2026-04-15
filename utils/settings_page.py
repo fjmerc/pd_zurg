@@ -133,6 +133,15 @@ textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;l
   .field-label{padding-top:0}
   .tabs{overflow-x:auto}
 }
+@media(max-width:600px){
+  /* Default flex min-width is content-sized, so a long URL/path in a .list-row
+     input keeps the row from shrinking and pushes the delete button offscreen.
+     Zero it out so the input can compress to the available flex track. */
+  .list-row input,.list-row .pair-input input{min-width:0}
+  .list-row .pair-input{min-width:0;flex-wrap:wrap}
+  /* 9-char OAuth device codes can overflow at 1.8em + .15em letter-spacing. */
+  .oauth-panel .oauth-code{font-size:1.3em;letter-spacing:.1em;word-break:break-all}
+}
 
 /* Settings spinner has margin-right for inline use */
 .spinner{margin-right:6px}

@@ -328,4 +328,33 @@ details summary:hover{color:var(--blue)}
 .cfg-table td{font-family:monospace;font-size:.8em}
 .cfg-table td:first-child{color:var(--blue);font-weight:500;white-space:nowrap;padding-right:16px}
 .footer{display:flex;justify-content:flex-end;align-items:center;gap:8px;color:var(--text3);font-size:.78em}
+
+@media(max-width:600px){
+  /* Tasks table: card-stacked layout. DOM: Task(1) Interval(2) Last(3)
+     Duration(4) Result(5) Next(6) Actions(7). Visual via flex `order`:
+     Task, Result, meta row (Interval/Last/Next/Duration), Run button. */
+  #panel-tasks table,#panel-tasks tbody{display:block}
+  #panel-tasks thead{display:none}
+  #tasks tr{display:flex;flex-wrap:wrap;align-items:baseline;border:1px solid var(--border2);border-radius:6px;padding:10px 12px;margin-bottom:8px}
+  #tasks td{border:none;padding:2px 0;width:auto !important;text-align:left !important}
+  #tasks tr:has(td[colspan]){display:block;border:none;padding:16px 0;margin-bottom:0}
+  #tasks tr td[colspan]{display:block;text-align:center !important;padding:16px 0 !important}
+  #tasks td:nth-child(1){order:1;flex-basis:100%;font-weight:500;margin-bottom:2px;overflow-wrap:anywhere}
+  #tasks td:nth-child(5){order:2;flex-basis:100%;font-size:.85em;margin-bottom:4px;overflow-wrap:anywhere}
+  #tasks td:nth-child(2){order:3;margin-right:10px;font-size:.75em;color:var(--text3)}
+  #tasks td:nth-child(3){order:4;margin-right:10px;font-size:.75em;color:var(--text3)}
+  #tasks td:nth-child(6){order:5;margin-right:10px;font-size:.75em;color:var(--text3)}
+  #tasks td:nth-child(4){order:6;font-size:.75em;color:var(--text3)}
+  #tasks td:nth-child(7){order:7;flex-basis:100%;text-align:right !important;margin-top:6px}
+
+  /* Config table: key as small uppercase label above the value, so long keys
+     and long values both get their own line instead of fighting for width. */
+  #config-table,#config-table tbody{display:block}
+  #config-table tr{display:block;border-bottom:1px solid var(--border2);padding:6px 0}
+  #config-table td{display:block;border:none;padding:2px 0;white-space:normal !important;word-break:break-all}
+  #config-table td:first-child{font-size:.7em;text-transform:uppercase;letter-spacing:.04em;padding-right:0 !important;color:var(--blue)}
+  #config-table td:last-child{font-size:.85em;color:var(--text)}
+  #config-table tr:has(td[colspan]){border:none;padding:0}
+  #config-table tr td[colspan]{text-align:center;padding:16px 0}
+}
 """

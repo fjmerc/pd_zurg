@@ -53,7 +53,7 @@ __NAV_HTML__
 <!-- History Tab -->
 <div class="tab-panel active" id="panel-history">
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
-    <select id="activity-type" onchange="loadActivity()" style="background:var(--input-bg);color:var(--text);border:1px solid var(--input-border);border-radius:4px;padding:4px 8px;font-size:.8em">
+    <select id="activity-type" onchange="loadActivity(1)" style="background:var(--input-bg);color:var(--text);border:1px solid var(--input-border);border-radius:4px;padding:4px 8px;font-size:.8em">
       <option value="">All Types</option>
       <option value="grabbed">Grabbed</option>
       <option value="cached">Cached</option>
@@ -67,7 +67,7 @@ __NAV_HTML__
       <option value="blocklisted">Blocklisted</option>
       <option value="blocklist_added">Auto-Blocked</option>
     </select>
-    <input type="text" id="activity-search" data-kb="search" placeholder="Search titles... (/)" oninput="loadActivity()" style="flex:1;background:var(--input-bg);border:1px solid var(--input-border);border-radius:4px;padding:4px 8px;font-size:.8em;color:var(--text);outline:none;min-width:120px">
+    <input type="text" id="activity-search" data-kb="search" placeholder="Search titles... (/)" oninput="loadActivity(1)" style="flex:1;background:var(--input-bg);border:1px solid var(--input-border);border-radius:4px;padding:4px 8px;font-size:.8em;color:var(--text);outline:none;min-width:120px">
     <button class="btn btn-ghost btn-sm" onclick="clearHistory()" id="activity-clear-btn" style="display:none">Clear</button>
     <button class="btn btn-ghost btn-sm" data-kb="refresh" onclick="loadActivity()">Refresh</button>
   </div>
@@ -118,7 +118,7 @@ function loadActivity(page){
       var icon=_actIcons[e.type]||'\u2022';
       h+='<tr><td style="font-size:.8em;color:var(--text3);white-space:nowrap">'+timeAgo(e.ts)+'</td>';
       h+='<td><span class="type-badge type-'+esc(e.type)+'">'+icon+' '+esc(e.type.replace(/_/g,' '))+'</span></td>';
-      h+='<td style="font-size:.85em">'+esc(e.title)+(e.episode?' <span style="color:var(--text2)">'+esc(e.episode)+'</span>':'')+'</td>';
+      h+='<td style="font-size:.85em">'+esc(e.media_title||e.title)+(e.episode?' <span style="color:var(--text2)">'+esc(e.episode)+'</span>':'')+'</td>';
       h+='<td style="font-size:.8em;color:var(--text2)">'+esc(e.detail||'')+'</td>';
       h+='<td style="font-size:.75em;color:var(--text3)">'+esc(e.source||'')+'</td></tr>';
     });
@@ -138,7 +138,7 @@ function loadActivity(page){
 function clearHistory(){
   showConfirm('Clear history?','This will remove all activity history entries.').then(function(ok){
     if(!ok)return;
-    fetch('/api/history',{method:'DELETE'}).then(function(){loadActivity()}).catch(function(){});
+    fetch('/api/history',{method:'DELETE'}).then(function(){loadActivity(1)}).catch(function(){});
   });
 }
 
@@ -190,7 +190,7 @@ function clearBlocklist(){
 /* Escape handler */
 window.onKbEscape=function(){
   var s=document.getElementById('activity-search');
-  if(s&&s.value){s.value='';loadActivity();return;}
+  if(s&&s.value){s.value='';loadActivity(1);return;}
 };
 
 /* Initial load (wait for auth detection) + polling */

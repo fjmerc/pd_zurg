@@ -46,15 +46,16 @@ a:hover{text-decoration:underline}
 .main-content{margin-left:var(--sidebar-w);padding:20px;min-height:100vh}
 
 /* === Mobile Sidebar === */
-.hamburger-btn{display:none;position:fixed;top:10px;left:10px;z-index:1001;background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;cursor:pointer;line-height:1}
-.hamburger-btn svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.hamburger-btn{display:none;position:fixed;top:8px;left:8px;z-index:1001;background:var(--bg);border:1px solid var(--border);color:var(--text2);border-radius:6px;padding:7px;cursor:pointer;line-height:0;transition:color var(--motion-fast),border-color var(--motion-fast)}
+.hamburger-btn:hover,.hamburger-btn:focus-visible{color:var(--text);border-color:var(--blue)}
+.hamburger-btn svg{display:block;width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .sidebar-backdrop{display:none;position:fixed;inset:0;z-index:999;background:rgba(0,0,0,.5)}
 .sidebar-backdrop.visible{display:block}
 @media(max-width:768px){
   .sidebar{transform:translateX(-100%);transition:transform .3s ease}
   .sidebar.open{transform:translateX(0)}
   .hamburger-btn{display:block}
-  .main-content{margin-left:0;padding:16px;padding-top:48px}
+  .main-content{margin-left:0;padding:16px;padding-top:44px}
 }
 
 /* === Unified Button System === */

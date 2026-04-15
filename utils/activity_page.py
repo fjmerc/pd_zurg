@@ -82,7 +82,7 @@ __NAV_HTML__
     <button class="btn btn-ghost btn-sm" onclick="clearBlocklist()" id="blocklist-clear-btn" style="display:none">Clear All</button>
     <button class="btn btn-ghost btn-sm" data-kb="refresh" onclick="loadBlocklist()">Refresh</button>
   </div>
-  <table><thead><tr><th>Title</th><th style="width:120px;text-align:center">Hash</th><th>Reason</th><th style="width:80px">Date</th><th style="width:60px">Source</th><th style="width:50px" id="bl-actions-hdr"></th></tr></thead>
+  <table><thead><tr><th style="text-align:center">Title</th><th style="width:120px">Hash</th><th style="text-align:center">Reason</th><th style="width:80px;text-align:center">Date</th><th style="width:60px;text-align:center">Source</th><th style="width:50px;text-align:center" id="bl-actions-hdr"></th></tr></thead>
   <tbody id="blocklist-body"></tbody></table>
 </div>
 
@@ -126,7 +126,7 @@ function loadActivity(page){
       var _name=e.media_title||e.title;
       var _canLink=!!e.media_title||e.source==='library';
       var _mediaType=(e.title&&/^Sonarr /.test(e.title))||e.episode?'show':(e.title&&/^Radarr /.test(e.title))?'movie':'movie';
-      var _titleCell=_canLink&&_name?'<a class="act-link" href="/library?detail='+encodeURIComponent(_name)+'&type='+_mediaType+'">'+esc(_name)+'</a>':esc(_name);
+      var _titleCell=_canLink&&_name?'<a class="act-link" href="/library?detail='+encodeURIComponent(_name)+'&type='+_mediaType+'&from=activity">'+esc(_name)+'</a>':esc(_name);
       h+='<td style="font-size:.85em">'+_titleCell+(e.episode?' <span style="color:var(--text2)">'+esc(e.episode)+'</span>':'')+'</td>';
       h+='<td style="font-size:.8em;color:var(--text2)">'+esc(e.detail||'')+'</td>';
       h+='<td style="font-size:.75em;color:var(--text3)">'+esc(e.source||'')+'</td></tr>';

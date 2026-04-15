@@ -518,6 +518,7 @@ let _scanning  = false;
 let _tsRefreshTimer = null;
 let _displayedItems = [];
 let _inDetailView = false;
+let _detailOrigin = null;  // e.g. 'activity' when arrived via Activity link — controls back-button target
 let _preferences = {};
 let _pending = {};
 let _detailSeasons = [];
@@ -1819,12 +1820,20 @@ function fetchLibrary() {
     });
 }
 
+function _backButtonHtml() {
+  if (_detailOrigin === 'activity') {
+    return '<button class="detail-back" onclick="location.href=\'/activity\'" tabindex="0">&larr; Back to Activity</button>';
+  }
+  return '<button class="detail-back" onclick="hideDetail()" tabindex="0">&larr; Back to Library</button>';
+}
+
 function _restoreDetailFromUrl() {
   try {
     var params = new URLSearchParams(window.location.search);
     var detailTitle = params.get('detail');
     var detailType = params.get('type');
     if (!detailTitle) return;
+    _detailOrigin = params.get('from') || null;
     var nk = normTitle(detailTitle);
     // Try the hinted type first, then fall back to the other list. The hint
     // from Activity links isn't always right, but we can still resolve the
@@ -1995,7 +2004,7 @@ function _renderDetail() {
 function _renderMovieDetail(movie, meta) {
   var area = document.getElementById('content-area');
   var html = '<div class="detail-view">';
-  html += '<button class="detail-back" onclick="hideDetail()" tabindex="0">&larr; Back to Library</button>';
+  html += _backButtonHtml();
 
   html += '<div class="detail-hero">';
   if (meta && meta.poster_url) {
@@ -2395,7 +2404,7 @@ function _renderShowDetail(show, meta) {
   var hasPrev = Object.keys(expandedNums).length > 0;
 
   var html = '<div class="detail-view">';
-  html += '<button class="detail-back" onclick="hideDetail()" tabindex="0">&larr; Back to Library</button>';
+  html += _backButtonHtml();
 
   html += '<div class="detail-hero">';
   if (meta && meta.poster_url) {
@@ -2530,6 +2539,7 @@ function _renderShowDetail(show, meta) {
 function hideDetail() {
   _closeBlockModal();
   _inDetailView = false;
+  _detailOrigin = null;
   _detailItem = null;
   _historySidebarGen = 0;
   _detailSeasons = [];
@@ -2541,6 +2551,7 @@ function hideDetail() {
   var _hUrl = new URL(window.location);
   _hUrl.searchParams.delete('detail');
   _hUrl.searchParams.delete('type');
+  _hUrl.searchParams.delete('from');
   history.replaceState(null, '', _hUrl);
   document.querySelector('.tabs').style.display = '';
   document.querySelector('.controls').style.display = '';

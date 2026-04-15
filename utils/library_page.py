@@ -1824,14 +1824,20 @@ function _restoreDetailFromUrl() {
     var params = new URLSearchParams(window.location.search);
     var detailTitle = params.get('detail');
     var detailType = params.get('type');
-    if (!detailTitle || !detailType) return;
-    var items = detailType === 'movie' ? _allMovies : _allShows;
+    if (!detailTitle) return;
     var nk = normTitle(detailTitle);
-    for (var i = 0; i < items.length; i++) {
-      if (normTitle(items[i].title) === nk) {
-        // Switch to the correct tab so _displayedItems contains the item
-        if (_activeTab !== (detailType === 'movie' ? 'movies' : 'shows')) {
-          _activeTab = detailType === 'movie' ? 'movies' : 'shows';
+    // Try the hinted type first, then fall back to the other list. The hint
+    // comes from callers (e.g. Activity table links) that can't always tell
+    // show vs movie — a wrong hint should still resolve to the real item.
+    var order = detailType === 'movie' ? ['movie', 'show'] : ['show', 'movie'];
+    for (var oi = 0; oi < order.length; oi++) {
+      var tryType = order[oi];
+      var items = tryType === 'movie' ? _allMovies : _allShows;
+      for (var i = 0; i < items.length; i++) {
+        if (normTitle(items[i].title) !== nk) continue;
+        var wantTab = tryType === 'movie' ? 'movies' : 'shows';
+        if (_activeTab !== wantTab) {
+          _activeTab = wantTab;
           document.querySelectorAll('.tab').forEach(function(t) {
             var active = t.getAttribute('aria-controls') === 'tab-' + _activeTab;
             t.classList.toggle('active', active);
@@ -1839,7 +1845,6 @@ function _restoreDetailFromUrl() {
           });
           applyFilters();
         }
-        // Find the item index in _displayedItems
         var dispIdx = -1;
         for (var j = 0; j < _displayedItems.length; j++) {
           if (normTitle(_displayedItems[j].title) === nk) { dispIdx = j; break; }

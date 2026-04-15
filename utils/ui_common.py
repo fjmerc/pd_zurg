@@ -467,7 +467,7 @@ def get_base_head(title, extra_css=''):
     """
     dialog_css = (
         'dialog{background:var(--card);color:var(--text);border:1px solid var(--border);'
-        'border-radius:10px;padding:24px;max-width:380px;box-shadow:0 8px 32px rgba(0,0,0,.5)}'
+        'border-radius:10px;padding:24px;max-width:min(380px,calc(100vw - 32px));margin:auto;box-shadow:0 8px 32px rgba(0,0,0,.5)}'
         'dialog::backdrop{background:rgba(0,0,0,.6);backdrop-filter:blur(2px)}'
         'dialog h3{margin-bottom:12px;font-size:1em;color:var(--text)}'
         'dialog p{margin-bottom:20px;font-size:.9em;color:var(--text2)}'

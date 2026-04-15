@@ -71,7 +71,7 @@ __NAV_HTML__
     <button class="btn btn-ghost btn-sm" onclick="clearHistory()" id="activity-clear-btn" style="display:none">Clear</button>
     <button class="btn btn-ghost btn-sm" data-kb="refresh" onclick="loadActivity()">Refresh</button>
   </div>
-  <table><thead><tr><th style="width:80px">Time</th><th style="width:90px;text-align:center">Type</th><th>Title</th><th>Detail</th><th style="width:60px">Source</th></tr></thead>
+  <table><thead><tr><th style="width:80px;text-align:center">Time</th><th style="width:90px;text-align:center">Type</th><th>Title</th><th>Detail</th><th style="width:60px">Source</th></tr></thead>
   <tbody id="activity-body"></tbody></table>
   <div style="display:flex;justify-content:center;margin-top:8px;gap:8px" id="activity-pager"></div>
 </div>
@@ -82,7 +82,7 @@ __NAV_HTML__
     <button class="btn btn-ghost btn-sm" onclick="clearBlocklist()" id="blocklist-clear-btn" style="display:none">Clear All</button>
     <button class="btn btn-ghost btn-sm" data-kb="refresh" onclick="loadBlocklist()">Refresh</button>
   </div>
-  <table><thead><tr><th>Title</th><th style="width:120px">Hash</th><th>Reason</th><th style="width:80px">Date</th><th style="width:60px">Source</th><th style="width:50px" id="bl-actions-hdr"></th></tr></thead>
+  <table><thead><tr><th>Title</th><th style="width:120px;text-align:center">Hash</th><th>Reason</th><th style="width:80px">Date</th><th style="width:60px">Source</th><th style="width:50px" id="bl-actions-hdr"></th></tr></thead>
   <tbody id="blocklist-body"></tbody></table>
 </div>
 
@@ -216,7 +216,8 @@ _ACTIVITY_EXTRA_CSS = """
 table{width:100%;border-collapse:collapse}
 th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border2);font-size:.85em}
 th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;letter-spacing:.05em}
-#activity-body td:nth-child(2){text-align:center}
+#activity-body td:nth-child(1),#activity-body td:nth-child(2){text-align:center}
+#blocklist-body td:nth-child(5){text-align:center}
 .act-link{color:inherit;text-decoration:none;border-bottom:1px dotted var(--text3);transition:color var(--motion-fast),border-color var(--motion-fast)}
 .act-link:hover{color:var(--blue);border-bottom-color:var(--blue);text-decoration:none}
 .type-badge{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-size:.75em;font-weight:500;white-space:nowrap}

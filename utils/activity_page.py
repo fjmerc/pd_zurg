@@ -71,7 +71,7 @@ __NAV_HTML__
     <button class="btn btn-ghost btn-sm" onclick="clearHistory()" id="activity-clear-btn" style="display:none">Clear</button>
     <button class="btn btn-ghost btn-sm" data-kb="refresh" onclick="loadActivity()">Refresh</button>
   </div>
-  <table><thead><tr><th style="width:80px">Time</th><th style="width:90px">Type</th><th>Title</th><th>Detail</th><th style="width:60px">Source</th></tr></thead>
+  <table><thead><tr><th style="width:80px">Time</th><th style="width:90px;text-align:center">Type</th><th>Title</th><th>Detail</th><th style="width:60px">Source</th></tr></thead>
   <tbody id="activity-body"></tbody></table>
   <div style="display:flex;justify-content:center;margin-top:8px;gap:8px" id="activity-pager"></div>
 </div>
@@ -118,7 +118,16 @@ function loadActivity(page){
       var icon=_actIcons[e.type]||'\u2022';
       h+='<tr><td style="font-size:.8em;color:var(--text3);white-space:nowrap">'+timeAgo(e.ts)+'</td>';
       h+='<td><span class="type-badge type-'+esc(e.type)+'">'+icon+' '+esc(e.type.replace(/_/g,' '))+'</span></td>';
-      h+='<td style="font-size:.85em">'+esc(e.media_title||e.title)+(e.episode?' <span style="color:var(--text2)">'+esc(e.episode)+'</span>':'')+'</td>';
+      /* Link titles to the library detail page when we have a canonical
+         name: either the event was enriched with media_title (blackhole/arr),
+         or it came from the library scanner where title is already canonical.
+         Type is a best-effort hint — library_page._restoreDetailFromUrl
+         falls back to the other list if the hint is wrong. */
+      var _name=e.media_title||e.title;
+      var _canLink=!!e.media_title||e.source==='library';
+      var _mediaType=(e.title&&/^Sonarr /.test(e.title))||e.episode?'show':(e.title&&/^Radarr /.test(e.title))?'movie':'movie';
+      var _titleCell=_canLink&&_name?'<a class="act-link" href="/library?detail='+encodeURIComponent(_name)+'&type='+_mediaType+'">'+esc(_name)+'</a>':esc(_name);
+      h+='<td style="font-size:.85em">'+_titleCell+(e.episode?' <span style="color:var(--text2)">'+esc(e.episode)+'</span>':'')+'</td>';
       h+='<td style="font-size:.8em;color:var(--text2)">'+esc(e.detail||'')+'</td>';
       h+='<td style="font-size:.75em;color:var(--text3)">'+esc(e.source||'')+'</td></tr>';
     });
@@ -207,6 +216,9 @@ _ACTIVITY_EXTRA_CSS = """
 table{width:100%;border-collapse:collapse}
 th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border2);font-size:.85em}
 th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;letter-spacing:.05em}
+#activity-body td:nth-child(2){text-align:center}
+.act-link{color:inherit;text-decoration:none;border-bottom:1px dotted var(--text3);transition:color var(--motion-fast),border-color var(--motion-fast)}
+.act-link:hover{color:var(--blue);border-bottom-color:var(--blue);text-decoration:none}
 .type-badge{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-size:.75em;font-weight:500;white-space:nowrap}
 .type-grabbed{background:#58a6ff1a;color:var(--blue)}.type-cached{background:#3fb9501a;color:var(--green)}.type-symlink_created{background:#bc8cff1a;color:#bc8cff}.type-failed{background:#f851491a;color:var(--red)}.type-cleanup{background:#d299221a;color:var(--yellow)}.type-switched_source{background:#db6d281a;color:var(--orange)}.type-search_triggered{background:#58a6ff1a;color:var(--blue)}.type-rescan_triggered{background:#3fb9501a;color:var(--green)}.type-task_completed{background:var(--border);color:var(--text2)}.type-blocklisted{background:#f851491a;color:var(--red)}.type-blocklist_added{background:#db6d281a;color:var(--orange)}
 #activity-search:focus{border-color:var(--input-focus)}

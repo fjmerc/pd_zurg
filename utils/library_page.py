@@ -1827,8 +1827,8 @@ function _restoreDetailFromUrl() {
     if (!detailTitle) return;
     var nk = normTitle(detailTitle);
     // Try the hinted type first, then fall back to the other list. The hint
-    // comes from callers (e.g. Activity table links) that can't always tell
-    // show vs movie — a wrong hint should still resolve to the real item.
+    // from Activity links isn't always right, but we can still resolve the
+    // item by searching both lists.
     var order = detailType === 'movie' ? ['movie', 'show'] : ['show', 'movie'];
     for (var oi = 0; oi < order.length; oi++) {
       var tryType = order[oi];
@@ -1843,13 +1843,13 @@ function _restoreDetailFromUrl() {
             t.classList.toggle('active', active);
             t.setAttribute('aria-selected', active ? 'true' : 'false');
           });
-          applyFilters();
         }
-        var dispIdx = -1;
-        for (var j = 0; j < _displayedItems.length; j++) {
-          if (normTitle(_displayedItems[j].title) === nk) { dispIdx = j; break; }
-        }
-        if (dispIdx !== -1) showDetail(dispIdx);
+        // Bypass filters — saved localStorage filters (source/status/year)
+        // could have excluded this item from _displayedItems via applyFilters.
+        // Feed the item to showDetail directly. hideDetail() calls
+        // applyFilters() to restore the normal grid on exit.
+        _displayedItems = [items[i]];
+        showDetail(0);
         return;
       }
     }

@@ -261,8 +261,9 @@ __NAV_HTML__
 
 /* Detail hero with poster */
 .detail-hero{display:flex;gap:16px;margin-bottom:16px}
-.detail-poster{width:150px;min-width:150px;border-radius:8px;overflow:hidden}
+.detail-poster{width:150px;min-width:150px;display:flex;flex-direction:column;gap:8px}
 .detail-poster img{width:100%;display:block;border-radius:8px}
+.detail-poster .poster-rating{display:flex;justify-content:center}
 .detail-info{flex:1;min-width:0}
 .detail-info .card-badges{margin-top:6px}
 .detail-overview{font-size:.85em;color:var(--text2);margin-top:8px;line-height:1.5;max-height:7.5em;overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,black 85%,transparent);mask-image:linear-gradient(to bottom,black 85%,transparent);cursor:pointer;transition:max-height .3s ease}
@@ -274,26 +275,25 @@ __NAV_HTML__
 .detail-meta-row .sep{color:var(--text3)}
 .detail-cert{padding:1px 6px;border:1px solid var(--border);border-radius:4px;font-size:.78em;color:var(--text2)}
 .detail-genres{font-size:.82em;color:var(--text2);margin-top:4px}
-.detail-rating{display:inline-flex;align-items:center;gap:6px;margin-top:6px}
-.detail-rating .rating-badge{background:#f5c51826;color:#d4a017;border:1px solid #d4a01740;padding:1px 6px;border-radius:3px;font-weight:600;font-size:.7em;letter-spacing:.3px}
-[data-theme="light"] .detail-rating .rating-badge{background:#9a670014;color:#9a6700;border-color:#9a670033}
+.rating-badge{background:#f5c51826;color:#d4a017;border:1px solid #d4a01740;padding:2px 8px;border-radius:3px;font-weight:600;font-size:.75em;letter-spacing:.3px}
+[data-theme="light"] .rating-badge{background:#9a670014;color:#9a6700;border-color:#9a670033}
 .detail-directors{font-size:.82em;color:var(--text2);margin-top:4px}
-
-/* Media info block */
-.media-info{display:flex;gap:16px;margin-top:10px;padding:8px 10px;background:var(--border2);border-radius:6px;font-size:.78em;flex-wrap:wrap}
-.media-info .mi-group{display:flex;flex-direction:column;gap:2px}
-.media-info .mi-label{color:var(--text3);text-transform:uppercase;font-size:.7em;letter-spacing:.5px}
-.media-info .mi-value{color:var(--text2)}
 
 /* Cast & Crew */
 .cast-section{margin-top:18px}
 .cast-section h3{font-size:1em;font-weight:600;margin-bottom:8px;color:var(--text)}
-.cast-scroll{display:flex;gap:12px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none;-ms-overflow-style:none}
+.cast-scroll-wrap{position:relative}
+.cast-scroll{display:flex;gap:12px;overflow-x:auto;padding-bottom:4px;scroll-behavior:smooth;scrollbar-width:none;-ms-overflow-style:none}
 .cast-scroll::-webkit-scrollbar{display:none}
 .cast-card{flex:0 0 92px;text-align:center}
 .cast-photo{width:92px;height:92px;border-radius:50%;background:var(--border);background-size:cover;background-position:center;margin-bottom:4px}
 .cast-name{font-size:.78em;color:var(--text);font-weight:600;line-height:1.2;max-width:92px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 .cast-role{font-size:.72em;color:var(--text3);line-height:1.2;max-width:92px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.cast-arrow{position:absolute;top:46px;width:32px;height:32px;border-radius:50%;border:1px solid var(--border);background:var(--card);color:var(--text);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:1.2em;font-weight:600;line-height:1;padding:0;box-shadow:0 2px 6px rgba(0,0,0,.3);opacity:.9;transition:opacity .15s,background .15s;z-index:2}
+.cast-arrow:hover{background:var(--border);opacity:1}
+.cast-arrow:disabled{opacity:0;pointer-events:none}
+.cast-arrow-left{left:-4px}
+.cast-arrow-right{right:-4px}
 
 /* Episode titles and missing */
 .ep-title{color:var(--text);font-size:.95em;font-weight:600;display:inline}
@@ -400,6 +400,7 @@ body.has-bulk-bar{padding-bottom:60px}
   .cast-card{flex:0 0 72px}
   .cast-photo{width:72px;height:72px}
   .cast-name,.cast-role{max-width:72px}
+  .cast-arrow{display:none}
   .card-header .card-title{font-size:.78em}
   .card-header .card-badges{gap:2px}
   .card-status{gap:4px;margin-top:2px}
@@ -566,6 +567,7 @@ let _lastTransferType = '';
 let _transferClearTimer = null;
 let _pollTimer = null;
 let _pollActive = false;
+let _lastDetailSig = null;  // signature of the last-rendered detail item (used to skip no-op re-renders from smart-poll)
 let _refreshPollTimer = null;
 
 // ---------------------------------------------------------------------------
@@ -1816,7 +1818,15 @@ function _applyLibraryData(data, opts) {
     var nk = normTitle(_detailItem.title);
     for (var i = 0; i < items.length; i++) {
       if (normTitle(items[i].title) === nk) {
-        _detailItem = items[i];
+        var newItem = items[i];
+        // Skip the full innerHTML rebuild when nothing visible changed.
+        // Without this, smart-poll's 15-s tick flickers the whole detail view
+        // (poster + cast + seasons + Activity refetch) every time, even when
+        // the payload is byte-identical to the last render.
+        var sig = JSON.stringify(newItem) + '|' + JSON.stringify(_pending[nk] || null) + '|' + (_preferences[nk] || '');
+        if (sig === _lastDetailSig) break;
+        _lastDetailSig = sig;
+        _detailItem = newItem;
         _renderDetail();
         break;
       }
@@ -1985,6 +1995,7 @@ function showDetail(index) {
   _inDetailView = true;
   _detailItem = item;
   _detailMeta = null;
+  _lastDetailSig = null;  // force first render in this detail view
   _lastTransferText = '';
   _lastTransferType = '';
   if (_transferClearTimer) { clearTimeout(_transferClearTimer); _transferClearTimer = null; }
@@ -2061,9 +2072,6 @@ function _renderDetailMeta(item, meta) {
   if (meta.genres && meta.genres.length) {
     out += '<div class="detail-genres">' + meta.genres.map(esc).join(', ') + '</div>';
   }
-  if (meta.vote_average && meta.vote_average > 0) {
-    out += '<div class="detail-rating"><span class="rating-badge">TMDB ' + meta.vote_average.toFixed(1) + '</span></div>';
-  }
   var byline = '';
   if (meta.directors && meta.directors.length) {
     byline = 'Directed by ' + meta.directors.map(esc).join(', ');
@@ -2076,21 +2084,17 @@ function _renderDetailMeta(item, meta) {
   return out;
 }
 
-function _renderMediaInfo(quality) {
-  if (!quality || !quality.label) return '';
-  var videoParts = [];
-  if (quality.resolution) videoParts.push(quality.resolution);
-  if (quality.codec) videoParts.push('(' + quality.codec + ')');
-  var videoStr = videoParts.join(' ');
-  if (!videoStr) return '';
-  return '<div class="media-info">'
-    + '<div class="mi-group"><div class="mi-label">Video</div><div class="mi-value">' + esc(videoStr) + '</div></div>'
-    + '</div>';
+function _renderPosterRating(meta) {
+  if (!meta || !meta.vote_average || meta.vote_average <= 0) return '';
+  return '<div class="poster-rating"><span class="rating-badge">TMDB ' + meta.vote_average.toFixed(1) + '</span></div>';
 }
 
 function _renderCastSection(meta) {
   if (!meta || !meta.cast || !meta.cast.length) return '';
-  var out = '<div class="cast-section"><h3>Cast &amp; Crew</h3><div class="cast-scroll">';
+  var out = '<div class="cast-section"><h3>Cast &amp; Crew</h3>';
+  out += '<div class="cast-scroll-wrap">';
+  out += '<button class="cast-arrow cast-arrow-left" aria-label="Scroll cast left" onclick="_castScroll(this,-1)">\u2039</button>';
+  out += '<div class="cast-scroll" onscroll="_updateCastArrows(this)">';
   meta.cast.slice(0, 15).forEach(function(p) {
     var bg = p.profile_url ? 'background-image:url(\'' + escAttr(p.profile_url) + '\')' : '';
     out += '<div class="cast-card">'
@@ -2099,8 +2103,29 @@ function _renderCastSection(meta) {
          + (p.character ? '<div class="cast-role">' + esc(p.character) + '</div>' : '')
          + '</div>';
   });
+  out += '</div>';
+  out += '<button class="cast-arrow cast-arrow-right" aria-label="Scroll cast right" onclick="_castScroll(this,1)">\u203A</button>';
   out += '</div></div>';
   return out;
+}
+
+function _castScroll(btn, dir) {
+  var wrap = btn.parentElement;
+  var scroll = wrap && wrap.querySelector('.cast-scroll');
+  if (!scroll) return;
+  // Scroll by roughly 3 cards at a time (card ~92px + 12px gap)
+  scroll.scrollBy({left: dir * (scroll.clientWidth * 0.7), behavior: 'smooth'});
+}
+
+function _updateCastArrows(scroll) {
+  var wrap = scroll.parentElement;
+  if (!wrap) return;
+  var left = wrap.querySelector('.cast-arrow-left');
+  var right = wrap.querySelector('.cast-arrow-right');
+  var atStart = scroll.scrollLeft <= 2;
+  var atEnd = scroll.scrollLeft + scroll.clientWidth >= scroll.scrollWidth - 2;
+  if (left) left.disabled = atStart;
+  if (right) right.disabled = atEnd || scroll.scrollWidth <= scroll.clientWidth;
 }
 
 function _renderMovieDetail(movie, meta) {
@@ -2110,7 +2135,7 @@ function _renderMovieDetail(movie, meta) {
 
   html += '<div class="detail-hero">';
   if (meta && meta.poster_url) {
-    html += '<div class="detail-poster"><img src="' + escAttr(meta.poster_url) + '" alt="' + escAttr('Poster for ' + movie.title) + '"></div>';
+    html += '<div class="detail-poster"><img src="' + escAttr(meta.poster_url) + '" alt="' + escAttr('Poster for ' + movie.title) + '">' + _renderPosterRating(meta) + '</div>';
   }
   html += '<div class="detail-info">';
   html += '<h2>' + esc(movie.title);
@@ -2140,8 +2165,6 @@ function _renderMovieDetail(movie, meta) {
   }
   if (meta) {
     html += _renderDetailMeta(movie, meta);
-    // Movie-only: shows have per-episode quality rendered in the episode table
-    html += _renderMediaInfo(movie.quality);
     if (meta.overview) html += '<div class="detail-overview" onclick="this.classList.toggle(\'expanded\')">' + esc(meta.overview) + '</div>';
   }
   // Movie preference dropdown + action buttons
@@ -2200,6 +2223,8 @@ function _renderMovieDetail(movie, meta) {
   html += '</div>';
   area.innerHTML = html;
   _loadHistorySidebar();
+  var _cs = area.querySelector('.cast-scroll');
+  if (_cs) _updateCastArrows(_cs);
 }
 
 function _mergeShowMeta(show, meta) {
@@ -2510,7 +2535,7 @@ function _renderShowDetail(show, meta) {
 
   html += '<div class="detail-hero">';
   if (meta && meta.poster_url) {
-    html += '<div class="detail-poster"><img src="' + escAttr(meta.poster_url) + '" alt="' + escAttr('Poster for ' + show.title) + '"></div>';
+    html += '<div class="detail-poster"><img src="' + escAttr(meta.poster_url) + '" alt="' + escAttr('Poster for ' + show.title) + '">' + _renderPosterRating(meta) + '</div>';
   }
   html += '<div class="detail-info">';
   html += '<h2>' + esc(show.title);
@@ -2640,6 +2665,8 @@ function _renderShowDetail(show, meta) {
   html += '</div>';
   area.innerHTML = html;
   _loadHistorySidebar();
+  var _cs = area.querySelector('.cast-scroll');
+  if (_cs) _updateCastArrows(_cs);
 }
 
 function hideDetail() {
@@ -2650,6 +2677,7 @@ function hideDetail() {
   _historySidebarGen = 0;
   _detailSeasons = [];
   _actionInFlight = false;
+  _lastDetailSig = null;
   _stopSmartPoll();
   if (_refreshTimer) { clearTimeout(_refreshTimer); _refreshTimer = null; }
   if (_pendingConfirmCleanup) { _pendingConfirmCleanup(); _pendingConfirmCleanup = null; }

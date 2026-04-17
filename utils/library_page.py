@@ -519,6 +519,7 @@ let _tsRefreshTimer = null;
 let _displayedItems = [];
 let _inDetailView = false;
 let _detailOrigin = null;  // e.g. 'activity' when arrived via Activity link — controls back-button target
+let _librarySavedScrollY = 0;  // window.scrollY captured when entering detail view, restored on exit
 let _preferences = {};
 let _pending = {};
 let _detailSeasons = [];
@@ -1858,6 +1859,11 @@ function _restoreDetailFromUrl() {
         // Feed the item to showDetail directly. hideDetail() calls
         // applyFilters() to restore the normal grid on exit.
         _displayedItems = [items[i]];
+        // On browser reload/direct URL entry the browser may have restored
+        // scrollY from the last session — that Y belongs to the detail view,
+        // not the library grid. Force to 0 before showDetail captures it, so
+        // Back-to-Library lands at the top of the grid rather than random Y.
+        window.scrollTo(0, 0);
         showDetail(0);
         return;
       }
@@ -1946,6 +1952,11 @@ function showDetail(index) {
   var item = _displayedItems[index];
   if (!item) return;
   if (item.type === 'show' && (!item.season_data || !item.season_data.length)) return;
+  // Capture scroll before hiding chrome so we can restore the user's spot on back.
+  // Guard against nested re-entry overwriting the saved Y with a detail-view scroll.
+  if (!_inDetailView) {
+    _librarySavedScrollY = window.scrollY || window.pageYOffset || 0;
+  }
   _inDetailView = true;
   _detailItem = item;
   _detailMeta = null;
@@ -2565,7 +2576,14 @@ function hideDetail() {
     if (area) area.classList.add('select-mode');
     _updateBulkBar();
   }
-  document.getElementById('search-input').focus();
+  // Focus before scrollTo so that any focus-triggered scroll (legacy browsers
+  // that ignore the preventScroll option) is immediately overridden.
+  // applyFilters() rebuilds #content-area synchronously so document height is
+  // already correct; the browser clamps scrollY to the new max if the filtered
+  // set is shorter.
+  var _si = document.getElementById('search-input');
+  if (_si) _si.focus({preventScroll: true});
+  window.scrollTo(0, _librarySavedScrollY);
 }
 
 // Excluded from detail sidebar: system-level events, startup-skip events

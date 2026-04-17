@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Plex-style library detail page**: Library detail views now surface a compact `year · runtime · rating` meta row, a genres line, TMDB score badge, director (movie) or creator (show) byline, and a horizontal `Cast & Crew` photo strip of up to 15 top-billed actors. The cast scroller uses a hidden scrollbar (scroll via mouse wheel, trackpad, or drag) to match modern media UIs. Powered by the existing TMDB cache — existing cache entries refresh transparently over 7 days as users browse, bulk lookups keep using legacy entries until the refetch lands (no regression during the migration window). Set `TMDB_RATING_COUNTRY` (default `US`) to pick MPAA/content ratings from a non-US country.
+- **Plex-style library detail page**: Library detail views now surface a compact `year · runtime · rating` meta row, a genres line, TMDB score badge, director (movie) or creator (show) byline, and a horizontal `Cast & Crew` photo strip of up to 15 top-billed actors. The cast scroller uses a hidden scrollbar (scroll via mouse wheel, trackpad, or drag) to match modern media UIs. The Activity panel moved from a right-hand sidebar to a full-width section below the seasons/cast, so it no longer floats awkwardly next to short content or wastes column space next to long shows. Powered by the existing TMDB cache — existing cache entries refresh transparently over 7 days as users browse, bulk lookups keep using legacy entries until the refetch lands (no regression during the migration window). Set `TMDB_RATING_COUNTRY` (default `US`) to pick MPAA/content ratings from a non-US country.
 
 ### Fixed
 

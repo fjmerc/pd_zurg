@@ -2112,14 +2112,24 @@ class LibraryScanner:
         rclone_real = os.path.realpath(rclone_mount)
         base_prefix = symlink_base.rstrip(os.sep) + os.sep
 
-        # Guard: verify the rclone mount is responsive and populated.
-        # If the FUSE mount is down, os.path.exists() returns False for
-        # everything, which would cause mass deletion of valid symlinks.
-        # A healthy Zurg mount always has category dirs (movies, shows, etc.);
-        # an empty listing means Zurg is still starting or the mount is stale.
+        # Guard: verify the rclone mount exists, is responsive, and has content.
+        # A missing or stalled FUSE mount makes os.path.exists() return False
+        # for everything, which would cause mass deletion of valid symlinks.
+        # Zurg category stubs (movies/, shows/) can persist even when all
+        # content is gone, so check that at least one known category dir
+        # is non-empty.  Mirrors the guard in scheduled_tasks.verify_symlinks.
         try:
-            if not os.listdir(rclone_real):
-                logger.debug("[library] Rclone mount empty at %s — "
+            if not os.path.isdir(rclone_real) or not os.listdir(rclone_real):
+                logger.debug("[library] Rclone mount empty or missing at %s — "
+                             "skipping broken symlink cleanup", rclone_real)
+                return
+            _mount_cats = ('movies', 'shows', 'anime')
+            if not any(
+                os.path.isdir(os.path.join(rclone_real, c))
+                and os.listdir(os.path.join(rclone_real, c))
+                for c in _mount_cats
+            ):
+                logger.debug("[library] Rclone mount categories empty at %s — "
                              "skipping broken symlink cleanup", rclone_real)
                 return
         except OSError:

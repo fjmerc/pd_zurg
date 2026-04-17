@@ -316,7 +316,7 @@ VERIFICATION (scheduled_tasks.verify_symlinks — default: every 6 hours)
   ├─ Translate: BLACKHOLE_SYMLINK_TARGET_BASE → BLACKHOLE_RCLONE_MOUNT
   │   (symlink targets resolve in arr containers, not pd_zurg)
   ├─ Check: does the translated target exist on the FUSE mount?
-  ├─ Safety threshold: refuse mass deletion if >50% broken AND >threshold count
+  ├─ Mount health guard: abort if mount missing, empty, or categories empty
   │
   ├─ If broken → attempt REPAIR:
   │   ├─ Search mount for the release name under different categories
@@ -553,14 +553,15 @@ Torrent submission fails → retry with schedule:
       Retry state persisted in .meta.json sidecar files
 ```
 
-### Symlink Safety Threshold
+### Symlink Mount Health Guard
 
 ```
-verify_symlinks() counts broken symlinks:
-  If broken > threshold AND broken/total > 50%:
-    → REFUSE mass deletion
-    → Log error: "threshold exceeded, check mount health"
-    → Return error status (visible in WebUI Tasks tab)
+verify_symlinks() and _cleanup_broken_debrid_symlinks() guard against
+mass deletion by checking mount health before processing:
+  1. Mount directory must exist (os.path.isdir)
+  2. Mount must be non-empty (os.listdir returns entries)
+  3. At least one category dir must have content (deeper check)
+  If any check fails → ABORT, log warning, return error status
   Purpose: prevent nuking entire library on temporary mount failure
 ```
 

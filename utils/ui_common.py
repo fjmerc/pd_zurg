@@ -376,7 +376,7 @@ function fmtBytes(b){
 }
 /* Auth detection */
 window._hasAuth=false;
-window._hasAuthReady=fetch('/api/restart/test',{method:'POST'}).then(function(r){window._hasAuth=r.status!==403;}).catch(function(){});
+window._hasAuthReady=fetch('/api/auth/check').then(function(r){window._hasAuth=r.status!==403;}).catch(function(){});
 /* Version display in sidebar */
 fetch('/api/status').then(function(r){return r.json()}).then(function(d){
   var el=document.getElementById('header-meta');

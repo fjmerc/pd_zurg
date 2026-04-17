@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`/api/restart/test` 400 no longer shows in the browser console**: The frontend auth probe POSTed to `/api/restart/test` on every page load and relied on the 400 "unknown service" response to detect that the user was authenticated. The 400 surfaced as a red error in DevTools on every page load, noisy during screen shares and when debugging unrelated issues. Replaced the probe with a dedicated `GET /api/auth/check` endpoint that returns 200/403 cleanly — 200 when auth is not configured or valid credentials are provided, 403 when auth is configured but not provided.
 - **Library detail view no longer flickers during background polls**: The detail page re-rendered its entire content area on every smart-poll tick (every 15 s when any library item had pending state), nuking the poster, cast strip, seasons, and Activity sidebar even when the payload was byte-identical to the last render. Each re-render also refetched `/api/history/show/…`. Added a signature-based guard (`_lastDetailSig`) that skips `_renderDetail()` when the detail item, its pending state, and its preference are unchanged; re-renders still fire when data actually changes (action completes, pending clears, etc.).
 
 ### Fixed

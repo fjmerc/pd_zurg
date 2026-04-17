@@ -1066,6 +1066,29 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
             return
 
+        # Auth probe — returns 403 on auth wall, 200 otherwise. Bypasses the
+        # normal 401 middleware so the frontend can distinguish "you hit an
+        # auth wall" from "everything is fine" without a basic-auth challenge.
+        if self.path == '/api/auth/check':
+            creds = self.auth_credentials  # snapshot to avoid SIGHUP reload race
+            if creds:
+                auth_header = self.headers.get('Authorization', '')
+                ok = False
+                if auth_header.startswith('Basic '):
+                    raw = auth_header[6:]
+                    if len(raw) <= 256:
+                        try:
+                            decoded = base64.b64decode(raw, validate=True).decode('utf-8')
+                            if hmac.compare_digest(decoded.encode(), creds.encode()):
+                                ok = True
+                        except (ValueError, UnicodeDecodeError):
+                            pass
+                if not ok:
+                    self._send_json_response(403, json.dumps({'error': 'auth required'}))
+                    return
+            self._send_json_response(200, json.dumps({'ok': True}))
+            return
+
         if self.auth_credentials:
             auth_header = self.headers.get('Authorization', '')
             if not auth_header.startswith('Basic '):

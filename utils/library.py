@@ -1026,6 +1026,7 @@ class LibraryScanner:
         self._clear_resolved_pending(shows, movies)
         self._escalate_stuck_pending()
         self._warn_stalled_pending()
+        self._cleanup_broken_debrid_symlinks()
         self._create_debrid_symlinks(shows, movies, path_index)
         return changed
 
@@ -2087,6 +2088,95 @@ class LibraryScanner:
                 except Exception as e:
                     logger.warning(f"[library] Failed to re-route movie {norm_title!r}: {e}")
 
+    def _cleanup_broken_debrid_symlinks(self):
+        """Remove broken debrid symlinks from local library directories.
+
+        When a debrid torrent is removed or replaced (e.g. user switches from
+        a buffering 2160p to a 1080p), the symlinks created by
+        ``_create_debrid_symlinks`` become broken.  This method detects those
+        broken links and removes them so the next symlink-creation pass can
+        lay down fresh links for replacement content.
+
+        Only touches symlinks whose targets start with BLACKHOLE_SYMLINK_TARGET_BASE.
+        Real files and non-debrid symlinks are never modified.
+
+        Must run BEFORE ``_create_debrid_symlinks`` in the effects pipeline.
+        """
+        if not str(os.environ.get('BLACKHOLE_SYMLINK_ENABLED', '')).lower() == 'true':
+            return
+        rclone_mount = os.environ.get('BLACKHOLE_RCLONE_MOUNT', '').strip()
+        symlink_base = os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', '').strip()
+        if not rclone_mount or not symlink_base:
+            return
+
+        rclone_real = os.path.realpath(rclone_mount)
+        base_prefix = symlink_base.rstrip(os.sep) + os.sep
+
+        # Guard: verify the rclone mount is responsive and populated.
+        # If the FUSE mount is down, os.path.exists() returns False for
+        # everything, which would cause mass deletion of valid symlinks.
+        # A healthy Zurg mount always has category dirs (movies, shows, etc.);
+        # an empty listing means Zurg is still starting or the mount is stale.
+        try:
+            if not os.listdir(rclone_real):
+                logger.debug("[library] Rclone mount empty at %s — "
+                             "skipping broken symlink cleanup", rclone_real)
+                return
+        except OSError:
+            logger.debug("[library] Rclone mount not responsive at %s — "
+                         "skipping broken symlink cleanup", rclone_real)
+            return
+
+        removed = 0
+
+        for lib_path in (self._local_movies_path, self._local_tv_path):
+            if not lib_path or not os.path.isdir(lib_path):
+                continue
+            try:
+                with os.scandir(lib_path) as top:
+                    for entry in top:
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                        # Walk into subdirectories (Season dirs for TV, flat for movies)
+                        for root, _dirs, files in os.walk(entry.path):
+                            for fname in files:
+                                fpath = os.path.join(root, fname)
+                                if not os.path.islink(fpath):
+                                    continue
+                                target = os.readlink(fpath)
+                                # Resolve relative symlinks to absolute
+                                if not os.path.isabs(target):
+                                    target = os.path.normpath(
+                                        os.path.join(os.path.dirname(fpath), target)
+                                    )
+                                if not target.startswith(base_prefix):
+                                    continue
+                                # Translate arr-namespace target to rclone mount for existence check
+                                check_path = os.path.normpath(
+                                    rclone_real + os.sep + target[len(base_prefix):]
+                                )
+                                # Ensure translated path stays within the mount
+                                if not check_path.startswith(rclone_real + os.sep):
+                                    continue
+                                if not os.path.exists(check_path):
+                                    # Re-verify still a symlink to narrow TOCTOU window
+                                    if not os.path.islink(fpath):
+                                        continue
+                                    try:
+                                        os.unlink(fpath)
+                                        removed += 1
+                                        logger.debug(
+                                            "[library] Removed broken debrid symlink: %s -> %s",
+                                            fpath, target,
+                                        )
+                                    except OSError as e:
+                                        logger.debug("[library] Failed to remove broken symlink %s: %s", fpath, e)
+            except (PermissionError, OSError) as e:
+                logger.debug("[library] Cannot scan %s for broken symlinks: %s", lib_path, e)
+
+        if removed:
+            logger.info("[library] Cleaned up %d broken debrid symlink(s) from local library", removed)
+
     def _create_debrid_symlinks(self, shows, movies, path_index):
         """Create local library symlinks for debrid-only content.
 
@@ -2231,10 +2321,13 @@ class LibraryScanner:
                 title = movie['title']
                 year = movie.get('year')
 
-                # Skip blocklisted items (check by mount folder name and parsed title)
+                # Skip blocklisted items by mount folder name (full release name).
+                # Only match on the release folder — not the parsed title — so
+                # that blocking one quality/release doesn't block replacements
+                # of the same movie (e.g. blocking a 2160p doesn't block a 1080p).
                 if _blocklist:
                     mount_folder = os.path.basename(mount_dir)
-                    if _blocklist.is_blocked_title(mount_folder) or _blocklist.is_blocked_title(title):
+                    if _blocklist.is_blocked_title(mount_folder):
                         continue
 
                 # Year-qualified exact match first to disambiguate same-title
@@ -2370,10 +2463,19 @@ class LibraryScanner:
                         if not debrid_path:
                             continue
 
-                        # Skip blocklisted items (check by release folder name and show title)
+                        # Skip blocklisted items by release folder name.
+                        # Only match on the release folder — not the parsed title — so
+                        # that blocking one release doesn't block replacements.
+                        # debrid_path may be .../release/Season N/ep.mkv or .../release/ep.mkv;
+                        # climb past Season dirs to reach the actual release folder.
                         if _blocklist:
-                            release_folder = os.path.basename(os.path.dirname(debrid_path))
-                            if _blocklist.is_blocked_title(release_folder) or _blocklist.is_blocked_title(title):
+                            parent = os.path.dirname(debrid_path)
+                            parent_name = os.path.basename(parent)
+                            if _SEASON_DIR_PATTERN.match(parent_name):
+                                release_folder = os.path.basename(os.path.dirname(parent))
+                            else:
+                                release_folder = parent_name
+                            if _blocklist.is_blocked_title(release_folder):
                                 continue
 
                         filename = os.path.basename(debrid_path)
@@ -2942,7 +3044,7 @@ class LibraryScanner:
         """Translate a WebDAV relative path to a FUSE mount path."""
         result = os.path.normpath(os.path.join(self._mount_path, category, rel_path))
         # Guard against path traversal via ".." in crafted hrefs
-        cat_root = os.path.join(self._mount_path, category)
+        cat_root = os.path.normpath(os.path.join(self._mount_path, category))
         if not result.startswith(cat_root + os.sep) and result != cat_root:
             return None
         return result

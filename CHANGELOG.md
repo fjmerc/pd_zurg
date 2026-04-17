@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Version [2.17.8] - 2026-04-17
 
+### Added
+
+- **Plex-style library detail page**: Library detail views now surface a compact `year · runtime · rating` meta row, a genres line, TMDB score badge, director (movie) or creator (show) byline, and a horizontal `Cast & Crew` photo strip of up to 15 top-billed actors. Powered by the existing TMDB cache — existing cache entries refresh transparently over 7 days as users browse, bulk lookups keep using legacy entries until the refetch lands (no regression during the migration window). Set `TMDB_RATING_COUNTRY` (default `US`) to pick MPAA/content ratings from a non-US country.
+
 ### Fixed
 
 - **Library back button restores scroll position**: Clicking "← Back to Library" from a movie or show detail view previously scrolled all the way back to the top of the A's, forcing the user to re-scroll to find where they were. The library page now captures `window.scrollY` when opening the detail view and restores it after the grid re-renders on back, so the user lands exactly where they clicked. Also adds `preventScroll:true` to the search-input refocus call so the input no longer pulls the viewport when the detail view closes.

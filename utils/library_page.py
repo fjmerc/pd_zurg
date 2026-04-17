@@ -271,7 +271,31 @@ __NAV_HTML__
 .detail-overview{font-size:.85em;color:var(--text2);margin-top:8px;line-height:1.5;max-height:7.5em;overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,black 85%,transparent);mask-image:linear-gradient(to bottom,black 85%,transparent);cursor:pointer;transition:max-height .3s ease}
 .detail-overview.expanded{max-height:60em;-webkit-mask-image:none;mask-image:none}
 .detail-status{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:var(--border);color:var(--text2);margin-left:6px}
-.detail-runtime{font-size:.82em;color:var(--text2);margin-top:6px}
+
+/* Plex-style detail meta */
+.detail-meta-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:6px;font-size:.85em;color:var(--text2)}
+.detail-meta-row .sep{color:var(--text3)}
+.detail-cert{padding:1px 6px;border:1px solid var(--border);border-radius:4px;font-size:.78em;color:var(--text2)}
+.detail-genres{font-size:.82em;color:var(--text2);margin-top:4px}
+.detail-rating{display:inline-flex;align-items:center;gap:6px;margin-top:6px}
+.detail-rating .rating-badge{background:#f5c51833;color:#d4a017;border:1px solid #d4a01766;padding:2px 8px;border-radius:4px;font-weight:700;font-size:.8em}
+[data-theme="light"] .detail-rating .rating-badge{background:#9a67001a;color:#9a6700;border-color:#9a670040}
+.detail-directors{font-size:.82em;color:var(--text2);margin-top:4px}
+
+/* Media info block */
+.media-info{display:flex;gap:16px;margin-top:10px;padding:8px 10px;background:var(--border2);border-radius:6px;font-size:.78em;flex-wrap:wrap}
+.media-info .mi-group{display:flex;flex-direction:column;gap:2px}
+.media-info .mi-label{color:var(--text3);text-transform:uppercase;font-size:.7em;letter-spacing:.5px}
+.media-info .mi-value{color:var(--text2)}
+
+/* Cast & Crew */
+.cast-section{margin-top:18px}
+.cast-section h3{font-size:1em;font-weight:600;margin-bottom:8px;color:var(--text)}
+.cast-scroll{display:flex;gap:12px;overflow-x:auto;padding-bottom:4px;scrollbar-width:thin}
+.cast-card{flex:0 0 92px;text-align:center}
+.cast-photo{width:92px;height:92px;border-radius:50%;background:var(--border);background-size:cover;background-position:center;margin-bottom:4px}
+.cast-name{font-size:.78em;color:var(--text);font-weight:600;line-height:1.2;max-width:92px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.cast-role{font-size:.72em;color:var(--text3);line-height:1.2;max-width:92px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 
 /* Episode titles and missing */
 .ep-title{color:var(--text);font-size:.95em;font-weight:600;display:inline}
@@ -375,6 +399,9 @@ body.has-bulk-bar{padding-bottom:60px}
   .season-actions{flex-wrap:wrap}
   .detail-hero{flex-direction:column}
   .detail-poster{width:120px}
+  .cast-card{flex:0 0 72px}
+  .cast-photo{width:72px;height:72px}
+  .cast-name,.cast-role{max-width:72px}
   .card-header .card-title{font-size:.78em}
   .card-header .card-badges{gap:2px}
   .card-status{gap:4px;margin-top:2px}
@@ -2012,6 +2039,72 @@ function _renderDetail() {
   _restoreTransferMsg();
 }
 
+function _formatRuntime(mins) {
+  if (!mins || mins <= 0) return '';
+  var h = Math.floor(mins / 60);
+  var m = mins % 60;
+  if (h && m) return h + 'hr ' + m + 'min';
+  if (h) return h + 'hr';
+  return m + 'min';
+}
+
+function _renderDetailMeta(item, meta) {
+  if (!meta) return '';
+  var out = '';
+  var metaBits = [];
+  if (item.year) metaBits.push(esc(String(item.year)));
+  var runtime = meta.runtime || meta.episode_run_time || 0;
+  if (runtime) metaBits.push(esc(_formatRuntime(runtime)));
+  var cert = meta.certification || meta.content_rating || '';
+  if (cert) metaBits.push('<span class="detail-cert">' + esc(cert) + '</span>');
+  if (metaBits.length) {
+    out += '<div class="detail-meta-row">' + metaBits.join('<span class="sep">&middot;</span>') + '</div>';
+  }
+  if (meta.genres && meta.genres.length) {
+    out += '<div class="detail-genres">' + meta.genres.map(esc).join(', ') + '</div>';
+  }
+  if (meta.vote_average && meta.vote_average > 0) {
+    out += '<div class="detail-rating"><span class="rating-badge">TMDB ' + meta.vote_average.toFixed(1) + '</span></div>';
+  }
+  var byline = '';
+  if (meta.directors && meta.directors.length) {
+    byline = 'Directed by ' + meta.directors.map(esc).join(', ');
+  } else if (meta.creators && meta.creators.length) {
+    byline = 'Created by ' + meta.creators.map(esc).join(', ');
+  }
+  if (byline) {
+    out += '<div class="detail-directors">' + byline + '</div>';
+  }
+  return out;
+}
+
+function _renderMediaInfo(quality) {
+  if (!quality || !quality.label) return '';
+  var videoParts = [];
+  if (quality.resolution) videoParts.push(quality.resolution);
+  if (quality.codec) videoParts.push('(' + quality.codec + ')');
+  var videoStr = videoParts.join(' ');
+  if (!videoStr) return '';
+  return '<div class="media-info">'
+    + '<div class="mi-group"><div class="mi-label">Video</div><div class="mi-value">' + esc(videoStr) + '</div></div>'
+    + '</div>';
+}
+
+function _renderCastSection(meta) {
+  if (!meta || !meta.cast || !meta.cast.length) return '';
+  var out = '<div class="cast-section"><h3>Cast &amp; Crew</h3><div class="cast-scroll">';
+  meta.cast.slice(0, 15).forEach(function(p) {
+    var bg = p.profile_url ? 'background-image:url(\'' + escAttr(p.profile_url) + '\')' : '';
+    out += '<div class="cast-card">'
+         + '<div class="cast-photo" style="' + bg + '" role="img" aria-label="' + escAttr(p.name) + '"></div>'
+         + '<div class="cast-name">' + esc(p.name) + '</div>'
+         + (p.character ? '<div class="cast-role">' + esc(p.character) + '</div>' : '')
+         + '</div>';
+  });
+  out += '</div></div>';
+  return out;
+}
+
 function _renderMovieDetail(movie, meta) {
   var area = document.getElementById('content-area');
   var html = '<div class="detail-view">';
@@ -2048,10 +2141,9 @@ function _renderMovieDetail(movie, meta) {
           + esc(movieErrText) + '</div>';
   }
   if (meta) {
-    var runtimeParts = [];
-    if (meta.runtime) runtimeParts.push(esc(String(meta.runtime)) + ' min');
-    if (meta.release_date) runtimeParts.push('Released ' + esc(meta.release_date));
-    if (runtimeParts.length) html += '<div class="detail-runtime">' + runtimeParts.join(' &middot; ') + '</div>';
+    html += _renderDetailMeta(movie, meta);
+    // Movie-only: shows have per-episode quality rendered in the episode table
+    html += _renderMediaInfo(movie.quality);
     if (meta.overview) html += '<div class="detail-overview" onclick="this.classList.toggle(\'expanded\')">' + esc(meta.overview) + '</div>';
   }
   // Movie preference dropdown + action buttons
@@ -2102,6 +2194,7 @@ function _renderMovieDetail(movie, meta) {
   }
   html += '</div></div>';
   html += '<div class="detail-body"><div class="detail-main">';
+  html += _renderCastSection(meta);
   html += '<div id="transfer-msg" aria-live="polite"></div>';
   html += '</div>';
   html += '<div class="detail-sidebar"><div class="history-sidebar" id="history-sidebar-content"><h3>Activity</h3><div class="hs-empty">Loading\u2026</div></div></div>';
@@ -2435,7 +2528,10 @@ function _renderShowDetail(show, meta) {
           + '<span class="pending-callout-icon">\u26A0</span> '
           + esc(showErrText) + '</div>';
   }
-  if (meta && meta.overview) html += '<div class="detail-overview" onclick="this.classList.toggle(\'expanded\')">' + esc(meta.overview) + '</div>';
+  if (meta) {
+    html += _renderDetailMeta(show, meta);
+    if (meta.overview) html += '<div class="detail-overview" onclick="this.classList.toggle(\'expanded\')">' + esc(meta.overview) + '</div>';
+  }
   if ((show.source === 'debrid' || show.source === 'both') && !_downloadServices.show) {
     html += '<div style="font-size:.82em;color:var(--text3);margin-top:8px">To switch episodes to local, configure <a href="/settings">Sonarr or Overseerr</a> in Settings.</div>';
   }
@@ -2464,6 +2560,7 @@ function _renderShowDetail(show, meta) {
   html += '</div></div>';
 
   html += '<div class="detail-body"><div class="detail-main">';
+  html += _renderCastSection(meta);
   if (seasons.length > 1) {
     var allExpanded = hasPrev && seasons.every(function(s) { return !!expandedNums[String(s.number)]; });
     html += '<div class="expand-all-row"><button class="btn btn-ghost btn-sm" onclick="toggleAllSeasons(this)">' + (allExpanded ? 'Collapse All' : 'Expand All') + '</button></div>';

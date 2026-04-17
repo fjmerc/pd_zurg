@@ -17,6 +17,8 @@ def symlink_env(tmp_dir, monkeypatch):
 
     for d in (completed, local_tv, local_movies, mount, target_base):
         os.makedirs(d, exist_ok=True)
+    # Mount must have at least one entry so the health check passes
+    os.makedirs(os.path.join(mount, 'movies'), exist_ok=True)
 
     monkeypatch.setenv('BLACKHOLE_COMPLETED_DIR', completed)
     monkeypatch.setenv('BLACKHOLE_LOCAL_LIBRARY_TV', local_tv)
@@ -161,8 +163,8 @@ class TestVerifySymlinks:
         # Parent dir should be cleaned up too (no media files left)
         assert not os.path.isdir(movie_dir)
 
-    def test_mass_deletion_blocked_by_threshold(self, symlink_env):
-        """When >50 and >50% of symlinks appear broken, refuse to delete."""
+    def test_mass_broken_symlinks_deleted_when_mount_healthy(self, symlink_env):
+        """When mount is healthy, all broken symlinks are removed regardless of count."""
         from utils.scheduled_tasks import verify_symlinks
         # Create 60 broken symlinks (all pointing to nonexistent mount paths)
         for i in range(60):
@@ -172,13 +174,12 @@ class TestVerifySymlinks:
             )
 
         result = verify_symlinks()
-        assert result['status'] == 'error'
-        assert 'blocked' in result['message'].lower()
-        assert result['items'] == 0
-        # All symlinks should still exist (not deleted)
+        assert result['status'] == 'success'
+        assert result['items'] == 60
+        # All symlinks should be removed
         remaining = [f for f in os.listdir(symlink_env['completed']) if
                      os.path.islink(os.path.join(symlink_env['completed'], f))]
-        assert len(remaining) == 60
+        assert len(remaining) == 0
 
 
 class TestSymlinkRepair:

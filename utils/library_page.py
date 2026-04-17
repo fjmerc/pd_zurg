@@ -278,8 +278,8 @@ __NAV_HTML__
 .detail-cert{padding:1px 6px;border:1px solid var(--border);border-radius:4px;font-size:.78em;color:var(--text2)}
 .detail-genres{font-size:.82em;color:var(--text2);margin-top:4px}
 .detail-rating{display:inline-flex;align-items:center;gap:6px;margin-top:6px}
-.detail-rating .rating-badge{background:#f5c51833;color:#d4a017;border:1px solid #d4a01766;padding:2px 8px;border-radius:4px;font-weight:700;font-size:.8em}
-[data-theme="light"] .detail-rating .rating-badge{background:#9a67001a;color:#9a6700;border-color:#9a670040}
+.detail-rating .rating-badge{background:#f5c51826;color:#d4a017;border:1px solid #d4a01740;padding:1px 6px;border-radius:3px;font-weight:600;font-size:.7em;letter-spacing:.3px}
+[data-theme="light"] .detail-rating .rating-badge{background:#9a670014;color:#9a6700;border-color:#9a670033}
 .detail-directors{font-size:.82em;color:var(--text2);margin-top:4px}
 
 /* Media info block */
@@ -291,7 +291,8 @@ __NAV_HTML__
 /* Cast & Crew */
 .cast-section{margin-top:18px}
 .cast-section h3{font-size:1em;font-weight:600;margin-bottom:8px;color:var(--text)}
-.cast-scroll{display:flex;gap:12px;overflow-x:auto;padding-bottom:4px;scrollbar-width:thin}
+.cast-scroll{display:flex;gap:12px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none;-ms-overflow-style:none}
+.cast-scroll::-webkit-scrollbar{display:none}
 .cast-card{flex:0 0 92px;text-align:center}
 .cast-photo{width:92px;height:92px;border-radius:50%;background:var(--border);background-size:cover;background-position:center;margin-bottom:4px}
 .cast-name{font-size:.78em;color:var(--text);font-weight:600;line-height:1.2;max-width:92px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}

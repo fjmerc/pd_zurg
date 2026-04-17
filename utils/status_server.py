@@ -1070,42 +1070,15 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
         # normal 401 middleware so the frontend can distinguish "you hit an
         # auth wall" from "everything is fine" without a basic-auth challenge.
         if self.path == '/api/auth/check':
-            creds = self.auth_credentials  # snapshot to avoid SIGHUP reload race
-            if creds:
-                auth_header = self.headers.get('Authorization', '')
-                ok = False
-                if auth_header.startswith('Basic '):
-                    raw = auth_header[6:]
-                    if len(raw) <= 256:
-                        try:
-                            decoded = base64.b64decode(raw, validate=True).decode('utf-8')
-                            if hmac.compare_digest(decoded.encode(), creds.encode()):
-                                ok = True
-                        except (ValueError, UnicodeDecodeError):
-                            pass
-                if not ok:
-                    self._send_json_response(403, json.dumps({'error': 'auth required'}))
-                    return
+            if not self._is_authenticated():
+                self._send_json_response(403, json.dumps({'error': 'auth required'}))
+                return
             self._send_json_response(200, json.dumps({'ok': True}))
             return
 
-        if self.auth_credentials:
-            auth_header = self.headers.get('Authorization', '')
-            if not auth_header.startswith('Basic '):
-                self._send_auth_required()
-                return
-            raw = auth_header[6:]
-            if len(raw) > 256:
-                self._send_auth_required()
-                return
-            try:
-                decoded = base64.b64decode(raw, validate=True).decode('utf-8')
-                if not hmac.compare_digest(decoded.encode(), self.auth_credentials.encode()):
-                    self._send_auth_required()
-                    return
-            except (ValueError, UnicodeDecodeError):
-                self._send_auth_required()
-                return
+        if not self._is_authenticated():
+            self._send_auth_required()
+            return
 
         if self.path == '/api/status':
             data = json.dumps(self.status_data_ref.to_dict())
@@ -2457,27 +2430,31 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _check_auth(self):
-        """Verify basic auth credentials. Returns True if valid, sends 401 if not."""
-        if not self.auth_credentials:
+    def _is_authenticated(self):
+        """Return True if the request passes Basic auth or auth is not
+        configured. Pure check — sends no response. Callers decide how to
+        handle failure (401 for challenges, 403 for the auth probe)."""
+        creds = self.auth_credentials  # snapshot to survive SIGHUP reload
+        if not creds:
             return True
         auth_header = self.headers.get('Authorization', '')
         if not auth_header.startswith('Basic '):
-            self._send_auth_required()
             return False
         raw = auth_header[6:]
         if len(raw) > 256:
-            self._send_auth_required()
             return False
         try:
             decoded = base64.b64decode(raw, validate=True).decode('utf-8')
-            if not hmac.compare_digest(decoded.encode(), self.auth_credentials.encode()):
-                self._send_auth_required()
-                return False
         except (ValueError, UnicodeDecodeError):
-            self._send_auth_required()
             return False
-        return True
+        return hmac.compare_digest(decoded.encode(), creds.encode())
+
+    def _check_auth(self):
+        """Verify basic auth credentials. Returns True if valid, sends 401 if not."""
+        if self._is_authenticated():
+            return True
+        self._send_auth_required()
+        return False
 
     def log_message(self, format, *args):
         pass  # Suppress default request logging

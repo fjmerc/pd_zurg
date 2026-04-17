@@ -17,8 +17,8 @@ def symlink_env(tmp_dir, monkeypatch):
 
     for d in (completed, local_tv, local_movies, mount, target_base):
         os.makedirs(d, exist_ok=True)
-    # Mount must have at least one entry so the health check passes
-    os.makedirs(os.path.join(mount, 'movies'), exist_ok=True)
+    # Mount must have a non-empty category dir so the health check passes
+    os.makedirs(os.path.join(mount, 'movies', '_placeholder'), exist_ok=True)
 
     monkeypatch.setenv('BLACKHOLE_COMPLETED_DIR', completed)
     monkeypatch.setenv('BLACKHOLE_LOCAL_LIBRARY_TV', local_tv)
@@ -180,6 +180,50 @@ class TestVerifySymlinks:
         remaining = [f for f in os.listdir(symlink_env['completed']) if
                      os.path.islink(os.path.join(symlink_env['completed'], f))]
         assert len(remaining) == 0
+
+    def test_aborts_when_mount_does_not_exist(self, symlink_env, monkeypatch, tmp_dir):
+        """Mount directory missing: abort without deleting any symlinks."""
+        from utils.scheduled_tasks import verify_symlinks
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', os.path.join(tmp_dir, 'nonexistent_mount'))
+        link = _make_symlink(
+            symlink_env['completed'], 'ep.mkv',
+            os.path.join(tmp_dir, 'nonexistent_mount', 'shows', 'gone', 'ep.mkv'),
+        )
+        result = verify_symlinks()
+        assert result['status'] == 'error'
+        assert os.path.islink(link)  # must NOT be deleted
+
+    def test_aborts_when_mount_empty(self, symlink_env, monkeypatch, tmp_dir):
+        """Empty mount (Zurg still starting): abort without deleting symlinks."""
+        from utils.scheduled_tasks import verify_symlinks
+        empty_mount = os.path.join(tmp_dir, 'empty_mount')
+        os.makedirs(empty_mount)
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', empty_mount)
+        link = _make_symlink(
+            symlink_env['completed'], 'ep.mkv',
+            os.path.join(empty_mount, 'shows', 'gone', 'ep.mkv'),
+        )
+        result = verify_symlinks()
+        assert result['status'] == 'error'
+        assert 'empty' in result['message'].lower()
+        assert os.path.islink(link)  # must NOT be deleted
+
+    def test_aborts_when_mount_categories_empty(self, symlink_env, monkeypatch, tmp_dir):
+        """Mount has category stubs but no content: abort without deleting."""
+        from utils.scheduled_tasks import verify_symlinks
+        stub_mount = os.path.join(tmp_dir, 'stub_mount')
+        # Create empty category dirs (like Zurg with no torrents)
+        os.makedirs(os.path.join(stub_mount, 'movies'))
+        os.makedirs(os.path.join(stub_mount, 'shows'))
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', stub_mount)
+        link = _make_symlink(
+            symlink_env['completed'], 'ep.mkv',
+            os.path.join(stub_mount, 'shows', 'gone', 'ep.mkv'),
+        )
+        result = verify_symlinks()
+        assert result['status'] == 'error'
+        assert 'empty' in result['message'].lower()
+        assert os.path.islink(link)  # must NOT be deleted
 
 
 class TestSymlinkRepair:

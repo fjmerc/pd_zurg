@@ -329,18 +329,34 @@ def verify_symlinks():
     if not scan_dirs:
         return {'status': 'success', 'message': 'No directories to check'}
 
-    # Guard: verify the rclone mount is responsive and populated.
-    # A stalled FUSE mount makes os.path.exists return False for everything,
-    # which would cause mass deletion of all symlinks.  An empty listing
-    # indicates Zurg is still starting or the mount is stale.
-    if os.path.isdir(rclone_mount):
-        try:
-            if not os.listdir(rclone_mount):
-                logger.warning(f"[scheduler] Mount {rclone_mount} is empty — aborting symlink verify")
-                return {'status': 'error', 'message': 'Mount empty, aborted'}
-        except OSError as e:
-            logger.error(f"[scheduler] Mount {rclone_mount} unresponsive — aborting symlink verify to prevent mass deletion: {e}")
-            return {'status': 'error', 'message': f'Mount unresponsive, aborted: {e}'}
+    # Guard: verify the rclone mount exists, is responsive, and has content.
+    # A missing or stalled FUSE mount makes os.path.exists return False for
+    # everything, which would cause mass deletion of all symlinks.  Zurg
+    # category stubs (movies/, shows/) can exist even when all content is
+    # gone, so check that at least one known category dir is non-empty.
+    # The entire guard is inside try/except OSError because os.path.isdir
+    # itself can raise on a stalled FUSE mount (ENOTCONN, EIO).
+    from utils.blackhole import MOUNT_CATEGORIES
+    try:
+        if not os.path.isdir(rclone_mount):
+            logger.warning(f"[scheduler] Mount {rclone_mount} does not exist — aborting symlink verify")
+            return {'status': 'error', 'message': 'Mount not found, aborted'}
+        if not os.listdir(rclone_mount):
+            logger.warning(f"[scheduler] Mount {rclone_mount} is empty — aborting symlink verify")
+            return {'status': 'error', 'message': 'Mount empty, aborted'}
+        # Deeper check: at least one known Zurg category dir has content.
+        # Empty category stubs persist even when debrid has no torrents.
+        has_content = any(
+            os.path.isdir(os.path.join(rclone_mount, cat))
+            and os.listdir(os.path.join(rclone_mount, cat))
+            for cat in MOUNT_CATEGORIES
+        )
+        if not has_content:
+            logger.warning(f"[scheduler] Mount categories at {rclone_mount} are empty — aborting symlink verify")
+            return {'status': 'error', 'message': 'Mount categories empty, aborted'}
+    except OSError as e:
+        logger.error(f"[scheduler] Mount {rclone_mount} unresponsive — aborting symlink verify to prevent mass deletion: {e}")
+        return {'status': 'error', 'message': f'Mount unresponsive, aborted: {e}'}
 
     # Phase 1: Identify broken symlinks (don't delete yet)
     to_delete = []

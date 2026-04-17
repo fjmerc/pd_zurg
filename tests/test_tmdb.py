@@ -408,6 +408,338 @@ class TestMovieMetadata:
         _mock_api(monkeypatch, {})
         assert tmdb.get_movie_metadata(9999) is None
 
+    def test_get_movie_metadata_surfaces_new_fields(self, monkeypatch):
+        _mock_api(monkeypatch, {
+            '/movie/500': {
+                'title': 'Test',
+                'overview': '',
+                'poster_path': '/t.jpg',
+                'runtime': 120,
+                'release_date': '2020-01-01',
+                'genres': [{'id': 1, 'name': 'Action'}, {'id': 2, 'name': 'Drama'}],
+                'vote_average': 7.4,
+                'credits': {
+                    'cast': [
+                        {'name': 'A', 'character': 'Hero', 'profile_path': '/a.jpg', 'order': 0},
+                        {'name': 'B', 'character': 'Sidekick', 'profile_path': None, 'order': 1},
+                    ],
+                    'crew': [
+                        {'name': 'Dir One', 'job': 'Director'},
+                        {'name': 'Prod', 'job': 'Producer'},
+                        {'name': 'Dir Two', 'job': 'Director'},
+                    ],
+                },
+                'release_dates': {
+                    'results': [
+                        {'iso_3166_1': 'GB', 'release_dates': [{'certification': '15'}]},
+                        {'iso_3166_1': 'US', 'release_dates': [
+                            {'certification': ''},
+                            {'certification': 'R'},
+                        ]},
+                    ],
+                },
+            }
+        })
+        result = tmdb.get_movie_metadata(500)
+        assert result['genres'] == ['Action', 'Drama']
+        assert result['vote_average'] == 7.4
+        assert result['certification'] == 'R'
+        assert result['directors'] == ['Dir One', 'Dir Two']
+        assert len(result['cast']) == 2
+        assert result['cast'][0]['name'] == 'A'
+        assert result['cast'][0]['character'] == 'Hero'
+        # Profile path stored as empty string when None
+        assert result['cast'][1]['profile_path'] == ''
+
+    def test_get_show_metadata_surfaces_new_fields(self, monkeypatch):
+        _mock_api(monkeypatch, {
+            '/tv/99': {
+                'name': 'Show',
+                'overview': '',
+                'poster_path': '/s.jpg',
+                'status': 'Ended',
+                'seasons': [],
+                'genres': [{'id': 1, 'name': 'Sci-Fi'}],
+                'vote_average': 8.5,
+                'episode_run_time': [42, 45, 48],
+                'created_by': [
+                    {'id': 1, 'name': 'Creator A'},
+                    {'id': 2, 'name': 'Creator B'},
+                ],
+                'credits': {
+                    'cast': [{'name': 'Star', 'character': 'Lead', 'profile_path': '/x.jpg', 'order': 0}],
+                    'crew': [],
+                },
+                'content_ratings': {
+                    'results': [
+                        {'iso_3166_1': 'US', 'rating': 'TV-MA'},
+                        {'iso_3166_1': 'DE', 'rating': '16'},
+                    ],
+                },
+            }
+        })
+        result = tmdb.get_show_metadata(99)
+        assert result['genres'] == ['Sci-Fi']
+        assert result['vote_average'] == 8.5
+        assert result['content_rating'] == 'TV-MA'
+        assert result['episode_run_time'] == 45  # average of [42,45,48]
+        assert result['creators'] == ['Creator A', 'Creator B']
+        assert result['cast'] == [{
+            'name': 'Star', 'character': 'Lead',
+            'profile_path': '/x.jpg', 'order': 0,
+        }]
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 helpers: Plex-style detail fields
+# ---------------------------------------------------------------------------
+
+class TestPlexDetailHelpers:
+
+    def test_pick_us_certification_finds_first_non_empty(self):
+        payload = {'results': [
+            {'iso_3166_1': 'US', 'release_dates': [
+                {'certification': ''},
+                {'certification': 'PG-13'},
+            ]},
+        ]}
+        assert tmdb._pick_us_certification(payload) == 'PG-13'
+
+    def test_pick_us_certification_skips_other_countries(self):
+        payload = {'results': [
+            {'iso_3166_1': 'GB', 'release_dates': [{'certification': '15'}]},
+            {'iso_3166_1': 'DE', 'release_dates': [{'certification': '12'}]},
+        ]}
+        assert tmdb._pick_us_certification(payload) == ''
+
+    def test_pick_us_certification_empty_input(self):
+        assert tmdb._pick_us_certification({}) == ''
+        assert tmdb._pick_us_certification(None) == ''
+        assert tmdb._pick_us_certification({'results': []}) == ''
+
+    def test_pick_us_content_rating(self):
+        payload = {'results': [
+            {'iso_3166_1': 'DE', 'rating': '16'},
+            {'iso_3166_1': 'US', 'rating': 'TV-MA'},
+        ]}
+        assert tmdb._pick_us_content_rating(payload) == 'TV-MA'
+
+    def test_pick_us_content_rating_missing(self):
+        assert tmdb._pick_us_content_rating({'results': [
+            {'iso_3166_1': 'GB', 'rating': '15'},
+        ]}) == ''
+
+    def test_top_cast_sorted_by_order_and_truncated(self):
+        credits = {'cast': [
+            {'name': f'Actor {i}', 'character': f'Role {i}',
+             'profile_path': f'/p{i}.jpg', 'order': i}
+            for i in range(25)
+        ]}
+        result = tmdb._top_cast(credits, limit=5)
+        assert [c['name'] for c in result] == [f'Actor {i}' for i in range(5)]
+
+    def test_top_cast_respects_order_not_input_position(self):
+        credits = {'cast': [
+            {'name': 'Fifth', 'character': '', 'profile_path': '', 'order': 4},
+            {'name': 'First', 'character': '', 'profile_path': '', 'order': 0},
+            {'name': 'Third', 'character': '', 'profile_path': '', 'order': 2},
+        ]}
+        result = tmdb._top_cast(credits, limit=2)
+        assert [c['name'] for c in result] == ['First', 'Third']
+
+    def test_top_cast_skips_entries_without_name(self):
+        credits = {'cast': [
+            {'name': '', 'character': 'X', 'profile_path': '', 'order': 0},
+            {'name': 'Valid', 'character': 'Y', 'profile_path': '', 'order': 1},
+        ]}
+        result = tmdb._top_cast(credits)
+        assert len(result) == 1
+        assert result[0]['name'] == 'Valid'
+
+    def test_top_cast_empty(self):
+        assert tmdb._top_cast(None) == []
+        assert tmdb._top_cast({}) == []
+        assert tmdb._top_cast({'cast': []}) == []
+
+    def test_directors_from_credits_deduplicated(self):
+        credits = {'crew': [
+            {'name': 'Someone', 'job': 'Producer'},
+            {'name': 'Director A', 'job': 'Director'},
+            {'name': 'Director A', 'job': 'Director'},
+            {'name': 'Director B', 'job': 'Director'},
+            {'name': 'Editor', 'job': 'Editor'},
+        ]}
+        assert tmdb._directors_from_credits(credits) == ['Director A', 'Director B']
+
+    def test_directors_from_credits_none(self):
+        assert tmdb._directors_from_credits(None) == []
+        assert tmdb._directors_from_credits({'crew': []}) == []
+
+    def test_creator_names_deduplicated(self):
+        created_by = [
+            {'id': 1, 'name': 'Creator A'},
+            {'id': 2, 'name': 'Creator A'},
+            {'id': 3, 'name': 'Creator B'},
+        ]
+        assert tmdb._creator_names(created_by) == ['Creator A', 'Creator B']
+
+    def test_creator_names_empty(self):
+        assert tmdb._creator_names(None) == []
+        assert tmdb._creator_names([]) == []
+
+    def test_avg_runtime(self):
+        assert tmdb._avg_runtime([42, 45, 48]) == 45
+        assert tmdb._avg_runtime([30]) == 30
+        assert tmdb._avg_runtime([]) == 0
+        assert tmdb._avg_runtime(None) == 0
+        # Rounded to nearest int
+        assert tmdb._avg_runtime([30, 31]) in (30, 31)
+
+    def test_genre_names_extracts_name_field(self):
+        assert tmdb._genre_names([
+            {'id': 1, 'name': 'Action'},
+            {'id': 2, 'name': 'Thriller'},
+        ]) == ['Action', 'Thriller']
+
+    def test_genre_names_empty(self):
+        assert tmdb._genre_names(None) == []
+        assert tmdb._genre_names([]) == []
+        assert tmdb._genre_names([{'id': 1}]) == []
+
+    def test_cast_with_urls_expands_profile_path(self):
+        entries = [{'name': 'A', 'character': 'X', 'profile_path': '/a.jpg', 'order': 0}]
+        result = tmdb._cast_with_urls(entries)
+        assert result[0]['profile_url'] == 'https://image.tmdb.org/t/p/w185/a.jpg'
+        assert 'profile_path' not in result[0]
+
+    def test_cast_with_urls_empty_profile_stays_empty(self):
+        entries = [{'name': 'A', 'character': '', 'profile_path': '', 'order': 0}]
+        result = tmdb._cast_with_urls(entries)
+        assert result[0]['profile_url'] == ''
+
+    def test_poster_url_rejects_css_breakout_chars(self):
+        """Defense-in-depth: paths containing quote/backslash/paren/whitespace
+        must return '' so they can't break out of a CSS url('...') context."""
+        for bad in ("'", '"', '\\', '\n', '\r', ' ', '(', ')'):
+            assert tmdb._poster_url('/a' + bad + 'b.jpg') == ''
+        # Normal paths still work
+        assert tmdb._poster_url('/abc123.jpg').endswith('/abc123.jpg')
+
+    def test_rating_country_env_var_respected(self, monkeypatch):
+        """Setting TMDB_RATING_COUNTRY picks ratings from that country."""
+        monkeypatch.setattr(tmdb, '_RATING_COUNTRY', 'GB')
+        cert_payload = {'results': [
+            {'iso_3166_1': 'US', 'release_dates': [{'certification': 'R'}]},
+            {'iso_3166_1': 'GB', 'release_dates': [{'certification': '15'}]},
+        ]}
+        assert tmdb._pick_us_certification(cert_payload) == '15'
+
+        rating_payload = {'results': [
+            {'iso_3166_1': 'US', 'rating': 'TV-MA'},
+            {'iso_3166_1': 'GB', 'rating': '18'},
+        ]}
+        assert tmdb._pick_us_content_rating(rating_payload) == '18'
+
+
+class TestSchemaMigration:
+    """v2 schema migration: pre-v2 entries refetch transparently."""
+
+    def test_show_info_refetches_when_schema_is_legacy(self, monkeypatch):
+        """A TTL-fresh but pre-v2 cache entry triggers an API refetch."""
+        from datetime import datetime, timezone
+        # Legacy entry: TTL-fresh but no 'cast' field
+        cache = {
+            'shows': {
+                'old show (2020)': {
+                    'tmdb_id': 100, 'title': 'Old Show', 'poster_path': '/old.jpg',
+                    'status': 'Ended', 'seasons': [],
+                    'cached_at': datetime.now(timezone.utc).isoformat(),
+                }
+            }
+        }
+        tmdb._save_cache(cache)
+
+        api_calls = []
+
+        def _fake_get(path, params=None):
+            api_calls.append(path)
+            if path.startswith('/search/tv'):
+                return {'results': [{
+                    'id': 100, 'name': 'Old Show', 'overview': '',
+                    'poster_path': '/old.jpg', 'first_air_date': '2020-01-01',
+                }]}
+            if path.startswith('/tv/100'):
+                return {
+                    'name': 'Old Show', 'overview': '', 'poster_path': '/old.jpg',
+                    'status': 'Ended', 'seasons': [],
+                    'genres': [{'id': 1, 'name': 'Drama'}],
+                    'vote_average': 7.0,
+                    'credits': {'cast': [], 'crew': []},
+                }
+            return None
+        monkeypatch.setattr(tmdb, '_api_get', _fake_get)
+
+        result = tmdb.get_show_info('Old Show', 2020)
+        assert result is not None
+        # v2 fields are now present in the response
+        assert result['genres'] == ['Drama']
+        assert result['vote_average'] == 7.0
+        # Cache was refetched (at least one /tv or /search call was made)
+        assert any('/tv/' in p or '/search/' in p for p in api_calls)
+        # Cache entry now has the v2 sentinel
+        refreshed = tmdb._load_cache()['shows']['old show (2020)']
+        assert 'cast' in refreshed
+
+    def test_bulk_lookup_still_uses_legacy_entries(self, monkeypatch):
+        """`get_cached_posters` must not regress when the cache has pre-v2 entries.
+        The bulk lookup doesn't need the new fields, so legacy entries stay usable
+        until the background refetch lands.
+        """
+        from datetime import datetime, timezone
+        cache = {
+            'shows': {
+                'legacy show': {
+                    'tmdb_id': 1, 'title': 'Legacy Show', 'poster_path': '/l.jpg',
+                    'status': 'Ended',
+                    'seasons': [{'number': 1, 'total_episodes': 1,
+                                 'episodes': [{'number': 1, 'title': 'Pilot',
+                                               'air_date': '2020-01-01'}]}],
+                    'cached_at': datetime.now(timezone.utc).isoformat(),
+                    # NOTE: no 'cast' key — pre-v2 entry
+                }
+            }
+        }
+        tmdb._save_cache(cache)
+        items = [{'title': 'Legacy Show', 'year': None, 'type': 'show'}]
+        result = tmdb.get_cached_posters(items)
+        # Legacy entry is still served — no UI regression during migration
+        assert 'legacy show' in result
+        assert result['legacy show']['total_episodes'] == 1
+
+    def test_find_show_by_season_uses_legacy_entries(self, monkeypatch):
+        """Season-aware show lookup works on pre-v2 entries — critical for
+        symlink/arr integration during the migration window."""
+        from datetime import datetime, timezone
+        eps = [{'number': i, 'title': f'E{i}', 'air_date': '2020-01-01'} for i in range(1, 6)]
+        cache = {
+            'shows': {
+                'legacy season show': {
+                    'tmdb_id': 42, 'title': 'Legacy Season Show',
+                    'poster_path': '/ls.jpg', 'status': 'Ended',
+                    'seasons': [{'number': 3, 'total_episodes': 5, 'episodes': eps}],
+                    'cached_at': datetime.now(timezone.utc).isoformat(),
+                    # NOTE: no 'cast' key
+                }
+            }
+        }
+        tmdb._save_cache(cache)
+        info = tmdb.find_show_by_season('legacy season show', 3)
+        assert info is not None
+        assert info['tmdb_id'] == 42
+
+        tid = tmdb.find_show_tmdb_id_by_season('legacy season show', 3)
+        assert tid == 42
+
 
 # ---------------------------------------------------------------------------
 # Caching
@@ -509,6 +841,59 @@ class TestFormatting:
         result = tmdb._format_movie(entry)
         assert result['runtime'] == 90
 
+    def test_format_show_surfaces_plex_fields(self):
+        entry = {
+            'tmdb_id': 1, 'title': 'T', 'overview': '', 'poster_path': '/p.jpg',
+            'status': 'Ended', 'seasons': [],
+            'genres': ['Drama'], 'vote_average': 8.1, 'content_rating': 'TV-14',
+            'episode_run_time': 42, 'creators': ['Vince Gilligan'],
+            'cast': [{'name': 'X', 'character': 'Y', 'profile_path': '/x.jpg', 'order': 0}],
+        }
+        result = tmdb._format_show(entry)
+        assert result['genres'] == ['Drama']
+        assert result['vote_average'] == 8.1
+        assert result['content_rating'] == 'TV-14'
+        assert result['episode_run_time'] == 42
+        assert result['creators'] == ['Vince Gilligan']
+        assert result['cast'][0]['profile_url'] == 'https://image.tmdb.org/t/p/w185/x.jpg'
+
+    def test_format_show_missing_new_fields_defaults(self):
+        """Legacy cache entries (pre-v2) may be read during migration window."""
+        entry = {'tmdb_id': 1, 'title': 'T', 'overview': '', 'poster_path': '',
+                 'status': '', 'seasons': []}
+        result = tmdb._format_show(entry)
+        assert result['genres'] == []
+        assert result['vote_average'] == 0
+        assert result['content_rating'] == ''
+        assert result['episode_run_time'] == 0
+        assert result['creators'] == []
+        assert result['cast'] == []
+
+    def test_format_movie_surfaces_plex_fields(self):
+        entry = {
+            'tmdb_id': 1, 'title': 'M', 'overview': '', 'poster_path': '',
+            'runtime': 148, 'release_date': '2010-07-16',
+            'genres': ['Sci-Fi', 'Action'], 'vote_average': 8.4,
+            'certification': 'PG-13', 'directors': ['Christopher Nolan'],
+            'cast': [{'name': 'Leo', 'character': 'Cobb', 'profile_path': '/l.jpg', 'order': 0}],
+        }
+        result = tmdb._format_movie(entry)
+        assert result['genres'] == ['Sci-Fi', 'Action']
+        assert result['vote_average'] == 8.4
+        assert result['certification'] == 'PG-13'
+        assert result['directors'] == ['Christopher Nolan']
+        assert result['cast'][0]['profile_url'] == 'https://image.tmdb.org/t/p/w185/l.jpg'
+
+    def test_format_movie_missing_new_fields_defaults(self):
+        entry = {'tmdb_id': 1, 'title': 'M', 'overview': '', 'poster_path': '',
+                 'runtime': 0, 'release_date': ''}
+        result = tmdb._format_movie(entry)
+        assert result['genres'] == []
+        assert result['vote_average'] == 0
+        assert result['certification'] == ''
+        assert result['directors'] == []
+        assert result['cast'] == []
+
 
 # ---------------------------------------------------------------------------
 # Cache freshness
@@ -518,18 +903,26 @@ class TestCacheFreshness:
 
     def test_fresh_entry(self):
         from datetime import datetime, timezone
-        entry = {'cached_at': datetime.now(timezone.utc).isoformat()}
+        entry = {'cached_at': datetime.now(timezone.utc).isoformat(), 'cast': []}
         assert tmdb._is_fresh(entry) is True
 
     def test_stale_entry(self):
-        entry = {'cached_at': '2020-01-01T00:00:00+00:00'}
+        entry = {'cached_at': '2020-01-01T00:00:00+00:00', 'cast': []}
         assert tmdb._is_fresh(entry) is False
 
     def test_missing_cached_at(self):
         assert tmdb._is_fresh({}) is False
 
     def test_invalid_cached_at(self):
-        assert tmdb._is_fresh({'cached_at': 'not-a-date'}) is False
+        assert tmdb._is_fresh({'cached_at': 'not-a-date', 'cast': []}) is False
+
+    def test_has_current_schema_detects_v2(self):
+        """`cast` is the sentinel key for the v2 schema (Plex-style fields)."""
+        from datetime import datetime, timezone
+        v2 = {'cached_at': datetime.now(timezone.utc).isoformat(), 'cast': []}
+        v1 = {'cached_at': datetime.now(timezone.utc).isoformat()}
+        assert tmdb._has_current_schema(v2) is True
+        assert tmdb._has_current_schema(v1) is False
 
 
 # ---------------------------------------------------------------------------
@@ -552,6 +945,7 @@ class TestCachedPosters:
                     'title': 'Breaking Bad',
                     'poster_path': '/bb.jpg',
                     'status': 'Ended',
+                    'cast': [],
                     'seasons': [
                         {'number': 1, 'total_episodes': 7, 'episodes': s1_eps},
                         {'number': 2, 'total_episodes': 5, 'episodes': s2_eps},
@@ -580,6 +974,7 @@ class TestCachedPosters:
                     'poster_path': '/inc.jpg',
                     'runtime': 148,
                     'release_date': '2010-07-16',
+                    'cast': [],
                     'cached_at': datetime.now(timezone.utc).isoformat(),
                 }
             }
@@ -674,7 +1069,7 @@ class TestBackgroundPopulate:
             'shows': {
                 'cached show': {
                     'tmdb_id': 1, 'title': 'Cached Show', 'poster_path': '/c.jpg',
-                    'status': 'Ended', 'seasons': [],
+                    'status': 'Ended', 'seasons': [], 'cast': [],
                     'cached_at': datetime.now(timezone.utc).isoformat(),
                 }
             }

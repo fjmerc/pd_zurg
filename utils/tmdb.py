@@ -28,6 +28,14 @@ _CACHE_TTL = 7 * 86400  # 7 days in seconds
 _TIMEOUT = 8
 _cache_lock = threading.Lock()
 
+# Country used for MPAA/content-rating lookup. US by default; override with
+# TMDB_RATING_COUNTRY env var for regions with different certification systems.
+_RATING_COUNTRY = (os.environ.get('TMDB_RATING_COUNTRY') or 'US').strip().upper() or 'US'
+
+# Cap cast list to prevent cache bloat. Only name/character/profile_path/order
+# are persisted — no biographies.
+_CAST_LIMIT = 15
+
 
 # ---------------------------------------------------------------------------
 # Low-level API
@@ -157,17 +165,141 @@ def search_movie(title, year=None, fallback_no_year=False):
 # Metadata
 # ---------------------------------------------------------------------------
 
+def _genre_names(genres):
+    """Extract genre name strings from a TMDB genres[] list."""
+    if not isinstance(genres, list):
+        return []
+    names = []
+    for g in genres:
+        name = (g or {}).get('name')
+        if name:
+            names.append(name)
+    return names
+
+
+def _pick_us_certification(release_dates):
+    """Return the MPAA certification for the configured country, or ''.
+
+    Iterates TMDB's movie `release_dates.results` looking for the configured
+    country entry and returns the first non-empty `certification` string from
+    its `release_dates` list.
+    """
+    results = (release_dates or {}).get('results') or []
+    for row in results:
+        if (row or {}).get('iso_3166_1') != _RATING_COUNTRY:
+            continue
+        for rd in row.get('release_dates') or []:
+            cert = (rd or {}).get('certification')
+            if cert:
+                return cert
+    return ''
+
+
+def _pick_us_content_rating(content_ratings):
+    """Return the TV content rating for the configured country, or ''."""
+    results = (content_ratings or {}).get('results') or []
+    for row in results:
+        if (row or {}).get('iso_3166_1') != _RATING_COUNTRY:
+            continue
+        rating = (row or {}).get('rating')
+        if rating:
+            return rating
+    return ''
+
+
+def _top_cast(credits, limit=_CAST_LIMIT):
+    """Return the top N cast entries, sorted by TMDB order.
+
+    Each entry has `name`, `character`, `profile_path`, `order`. Missing
+    profile images are kept as empty strings (the frontend falls back to a
+    placeholder circle).
+    """
+    cast_list = (credits or {}).get('cast') or []
+    cleaned = []
+    for c in cast_list:
+        if not isinstance(c, dict):
+            continue
+        name = c.get('name') or ''
+        if not name:
+            continue
+        cleaned.append({
+            'name': name,
+            'character': c.get('character') or '',
+            'profile_path': c.get('profile_path') or '',
+            'order': c.get('order', 9999),
+        })
+    cleaned.sort(key=lambda e: e.get('order', 9999))
+    return cleaned[:limit]
+
+
+def _directors_from_credits(credits):
+    """Return director names from a movie credits.crew[] list."""
+    crew = (credits or {}).get('crew') or []
+    names = []
+    seen = set()
+    for c in crew:
+        if not isinstance(c, dict):
+            continue
+        if c.get('job') != 'Director':
+            continue
+        name = c.get('name') or ''
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def _creator_names(created_by):
+    """Return creator names from a TV show's `created_by[]` list."""
+    names = []
+    seen = set()
+    for c in created_by or []:
+        if not isinstance(c, dict):
+            continue
+        name = c.get('name') or ''
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def _avg_runtime(episode_run_time):
+    """Return average episode runtime as an int, or 0."""
+    vals = [int(v) for v in (episode_run_time or []) if isinstance(v, (int, float))]
+    if not vals:
+        return 0
+    return int(round(sum(vals) / len(vals)))
+
+
+def _cast_with_urls(cast_entries):
+    """Expand stored cast entries with absolute profile URLs for API output."""
+    out = []
+    for c in cast_entries or []:
+        out.append({
+            'name': c.get('name', ''),
+            'character': c.get('character', ''),
+            'profile_url': _poster_url(c.get('profile_path', ''), size='w185'),
+            'order': c.get('order', 9999),
+        })
+    return out
+
+
 def get_show_metadata(tmdb_id):
     """Fetch full show details including all season/episode data.
     Skips Season 0 (specials).
     """
-    show = _api_get(f'/tv/{tmdb_id}', params={'append_to_response': 'external_ids'})
+    show = _api_get(
+        f'/tv/{tmdb_id}',
+        params={'append_to_response': 'external_ids,credits,content_ratings'},
+    )
     if not show:
         return None
 
     # IMDb ID from external_ids (appended to response)
     ext = show.get('external_ids', {})
     imdb_id = ext.get('imdb_id') or ''
+
+    credits = show.get('credits') or {}
 
     result = {
         'tmdb_id': tmdb_id,
@@ -176,6 +308,12 @@ def get_show_metadata(tmdb_id):
         'overview': show.get('overview', ''),
         'poster_path': show.get('poster_path') or '',
         'status': show.get('status', ''),
+        'genres': _genre_names(show.get('genres')),
+        'vote_average': show.get('vote_average') or 0,
+        'content_rating': _pick_us_content_rating(show.get('content_ratings')),
+        'episode_run_time': _avg_runtime(show.get('episode_run_time')),
+        'creators': _creator_names(show.get('created_by')),
+        'cast': _top_cast(credits),
         'seasons': [],
     }
 
@@ -207,9 +345,13 @@ def get_show_metadata(tmdb_id):
 
 def get_movie_metadata(tmdb_id):
     """Fetch movie details from TMDB."""
-    data = _api_get(f'/movie/{tmdb_id}')
+    data = _api_get(
+        f'/movie/{tmdb_id}',
+        params={'append_to_response': 'credits,release_dates'},
+    )
     if not data:
         return None
+    credits = data.get('credits') or {}
     return {
         'tmdb_id': tmdb_id,
         'imdb_id': data.get('imdb_id') or '',
@@ -218,6 +360,11 @@ def get_movie_metadata(tmdb_id):
         'poster_path': data.get('poster_path') or '',
         'runtime': data.get('runtime') or 0,
         'release_date': data.get('release_date', ''),
+        'genres': _genre_names(data.get('genres')),
+        'vote_average': data.get('vote_average') or 0,
+        'certification': _pick_us_certification(data.get('release_dates')),
+        'directors': _directors_from_credits(credits),
+        'cast': _top_cast(credits),
     }
 
 
@@ -241,6 +388,14 @@ def _save_cache(cache):
 
 
 def _is_fresh(entry):
+    """Return True when the entry is within its TTL.
+
+    Does NOT check schema — bulk lookups (get_cached_posters,
+    find_show_by_season, get_cached_tmdb_ids, etc.) only need the
+    seasons/tmdb_id/poster fields, which are present on pre-v2 entries too.
+    Callers that care about the v2 Plex-detail fields (genres, cast, etc.)
+    combine this with `_has_current_schema()` to trigger a refetch.
+    """
     cached_at = entry.get('cached_at', '')
     if not cached_at:
         return False
@@ -252,12 +407,30 @@ def _is_fresh(entry):
         return False
 
 
+def _has_current_schema(entry):
+    """Return True when entry contains the v2 Plex-detail fields.
+
+    Uses `cast` as the sentinel key. Pre-v2 entries lack it, so
+    `get_show_info`/`get_movie_info` refetch them to backfill the new
+    metadata while bulk lookups continue to use the still-valid legacy
+    data until the refetch lands.
+    """
+    return 'cast' in entry
+
+
 # ---------------------------------------------------------------------------
 # Public API (cache-aware)
 # ---------------------------------------------------------------------------
 
 def _poster_url(path, size='w300'):
+    """Build a TMDB image URL. Rejects paths with characters that could
+    break out of a CSS `url('...')` context when the result is embedded in
+    an HTML style attribute (defense-in-depth; real TMDB paths never
+    contain these).
+    """
     if not path:
+        return ''
+    if any(c in path for c in ("'", '"', '\\', '\n', '\r', ' ', '(', ')')):
         return ''
     return _IMAGE_BASE + size + path
 
@@ -323,11 +496,12 @@ def get_show_info(title, year=None):
     with _cache_lock:
         cache = _load_cache()
         entry = _cache_lookup(cache.get('shows', {}), norm, year)
-        if entry and _is_fresh(entry):
+        if entry and _is_fresh(entry) and _has_current_schema(entry):
             return _format_show(entry)
 
-    # Cache miss — fetch from TMDB (fallback_no_year=True because folder
-    # years are unreliable and this path is only for poster/metadata caching)
+    # Cache miss or schema migration — fetch from TMDB (fallback_no_year=True
+    # because folder years are unreliable and this path is only for
+    # poster/metadata caching)
     search = search_show(title, year, fallback_no_year=True)
     if not search:
         return None
@@ -358,7 +532,7 @@ def get_movie_info(title, year=None):
     with _cache_lock:
         cache = _load_cache()
         entry = _cache_lookup(cache.get('movies', {}), norm, year)
-        if entry and _is_fresh(entry):
+        if entry and _is_fresh(entry) and _has_current_schema(entry):
             return _format_movie(entry)
 
     search = search_movie(title, year, fallback_no_year=True)
@@ -387,6 +561,12 @@ def _format_show(entry):
         'overview': entry.get('overview', ''),
         'poster_url': _poster_url(entry.get('poster_path', '')),
         'status': entry.get('status', ''),
+        'genres': entry.get('genres', []) or [],
+        'vote_average': entry.get('vote_average', 0) or 0,
+        'content_rating': entry.get('content_rating', '') or '',
+        'episode_run_time': entry.get('episode_run_time', 0) or 0,
+        'creators': entry.get('creators', []) or [],
+        'cast': _cast_with_urls(entry.get('cast', [])),
         'seasons': entry.get('seasons', []),
     }
 
@@ -400,6 +580,11 @@ def _format_movie(entry):
         'poster_url': _poster_url(entry.get('poster_path', '')),
         'runtime': entry.get('runtime', 0),
         'release_date': entry.get('release_date', ''),
+        'genres': entry.get('genres', []) or [],
+        'vote_average': entry.get('vote_average', 0) or 0,
+        'certification': entry.get('certification', '') or '',
+        'directors': entry.get('directors', []) or [],
+        'cast': _cast_with_urls(entry.get('cast', [])),
     }
 
 
@@ -721,13 +906,15 @@ def background_populate_cache(items):
                 if not title:
                     continue
 
-                # Skip if already cached by another path
+                # Skip if already cached by another path with current schema.
+                # Entries that are TTL-fresh but pre-v2 schema need refetching
+                # so the new Plex-detail fields backfill.
                 norm = _normalize_title(title)
                 with _cache_lock:
                     c = _load_cache()
                     section = 'shows' if item_type == 'show' else 'movies'
                     entry = _cache_lookup(c.get(section, {}), norm, year)
-                    if entry and _is_fresh(entry):
+                    if entry and _is_fresh(entry) and _has_current_schema(entry):
                         continue
 
                 if item_type == 'show':

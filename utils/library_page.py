@@ -181,13 +181,12 @@ __NAV_HTML__
 .detail-header{margin-bottom:16px}
 .detail-header h2{font-size:1.3em;font-weight:600;margin-bottom:6px}
 
-/* Two-column detail body */
-.detail-body{display:flex;gap:20px;align-items:flex-start}
-.detail-main{flex:1;min-width:0}
-.detail-sidebar{width:320px;min-width:280px;position:sticky;top:16px;max-height:calc(100vh - 32px);overflow-y:auto}
-/* History sidebar */
-.history-sidebar{border:1px solid var(--border);border-radius:8px;background:var(--card);padding:12px 14px}
-.history-sidebar h3{font-size:.85em;font-weight:600;margin:0 0 10px;color:var(--text)}
+/* Detail body — single column (Activity renders full-width below seasons) */
+.detail-body{display:block}
+.detail-main{min-width:0}
+/* History sidebar — rendered as a full-width section below seasons */
+.history-sidebar{border:1px solid var(--border);border-radius:8px;background:var(--card);padding:12px 14px;margin-top:18px}
+.history-sidebar h3{font-size:.95em;font-weight:600;margin:0 0 10px;color:var(--text)}
 .hs-empty{font-size:.82em;color:var(--text3);padding:8px 0}
 /* Timeline rail */
 .hs-timeline{position:relative;padding-left:20px}
@@ -208,8 +207,6 @@ __NAV_HTML__
 .hs-event-episode{display:inline-block;padding:1px 5px;border-radius:3px;font-size:.78em;font-weight:600;background:var(--border);color:var(--text2);margin-left:4px}
 .hs-event-detail{color:var(--text2);font-size:.92em;margin-top:1px;word-break:break-word}
 .hs-event-time{color:var(--text3);font-size:.82em;font-family:monospace}
-/* Mobile: collapse to single column */
-@media(max-width:768px){.detail-body{flex-direction:column}.detail-sidebar{width:100%;max-width:100%;position:static;max-height:none;overflow-y:visible}}
 
 /* Season accordion */
 .season-section{border:1px solid var(--border);border-radius:8px;margin-bottom:8px;overflow:hidden}
@@ -2197,8 +2194,8 @@ function _renderMovieDetail(movie, meta) {
   html += '<div class="detail-body"><div class="detail-main">';
   html += _renderCastSection(meta);
   html += '<div id="transfer-msg" aria-live="polite"></div>';
+  html += '<div class="history-sidebar" id="history-sidebar-content"><h3>Activity</h3><div class="hs-empty">Loading\u2026</div></div>';
   html += '</div>';
-  html += '<div class="detail-sidebar"><div class="history-sidebar" id="history-sidebar-content"><h3>Activity</h3><div class="hs-empty">Loading\u2026</div></div></div>';
   html += '</div>';
   html += '</div>';
   area.innerHTML = html;
@@ -2637,8 +2634,8 @@ function _renderShowDetail(show, meta) {
   }
 
   html += '<div id="transfer-msg" aria-live="polite"></div>';
+  html += '<div class="history-sidebar" id="history-sidebar-content"><h3>Activity</h3><div class="hs-empty">Loading\u2026</div></div>';
   html += '</div>';
-  html += '<div class="detail-sidebar"><div class="history-sidebar" id="history-sidebar-content"><h3>Activity</h3><div class="hs-empty">Loading\u2026</div></div></div>';
   html += '</div>';
   html += '</div>';
   area.innerHTML = html;

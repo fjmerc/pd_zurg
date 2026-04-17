@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Blocklist no longer blocks replacement releases**: Blocklisting a specific release (e.g. a buffering 2160p) previously blocked ALL versions of the same title, preventing the library scanner from creating symlinks for a replacement release (e.g. a 1080p). The blocklist check in debrid symlink creation now matches on the full release folder name instead of the parsed title, so different quality releases of the same movie or show are handled independently.
 - **Broken debrid symlinks are now auto-cleaned**: When a debrid torrent is removed or replaced, symlinks in the local library pointing to the old content became permanently broken — causing Zurg 404 errors and leaving arrs in a `hasFile: false` state. The library scanner now detects and removes broken debrid symlinks before creating new ones, allowing replacement content to be linked automatically in the same scan cycle.
+- **Symlink verify no longer refuses to clean large backlogs**: The scheduled `verify_symlinks` task had a safety threshold that refused to delete broken symlinks when >50 were found and >50% appeared broken. This created a self-reinforcing cycle where broken symlinks accumulated past the threshold and could never be cleaned. Replaced the threshold with a proper mount health guard (non-empty mount listing), which is the correct protection against mass deletion during mount failures.
 
 ## Version [2.17.7] - 2026-04-14
 

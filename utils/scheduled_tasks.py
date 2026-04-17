@@ -138,8 +138,6 @@ def library_scan():
 # Task: Verify Symlinks (Priority 1)
 # ---------------------------------------------------------------------------
 
-_SYMLINK_DELETE_THRESHOLD = 50
-
 MEDIA_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m4v', '.webm'}
 
 # Track recently re-triggered arr search IDs to prevent search storms.
@@ -331,12 +329,15 @@ def verify_symlinks():
     if not scan_dirs:
         return {'status': 'success', 'message': 'No directories to check'}
 
-    # Guard: verify the rclone mount is responsive before scanning.
+    # Guard: verify the rclone mount is responsive and populated.
     # A stalled FUSE mount makes os.path.exists return False for everything,
-    # which would cause mass deletion of all symlinks.
+    # which would cause mass deletion of all symlinks.  An empty listing
+    # indicates Zurg is still starting or the mount is stale.
     if os.path.isdir(rclone_mount):
         try:
-            os.listdir(rclone_mount)
+            if not os.listdir(rclone_mount):
+                logger.warning(f"[scheduler] Mount {rclone_mount} is empty — aborting symlink verify")
+                return {'status': 'error', 'message': 'Mount empty, aborted'}
         except OSError as e:
             logger.error(f"[scheduler] Mount {rclone_mount} unresponsive — aborting symlink verify to prevent mass deletion: {e}")
             return {'status': 'error', 'message': f'Mount unresponsive, aborted: {e}'}
@@ -373,21 +374,7 @@ def verify_symlinks():
                 if not os.path.exists(check_target):
                     to_delete.append((fpath, target, scan_dir))
 
-    # Phase 2: Safety threshold — refuse mass deletion
-    broken = len(to_delete)
-    if broken > _SYMLINK_DELETE_THRESHOLD and checked > 0 and broken / checked > 0.5:
-        logger.error(
-            f"[scheduler] Refusing to delete {broken}/{checked} symlinks — "
-            f"threshold exceeded (>{_SYMLINK_DELETE_THRESHOLD} and >50%). "
-            f"Check mount health or debrid subscription."
-        )
-        return {
-            'status': 'error',
-            'message': f'Mass deletion blocked: {broken}/{checked} symlinks appear broken',
-            'items': 0,
-        }
-
-    # Phase 3: Attempt repair, then delete confirmed broken symlinks
+    # Phase 2: Attempt repair, then delete confirmed broken symlinks
     auto_search = os.environ.get('SYMLINK_REPAIR_AUTO_SEARCH', 'false').lower() == 'true'
     repaired = 0
     searched = 0

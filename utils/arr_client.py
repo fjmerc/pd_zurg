@@ -35,6 +35,92 @@ _RELEASE_TIMEOUT = 120  # seconds — interactive search queries all indexers sy
 _NOT_FOUND = object()  # sentinel for "looked up, not found" in tag cache
 _tag_creation_lock = threading.Lock()  # prevents duplicate tags from concurrent requests
 
+# Sonarr/Radarr rejection-reason substrings that the force-grab is designed
+# to override (the feature's whole purpose is bypassing the cutoff when the
+# user wants a debrid copy of a file they already have locally).  A release
+# whose rejections are ALL in this family is still eligible; rejections for
+# anything else (profile quality tier, custom format score, size floor,
+# parse failure, etc.) disqualify the release.
+_CUTOFF_REJECTION_SUBSTRINGS = (
+    'meets quality cutoff',
+    'equal or higher custom format score',
+    'equal or higher preference',
+)
+
+
+def _is_number(v):
+    """True for real numeric types (int/float), False for bool or non-numeric.
+
+    `bool` subclasses `int` in Python, so `isinstance(True, int)` is True —
+    exclude it explicitly so a `customFormatScore=True` from a buggy
+    serializer doesn't sort as 1 above a legitimate score of 0.
+    """
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _force_grab_eligible(release):
+    """Return True if *release* should be considered by _grab_debrid_release.
+
+    Non-rejected releases are always eligible.  Rejected releases are
+    eligible only if every rejection reason is a string falling within
+    the cutoff-met family — the force-grab's sole intended bypass.
+    Rejections for profile violations (quality tier, custom format score,
+    etc.) always disqualify.
+
+    Note: the cutoff-met substrings are English only.  On a non-English
+    Sonarr/Radarr instance, cutoff rejections won't match, and the feature
+    degrades to "grab only non-rejected candidates" — still safe, just
+    less permissive.  Configure `uiLanguage` to English on the arr or
+    adjust the allowlist if this matters.
+    """
+    if not release.get('rejected'):
+        return True
+    reasons = release.get('rejections') or []
+    if not reasons:
+        logger.warning(
+            f"[arr] Release marked rejected with no rejection reasons — "
+            f"treating as ineligible: guid={release.get('guid')!r} "
+            f"title={release.get('title')!r}"
+        )
+        return False
+    return all(
+        isinstance(reason, str)
+        and any(sub in reason.lower() for sub in _CUTOFF_REJECTION_SUBSTRINGS)
+        for reason in reasons
+    )
+
+
+def _force_grab_sort_key(release):
+    """Sort key for force-grab candidates: highest customFormatScore, then seeders.
+
+    Missing or non-numeric scores/seeders sort to the BOTTOM (via -inf/-1),
+    not to zero — that prevents a release with an unknown score from
+    outranking a release with a legitimately-negative score.  Booleans are
+    rejected (bool is-a int in Python) to avoid False sorting as 0.
+    """
+    score = release.get('customFormatScore')
+    if not _is_number(score):
+        score = float('-inf')
+    seeders = release.get('seeders')
+    if not _is_number(seeders):
+        seeders = -1
+    return (score, seeders)
+
+
+def _release_identifier(release):
+    """Return the best stable identifier for dedup/logging, or None.
+
+    Prefers guid → infoHash → title.  A release with none of these is
+    undedupable and should be filtered out before push rather than
+    pushed with a placeholder that collides on subsequent iterations.
+    """
+    return release.get('guid') or release.get('infoHash') or release.get('title') or None
+
+
+def _log_val(v):
+    """Format a release field for log output: number as-is, else '?'."""
+    return v if _is_number(v) else '?'
+
 
 # ---------------------------------------------------------------------------
 # Base HTTP helpers
@@ -600,45 +686,52 @@ class SonarrClient(_ArrClientBase):
 
         Used when prefer_debrid=True and the episode already has a file at
         cutoff quality.  Normal EpisodeSearch won't grab because the file
-        isn't an upgrade — this bypasses that by doing an interactive search
-        and manually pushing the best torrent release.
+        isn't an upgrade — this bypasses the cutoff by doing an interactive
+        search and manually pushing the best torrent release.
 
-        Ignores Sonarr's rejected flag because the whole point is to bypass
-        the quality cutoff that causes the rejection.  Filters by season_number
-        because Sonarr returns releases for ALL seasons, not just the requested
+        Respects Sonarr's profile: releases rejected for reasons other than
+        cutoff-met (quality tier not allowed, custom-format score below
+        minimum, etc.) are excluded, and the remaining candidates are
+        sorted by (customFormatScore desc, seeders desc) so the user's
+        profile scoring picks the winner.  Filters by season_number because
+        Sonarr returns releases for ALL seasons, not just the requested
         episode's season.  Skips releases already in seen_guids to avoid
-        pushing the same season pack multiple times.
+        pushing the same season pack twice.
 
-        Returns the pushed release's GUID on success, or None on failure.
+        Returns the pushed release's identifier (guid/infoHash/title) on
+        success, or None on failure.
         """
         releases = self.get_episode_releases(episode_id)
         if not releases:
             logger.debug(f"[sonarr] No releases found for episode {episode_id}")
             return None
-        # Filter for torrent releases matching the correct season.
-        # Accept: exact match, seasonNumber 0 (multi-season/complete packs),
-        # or missing seasonNumber (untagged releases from some indexers).
-        # Skip releases already pushed (dedup by GUID).
         _seen = seen_guids or set()
         torrents = [
             r for r in releases
             if r.get('protocol') == 'torrent'
             and (season_number is None
                  or r.get('seasonNumber') in (season_number, 0, None))
+            and _release_identifier(r) is not None
             and r.get('guid') not in _seen
+            and r.get('infoHash') not in _seen
+            and _force_grab_eligible(r)
         ]
         if not torrents:
-            logger.debug(f"[sonarr] No torrent releases for episode {episode_id} S{season_number or '?'}")
+            logger.debug(f"[sonarr] No eligible torrent releases for episode {episode_id} S{season_number or '?'}")
             return None
-        # Pick the first (Sonarr returns releases sorted by preference)
+        torrents.sort(key=_force_grab_sort_key, reverse=True)
         best = torrents[0]
         result = self.push_release(best)
         if result is not None:
+            size_gb = round((best.get('size') or 0) / 1024**3, 2)
             logger.info(
                 f"[sonarr] Force-grabbed debrid release for {title or f'episode {episode_id}'}: "
-                f"{best.get('title', '?')}"
+                f"{best.get('title', '?')} "
+                f"(score={_log_val(best.get('customFormatScore'))}, "
+                f"seeders={_log_val(best.get('seeders'))}, "
+                f"size={size_gb}GB)"
             )
-            return best.get('guid') or best.get('title') or 'pushed'
+            return _release_identifier(best)
         logger.warning(f"[sonarr] Failed to push release for episode {episode_id}")
         return None
 
@@ -1471,8 +1564,13 @@ class RadarrClient(_ArrClientBase):
         """Interactive search + force grab of a torrent release for a movie.
 
         Used when prefer_debrid=True and the movie already has a file at
-        cutoff quality.  Bypasses quality cutoff via manual push.
-        Ignores the rejected flag since the whole point is to bypass it.
+        cutoff quality.  Bypasses the cutoff via manual push.
+
+        Respects Radarr's profile: releases rejected for reasons other than
+        cutoff-met (quality tier not allowed, custom-format score below
+        minimum, etc.) are excluded, and the remaining candidates are
+        sorted by (customFormatScore desc, seeders desc) so the user's
+        profile scoring picks the winner.
 
         Returns True if a release was pushed, False otherwise.
         """
@@ -1483,16 +1581,23 @@ class RadarrClient(_ArrClientBase):
         torrents = [
             r for r in releases
             if r.get('protocol') == 'torrent'
+            and _release_identifier(r) is not None
+            and _force_grab_eligible(r)
         ]
         if not torrents:
-            logger.debug(f"[radarr] No torrent releases for movie {movie_id}")
+            logger.debug(f"[radarr] No eligible torrent releases for movie {movie_id}")
             return False
+        torrents.sort(key=_force_grab_sort_key, reverse=True)
         best = torrents[0]
         result = self.push_release(best)
         if result is not None:
+            size_gb = round((best.get('size') or 0) / 1024**3, 2)
             logger.info(
                 f"[radarr] Force-grabbed debrid release for {title or f'movie {movie_id}'}: "
-                f"{best.get('title', '?')}"
+                f"{best.get('title', '?')} "
+                f"(score={_log_val(best.get('customFormatScore'))}, "
+                f"seeders={_log_val(best.get('seeders'))}, "
+                f"size={size_gb}GB)"
             )
             return True
         logger.warning(f"[radarr] Failed to push release for movie {movie_id}")

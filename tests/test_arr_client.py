@@ -10,6 +10,7 @@ from utils.arr_client import (
     SonarrClient, RadarrClient, OverseerrClient,
     get_download_service, get_configured_services,
     _NOT_FOUND,
+    _force_grab_eligible, _force_grab_sort_key, _release_identifier,
 )
 
 
@@ -39,6 +40,95 @@ def _mock_urlopen(response_data, status=200):
     mock_resp.__enter__ = MagicMock(return_value=mock_resp)
     mock_resp.__exit__ = MagicMock(return_value=False)
     return mock_resp
+
+
+# ---------------------------------------------------------------------------
+# Force-grab helpers (_force_grab_eligible, _force_grab_sort_key,
+# _release_identifier)
+# ---------------------------------------------------------------------------
+
+class TestForceGrabEligible:
+    def test_non_rejected_is_eligible(self):
+        assert _force_grab_eligible({'rejected': False}) is True
+        assert _force_grab_eligible({}) is True  # rejected key absent
+
+    def test_cutoff_only_rejection_is_eligible(self):
+        r = {'rejected': True,
+             'rejections': ['Existing file on disk meets quality cutoff: WEBDL-1080p']}
+        assert _force_grab_eligible(r) is True
+
+    def test_preference_only_rejection_is_eligible(self):
+        r = {'rejected': True,
+             'rejections': ['Existing file on disk is of equal or higher preference: WEBDL-1080p v1']}
+        assert _force_grab_eligible(r) is True
+
+    def test_profile_violation_is_ineligible(self):
+        r = {'rejected': True,
+             'rejections': ['Remux-2160p is not wanted in profile',
+                            'Existing file on disk meets quality cutoff: WEBDL-1080p']}
+        assert _force_grab_eligible(r) is False
+
+    def test_empty_rejections_list_is_ineligible(self, caplog):
+        """rejected=True with no reasons is a malformed response; log + reject."""
+        import logging
+        with caplog.at_level(logging.WARNING):
+            assert _force_grab_eligible({'rejected': True, 'rejections': []}) is False
+        assert any('no rejection reasons' in rec.message for rec in caplog.records)
+
+    def test_missing_rejections_key_is_ineligible(self):
+        assert _force_grab_eligible({'rejected': True}) is False
+
+    def test_non_string_rejection_entry_does_not_crash(self):
+        """Regression: earlier version crashed with AttributeError on None."""
+        r = {'rejected': True,
+             'rejections': [None, 'Existing file on disk meets quality cutoff: WEBDL-1080p']}
+        assert _force_grab_eligible(r) is False  # None entry fails isinstance check
+
+    def test_dict_rejection_entry_does_not_crash(self):
+        r = {'rejected': True,
+             'rejections': [{'reason': 'x'}, 'meets quality cutoff']}
+        assert _force_grab_eligible(r) is False
+
+
+class TestForceGrabSortKey:
+    def test_numeric_score_and_seeders(self):
+        assert _force_grab_sort_key({'customFormatScore': 3400, 'seeders': 500}) == (3400, 500)
+
+    def test_zero_score_sorts_above_negative(self):
+        assert _force_grab_sort_key({'customFormatScore': 0, 'seeders': 0}) > \
+               _force_grab_sort_key({'customFormatScore': -50, 'seeders': 9999})
+
+    def test_missing_score_sorts_below_negative(self):
+        negative = _force_grab_sort_key({'customFormatScore': -50, 'seeders': 10})
+        missing = _force_grab_sort_key({'seeders': 500})
+        assert negative > missing
+
+    def test_string_score_demoted(self):
+        """Stringified score from a buggy proxy is treated as unknown."""
+        assert _force_grab_sort_key({'customFormatScore': '3400', 'seeders': 5})[0] == float('-inf')
+
+    def test_bool_score_demoted(self):
+        """True/False must not sneak past isinstance int."""
+        assert _force_grab_sort_key({'customFormatScore': True, 'seeders': 0})[0] == float('-inf')
+
+    def test_float_seeders_accepted(self):
+        """Some proxies emit seeders as float; don't demote them."""
+        assert _force_grab_sort_key({'customFormatScore': 0, 'seeders': 500.0})[1] == 500.0
+
+
+class TestReleaseIdentifier:
+    def test_prefers_guid(self):
+        assert _release_identifier({'guid': 'g', 'infoHash': 'h', 'title': 't'}) == 'g'
+
+    def test_falls_back_to_infohash(self):
+        assert _release_identifier({'guid': '', 'infoHash': 'h', 'title': 't'}) == 'h'
+
+    def test_falls_back_to_title(self):
+        assert _release_identifier({'title': 't'}) == 't'
+
+    def test_returns_none_when_empty(self):
+        assert _release_identifier({'guid': '', 'infoHash': '', 'title': ''}) is None
+        assert _release_identifier({}) is None
 
 
 # ---------------------------------------------------------------------------
@@ -395,8 +485,8 @@ class TestSonarrClient:
             ]),
             _mock_urlopen({'records': []}),  # queue cleanup
             _mock_urlopen([]),  # ep 100: no releases
-            _mock_urlopen([  # ep 101: has torrent
-                {'guid': 'found', 'indexerId': 2, 'protocol': 'torrent', 'title': 'S01E02', 'rejected': True, 'seasonNumber': 1},
+            _mock_urlopen([  # ep 101: has accepted torrent
+                {'guid': 'found', 'indexerId': 2, 'protocol': 'torrent', 'title': 'S01E02', 'rejected': False, 'seasonNumber': 1},
             ]),
             _mock_urlopen({'id': 99}),  # push
         ]
@@ -455,19 +545,148 @@ class TestSonarrClient:
         assert 'Force-grabbed' not in result['message']
 
     @patch('urllib.request.urlopen')
-    def test_grab_debrid_release_ignores_rejected_flag(self, mock_urlopen, sonarr):
-        """Rejected flag is ignored — force-grab bypasses quality cutoff."""
+    def test_grab_debrid_release_skips_rejected(self, mock_urlopen, sonarr):
+        """Rejected releases are excluded — profile rules are respected."""
         responses = [
             _mock_urlopen([
-                {'guid': 'first', 'indexerId': 1, 'protocol': 'torrent', 'title': 'Release', 'rejected': True},
+                {'guid': 'bad', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'Remux-2160p', 'rejected': True, 'customFormatScore': -10000},
+                {'guid': 'good', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'WEBDL-1080p', 'rejected': False, 'customFormatScore': 3400},
             ]),
             _mock_urlopen({'id': 1}),  # push
         ]
         mock_urlopen.side_effect = responses
         result = sonarr._grab_debrid_release(100, title='Test')
-        assert result == 'first'  # returns GUID on success
+        assert result == 'good'
         push_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
-        assert push_body['guid'] == 'first'
+        assert push_body['guid'] == 'good'
+
+    @patch('urllib.request.urlopen')
+    def test_grab_debrid_release_all_rejected_returns_none(self, mock_urlopen, sonarr):
+        """When every candidate is rejected, fall through (no push)."""
+        responses = [
+            _mock_urlopen([
+                {'guid': 'r1', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'Remux', 'rejected': True, 'customFormatScore': -10000},
+                {'guid': 'r2', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'BR-DISK', 'rejected': True, 'customFormatScore': -20000},
+            ]),
+        ]
+        mock_urlopen.side_effect = responses
+        result = sonarr._grab_debrid_release(100, title='Test')
+        assert result is None
+        assert mock_urlopen.call_count == 1  # only GET, no push
+
+    @patch('urllib.request.urlopen')
+    def test_grab_debrid_release_prefers_higher_custom_format_score(self, mock_urlopen, sonarr):
+        """Among accepted releases, highest customFormatScore wins."""
+        responses = [
+            _mock_urlopen([
+                {'guid': 'low', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'HDTV', 'rejected': False, 'customFormatScore': 100},
+                {'guid': 'high', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'WEBDL-1080p', 'rejected': False, 'customFormatScore': 3400},
+                {'guid': 'mid', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'WEBRip', 'rejected': False, 'customFormatScore': 1600},
+            ]),
+            _mock_urlopen({'id': 1}),
+        ]
+        mock_urlopen.side_effect = responses
+        result = sonarr._grab_debrid_release(100, title='Test')
+        assert result == 'high'
+        push_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
+        assert push_body['guid'] == 'high'
+
+    @patch('urllib.request.urlopen')
+    def test_grab_debrid_release_tie_breaks_on_seeders(self, mock_urlopen, sonarr):
+        """Same customFormatScore → higher seeders wins."""
+        responses = [
+            _mock_urlopen([
+                {'guid': 'few', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'A', 'rejected': False, 'customFormatScore': 100, 'seeders': 5},
+                {'guid': 'many', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'B', 'rejected': False, 'customFormatScore': 100, 'seeders': 200},
+            ]),
+            _mock_urlopen({'id': 1}),
+        ]
+        mock_urlopen.side_effect = responses
+        result = sonarr._grab_debrid_release(100, title='Test')
+        assert result == 'many'
+
+    @patch('urllib.request.urlopen')
+    def test_grab_debrid_release_allows_cutoff_only_rejection(self, mock_urlopen, sonarr):
+        """A release rejected ONLY for cutoff-met is still eligible — that's
+        the force-grab's intended bypass."""
+        responses = [
+            _mock_urlopen([
+                {'guid': 'cutoff-only', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'S01E01 WEBDL-1080p', 'rejected': True,
+                 'rejections': ['Existing file on disk meets quality cutoff: WEBDL-1080p'],
+                 'customFormatScore': 3400},
+            ]),
+            _mock_urlopen({'id': 1}),
+        ]
+        mock_urlopen.side_effect = responses
+        result = sonarr._grab_debrid_release(100, title='Test')
+        assert result == 'cutoff-only'
+
+    @patch('urllib.request.urlopen')
+    def test_grab_debrid_release_excludes_profile_violation_even_with_cutoff(self, mock_urlopen, sonarr):
+        """A rejection combining cutoff-met AND a profile violation is NOT eligible."""
+        responses = [
+            _mock_urlopen([
+                {'guid': 'mixed', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'Remux-2160p', 'rejected': True,
+                 'rejections': [
+                     'Existing file on disk meets quality cutoff: WEBDL-1080p',
+                     'Remux-2160p is not wanted in profile',
+                 ],
+                 'customFormatScore': -10000},
+            ]),
+        ]
+        mock_urlopen.side_effect = responses
+        result = sonarr._grab_debrid_release(100, title='Test')
+        assert result is None
+        assert mock_urlopen.call_count == 1  # no push attempted
+
+    @patch('urllib.request.urlopen')
+    def test_grab_debrid_release_missing_score_sorts_below_negative(self, mock_urlopen, sonarr):
+        """Releases with missing customFormatScore must NOT outrank releases with a
+        legitimately negative score. Regression guard for the `or 0` bug."""
+        responses = [
+            _mock_urlopen([
+                {'guid': 'no-score', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'A', 'rejected': False, 'seeders': 500},  # score absent
+                {'guid': 'negative', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'B', 'rejected': False, 'customFormatScore': -50, 'seeders': 10},
+            ]),
+            _mock_urlopen({'id': 1}),
+        ]
+        mock_urlopen.side_effect = responses
+        result = sonarr._grab_debrid_release(100, title='Test')
+        # -50 > -inf, so the negative-score release wins over the unknown one
+        assert result == 'negative'
+
+    @patch('urllib.request.urlopen')
+    def test_grab_debrid_release_dedups_by_infohash(self, mock_urlopen, sonarr):
+        """Releases already pushed in a prior iteration (identified by infoHash)
+        are skipped, even when the GUID differs."""
+        seen = {'abc123hash'}
+        responses = [
+            _mock_urlopen([
+                {'guid': 'different-guid', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'Duplicate pack', 'rejected': False,
+                 'infoHash': 'abc123hash', 'seasonNumber': 1},
+                {'guid': 'new', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'Fresh', 'rejected': False,
+                 'infoHash': 'different-hash', 'seasonNumber': 1},
+            ]),
+            _mock_urlopen({'id': 1}),
+        ]
+        mock_urlopen.side_effect = responses
+        result = sonarr._grab_debrid_release(100, season_number=1, title='Test', seen_guids=seen)
+        assert result == 'new'
 
     @patch('urllib.request.urlopen')
     def test_grab_debrid_release_skips_usenet(self, mock_urlopen, sonarr):
@@ -832,6 +1051,135 @@ class TestRadarrClient:
         result = radarr.ensure_and_search('Inception', 27205, prefer_debrid=True)
         assert result['status'] == 'sent'
         assert 'Force-grabbed' not in result['message']
+
+    @patch('urllib.request.urlopen')
+    def test_grab_debrid_release_skips_rejected_movie(self, mock_urlopen, radarr):
+        """Rejected releases are excluded — Radarr profile rules are respected."""
+        responses = [
+            _mock_urlopen([
+                {'guid': 'bad', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'Remux-2160p', 'rejected': True, 'customFormatScore': -10000},
+                {'guid': 'good', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'WEBDL-1080p', 'rejected': False, 'customFormatScore': 3400},
+            ]),
+            _mock_urlopen({'id': 1}),  # push
+        ]
+        mock_urlopen.side_effect = responses
+        result = radarr._grab_debrid_release(50, title='Test')
+        assert result is True
+        push_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
+        assert push_body['guid'] == 'good'
+
+    @patch('urllib.request.urlopen')
+    def test_grab_debrid_release_all_rejected_returns_false_movie(self, mock_urlopen, radarr):
+        """When every candidate is rejected, force-grab fails without pushing."""
+        responses = [
+            _mock_urlopen([
+                {'guid': 'r1', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'Remux', 'rejected': True, 'customFormatScore': -10000},
+                {'guid': 'r2', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'BR-DISK', 'rejected': True, 'customFormatScore': -20000},
+            ]),
+        ]
+        mock_urlopen.side_effect = responses
+        result = radarr._grab_debrid_release(50, title='Test')
+        assert result is False
+        assert mock_urlopen.call_count == 1  # only GET, no push
+
+    @patch('urllib.request.urlopen')
+    def test_grab_debrid_release_prefers_higher_custom_format_score_movie(self, mock_urlopen, radarr):
+        """Among accepted releases, highest customFormatScore wins."""
+        responses = [
+            _mock_urlopen([
+                {'guid': 'low', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'HDTV', 'rejected': False, 'customFormatScore': 100},
+                {'guid': 'high', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'WEBDL-1080p', 'rejected': False, 'customFormatScore': 3400},
+                {'guid': 'mid', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'WEBRip', 'rejected': False, 'customFormatScore': 1600},
+            ]),
+            _mock_urlopen({'id': 1}),
+        ]
+        mock_urlopen.side_effect = responses
+        result = radarr._grab_debrid_release(50, title='Test')
+        assert result is True
+        push_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
+        assert push_body['guid'] == 'high'
+
+    @patch('urllib.request.urlopen')
+    def test_grab_debrid_release_tie_breaks_on_seeders_movie(self, mock_urlopen, radarr):
+        """Same customFormatScore → higher seeders wins."""
+        responses = [
+            _mock_urlopen([
+                {'guid': 'few', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'A', 'rejected': False, 'customFormatScore': 100, 'seeders': 5},
+                {'guid': 'many', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'B', 'rejected': False, 'customFormatScore': 100, 'seeders': 200},
+            ]),
+            _mock_urlopen({'id': 1}),
+        ]
+        mock_urlopen.side_effect = responses
+        result = radarr._grab_debrid_release(50, title='Test')
+        assert result is True
+        push_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
+        assert push_body['guid'] == 'many'
+
+    @patch('urllib.request.urlopen')
+    def test_grab_debrid_release_allows_cutoff_only_rejection_movie(self, mock_urlopen, radarr):
+        """A Radarr release rejected ONLY for cutoff/preference-met is still eligible."""
+        responses = [
+            _mock_urlopen([
+                {'guid': 'cutoff-only', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'WEBDL-1080p', 'rejected': True,
+                 'rejections': ['Existing file on disk is of equal or higher preference: WEBDL-1080p v1'],
+                 'customFormatScore': 3400},
+            ]),
+            _mock_urlopen({'id': 1}),
+        ]
+        mock_urlopen.side_effect = responses
+        result = radarr._grab_debrid_release(50, title='Test')
+        assert result is True
+        push_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
+        assert push_body['guid'] == 'cutoff-only'
+
+    @patch('urllib.request.urlopen')
+    def test_grab_debrid_release_excludes_profile_violation_even_with_cutoff_movie(self, mock_urlopen, radarr):
+        """Live-data pattern: Remux-2160p rejections pair 'cutoff met' with a profile
+        violation.  The profile violation must disqualify the release."""
+        responses = [
+            _mock_urlopen([
+                {'guid': 'remux', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'Joker.Folie.a.Deux.2024.Remux-2160p', 'rejected': True,
+                 'rejections': [
+                     "Custom Formats DV have score -10000 below Movie's profile minimum 0",
+                     'Remux-2160p is not wanted in profile',
+                     'Existing file on disk meets quality cutoff: WEBDL-1080p',
+                 ],
+                 'customFormatScore': -10000},
+            ]),
+        ]
+        mock_urlopen.side_effect = responses
+        result = radarr._grab_debrid_release(50, title='Test')
+        assert result is False
+        assert mock_urlopen.call_count == 1  # no push attempted
+
+    @patch('urllib.request.urlopen')
+    def test_grab_debrid_release_missing_score_sorts_below_negative_movie(self, mock_urlopen, radarr):
+        """Regression guard: missing customFormatScore sorts to the BOTTOM, not to 0."""
+        responses = [
+            _mock_urlopen([
+                {'guid': 'no-score', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'A', 'rejected': False, 'seeders': 500},  # score absent
+                {'guid': 'negative', 'indexerId': 1, 'protocol': 'torrent',
+                 'title': 'B', 'rejected': False, 'customFormatScore': -50, 'seeders': 10},
+            ]),
+            _mock_urlopen({'id': 1}),
+        ]
+        mock_urlopen.side_effect = responses
+        result = radarr._grab_debrid_release(50, title='Test')
+        assert result is True
+        push_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
+        assert push_body['guid'] == 'negative'
 
     @patch('urllib.request.urlopen')
     def test_ensure_and_search_existing_no_file(self, mock_urlopen, radarr):

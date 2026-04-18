@@ -506,6 +506,13 @@ def _enrich_with_tmdb_cache(movies, shows):
     Performs a single bulk cache lookup (no API calls).  Items without
     cached data get None fields.  Triggers background population for
     uncached items.
+
+    When a TMDB hit yields a canonical title that differs from the parsed
+    folder title (e.g. multi-language torrent folders that bundle both
+    titles), the item's `title` is replaced with the canonical TMDB title
+    so the UI shows a clean name.  Returns a list of (old_norm, new_norm)
+    rename pairs so the caller can wire them into the scanner's alias map,
+    keeping disk-stored prefs/pending lookups working.
     """
     try:
         from utils.tmdb import get_cached_posters, background_populate_cache, find_show_by_season
@@ -520,7 +527,7 @@ def _enrich_with_tmdb_cache(movies, shows):
             item['imdb_id'] = None
             item['total_episodes'] = None
             item['missing_episodes'] = None
-        return
+        return []
 
     all_items = [
         {'title': m['title'], 'year': m.get('year'), 'type': 'movie'}
@@ -533,12 +540,40 @@ def _enrich_with_tmdb_cache(movies, shows):
     cached = get_cached_posters(all_items)
 
     uncached = []
+    renames = []  # list of (old_norm, new_norm)
+
+    def _maybe_rename(item, info):
+        """Replace item['title'] with the canonical TMDB title when it
+        differs.  Stashes the original parsed title in `_parsed_title` so
+        downstream code that needs to match against parsed-name-keyed state
+        (debrid filenames, TMDB cache, path_index) can still find it.
+        Records the (old_norm, new_norm) pair for alias bookkeeping.
+        """
+        parsed_title = (item.get('title') or '').strip()
+        if not parsed_title:
+            return  # nothing meaningful to rename from
+        canonical = (info.get('title') or '').strip()
+        if not canonical or canonical == parsed_title:
+            return
+        old_norm = _normalize_title(parsed_title)
+        new_norm = _normalize_title(canonical)
+        if not old_norm or not new_norm:
+            return  # never alias under an empty key — would pollute the map
+        # Preserve the parsed title BEFORE overwriting so downstream lookups
+        # (find_torrents_by_title, TMDB cache by parsed-folder key, etc.)
+        # can still resolve the original.
+        item['_parsed_title'] = parsed_title
+        item['title'] = canonical
+        if old_norm == new_norm:
+            return  # display changed but normalize key didn't — no alias needed
+        renames.append((old_norm, new_norm))
 
     for movie in movies:
         key = _normalize_title(movie['title'])
         yr = movie.get('year')
         info = cached.get(f"{key} ({yr})" if yr else key) or cached.get(key)
         if info:
+            _maybe_rename(movie, info)
             movie['poster_url'] = info['poster_url'] or None
             movie['tmdb_status'] = info.get('tmdb_status') or None
             movie['imdb_id'] = info.get('imdb_id') or None
@@ -566,6 +601,7 @@ def _enrich_with_tmdb_cache(movies, shows):
                 better = find_show_by_season(key, show_max, yr)
                 if better and better.get('max_cached_season', 0) >= show_max:
                     info = better
+            _maybe_rename(show, info)
             show['poster_url'] = info['poster_url'] or None
             show['tmdb_status'] = info.get('tmdb_status') or None
             show['imdb_id'] = info.get('imdb_id') or None
@@ -583,6 +619,8 @@ def _enrich_with_tmdb_cache(movies, shows):
 
     if uncached:
         background_populate_cache(uncached)
+
+    return renames
 
 
 def _normalize_title(title):
@@ -852,7 +890,10 @@ class LibraryScanner:
         # Seed alias_norms with all known TMDB aliases so preference
         # lookups work regardless of which name was used.  Each name maps
         # to the set of all its aliases (handles 3+ title groups correctly).
-        self._alias_norms = {}  # {norm_title: set of alias norm_titles}
+        # Build the map locally and atomically rebind self._alias_norms at
+        # the end of _scan_read — readers (request threads) iterate the set
+        # values, so mutating sets in-place mid-scan would race.
+        alias_norms_local = {}
         for all_aliases in (show_aliases, movie_aliases):
             seen = set()
             for norm_key, alias_set in all_aliases.items():
@@ -861,7 +902,7 @@ class LibraryScanner:
                 group = alias_set | {norm_key}
                 seen.update(group)
                 for name in group:
-                    self._alias_norms[name] = group - {name}
+                    alias_norms_local[name] = group - {name}
 
         movies = []
         merged_local_movie_keys = set()
@@ -881,8 +922,8 @@ class LibraryScanner:
                     logger.debug(
                         f"[library] TMDB alias match (movie): debrid '{key}' ↔ local '{matched_key}'"
                     )
-                    self._alias_norms.setdefault(key, set()).add(matched_key)
-                    self._alias_norms.setdefault(matched_key, set()).add(key)
+                    alias_norms_local.setdefault(key, set()).add(matched_key)
+                    alias_norms_local.setdefault(matched_key, set()).add(key)
                 item = dict(item)
                 item['source'] = 'both'
                 # Use earliest date_added from either source
@@ -920,8 +961,8 @@ class LibraryScanner:
                     logger.debug(
                         f"[library] TMDB alias match: debrid '{key}' ↔ local '{local_key}'"
                     )
-                    self._alias_norms.setdefault(key, set()).add(local_key)
-                    self._alias_norms.setdefault(local_key, set()).add(key)
+                    alias_norms_local.setdefault(key, set()).add(local_key)
+                    alias_norms_local.setdefault(local_key, set()).add(key)
                 merged_local_show_keys.add(local_key)
                 item = dict(item)
                 local_item = local_show_map[local_key]
@@ -964,7 +1005,32 @@ class LibraryScanner:
             if key not in debrid_show_keys and key not in merged_local_show_keys:
                 shows.append(ls)
 
-        # Build path indexes and season_data, then strip internal _episodes
+        # Build season_data first so enrichment's season-aware TMDB fallback
+        # has data to work with.  Don't pop _episodes yet — path_index still
+        # needs it after the (possibly title-renaming) enrichment runs.
+        for show in shows:
+            eps = show.get('_episodes', {})
+            show['season_data'] = _build_season_data(eps, show.get('source', 'debrid'))
+
+        from utils.library_prefs import get_all_preferences
+
+        preferences = get_all_preferences()
+        # Enrichment may replace item['title'] with the canonical TMDB title
+        # (e.g. multi-language torrent folders that bundle two titles).  Wire
+        # the (old → new) normalized-title pairs into the local alias map so
+        # prefs/pending entries saved under the old name still resolve.
+        renames = _enrich_with_tmdb_cache(movies, shows) or []
+        for old_norm, new_norm in renames:
+            if not old_norm or not new_norm:
+                continue
+            alias_norms_local.setdefault(new_norm, set()).add(old_norm)
+            alias_norms_local.setdefault(old_norm, set()).add(new_norm)
+
+        # Build path indexes keyed by post-rename normalized titles.  When
+        # two items collide on the same (norm, season, episode) — possible
+        # when distinct shows share a canonical title and dedup didn't merge
+        # them (no shared TMDB ID) — keep the first and warn so the bug is
+        # diagnosable instead of silently linking the wrong file.
         path_index = {}
         local_path_index = {}
         for show in shows:
@@ -976,24 +1042,42 @@ class LibraryScanner:
                 p = info.get('path', '')
                 lp = info.get('local_path', '')
                 if src in ('debrid', 'both') and p:
-                    path_index[(norm, sn, en)] = p
+                    existing = path_index.get((norm, sn, en))
+                    if existing and existing != p:
+                        logger.warning(
+                            "[library] path_index collision for %r S%02dE%02d — "
+                            "keeping %r, dropping %r", norm, sn, en, existing, p,
+                        )
+                    else:
+                        path_index[(norm, sn, en)] = p
                 if src == 'local' and p:
-                    local_path_index[(norm, sn, en)] = p
+                    existing_local = local_path_index.get((norm, sn, en))
+                    if existing_local and existing_local != p:
+                        logger.warning(
+                            "[library] local_path_index collision for %r S%02dE%02d — "
+                            "keeping %r, dropping %r", norm, sn, en, existing_local, p,
+                        )
+                    else:
+                        local_path_index[(norm, sn, en)] = p
                 if lp:
-                    local_path_index[(norm, sn, en)] = lp
+                    existing_local = local_path_index.get((norm, sn, en))
+                    if existing_local and existing_local != lp:
+                        logger.warning(
+                            "[library] local_path_index collision for %r S%02dE%02d — "
+                            "keeping %r, dropping %r", norm, sn, en, existing_local, lp,
+                        )
+                    else:
+                        local_path_index[(norm, sn, en)] = lp
 
         with self._path_lock:
             self._path_index = path_index
             self._local_path_index = local_path_index
+            # Atomically rebind the alias map so request threads iterating
+            # the previous map's sets aren't disturbed mid-flight.
+            self._alias_norms = alias_norms_local
 
         for show in shows:
-            eps = show.pop('_episodes', {})
-            show['season_data'] = _build_season_data(eps, show.get('source', 'debrid'))
-
-        from utils.library_prefs import get_all_preferences
-
-        preferences = get_all_preferences()
-        _enrich_with_tmdb_cache(movies, shows)
+            show.pop('_episodes', None)
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         return {
@@ -1130,6 +1214,15 @@ class LibraryScanner:
         t = threading.Thread(target=_run, daemon=True)
         t.start()
 
+    def aliases_for(self, normalized_title):
+        """Return the alias set for *normalized_title* (excluding itself).
+
+        Thread-safe snapshot — copies the set under `_path_lock` so the
+        caller can iterate without racing the next scan's atomic rebind.
+        """
+        with self._path_lock:
+            return set(self._alias_norms.get(normalized_title, ()))
+
     def get_episode_path(self, normalized_title, season, episode):
         """Get debrid mount path for an episode."""
         with self._path_lock:
@@ -1225,14 +1318,19 @@ class LibraryScanner:
         for m in confirmed:
             title = m['title']
             year = m.get('year')
-            norm = _normalize_title(title)
+            # find_torrents_by_title parses raw debrid filenames — match
+            # against the parsed folder norm, which equals item['title'] for
+            # un-renamed items and is preserved on `_parsed_title` for items
+            # whose display title was upgraded to the canonical TMDB name.
+            parsed_norm = _normalize_title(m.get('_parsed_title') or title)
+            accept_norms = {parsed_norm} | self.aliases_for(parsed_norm)
             bl_hash = ''
             deleted = 0
 
             # Find matching debrid torrent(s) and extract hash
             if client:
                 try:
-                    matches = client.find_torrents_by_title(norm, target_year=year)
+                    matches = client.find_torrents_by_title(accept_norms, target_year=year)
                 except Exception as e:
                     logger.debug(f"[library] Disc rip lookup failed for {title}: {e}")
                     matches = []
@@ -1509,7 +1607,13 @@ class LibraryScanner:
                         if norm in enforced_this_scan:
                             continue
                         year = item.get('year')
-                        matches = client.find_torrents_by_title(norm, target_year=year)
+                        # Debrid filenames carry the parsed folder title.
+                        # Match against the parsed norm (preserved by the
+                        # canonical-title rename) so renamed items still hit.
+                        parsed_norm = _normalize_title(
+                            item.get('_parsed_title') or item['title']
+                        )
+                        matches = client.find_torrents_by_title(parsed_norm, target_year=year)
                         if matches:
                             deleted = 0
                             for m in matches:
@@ -2059,9 +2163,24 @@ class LibraryScanner:
         show_norms = {_normalize_title(s['title']): s for s in shows}
         movie_norms = {_normalize_title(m['title']): m for m in movies}
 
+        def _resolve_via_aliases(norm, mapping):
+            """Look up *norm* in *mapping*, falling back through aliases.
+
+            Pending entries written before a canonical-title rename are keyed
+            by the parsed norm; current items are keyed by the canonical norm.
+            The alias map bridges the two.
+            """
+            item = mapping.get(norm)
+            if item is None:
+                for alias in self._alias_norms.get(norm, ()):
+                    item = mapping.get(alias)
+                    if item is not None:
+                        break
+            return item
+
         for norm_title in titles_to_reroute:
             # Try as show
-            show = show_norms.get(norm_title)
+            show = _resolve_via_aliases(norm_title, show_norms)
             if show and show_client and show_svc == 'sonarr':
                 try:
                     series = show_client.find_series_in_library(title=show['title'])
@@ -2075,7 +2194,7 @@ class LibraryScanner:
                     logger.warning(f"[library] Failed to re-route {norm_title!r}: {e}")
 
             # Try as movie
-            movie = movie_norms.get(norm_title)
+            movie = _resolve_via_aliases(norm_title, movie_norms)
             if movie and movie_client and movie_svc == 'radarr':
                 try:
                     radarr_movie = movie_client.find_movie_in_library(title=movie['title'])
@@ -2242,6 +2361,10 @@ class LibraryScanner:
         symlinked_shows = set()   # titles that got new symlinks
         symlinked_movies = set()  # titles that got new symlinks
         _symlink_years = {}       # title -> parsed year (for year-aware rescan matching)
+        # canonical title -> parsed-folder title (when display was upgraded
+        # via TMDB rename).  Lets the rescan-trigger TMDB cache fallback use
+        # the parsed-folder norm — TMDB cache is keyed by parsed norm.
+        _symlink_parsed = {}
         failed_titles = {}        # title -> last error string
 
         # Fetch arr libraries for canonical folder names and rescan IDs.
@@ -2347,9 +2470,12 @@ class LibraryScanner:
                     arr_info = radarr_map.get(f"{title} ({year})".lower())
                 if not arr_info:
                     arr_info = radarr_map.get(title.lower()) or radarr_map_norm.get(_norm_for_matching(title))
-                # Fallback: match via TMDB ID when title differs
+                # Fallback: match via TMDB ID when title differs.  The TMDB
+                # cache is keyed by the parsed-folder norm — use _parsed_title
+                # (preserved when the display title was upgraded to canonical)
+                # so renamed items still resolve via cache.
                 if not arr_info:
-                    _norm = _normalize_title(title)
+                    _norm = _normalize_title(movie.get('_parsed_title') or title)
                     tmdb_id = (cached_tmdb_movies.get(f"{_norm} ({year})") if year else None) or cached_tmdb_movies.get(_norm)
                     if tmdb_id:
                         arr_info = radarr_by_tmdb.get(tmdb_id)
@@ -2413,6 +2539,9 @@ class LibraryScanner:
                     symlinked_movies.add(title)
                     if year:
                         _symlink_years[title] = year
+                    parsed_t = movie.get('_parsed_title')
+                    if parsed_t and parsed_t != title:
+                        _symlink_parsed[title] = parsed_t
                 except FileExistsError:
                     pass
                 except OSError as e:
@@ -2448,13 +2577,16 @@ class LibraryScanner:
                     arr_info = sonarr_map.get(title.lower()) or sonarr_map_norm.get(_norm_for_matching(title))
                 if not arr_info:
                     # Season-aware TMDB fallback: use the show's max season
-                    # to disambiguate reboots/revivals with the same title
+                    # to disambiguate reboots/revivals with the same title.
+                    # The TMDB cache is keyed by parsed-folder norm — use
+                    # _parsed_title so renamed items still resolve via cache.
                     show_max_sn = _show_max_season.get(title)
-                    tmdb_id = (cached_tmdb_shows.get(f"{norm} ({year})") if year else None) or cached_tmdb_shows.get(norm)
+                    parsed_norm = _normalize_title(show.get('_parsed_title') or title)
+                    tmdb_id = (cached_tmdb_shows.get(f"{parsed_norm} ({year})") if year else None) or cached_tmdb_shows.get(parsed_norm)
                     if tmdb_id:
                         arr_info = sonarr_by_tmdb.get(tmdb_id)
                     if not arr_info and show_max_sn:
-                        alt_id = find_show_tmdb_id_by_season(norm, show_max_sn, year)
+                        alt_id = find_show_tmdb_id_by_season(parsed_norm, show_max_sn, year)
                         if alt_id and alt_id != tmdb_id:
                             arr_info = sonarr_by_tmdb.get(alt_id)
                 if arr_info and arr_info['folder']:
@@ -2517,6 +2649,9 @@ class LibraryScanner:
                             symlinked_shows.add(title)
                             if year:
                                 _symlink_years[title] = year
+                            parsed_t = show.get('_parsed_title')
+                            if parsed_t and parsed_t != title:
+                                _symlink_parsed[title] = parsed_t
                         except FileExistsError:
                             pass
                         except OSError as e:
@@ -2594,7 +2729,9 @@ class LibraryScanner:
                 if not info:
                     info = sonarr_map.get(title.lower()) or sonarr_map_norm.get(_norm_for_matching(title))
                 if not info:
-                    norm_t = _normalize_title(title)
+                    # TMDB cache is keyed by parsed-folder norm — use the
+                    # stashed parsed title so renamed items still resolve.
+                    norm_t = _normalize_title(_symlink_parsed.get(title) or title)
                     tmdb_id = (cached_tmdb_shows.get(f"{norm_t} ({_yr})") if _yr else None) or cached_tmdb_shows.get(norm_t)
                     if tmdb_id:
                         info = sonarr_by_tmdb.get(tmdb_id)
@@ -2638,7 +2775,9 @@ class LibraryScanner:
                 if not info:
                     info = radarr_map.get(title.lower()) or radarr_map_norm.get(_norm_for_matching(title))
                 if not info:
-                    _norm_t = _normalize_title(title)
+                    # TMDB cache is keyed by parsed-folder norm — use the
+                    # stashed parsed title so renamed items still resolve.
+                    _norm_t = _normalize_title(_symlink_parsed.get(title) or title)
                     tmdb_id = (cached_tmdb_movies.get(f"{_norm_t} ({_yr})") if _yr else None) or cached_tmdb_movies.get(_norm_t)
                     if tmdb_id:
                         info = radarr_by_tmdb.get(tmdb_id)
@@ -3399,6 +3538,23 @@ def get_wanted_counts(data, pending=None):
     pending = pending or {}
     counts = {'missing': 0, 'unavailable': 0, 'pending': 0, 'fallback': 0}
 
+    # Pending entries may be keyed by the parsed-folder norm even when the
+    # display title was upgraded to canonical via TMDB rename.  Resolve via
+    # scanner aliases so renamed items still match their pending entry.
+    scanner = _scanner
+
+    def _pending_for(title):
+        norm = _normalize_title(title or '')
+        if not norm:
+            return {}
+        pe = pending.get(norm)
+        if not pe and scanner is not None:
+            for alias in scanner.aliases_for(norm):
+                pe = pending.get(alias)
+                if pe:
+                    break
+        return pe or {}
+
     for show in data.get('shows', []):
         # Missing: TMDB enrichment sets missing_episodes = total - have.
         # season_data from the scan only contains episodes WITH files,
@@ -3407,9 +3563,7 @@ def get_wanted_counts(data, pending=None):
         if me is not None and me > 0:
             counts['missing'] += 1
 
-        # Pending directions
-        norm = _normalize_title(show.get('title', ''))
-        pe = pending.get(norm, {})
+        pe = _pending_for(show.get('title', ''))
         direction = pe.get('direction', '')
         if direction == 'debrid-unavailable':
             counts['unavailable'] += 1
@@ -3423,8 +3577,7 @@ def get_wanted_counts(data, pending=None):
         if me is not None and me > 0:
             counts['missing'] += 1
 
-        norm = _normalize_title(movie.get('title', ''))
-        pe = pending.get(norm, {})
+        pe = _pending_for(movie.get('title', ''))
         direction = pe.get('direction', '')
         if direction == 'debrid-unavailable':
             counts['unavailable'] += 1

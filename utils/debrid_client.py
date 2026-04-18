@@ -59,14 +59,25 @@ class DebridClientBase:
         scanner uses for mount folders, then compares normalized titles.
 
         Args:
-            normalized_title: Pre-normalized title (e.g., 'the eternaut').
-                Caller must normalize via library.normalize_title() before calling.
+            normalized_title: Pre-normalized title (e.g., 'the eternaut'),
+                or an iterable of acceptable normalized titles for cases
+                where the same canonical title has multiple parsed-folder
+                aliases (e.g. multi-language torrents).  Empty strings are
+                ignored.  Caller must normalize via library.normalize_title()
+                before calling.
             target_year: Optional year to narrow matches. When both the
                 target and parsed torrent have a year, they must agree.
 
         Returns list of dicts: [{id, filename, parsed_title, year}, ...]
         Raises if list_torrents() fails (API error).
         """
+        if isinstance(normalized_title, str):
+            accept = {normalized_title} if normalized_title else set()
+        else:
+            accept = {n for n in normalized_title if n}
+        if not accept:
+            return []
+
         matches = []
 
         torrents = self.list_torrents()
@@ -84,7 +95,7 @@ class DebridClientBase:
                     break
             parsed_title, parsed_year = parse_folder_name(name)
             normalized = normalize_title(parsed_title)
-            if normalized != normalized_title:
+            if normalized not in accept:
                 continue
             # Year-aware matching: if both sides have a year, they must agree
             if target_year is not None and parsed_year is not None:

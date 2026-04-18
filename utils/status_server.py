@@ -1377,10 +1377,21 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 prefer_debrid = values.get('prefer_debrid')
                 if prefer_debrid is None and service_name in ('sonarr', 'radarr'):
                     from utils.library_prefs import get_all_preferences
-                    from utils.library import normalize_title
+                    from utils.library import normalize_title, get_scanner
                     prefs = get_all_preferences()
                     nk = normalize_title(title)
-                    pref = prefs.get(nk, 'none')
+                    pref = prefs.get(nk)
+                    if not pref:
+                        # Pref may have been saved under the parsed-folder
+                        # norm before a canonical-title rename — consult
+                        # scanner aliases so the user's choice still applies.
+                        _sc = get_scanner()
+                        if _sc:
+                            for alias in _sc.aliases_for(nk):
+                                pref = prefs.get(alias)
+                                if pref:
+                                    break
+                    pref = pref or 'none'
                     if pref == 'prefer-debrid':
                         prefer_debrid = True
                     elif pref == 'prefer-local':
@@ -1802,8 +1813,15 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     except (ValueError, TypeError):
                         year = None
 
+                # Expand aliases so canonical titles surfaced in the UI still
+                # match torrents stored under the original parsed-folder name
+                # (multi-language releases bundling two titles).
+                from utils.library import get_scanner
+                _sc = get_scanner()
+                accept_norms = {norm} | (_sc.aliases_for(norm) if _sc else set())
+
                 try:
-                    matches = client.find_torrents_by_title(norm, target_year=year)
+                    matches = client.find_torrents_by_title(accept_norms, target_year=year)
                 except Exception as e:
                     logger.error(f"[remove-debrid] Failed to query debrid provider: {e}")
                     self._send_json_response(502, json.dumps({
@@ -1972,9 +1990,12 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     if str(delete_debrid).lower() in ('true', '1', 'yes'):
                         try:
                             from utils.debrid_client import get_debrid_client
+                            from utils.library import get_scanner
                             dclient, dservice = get_debrid_client()
                             if dclient:
-                                matches = dclient.find_torrents_by_title(norm, target_year=year)
+                                _sc = get_scanner()
+                                accept_norms = {norm} | (_sc.aliases_for(norm) if _sc else set())
+                                matches = dclient.find_torrents_by_title(accept_norms, target_year=year)
                                 deleted_count = 0
                                 for m in matches:
                                     if dclient.delete_torrent(str(m['id'])):
@@ -1994,18 +2015,26 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     except Exception as e:
                         logger.warning(f"[delete] Symlink cleanup failed for '{title}': {e}")
 
-                    # 3. Clean up preferences and pending state
+                    # 3. Clean up preferences and pending state.  Sweep
+                    # aliases too — entries saved under the parsed-folder
+                    # norm before a canonical-title rename would otherwise
+                    # linger and resurface as ghost prefs/pending state.
                     try:
                         from utils.library_prefs import remove_preference, clear_pending
-                        remove_preference(norm)
-                        clear_pending(norm)
+                        from utils.library import get_scanner
+                        _sc = get_scanner()
+                        norms_to_purge = {norm} | (_sc.aliases_for(norm) if _sc else set())
+                        for n in norms_to_purge:
+                            remove_preference(n)
+                            clear_pending(n)
                     except Exception as e:
                         logger.warning(f"[delete] Prefs/pending cleanup failed for '{title}': {e}")
 
-                    # 4. Remove TMDB cache entry
+                    # 4. Remove TMDB cache entries (canonical + parsed aliases)
                     try:
                         from utils.tmdb import remove_cached_entry
-                        remove_cached_entry(norm, media_type, year=year)
+                        for n in norms_to_purge:
+                            remove_cached_entry(n, media_type, year=year)
                     except Exception as e:
                         logger.warning(f"[delete] TMDB cache cleanup failed for '{title}': {e}")
 

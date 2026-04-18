@@ -646,6 +646,7 @@ def get_cached_posters(items):
                     'total_episodes': aired_eps,
                     'imdb_id': entry.get('imdb_id') or '',
                     'max_cached_season': max(season_nums) if season_nums else 0,
+                    'title': entry.get('title', '') or '',
                 }
                 result[result_key] = info
                 # Also store under yearless key if no collision
@@ -663,6 +664,7 @@ def get_cached_posters(items):
                     'tmdb_status': status,
                     'runtime': entry.get('runtime', 0),
                     'imdb_id': entry.get('imdb_id') or '',
+                    'title': entry.get('title', '') or '',
                 }
                 result[result_key] = info
                 if key != result_key and key not in result:
@@ -764,6 +766,7 @@ def find_show_by_season(norm_key, max_season, year=None):
             'imdb_id': entry.get('imdb_id') or '',
             'tmdb_id': entry.get('tmdb_id'),
             'max_cached_season': max(season_nums) if season_nums else 0,
+            'title': entry.get('title', '') or '',
         }
 
     primary = _cache_lookup(shows_cache, norm_key, year)

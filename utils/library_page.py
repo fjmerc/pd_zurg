@@ -32,6 +32,12 @@ __NAV_HTML__
 <style>
 .main-content{max-width:1400px}
 
+/* Sticky toolbar wrapper (keeps tabs + controls visible while scrolling) */
+.toolbar-sticky{position:sticky;top:0;z-index:10;background:var(--bg);margin:0 -20px;padding:0 20px;box-shadow:0 2px 6px rgba(0,0,0,.15)}
+@media(max-width:768px){.toolbar-sticky{margin:0 -16px;padding:0 16px}}
+/* Disable toolbar stickiness on tablet range where horizontal jump-bar sticks at top:0 */
+@media(max-width:640px) and (min-width:481px){.toolbar-sticky{position:static;box-shadow:none}}
+
 /* Tabs */
 .tabs{display:flex;gap:0;margin-bottom:0;border-bottom:2px solid var(--border)}
 .tab{padding:10px 20px;cursor:pointer;color:var(--text2);font-size:.9em;font-weight:500;border-bottom:2px solid transparent;margin-bottom:-2px;transition:color .15s,border-color .15s;user-select:none}
@@ -70,7 +76,7 @@ __NAV_HTML__
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:16px;margin-top:4px}
 
 /* Poster card (Sonarr-style grid cards) */
-.poster-card{background:var(--card);border-radius:8px;overflow:hidden;cursor:pointer;transition:transform 200ms ease-in,box-shadow 200ms ease-in;position:relative}
+.poster-card{background:var(--card);border-radius:8px;overflow:hidden;cursor:pointer;transition:transform 200ms ease-in,box-shadow 200ms ease-in;position:relative;scroll-margin-top:100px}
 .poster-card:hover{transform:translateY(-4px);box-shadow:0 0 12px rgba(0,0,0,.5);z-index:2}
 .poster-card:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 .poster-container{position:relative;aspect-ratio:2/3;overflow:hidden;background:var(--border)}
@@ -444,6 +450,7 @@ body.has-bulk-bar{padding-bottom:60px}
 .search-count{font-size:.75em;color:var(--text3);margin-left:auto}
 </style>
 
+<div class="toolbar-sticky">
 <div class="tabs" role="tablist">
   <div class="tab active" role="tab" tabindex="0" aria-selected="true" aria-controls="tab-movies"
        data-kb="tab-1" onclick="switchTab('movies')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('movies')}">
@@ -490,6 +497,7 @@ body.has-bulk-bar{padding-bottom:60px}
   <button class="btn-select" id="btn-select" onclick="toggleSelectMode()" aria-pressed="false">Select</button>
   <button class="btn btn-ghost" id="btn-refresh" data-kb="refresh" onclick="triggerRefresh()" title="Refresh library (R)">Refresh</button>
   <span class="scan-info" id="scan-info"></span>
+</div>
 </div>
 
 <div class="wanted-presets" id="wanted-presets">
@@ -1378,9 +1386,13 @@ function _updateJumpBar(items) {
 function jumpToLetter(letter) {
   var cards = document.querySelectorAll('.poster-card[data-title]');
   var prefersReduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // Measure current sticky toolbar height so the target card lands below it, not behind it
+  var sticky = document.querySelector('.toolbar-sticky');
+  var stickyH = (sticky && getComputedStyle(sticky).position === 'sticky') ? sticky.offsetHeight : 0;
   for (var i = 0; i < cards.length; i++) {
     var cardLetter = _getItemLetter(cards[i].getAttribute('data-title'));
     if (cardLetter === letter) {
+      cards[i].style.scrollMarginTop = (stickyH + 8) + 'px';
       cards[i].scrollIntoView({behavior: prefersReduced ? 'auto' : 'smooth', block: 'start'});
       cards[i].classList.add('jump-highlight');
       setTimeout(function(el) { el.classList.remove('jump-highlight'); }.bind(null, cards[i]), 1500);
@@ -2001,6 +2013,7 @@ function showDetail(index) {
   if (_transferClearTimer) { clearTimeout(_transferClearTimer); _transferClearTimer = null; }
   document.title = (item.title || '') + ' \u2014 pd_zurg Library';
 
+  document.querySelector('.toolbar-sticky').style.display = 'none';
   document.querySelector('.tabs').style.display = 'none';
   document.querySelector('.controls').style.display = 'none';
   document.getElementById('wanted-presets').style.display = 'none';
@@ -2687,6 +2700,7 @@ function hideDetail() {
   _hUrl.searchParams.delete('type');
   _hUrl.searchParams.delete('from');
   history.replaceState(null, '', _hUrl);
+  document.querySelector('.toolbar-sticky').style.display = '';
   document.querySelector('.tabs').style.display = '';
   document.querySelector('.controls').style.display = '';
   document.getElementById('wanted-presets').style.display = '';
@@ -4004,6 +4018,7 @@ try {
 try {
   var _dp = new URLSearchParams(window.location.search);
   if (_dp.get('detail')) {
+    document.querySelector('.toolbar-sticky').style.display = 'none';
     document.querySelector('.tabs').style.display = 'none';
     document.querySelector('.controls').style.display = 'none';
     document.getElementById('wanted-presets').style.display = 'none';

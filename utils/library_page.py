@@ -50,8 +50,13 @@ __NAV_HTML__
 /* Controls row */
 .controls{display:flex;gap:8px;align-items:center;padding:12px 0;flex-wrap:wrap}
 .search-wrap{flex:1;min-width:180px;position:relative}
-.search-wrap input{width:100%;background:var(--input-bg);border:1px solid var(--input-border);border-radius:6px;padding:8px 10px 8px 32px;color:var(--text);font-size:.85em;outline:none;transition:border-color .15s;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='15' height='15' fill='%23636e7b' viewBox='0 0 16 16'%3E%3Cpath d='M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85zm-5.242.156a5 5 0 1 1 0-10 5 5 0 0 1 0 10z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:9px center}
+.search-wrap input{width:100%;background:var(--input-bg);border:1px solid var(--input-border);border-radius:6px;padding:8px 32px 8px 32px;color:var(--text);font-size:.85em;outline:none;transition:border-color .15s;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='15' height='15' fill='%23636e7b' viewBox='0 0 16 16'%3E%3Cpath d='M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85zm-5.242.156a5 5 0 1 1 0-10 5 5 0 0 1 0 10z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:9px center}
 .search-wrap input:focus{border-color:var(--input-focus)}
+.search-wrap input::-webkit-search-cancel-button,.search-wrap input::-webkit-search-decoration{-webkit-appearance:none;appearance:none}
+.search-clear{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:20px;height:20px;border:none;background:transparent;color:var(--text3);cursor:pointer;display:none;align-items:center;justify-content:center;font-size:15px;line-height:1;border-radius:50%;padding:0;transition:color .15s,background .15s}
+.search-clear:hover{color:var(--text);background:var(--border)}
+.search-clear:focus-visible{outline:2px solid var(--blue);outline-offset:1px}
+.search-wrap.has-value .search-clear{display:flex}
 .filter-select{background:var(--input-bg);border:1px solid var(--input-border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:.85em;outline:none;cursor:pointer;transition:border-color .15s}
 .filter-select:focus{border-color:var(--input-focus)}
 .btn-select{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;padding:8px 14px;font-size:.85em;cursor:pointer;white-space:nowrap;transition:border-color .15s,color .15s,background .15s}
@@ -465,7 +470,8 @@ body.has-bulk-bar{padding-bottom:60px}
 <div class="controls">
   <div class="search-wrap">
     <input type="search" id="search-input" data-kb="search" placeholder="Search titles... (/)" autocomplete="off"
-           oninput="clearTimeout(_searchTimer);_searchTimer=setTimeout(applyFilters,150)" aria-label="Search titles">
+           oninput="_syncSearchClear();clearTimeout(_searchTimer);_searchTimer=setTimeout(applyFilters,150)" aria-label="Search titles">
+    <button type="button" class="search-clear" id="search-clear" aria-label="Clear search" title="Clear (Esc)" onclick="clearLibrarySearch()">&times;</button>
   </div>
   <select class="filter-select" id="source-filter" onchange="applyFilters()" aria-label="Filter by source">
     <option value="">All Sources</option>
@@ -564,11 +570,26 @@ let _refreshTimer = null;
 let _activeWantedPreset = null;
 let _wantedInFlight = false;
 
+function _syncSearchClear() {
+  var si = document.getElementById('search-input');
+  if (!si) return;
+  var wrap = si.parentElement;
+  if (wrap) wrap.classList.toggle('has-value', si.value.length > 0);
+}
+function clearLibrarySearch() {
+  var si = document.getElementById('search-input');
+  if (!si) return;
+  si.value = '';
+  _syncSearchClear();
+  applyFilters();
+  si.focus();
+}
+
 /* Keyboard shortcut: Escape handler for this page */
 window.onKbEscape = function() {
   if (_inDetailView) { hideDetail(); return; }
   var si = document.getElementById('search-input');
-  if (si && si.value) { si.value = ''; applyFilters(); return; }
+  if (si && si.value) { si.value = ''; _syncSearchClear(); applyFilters(); return; }
 };
 let _lastTransferText = '';
 let _lastTransferType = '';

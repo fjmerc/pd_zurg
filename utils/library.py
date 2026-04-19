@@ -72,6 +72,31 @@ _SITE_PREFIX_PATTERN = re.compile(
 )
 _BRACKET_TAG_PATTERN = re.compile(r'^\[.*?\][\s.\-_]*')
 
+# "Title - <GenreWord(s)> <year> ..." — some release naming conventions put a
+# genre descriptor between the title and the year.  Strip it ONLY when the
+# word(s) after the dash match a closed allowlist and a plausible 19xx/20xx
+# year follows, so titles with legitimate " - Subtitle" (Leon - The
+# Professional, Blade Runner - The Final Cut, Inception - Director's Cut)
+# stay untouched.  "War" is deliberately excluded — too ambiguous between
+# genre and real title word.  "Phycological" is the user-observed misspelling.
+# Separator class `[\s._]` accepts space-dash-space AND dotted/underscored
+# variants (Movie.-.Sci-Fi.2014..., Movie_-_Sci-Fi_2014_...).  Year boundary
+# accepts whitespace/punctuation/close-paren/close-bracket/end-of-string only
+# so `2020s`/`2014th` can't masquerade as years and silently lose the year.
+# The optional `[(\[]?` inside the lookahead handles parenthesized years
+# (Movie - Sci-Fi (2014) 1080p) without consuming the opening bracket, so
+# the downstream _MID_YEAR_PATTERN still extracts the year.
+_GENRE_SUFFIX_PATTERN = re.compile(
+    r'[\s._]-[\s._]+('
+    r'Sci-?Fi|Science[\s._]+Fiction|'
+    r'(?:Psychological|Phycological)[\s._]+Thriller|'
+    r'Action|Adventure|Animation|Biography|Comedy|Crime|'
+    r'Documentary|Drama|Family|Fantasy|Horror|Musical|'
+    r'Mystery|Romance|Thriller|Western'
+    r')[\s._]+(?=[(\[]?(?:19|20)\d{2}(?:[\s.\-_)\]]|$))',
+    re.IGNORECASE,
+)
+
 # Patterns for _clean_title
 _SEASON_TEXT_PATTERN = re.compile(
     r'[\s.\-_]+Seasons?[\s.\-_]+\d+(?:[\s.\-_]*[-\u2013][\s.\-_]*\d+|[\s.\-_]+(?:to|and|&)[\s.\-_]+\d+)?'
@@ -209,6 +234,9 @@ def _parse_folder_name(name):
     title = _SITE_PREFIX_PATTERN.sub('', title)
     # Strip bracket tags: "[TorrentDay] Show.Name" → "Show.Name"
     title = _BRACKET_TAG_PATTERN.sub('', title)
+    # Strip genre descriptor between title and year (see _GENRE_SUFFIX_PATTERN):
+    #   "Predestination - Sci-Fi 2014 ..." → "Predestination 2014 ..."
+    title = _GENRE_SUFFIX_PATTERN.sub(' ', title)
 
     # Strip trailing year in parens: "Movie Name (2024)"
     year = None

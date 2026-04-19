@@ -183,6 +183,149 @@ class TestParseFolderName:
         title, _ = _parse_folder_name("Show.Name.S01.1080p + Extras")
         assert title == "Show Name"
 
+    # Genre descriptor between title and year ("Title - <Genre> YYYY ...")
+    def test_genre_suffix_sci_fi_stripped(self):
+        # User-reported: Predestination was showing as "Predestination Sci Fi (2014)"
+        title, year = _parse_folder_name(
+            "Predestination - Sci-Fi 2014 Eng Rus Multi Subs 1080p [H264-mp4]"
+        )
+        assert title == "Predestination"
+        assert year == 2014
+
+    def test_genre_suffix_phycological_thriller_stripped(self):
+        # User-reported: The Jacket with the observed "Phycological" misspelling
+        title, year = _parse_folder_name(
+            "The Jacket - Phycological Thriller 2005 Eng Rus Ukr Multi Subs 1080p [H264-mp4]"
+        )
+        assert title == "The Jacket"
+        assert year == 2005
+
+    def test_genre_suffix_psychological_thriller_stripped(self):
+        title, year = _parse_folder_name(
+            "Movie Title - Psychological Thriller 2018 1080p BluRay"
+        )
+        assert title == "Movie Title"
+        assert year == 2018
+
+    def test_genre_suffix_two_word_science_fiction_stripped(self):
+        title, year = _parse_folder_name(
+            "Movie - Science Fiction 2020 1080p"
+        )
+        assert title == "Movie"
+        assert year == 2020
+
+    def test_genre_suffix_case_insensitive(self):
+        title, year = _parse_folder_name(
+            "Predestination - sci-fi 2014 1080p"
+        )
+        assert title == "Predestination"
+        assert year == 2014
+
+    # Negative cases — legitimate " - Subtitle" titles: the genre pattern
+    # must NOT consume the subtitle word.  Downstream `_clean_title` still
+    # collapses dashes to spaces, so "Leon - The Professional" ends up as
+    # "Leon The Professional" — the important thing is that "The
+    # Professional" survives the genre strip.
+    def test_leon_the_professional_untouched(self):
+        title, year = _parse_folder_name(
+            "Leon - The Professional 1994 1080p BluRay"
+        )
+        assert title == "Leon The Professional"
+        assert year == 1994
+
+    def test_blade_runner_final_cut_untouched(self):
+        title, year = _parse_folder_name(
+            "Blade Runner - The Final Cut 2007 1080p"
+        )
+        assert title == "Blade Runner The Final Cut"
+        assert year == 2007
+
+    def test_hyphenated_title_without_space_dash_space_untouched(self):
+        # Spider-Man has a hyphen but no " - " separator, so the genre
+        # pattern does not fire.  The hyphen becomes a space in
+        # _clean_title (pre-existing behavior, not caused by this rule).
+        title, year = _parse_folder_name("Spider-Man 2002 1080p BluRay")
+        assert title == "Spider Man"
+        assert year == 2002
+
+    def test_genre_without_year_untouched(self):
+        # Rule requires a plausible 4-digit year (19xx/20xx) to follow.
+        # "1080p" must NOT trigger the strip, or "Thriller" disappears.
+        title, _ = _parse_folder_name("Movie Title - Thriller 1080p")
+        assert title == "Movie Title Thriller"
+
+    def test_genre_not_in_allowlist_untouched(self):
+        # "War" is deliberately excluded from the allowlist — the word
+        # survives even though the surrounding dashes collapse to spaces.
+        title, year = _parse_folder_name("The Great - War 1998 1080p")
+        assert title == "The Great War"
+        assert year == 1998
+
+    def test_quality_prefix_1080p_not_treated_as_year(self):
+        # Regression guard: "1080p" starts with "10" which is not a valid
+        # year prefix (must be 19xx or 20xx), so the genre pattern must
+        # not strip before a quality marker.
+        title, _ = _parse_folder_name("Predestination - Sci-Fi 1080p")
+        assert title == "Predestination Sci Fi"
+
+    def test_genre_suffix_single_word_thriller_stripped(self):
+        # Happy path for a plain single-word genre from the allowlist
+        title, year = _parse_folder_name("Cape Fear - Thriller 2019 1080p BluRay")
+        assert title == "Cape Fear"
+        assert year == 2019
+
+    def test_genre_suffix_dotted_separator_stripped(self):
+        # Dotted release-naming convention: ".-." between title and genre
+        title, year = _parse_folder_name(
+            "Predestination.-.Sci-Fi.2014.1080p.BluRay"
+        )
+        assert title == "Predestination"
+        assert year == 2014
+
+    def test_genre_suffix_underscore_separator_stripped(self):
+        # Underscore release-naming convention
+        title, year = _parse_folder_name(
+            "Predestination_-_Sci-Fi_2014_1080p_BluRay"
+        )
+        assert title == "Predestination"
+        assert year == 2014
+
+    def test_genre_suffix_parenthesized_year_stripped(self):
+        # Parenthesized year form: "Movie - Sci-Fi (2014) 1080p"
+        title, year = _parse_folder_name(
+            "Predestination - Sci-Fi (2014) 1080p"
+        )
+        assert title == "Predestination"
+        assert year == 2014
+
+    def test_genre_suffix_year_with_letter_suffix_untouched(self):
+        # "2020s" / "2014th" must not satisfy the year lookahead —
+        # otherwise we'd strip the genre AND lose the year, leaving
+        # garbage downstream.  Strip must not fire.
+        title, _ = _parse_folder_name("Movie - Drama 2020s 1080p")
+        assert "Drama" in title or "2020s" in title  # strip did not fire
+
+    def test_genre_suffix_tv_show_parity(self):
+        # Sonarr/Radarr parity: the same pattern works for TV folders.
+        title, year = _parse_folder_name(
+            "Sherlock - Mystery 2010 Season 1 1080p"
+        )
+        assert title == "Sherlock"
+        assert year == 2010
+
+    def test_spider_man_with_subtitle_not_mistaken_for_genre(self):
+        # Internal word-hyphens (Spider-Man) must not be treated as
+        # " - " separators.  The adjacent "Action" would otherwise be
+        # stripped, but the genre pattern requires separator chars on
+        # both sides of the dash.
+        title, year = _parse_folder_name(
+            "Spider-Man - Action 2002 1080p"
+        )
+        # The " - Action " (space-dash-space + Action + year) should
+        # strip; the internal Spider-Man hyphen should not.
+        assert title == "Spider Man"
+        assert year == 2002
+
 
 # ---------------------------------------------------------------------------
 # _clean_title

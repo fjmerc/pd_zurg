@@ -655,6 +655,7 @@ def _norm_for_matching(title):
 # Public aliases for cross-module reuse (e.g., debrid_client title matching)
 parse_folder_name = _parse_folder_name
 normalize_title = _normalize_title
+norm_for_matching = _norm_for_matching
 
 
 def _build_tmdb_aliases():

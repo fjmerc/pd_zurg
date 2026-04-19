@@ -855,6 +855,150 @@ class TestCheckLocalLibrary:
         assert watcher._check_local_library('Fargo.S05E01.1080p.WEB.torrent') is False
 
 
+class TestCheckLocalLibraryPreferDebridBypass:
+    """Dedup bypass when the user has 'prefer-debrid' set for the title.
+
+    The preference key uses the canonical title (potentially with colons,
+    apostrophes, ampersands) while the release filename is dot-separated
+    and loses that punctuation during parsing.  The bypass must match
+    punctuation-insensitively or prefer-debrid force-grabs get dropped.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_prefs(self, tmp_dir, monkeypatch):
+        import utils.library_prefs as lp
+        monkeypatch.setattr(lp, 'PREFS_PATH', os.path.join(tmp_dir, 'library_prefs.json'))
+
+    def _make_watcher(self, tmp_dir):
+        tv_dir = os.path.join(tmp_dir, 'tv')
+        movies_dir = os.path.join(tmp_dir, 'movies')
+        os.makedirs(tv_dir)
+        os.makedirs(movies_dir)
+        watcher = BlackholeWatcher(
+            os.path.join(tmp_dir, 'watch'), 'key', 'realdebrid',
+            dedup_enabled=True,
+            local_library_tv=tv_dir,
+            local_library_movies=movies_dir,
+        )
+        return watcher, tv_dir, movies_dir
+
+    def _seed_movie(self, movies_dir, folder):
+        movie_path = os.path.join(movies_dir, folder)
+        os.makedirs(movie_path)
+        with open(os.path.join(movie_path, 'movie.mkv'), 'w') as f:
+            f.write('data')
+
+    def _seed_show_episode(self, tv_dir, folder, season, episode_basename):
+        season_dir = os.path.join(tv_dir, folder, f'Season {season:02d}')
+        os.makedirs(season_dir)
+        with open(os.path.join(season_dir, episode_basename), 'w') as f:
+            f.write('data')
+
+    def test_bypass_movie_with_colon_in_pref_key(self, tmp_dir):
+        """Pref key 'lego dc batman: family matters' must match dot-separated release."""
+        import utils.library_prefs as lp
+        watcher, _, movies_dir = self._make_watcher(tmp_dir)
+        self._seed_movie(movies_dir, 'Lego DC Batman Family Matters (2019)')
+        lp.set_preference('lego dc batman: family matters', 'prefer-debrid')
+
+        assert watcher._check_local_library(
+            'LEGO.DC.Batman.Family.Matters.2019.1080p.WEB-DL.DD5.1.H264-CMRG.magnet'
+        ) is False
+
+    def test_bypass_movie_with_apostrophe_in_pref_key(self, tmp_dir):
+        """Pref key with apostrophe must match release that dropped it."""
+        import utils.library_prefs as lp
+        watcher, _, movies_dir = self._make_watcher(tmp_dir)
+        self._seed_movie(movies_dir, "Ocean's Eleven (2001)")
+        lp.set_preference("ocean's eleven", 'prefer-debrid')
+
+        assert watcher._check_local_library(
+            'Oceans.Eleven.2001.1080p.BluRay.x264.torrent'
+        ) is False
+
+    def test_bypass_show_with_colon_in_pref_key(self, tmp_dir):
+        """TV parity: colon in canonical show title must still bypass dedup."""
+        import utils.library_prefs as lp
+        watcher, tv_dir, _ = self._make_watcher(tmp_dir)
+        self._seed_show_episode(
+            tv_dir, 'Marvels Agents of SHIELD (2013)', 1,
+            'Marvels Agents of SHIELD (2013) - S01E01.mkv',
+        )
+        lp.set_preference("marvel's agents of s.h.i.e.l.d.", 'prefer-debrid')
+
+        assert watcher._check_local_library(
+            'Marvels.Agents.of.SHIELD.S01E01.1080p.WEB.torrent'
+        ) is False
+
+    def test_no_bypass_for_prefer_local(self, tmp_dir):
+        """Only 'prefer-debrid' bypasses — 'prefer-local' must not."""
+        import utils.library_prefs as lp
+        watcher, _, movies_dir = self._make_watcher(tmp_dir)
+        self._seed_movie(movies_dir, 'Lego DC Batman Family Matters (2019)')
+        lp.set_preference('lego dc batman: family matters', 'prefer-local')
+
+        assert watcher._check_local_library(
+            'LEGO.DC.Batman.Family.Matters.2019.1080p.WEB-DL.torrent'
+        ) is True
+
+    def test_no_bypass_without_matching_pref(self, tmp_dir):
+        """Different title with prefer-debrid must not bypass unrelated release."""
+        import utils.library_prefs as lp
+        watcher, _, movies_dir = self._make_watcher(tmp_dir)
+        self._seed_movie(movies_dir, 'Gattaca (1997)')
+        lp.set_preference('some other movie', 'prefer-debrid')
+
+        assert watcher._check_local_library(
+            'Gattaca.1997.1080p.BluRay.torrent'
+        ) is True
+
+    def test_no_bypass_when_prefs_empty(self, tmp_dir):
+        """Baseline: no preferences set, dedup still runs normally."""
+        watcher, _, movies_dir = self._make_watcher(tmp_dir)
+        self._seed_movie(movies_dir, 'Gattaca (1997)')
+
+        assert watcher._check_local_library(
+            'Gattaca.1997.1080p.BluRay.torrent'
+        ) is True
+
+    def test_bypass_when_release_retains_parenthesized_year(self, tmp_dir):
+        """Release filenames with `(YYYY)` parens must still match a pref
+        key stored under the _normalize_title-stripped form.
+
+        parse_release_name's year regex requires `[.\\s](\\d{4})[.\\s]` but
+        a filename like `Name.(2014).quality.torrent` has `(` before the
+        year, so it falls through to the quality-match path and preserves
+        `(2014)` in the parsed name.  norm_for_matching keeps digits, so a
+        fuzzy-only bypass would miss.  The strict (_normalize_title) branch
+        must catch it.
+        """
+        import utils.library_prefs as lp
+        watcher, _, movies_dir = self._make_watcher(tmp_dir)
+        self._seed_movie(movies_dir, 'Gattaca (1997)')
+        lp.set_preference('gattaca', 'prefer-debrid')
+
+        assert watcher._check_local_library(
+            'Gattaca.(1997).1080p.BluRay.x264.torrent'
+        ) is False
+
+    def test_bypass_for_non_ascii_title(self, tmp_dir):
+        """Native-script pref key matching native-script release name.
+
+        norm_for_matching transliterates to ASCII via NFKD+encode-ignore,
+        which drops non-decomposable CJK/Arabic/Cyrillic characters to
+        empty string.  The strict branch compares _normalize_title
+        directly (preserves non-ASCII) so this case still bypasses.
+        """
+        import utils.library_prefs as lp
+        watcher, tv_dir, _ = self._make_watcher(tmp_dir)
+        self._seed_show_episode(
+            tv_dir, '鬼滅の刃', 1, 'ep01.mkv',
+        )
+        lp.set_preference('鬼滅の刃', 'prefer-debrid')
+
+        assert watcher._check_local_library('鬼滅の刃.S01E01.1080p.torrent') is False
+
+
 class TestIsMultiSeasonPack:
 
     def test_s01_s05(self):

@@ -1328,15 +1328,44 @@ class BlackholeWatcher:
 
         name_norm = self._normalize_name(name)
 
-        # Skip dedup for prefer-debrid titles — user wants the debrid copy
+        # Skip dedup for prefer-debrid titles — user wants the debrid copy.
+        # Pref keys come from canonical titles via _normalize_title (lowercase
+        # + strip trailing `(YYYY)`, punctuation preserved), while release
+        # names arrive via parse_release_name (dot-separated, may retain
+        # `(YYYY)` when the year parser missed it, punctuation stripped).
+        # Check both strict and fuzzy forms so neither asymmetry misses:
+        #   strict: _normalize_title both sides — handles parens-preserving
+        #           release names and non-ASCII (CJK/Arabic) titles that
+        #           collapse to empty under transliteration.
+        #   fuzzy : _norm_for_matching both sides — handles the punctuation
+        #           mismatch (e.g. "LEGO DC Batman: Family Matters" pref vs
+        #           "LEGO.DC.Batman.Family.Matters" release).
+        # Call-time imports are intentional — library.py and blackhole.py
+        # have a bidirectional circular dependency.
         try:
+            from utils.library import normalize_title, norm_for_matching
             from utils.library_prefs import get_all_preferences
             prefs = get_all_preferences()
-            if prefs.get(name_norm) == 'prefer-debrid':
-                logger.info(f"[blackhole] Bypassing local dedup for {filename}: prefer-debrid preference set")
+            name_strict = normalize_title(name)
+            name_fuzzy = norm_for_matching(name)
+            matched_key = next(
+                (k for k, v in prefs.items()
+                 if v == 'prefer-debrid'
+                 and (normalize_title(k) == name_strict
+                      or (name_fuzzy and norm_for_matching(k) == name_fuzzy))),
+                None,
+            )
+            if matched_key is not None:
+                logger.info(
+                    f"[blackhole] Bypassing local dedup for {filename}: "
+                    f"matched prefer-debrid pref {matched_key!r}"
+                )
                 return False
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                f"[blackhole] prefer-debrid bypass check failed for {filename}: {e} "
+                f"— falling through to dedup"
+            )
 
         if is_tv and self.local_library_tv and os.path.isdir(self.local_library_tv):
             for folder in os.listdir(self.local_library_tv):

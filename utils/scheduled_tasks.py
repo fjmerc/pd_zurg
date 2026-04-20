@@ -552,18 +552,38 @@ def housekeeping():
     except Exception as e:
         logger.error(f"[scheduler] Error cleaning empty dirs: {e}")
 
-    # 3. Clean old blackhole retry metadata (.meta files older than 7 days).
-    # RetryMeta sidecars sit next to their torrent files in watch_dir/failed/
-    # (flat mode) or watch_dir/failed/<label>/ (labeled mode). Walk the
-    # failed/ tree recursively — nothing ever had meta files at watch_dir root.
+    # 3. Clean old blackhole retry payloads + metadata in failed/.  The
+    # failed/ tree holds the original .torrent/.magnet payloads alongside
+    # their .meta sidecars.  ``BlackholeWatcher._retry_failed`` DOES poll
+    # this tree and will retry items up to ``MAX_RETRIES`` (3) with the
+    # ``RETRY_SCHEDULE`` backoff ([5m, 15m, 1h]) — so the maximum live
+    # retry window for any file is ~80 minutes from the moment it lands
+    # in failed/ (plus the time between scheduler ticks).  After that
+    # window, the retry loop skips the file on every pass (retries >=
+    # MAX_RETRIES or alt_exhausted=True), and nothing else touches it.
+    # A 7-day-old payload has been terminal for >>160× the max retry
+    # window — safely abandoned.  Without this sweep the payload class
+    # would accumulate indefinitely while only the .meta sidecars ever
+    # got cleaned, since the retry loop bumps sidecar mtime on every
+    # poll.  Supports both flat (watch_dir/failed/<file>) and labeled
+    # (watch_dir/failed/<label>/<file>) layouts via the recursive walk.
+    # Non-retry file types are preserved so a misplaced file can be
+    # inspected manually.
     now = time.time()
     watch_dir = os.environ.get('BLACKHOLE_DIR', '/watch')
     try:
         failed_root = os.path.join(watch_dir, 'failed')
         if os.path.isdir(failed_root):
-            for root, _dirs, files in os.walk(failed_root):
+            # followlinks=False (default, but explicit for defensive clarity):
+            # a symlinked subdir under failed/ must not let the sweep escape
+            # the tree.  Symlinked files inside failed/ are still listed under
+            # *files* and their os.remove() unlinks the link rather than the
+            # target, so there's no escape that way either.
+            for root, _dirs, files in os.walk(failed_root, followlinks=False):
                 for fname in files:
-                    if not fname.endswith('.meta'):
+                    if not (fname.endswith('.meta')
+                            or fname.endswith('.magnet')
+                            or fname.endswith('.torrent')):
                         continue
                     fpath = os.path.join(root, fname)
                     try:
@@ -571,11 +591,15 @@ def housekeeping():
                         if age_days > 7:
                             os.remove(fpath)
                             cleaned += 1
-                            logger.debug(f"[scheduler] Removed stale metadata: {fpath}")
+                            # INFO rather than DEBUG so operators auditing
+                            # "what did housekeeping delete?" don't need to
+                            # flip log levels — destructive actions deserve
+                            # visible logging by default.
+                            logger.info(f"[scheduler] Removed stale failed/ item: {fpath}")
                     except OSError:
                         pass
     except Exception as e:
-        logger.error(f"[scheduler] Error cleaning metadata: {e}")
+        logger.error(f"[scheduler] Error cleaning failed/ items: {e}")
 
     # 4. Rotate history log
     try:

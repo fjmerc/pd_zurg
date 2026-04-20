@@ -497,16 +497,107 @@ class TestHousekeepingMetadataCleanup:
         housekeeping()
         assert os.path.exists(meta)
 
-    def test_leaves_torrent_files_alone(self, tmp_dir, monkeypatch):
-        """The sweep must target .meta only — never the torrent files themselves,
-        even when they're old. Retry eligibility is separate from cleanup."""
+    def test_removes_stale_torrent_payload_in_failed(self, tmp_dir, monkeypatch):
+        """Items in failed/ never auto-retry, so a week-old .torrent/.magnet
+        there is permanently abandoned — without sweeping them the payloads
+        accumulate indefinitely (only their sidecars would ever be cleaned).
+        Matches the .meta sidecar threshold for symmetry."""
         from utils.scheduled_tasks import housekeeping
         watch = self._setup(tmp_dir, monkeypatch)
         torrent = os.path.join(watch, 'failed', 'x.torrent')
-        with open(torrent, 'w') as f:
-            f.write('data')
-        old = time.time() - 100 * 86400
-        os.utime(torrent, (old, old))
+        magnet = os.path.join(watch, 'failed', 'y.magnet')
+        for path in (torrent, magnet):
+            with open(path, 'w') as f:
+                f.write('data')
+        old = time.time() - 8 * 86400  # 8 days — just past threshold
+        for path in (torrent, magnet):
+            os.utime(path, (old, old))
 
         housekeeping()
-        assert os.path.exists(torrent)
+        assert not os.path.exists(torrent)
+        assert not os.path.exists(magnet)
+
+    def test_removes_stale_payload_in_labeled_failed(self, tmp_dir, monkeypatch):
+        """Labeled layout: failed/<label>/ must be swept recursively."""
+        from utils.scheduled_tasks import housekeeping
+        watch = self._setup(tmp_dir, monkeypatch)
+        label_dir = os.path.join(watch, 'failed', 'sonarr')
+        os.makedirs(label_dir)
+        magnet = os.path.join(label_dir, 'stale.magnet')
+        with open(magnet, 'w') as f:
+            f.write('magnet:?xt=...')
+        old = time.time() - 10 * 86400
+        os.utime(magnet, (old, old))
+
+        housekeeping()
+        assert not os.path.exists(magnet)
+
+    def test_preserves_fresh_payload_in_failed(self, tmp_dir, monkeypatch):
+        """A <7d payload in failed/ must survive — we only sweep permanently-
+        abandoned items, not items that just landed."""
+        from utils.scheduled_tasks import housekeeping
+        watch = self._setup(tmp_dir, monkeypatch)
+        magnet = os.path.join(watch, 'failed', 'fresh.magnet')
+        with open(magnet, 'w') as f:
+            f.write('magnet:?xt=...')
+        # mtime is now — younger than 7d threshold
+
+        housekeeping()
+        assert os.path.exists(magnet)
+
+    def test_preserves_payload_outside_failed(self, tmp_dir, monkeypatch):
+        """A stale .magnet in watch_dir root or .alt_pending/ must NOT be
+        swept — those are in-flight drops or retries, not abandoned items."""
+        from utils.scheduled_tasks import housekeeping
+        watch = self._setup(tmp_dir, monkeypatch)
+        # Root-level .magnet (Sonarr just dropped it, not yet processed)
+        root_magnet = os.path.join(watch, 'incoming.magnet')
+        alt_dir = os.path.join(watch, '.alt_pending')
+        os.makedirs(alt_dir)
+        alt_magnet = os.path.join(alt_dir, 'retrying.magnet')
+        for path in (root_magnet, alt_magnet):
+            with open(path, 'w') as f:
+                f.write('magnet:?xt=...')
+            old = time.time() - 100 * 86400  # deliberately ancient
+            os.utime(path, (old, old))
+
+        housekeeping()
+        assert os.path.exists(root_magnet)
+        assert os.path.exists(alt_magnet)
+
+    def test_fresh_sidecar_stale_payload(self, tmp_dir, monkeypatch):
+        """The exact production scenario that triggered this fix: a payload
+        whose real mtime is ancient (>7d) but whose sidecar has been kept
+        fresh by the retry loop's atomic_write rewriting it on every poll.
+        Payload must be swept (it's abandoned); sidecar must survive one
+        more housekeeping cycle (still under threshold on its own clock)."""
+        from utils.scheduled_tasks import housekeeping
+        watch = self._setup(tmp_dir, monkeypatch)
+        magnet = os.path.join(watch, 'failed', 'old.magnet')
+        sidecar = magnet + '.meta'
+        with open(magnet, 'w') as f:
+            f.write('magnet:?xt=...')
+        with open(sidecar, 'w') as f:
+            f.write('{"retries": 3, "alt_exhausted": true}')
+        # Payload ancient, sidecar fresh
+        os.utime(magnet, (time.time() - 20 * 86400, time.time() - 20 * 86400))
+        os.utime(sidecar, (time.time() - 86400, time.time() - 86400))  # 1 day old
+
+        housekeeping()
+        assert not os.path.exists(magnet)   # swept
+        assert os.path.exists(sidecar)      # preserved this cycle
+
+    def test_preserves_unknown_file_types_in_failed(self, tmp_dir, monkeypatch):
+        """If anything other than .torrent/.magnet/.meta lands in failed/
+        (e.g. an accidentally-misplaced user file), housekeeping must not
+        sweep it — the operator can inspect and handle it manually."""
+        from utils.scheduled_tasks import housekeeping
+        watch = self._setup(tmp_dir, monkeypatch)
+        unknown = os.path.join(watch, 'failed', 'notes.txt')
+        with open(unknown, 'w') as f:
+            f.write('note to self')
+        old = time.time() - 30 * 86400
+        os.utime(unknown, (old, old))
+
+        housekeeping()
+        assert os.path.exists(unknown)

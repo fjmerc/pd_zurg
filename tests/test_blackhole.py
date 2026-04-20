@@ -67,6 +67,452 @@ class TestRetryMeta:
         path = os.path.join(tmp_dir, 'movie.torrent')
         assert RetryMeta.meta_path(path) == path + '.meta'
 
+    def test_write_preserves_other_fields(self, tmp_dir):
+        """write() must not wipe unrelated keys like alt_exhausted or tier_state.
+
+        Without this guarantee, the first retry after tier_state is
+        seeded would silently reset the compromise state machine —
+        the dwell timer would be lost and I3 (dwell before compromise)
+        would never actually gate.
+        """
+        path = os.path.join(tmp_dir, 'test.torrent')
+        meta = path + '.meta'
+        # Hand-craft a sidecar with extra fields (simulates alt-exhausted
+        # path writing raw JSON, as the existing code does).
+        with open(meta, 'w') as f:
+            json.dump({
+                'retries': 1,
+                'last_attempt': 100.0,
+                'alt_exhausted': True,
+                'custom_future_field': 'keep-me',
+            }, f)
+        RetryMeta.write(path, 2)
+        with open(meta, 'r') as f:
+            data = json.load(f)
+        assert data['retries'] == 2  # bumped
+        assert data['last_attempt'] > 100.0  # refreshed
+        assert data['alt_exhausted'] is True  # preserved
+        assert data['custom_future_field'] == 'keep-me'  # preserved
+
+
+class TestRetryMetaTierStateV2:
+    """Plan 33 Phase 2 — tier_state schema on RetryMeta."""
+
+    def test_arr_url_hash_stable_and_short(self):
+        h = RetryMeta.arr_url_hash('http://sonarr:8989')
+        assert len(h) == 6
+        assert all(c in '0123456789abcdef' for c in h)
+        # Deterministic — same input yields the same hash
+        assert RetryMeta.arr_url_hash('http://sonarr:8989') == h
+
+    def test_arr_url_hash_differentiates_instances(self):
+        # Isolation for sonarr-4k vs sonarr-hd (per plan 33's per-arr keying)
+        a = RetryMeta.arr_url_hash('http://sonarr-4k:8989')
+        b = RetryMeta.arr_url_hash('http://sonarr-hd:8989')
+        assert a != b
+
+    def test_arr_url_hash_empty_url_returns_empty(self):
+        assert RetryMeta.arr_url_hash('') == ''
+        assert RetryMeta.arr_url_hash(None) == ''
+
+    def test_read_tier_state_returns_none_for_legacy_file(self, tmp_dir):
+        """Legacy v1 sidecar (no tier_state) must load as None, not raise.
+
+        Backward compat is the load-bearing promise of the v2 schema —
+        a user upgrading pd_zurg mid-retry must not lose retry state
+        or crash the blackhole on the first legacy sidecar it reads.
+        """
+        path = os.path.join(tmp_dir, 'legacy.torrent')
+        meta = path + '.meta'
+        with open(meta, 'w') as f:
+            json.dump({'retries': 2, 'last_attempt': 100.0}, f)
+        assert RetryMeta.read_tier_state(path) is None
+        # And the legacy retries/last_attempt readers still work
+        retries, last = RetryMeta.read(path)
+        assert retries == 2
+        assert last == 100.0
+
+    def test_read_tier_state_returns_none_for_missing_file(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'missing.torrent')
+        assert RetryMeta.read_tier_state(path) is None
+
+    def test_init_tier_state_seeds_fresh_file(self, tmp_dir):
+        """Fresh init creates a v1 tier_state with current_tier_index=0
+        and first_attempted_at=now.  These two fields are load-bearing
+        for the dwell check (I3: dwell measured from first attempt)."""
+        path = os.path.join(tmp_dir, 'show.torrent')
+        now = 1_700_000_000.0
+        ts = RetryMeta.init_tier_state(
+            path, 'sonarr', 'http://sonarr:8989',
+            profile_id=4, tier_order=['2160p', '1080p', '720p'], now=now,
+        )
+        assert ts['schema_version'] == RetryMeta.TIER_STATE_SCHEMA_VERSION
+        assert ts['arr_service'] == 'sonarr'
+        assert len(ts['arr_url_hash']) == 6
+        assert ts['profile_id'] == 4
+        assert ts['tier_order'] == ['2160p', '1080p', '720p']
+        assert ts['current_tier_index'] == 0
+        assert ts['first_attempted_at'] == now
+        assert ts['tier_attempts'] == []
+        assert ts['compromise_fired_at'] is None
+        assert ts['season_pack_attempted'] is False
+        # Round-trip
+        loaded = RetryMeta.read_tier_state(path)
+        assert loaded == ts
+
+    def test_init_tier_state_is_idempotent(self, tmp_dir):
+        """Re-init must NOT reset first_attempted_at — that would let a
+        user-initiated retry game the dwell clock (I3)."""
+        path = os.path.join(tmp_dir, 'show.torrent')
+        t1 = 1_700_000_000.0
+        t2 = t1 + 86400  # one day later
+        RetryMeta.init_tier_state(
+            path, 'sonarr', 'http://s:8989', 4, ['2160p', '1080p'], now=t1,
+        )
+        second = RetryMeta.init_tier_state(
+            path, 'sonarr', 'http://s:8989', 4, ['2160p', '1080p'], now=t2,
+        )
+        assert second['first_attempted_at'] == t1
+
+    def test_init_tier_state_preserves_legacy_fields(self, tmp_dir):
+        """Seeding tier_state on a sidecar that already carries
+        retries/alt_exhausted must keep those top-level fields intact."""
+        path = os.path.join(tmp_dir, 'show.torrent')
+        meta = path + '.meta'
+        with open(meta, 'w') as f:
+            json.dump({'retries': 1, 'last_attempt': 100.0, 'alt_exhausted': True}, f)
+        RetryMeta.init_tier_state(
+            path, 'sonarr', 'http://s:8989', 4, ['2160p'], now=200.0,
+        )
+        with open(meta, 'r') as f:
+            data = json.load(f)
+        assert data['retries'] == 1
+        assert data['alt_exhausted'] is True
+        assert data['tier_state']['profile_id'] == 4
+
+    def test_record_tier_attempt_creates_entry(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'show.torrent')
+        RetryMeta.init_tier_state(
+            path, 'sonarr', 'http://s:8989', 4, ['2160p', '1080p'], now=100.0,
+        )
+        assert RetryMeta.record_tier_attempt(
+            path, tier_index=0, cached_hits=0, uncached_hits=5,
+            outcome='no_cached_alts_exhausted', now=150.0,
+        ) is True
+        ts = RetryMeta.read_tier_state(path)
+        assert len(ts['tier_attempts']) == 1
+        entry = ts['tier_attempts'][0]
+        assert entry['tier'] == '2160p'
+        assert entry['tier_index'] == 0
+        assert entry['first_tried_at'] == 150.0
+        assert entry['last_tried_at'] == 150.0
+        assert entry['attempts'] == 1
+        assert entry['cached_hits_found'] == 0
+        assert entry['uncached_hits_found'] == 5
+        assert entry['outcome'] == 'no_cached_alts_exhausted'
+
+    def test_record_tier_attempt_updates_existing_entry(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'show.torrent')
+        RetryMeta.init_tier_state(
+            path, 'sonarr', 'http://s:8989', 4, ['2160p', '1080p'], now=100.0,
+        )
+        RetryMeta.record_tier_attempt(path, 0, 0, 3, 'waiting', now=150.0)
+        RetryMeta.record_tier_attempt(path, 0, 0, 5, 'no_cached_alts_exhausted', now=200.0)
+        ts = RetryMeta.read_tier_state(path)
+        assert len(ts['tier_attempts']) == 1  # upserted, not appended
+        entry = ts['tier_attempts'][0]
+        assert entry['first_tried_at'] == 150.0  # preserved
+        assert entry['last_tried_at'] == 200.0  # refreshed
+        assert entry['attempts'] == 2  # incremented
+        assert entry['uncached_hits_found'] == 5  # latest value
+        assert entry['outcome'] == 'no_cached_alts_exhausted'
+
+    def test_record_tier_attempt_without_tier_state_returns_false(self, tmp_dir):
+        """Guard: caller must seed tier_state first; recording without it
+        is a programming error we refuse rather than silently create an
+        orphan tier_attempts list."""
+        path = os.path.join(tmp_dir, 'show.torrent')
+        assert RetryMeta.record_tier_attempt(
+            path, 0, 0, 0, 'test',
+        ) is False
+
+    def test_record_tier_attempt_rejects_bool_index(self, tmp_dir):
+        """bool is-a int in Python — record_tier_attempt(True, ...) would
+        otherwise alias to tier_index=1 and corrupt tier attribution."""
+        path = os.path.join(tmp_dir, 'show.torrent')
+        RetryMeta.init_tier_state(
+            path, 'sonarr', 'http://s:8989', 4, ['2160p', '1080p'], now=100.0,
+        )
+        assert RetryMeta.record_tier_attempt(path, True, 0, 0, 'x') is False
+        assert RetryMeta.record_tier_attempt(path, False, 0, 0, 'x') is False
+
+    def test_advance_tier_monotonic_downward_only(self, tmp_dir):
+        """I2 — current_tier_index never decrements and never stays."""
+        path = os.path.join(tmp_dir, 'show.torrent')
+        RetryMeta.init_tier_state(
+            path, 'sonarr', 'http://s:8989', 4, ['2160p', '1080p', '720p'], now=100.0,
+        )
+        assert RetryMeta.advance_tier(path, 1, 'dwell_elapsed', now=200.0) is True
+        # Can't stay
+        assert RetryMeta.advance_tier(path, 1, 'x') is False
+        # Can't go back
+        assert RetryMeta.advance_tier(path, 0, 'x') is False
+        # Can go further down
+        assert RetryMeta.advance_tier(path, 2, 'still_no_cached', now=300.0) is True
+        ts = RetryMeta.read_tier_state(path)
+        assert ts['current_tier_index'] == 2
+        # compromise_fired_at set ONLY on first advance (not refreshed
+        # on subsequent advances — the history value is the original
+        # compromise moment, not the last tier change).
+        assert ts['compromise_fired_at'] == 200.0
+        assert ts['last_advance_reason'] == 'still_no_cached'
+
+    def test_advance_tier_out_of_range_refused(self, tmp_dir):
+        """I1 — never advance outside the profile's tier list."""
+        path = os.path.join(tmp_dir, 'show.torrent')
+        RetryMeta.init_tier_state(
+            path, 'sonarr', 'http://s:8989', 4, ['2160p', '1080p'], now=100.0,
+        )
+        # tier_order has 2 entries (indices 0, 1); index 2 is out of range
+        assert RetryMeta.advance_tier(path, 2, 'x') is False
+        ts = RetryMeta.read_tier_state(path)
+        assert ts['current_tier_index'] == 0  # unchanged
+
+    def test_advance_tier_rejects_bool_index(self, tmp_dir):
+        """bool-as-int guard: True would otherwise advance from 0 to 1."""
+        path = os.path.join(tmp_dir, 'show.torrent')
+        RetryMeta.init_tier_state(
+            path, 'sonarr', 'http://s:8989', 4, ['2160p', '1080p'], now=100.0,
+        )
+        assert RetryMeta.advance_tier(path, True, 'x') is False
+        ts = RetryMeta.read_tier_state(path)
+        assert ts['current_tier_index'] == 0
+
+    def test_advance_tier_without_state_returns_false(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'show.torrent')
+        assert RetryMeta.advance_tier(path, 1, 'x') is False
+
+    def test_mark_season_pack_attempted_flips_flag(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'show.torrent')
+        RetryMeta.init_tier_state(
+            path, 'sonarr', 'http://s:8989', 4, ['2160p', '1080p'], now=100.0,
+        )
+        assert RetryMeta.mark_season_pack_attempted(path) is True
+        ts = RetryMeta.read_tier_state(path)
+        assert ts['season_pack_attempted'] is True
+
+    def test_mark_season_pack_attempted_without_state_returns_false(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'show.torrent')
+        assert RetryMeta.mark_season_pack_attempted(path) is False
+
+    def test_tier_state_survives_retry_count_bump(self, tmp_dir):
+        """Regression: the load-bearing behavior of the write() change.
+        Seeding tier_state, then bumping retries via RetryMeta.write(),
+        must leave the tier_state intact."""
+        path = os.path.join(tmp_dir, 'show.torrent')
+        RetryMeta.init_tier_state(
+            path, 'sonarr', 'http://s:8989', 4, ['2160p', '1080p'], now=100.0,
+        )
+        RetryMeta.write(path, 2)
+        ts = RetryMeta.read_tier_state(path)
+        assert ts is not None
+        assert ts['profile_id'] == 4
+        retries, _ = RetryMeta.read(path)
+        assert retries == 2
+
+    def test_per_arr_url_hash_keying_isolates_state(self, tmp_dir):
+        """Two arr instances, same filename, separate sidecars
+        (filenames already differ by directory in practice — this test
+        asserts that the URL hash in tier_state is the disambiguator
+        for the compromise engine, not the filename)."""
+        path_a = os.path.join(tmp_dir, 'sonarr-4k', 'show.torrent')
+        path_b = os.path.join(tmp_dir, 'sonarr-hd', 'show.torrent')
+        os.makedirs(os.path.dirname(path_a))
+        os.makedirs(os.path.dirname(path_b))
+        RetryMeta.init_tier_state(
+            path_a, 'sonarr', 'http://sonarr-4k:8989', 4, ['2160p'], now=100.0,
+        )
+        RetryMeta.init_tier_state(
+            path_b, 'sonarr', 'http://sonarr-hd:8989', 2, ['1080p', '720p'], now=200.0,
+        )
+        ts_a = RetryMeta.read_tier_state(path_a)
+        ts_b = RetryMeta.read_tier_state(path_b)
+        assert ts_a['arr_url_hash'] != ts_b['arr_url_hash']
+        assert ts_a['tier_order'] == ['2160p']
+        assert ts_b['tier_order'] == ['1080p', '720p']
+        assert ts_a['profile_id'] == 4
+        assert ts_b['profile_id'] == 2
+
+    def test_mark_alt_exhausted_preserves_tier_state(self, tmp_dir):
+        """Regression: the old raw writers wiped tier_state; the new helper
+        must preserve it.  This is the load-bearing fix that prevents
+        alt-exhaustion from silently resetting the dwell timer."""
+        path = os.path.join(tmp_dir, 'show.torrent')
+        RetryMeta.init_tier_state(
+            path, 'sonarr', 'http://s:8989', 4, ['2160p', '1080p'], now=100.0,
+        )
+        RetryMeta.record_tier_attempt(
+            path, 0, cached_hits=0, uncached_hits=5,
+            outcome='no_cached_alts_exhausted', now=150.0,
+        )
+        assert RetryMeta.mark_alt_exhausted(path) is True
+        # Top-level fields set
+        assert RetryMeta.is_alt_exhausted(path) is True
+        retries, _ = RetryMeta.read(path)
+        assert retries == 1
+        # tier_state still intact — first_attempted_at unchanged,
+        # tier_attempts history survived
+        ts = RetryMeta.read_tier_state(path)
+        assert ts is not None
+        assert ts['first_attempted_at'] == 100.0
+        assert len(ts['tier_attempts']) == 1
+        assert ts['tier_attempts'][0]['uncached_hits_found'] == 5
+
+    def test_is_alt_exhausted_default_false(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'fresh.torrent')
+        assert RetryMeta.is_alt_exhausted(path) is False
+
+    def test_read_tier_state_rejects_future_schema_version(self, tmp_dir):
+        """Forward-compat guard: a downgrade to this reader must not act
+        on a sidecar written by a newer schema version."""
+        path = os.path.join(tmp_dir, 'show.torrent')
+        meta = path + '.meta'
+        future = {
+            'tier_state': {
+                'schema_version': RetryMeta.TIER_STATE_SCHEMA_VERSION + 1,
+                'tier_order': ['2160p'],
+                'current_tier_index': 0,
+                'first_attempted_at': 100.0,
+                'tier_attempts': [],
+            }
+        }
+        with open(meta, 'w') as f:
+            json.dump(future, f)
+        assert RetryMeta.read_tier_state(path) is None
+
+    def test_read_tier_state_rejects_malformed_tier_order(self, tmp_dir):
+        """A sidecar with tier_order=dict (hand-edit / corruption) must
+        degrade to None rather than crash downstream subscripting."""
+        path = os.path.join(tmp_dir, 'show.torrent')
+        meta = path + '.meta'
+        with open(meta, 'w') as f:
+            json.dump({
+                'tier_state': {
+                    'schema_version': 1,
+                    'tier_order': {'not': 'a list'},
+                    'current_tier_index': 0,
+                    'first_attempted_at': 100.0,
+                    'tier_attempts': [],
+                }
+            }, f)
+        assert RetryMeta.read_tier_state(path) is None
+
+    def test_read_tier_state_rejects_negative_current_index(self, tmp_dir):
+        """Malformed current_tier_index must fail validation."""
+        path = os.path.join(tmp_dir, 'show.torrent')
+        meta = path + '.meta'
+        with open(meta, 'w') as f:
+            json.dump({
+                'tier_state': {
+                    'schema_version': 1,
+                    'tier_order': ['2160p'],
+                    'current_tier_index': -1,
+                    'first_attempted_at': 100.0,
+                    'tier_attempts': [],
+                }
+            }, f)
+        assert RetryMeta.read_tier_state(path) is None
+
+    def test_init_tier_state_reseeds_malformed_existing(self, tmp_dir):
+        """A malformed pre-existing tier_state is replaced — not silently
+        trusted — so future runs have a well-formed baseline."""
+        path = os.path.join(tmp_dir, 'show.torrent')
+        meta = path + '.meta'
+        with open(meta, 'w') as f:
+            json.dump({
+                'tier_state': {'schema_version': 1, 'tier_order': 'bogus'}
+            }, f)
+        ts = RetryMeta.init_tier_state(
+            path, 'sonarr', 'http://s:8989', 4, ['2160p', '1080p'], now=300.0,
+        )
+        assert ts['first_attempted_at'] == 300.0
+        assert ts['tier_order'] == ['2160p', '1080p']
+
+    def test_record_tier_attempt_out_of_range_refused(self, tmp_dir):
+        """I1 — record_tier_attempt refuses indices outside tier_order so
+        a future caller race can't stuff tier=None into the history."""
+        path = os.path.join(tmp_dir, 'show.torrent')
+        RetryMeta.init_tier_state(
+            path, 'sonarr', 'http://s:8989', 4, ['2160p', '1080p'], now=100.0,
+        )
+        assert RetryMeta.record_tier_attempt(path, 2, 0, 0, 'x') is False
+        assert RetryMeta.record_tier_attempt(path, 99, 0, 0, 'x') is False
+        ts = RetryMeta.read_tier_state(path)
+        assert ts['tier_attempts'] == []
+
+    def test_save_raw_catches_type_error(self, tmp_dir, monkeypatch):
+        """A non-serializable value in tier_state must not crash the
+        watcher — catches TypeError alongside I/O errors."""
+        path = os.path.join(tmp_dir, 'show.torrent')
+        RetryMeta.init_tier_state(
+            path, 'sonarr', 'http://s:8989', 4, ['2160p', '1080p'], now=100.0,
+        )
+        # Inject a non-serializable object via monkeypatched _save_raw call
+        # path: pass an un-JSONable set() as the outcome string.
+        class Unserializable:
+            pass
+
+        # advance_tier goes through _save_raw; stuff a bad advance_reason
+        # via a mock that short-circuits the public API.  Easier: call
+        # _save_raw directly with a broken payload.
+        bad = {'tier_state': {'outcome': Unserializable()}}
+        assert RetryMeta._save_raw(path, bad) is False
+        # Original sidecar unchanged
+        ts = RetryMeta.read_tier_state(path)
+        assert ts is not None
+        assert ts['first_attempted_at'] == 100.0
+
+    def test_atomic_write_leaves_old_file_intact_on_failure(self, tmp_dir, monkeypatch):
+        """Simulated crash during write must leave the prior sidecar
+        readable rather than corrupting it — the entire reason for
+        routing tier_state through utils.file_utils.atomic_write.
+
+        We patch json.dump to raise mid-flight; atomic_write should
+        delete the temp file without replacing the target.
+        """
+        path = os.path.join(tmp_dir, 'show.torrent')
+        # Seed a valid sidecar first
+        RetryMeta.init_tier_state(
+            path, 'sonarr', 'http://s:8989', 4, ['2160p', '1080p'], now=100.0,
+        )
+        before = RetryMeta.read_tier_state(path)
+        assert before is not None
+
+        # Simulate a crash during the next save
+        import utils.blackhole as bh
+        real_dump = bh.json.dump
+
+        def exploding_dump(obj, fp, *a, **kw):
+            fp.write('{"partial": tr')  # write a torn prefix
+            raise OSError('simulated disk failure')
+
+        monkeypatch.setattr(bh.json, 'dump', exploding_dump)
+        # advance_tier goes through _save_raw which uses atomic_write
+        result = RetryMeta.advance_tier(path, 1, 'test', now=200.0)
+        monkeypatch.setattr(bh.json, 'dump', real_dump)
+
+        assert result is False  # write reported failure
+        # The target file must still be readable as the original state
+        after = RetryMeta.read_tier_state(path)
+        assert after is not None
+        assert after == before  # unchanged
+
+        # And no leftover temp files should linger next to it
+        parent = os.path.dirname(path)
+        leftovers = [f for f in os.listdir(parent)
+                     if f.startswith('tmp') and f != 'show.torrent.meta']
+        assert leftovers == []
+
 
 class TestBlackholeWatcher:
 

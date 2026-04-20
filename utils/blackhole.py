@@ -384,48 +384,367 @@ def _build_season_release_name(original_name, season_num):
     return result.strip('.')
 
 
+# Serializes all RetryMeta load-modify-save operations across threads so a
+# concurrent read-then-write cannot lose a tier advance or reset
+# first_attempted_at.  Sidecar writes are low-frequency (once per blackhole
+# decision) so a single module-level lock is cheap; per-file locking would
+# add bookkeeping without meaningful gain.  RLock so helpers that call
+# other helpers (future Phase 5 wiring) don't self-deadlock.
+_retry_meta_lock = threading.RLock()
+
+
 class RetryMeta:
     """Tracks retry state for failed blackhole files via JSON sidecar files.
 
     State survives container restarts since it's persisted to disk.
+
+    V2 schema (plan 33) adds a nested ``tier_state`` object for the
+    quality-compromise state machine.  Legacy files without ``tier_state``
+    load correctly — ``read_tier_state()`` returns ``None`` and the
+    compromise engine treats that as "not yet in the compromise flow".
+    Top-level keys (``retries``, ``last_attempt``, ``alt_exhausted``)
+    retain their v1 semantics; ``write()`` now preserves unrelated keys
+    so a retry-count bump does not wipe compromise state.
+
+    All load-modify-save helpers serialize through ``_retry_meta_lock``
+    so concurrent callers (blackhole worker + alt-retry thread) cannot
+    interleave reads and writes in a way that drops an advance or
+    re-seeds the dwell clock.
     """
+
+    # Bump whenever the nested tier_state shape changes so upgrades can
+    # migrate forward.  A reader encountering a HIGHER version than it
+    # knows falls back to "no tier state" (re-seeded fresh) rather than
+    # operating on unknown fields — see ``read_tier_state``.
+    TIER_STATE_SCHEMA_VERSION = 1
 
     @staticmethod
     def meta_path(file_path):
         return file_path + '.meta'
 
+    # -- Low-level I/O helpers (internal) ---------------------------------
+
+    @staticmethod
+    def _load_raw(file_path):
+        """Return the full meta dict; ``{}`` on missing or corrupt file."""
+        meta = RetryMeta.meta_path(file_path)
+        if not os.path.exists(meta):
+            return {}
+        try:
+            with open(meta, 'r') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, IOError):
+            pass
+        return {}
+
+    @staticmethod
+    def _save_raw(file_path, data):
+        """Atomic save of the full meta dict.  Returns True on success.
+
+        Uses ``atomic_write`` so a torn write during a crash leaves the
+        existing sidecar intact — critical once ``tier_state`` drives
+        compromise decisions, because a corrupt sidecar would either
+        re-seed from scratch (resetting the dwell clock) or be ignored
+        entirely (losing the per-tier attempt history).
+
+        Catches ``TypeError``/``ValueError`` alongside the usual I/O
+        errors because v2 serializes user-supplied strings (reason,
+        outcome, tier labels) and a malformed value must not bubble up
+        and kill the watcher poll cycle.
+        """
+        meta = RetryMeta.meta_path(file_path)
+        try:
+            with atomic_write(meta) as f:
+                json.dump(data, f)
+            return True
+        except (IOError, OSError, TypeError, ValueError) as e:
+            logger.warning(f"[blackhole] Could not write retry meta for {file_path}: {e}")
+            return False
+
+    @staticmethod
+    def _validate_tier_state(ts):
+        """Return *ts* if it passes v1 shape checks, else ``None``.
+
+        A hand-edited or future-schema sidecar could land a dict with
+        unexpected types in ``tier_order``/``tier_attempts`` /
+        ``current_tier_index`` — subscripting those in
+        ``record_tier_attempt`` or ``advance_tier`` would crash the
+        decision loop.  We reject the whole tier_state rather than
+        partially trust it; the caller treats ``None`` as "legacy /
+        absent" and re-seeds fresh.
+        """
+        if not isinstance(ts, dict):
+            return None
+        version = ts.get('schema_version', 1)
+        if not isinstance(version, int) or isinstance(version, bool):
+            return None
+        if version > RetryMeta.TIER_STATE_SCHEMA_VERSION:
+            # Forward-compat guard: a downgrade from a future writer must
+            # not silently act on fields this code doesn't understand.
+            logger.warning(
+                f"[blackhole] Ignoring tier_state with schema_version={version} "
+                f"(this code supports up to {RetryMeta.TIER_STATE_SCHEMA_VERSION})"
+            )
+            return None
+        if not isinstance(ts.get('tier_order', []), list):
+            return None
+        if not isinstance(ts.get('tier_attempts', []), list):
+            return None
+        current = ts.get('current_tier_index', 0)
+        if not isinstance(current, int) or isinstance(current, bool) or current < 0:
+            return None
+        return ts
+
     @staticmethod
     def read(file_path):
         """Read retry count and last attempt time. Returns (retries, last_attempt)."""
-        meta = RetryMeta.meta_path(file_path)
-        if os.path.exists(meta):
-            try:
-                with open(meta, 'r') as f:
-                    data = json.load(f)
-                return data.get('retries', 0), data.get('last_attempt', 0)
-            except (json.JSONDecodeError, IOError):
-                return 0, 0
-        return 0, 0
+        data = RetryMeta._load_raw(file_path)
+        return data.get('retries', 0), data.get('last_attempt', 0)
 
     @staticmethod
     def write(file_path, retries):
-        """Write retry count and current timestamp."""
-        meta = RetryMeta.meta_path(file_path)
-        try:
-            with open(meta, 'w') as f:
-                json.dump({'retries': retries, 'last_attempt': time.time()}, f)
-        except IOError as e:
-            logger.debug(f"[blackhole] Could not write retry meta for {file_path}: {e}")
+        """Write retry count and current timestamp.
+
+        Preserves unrelated keys (``alt_exhausted``, ``tier_state``, etc.)
+        so the compromise state survives a retry-count bump — without
+        this, the first retry after tier_state is seeded would silently
+        wipe the dwell timer and reset the state machine.
+
+        A persistent I/O failure used to be a debug-level log; it's now
+        a warning so operators see the cause if retry counts appear
+        stuck at zero (a read-only sidecar dir would otherwise retry
+        forever without surfacing).
+        """
+        with _retry_meta_lock:
+            data = RetryMeta._load_raw(file_path)
+            data['retries'] = retries
+            data['last_attempt'] = time.time()
+            if not RetryMeta._save_raw(file_path, data):
+                logger.warning(
+                    f"[blackhole] Retry count for {file_path} may not be persisted; "
+                    f"check sidecar directory permissions and free space"
+                )
 
     @staticmethod
     def remove(file_path):
         """Clean up sidecar meta file."""
-        meta = RetryMeta.meta_path(file_path)
-        try:
-            if os.path.exists(meta):
-                os.remove(meta)
-        except OSError:
-            pass
+        with _retry_meta_lock:
+            meta = RetryMeta.meta_path(file_path)
+            try:
+                if os.path.exists(meta):
+                    os.remove(meta)
+            except OSError:
+                pass
+
+    @staticmethod
+    def mark_alt_exhausted(file_path):
+        """Flag this sidecar so the retry loop skips alt-release re-search.
+
+        Centralises the two call sites that previously wrote the sidecar
+        by hand with plain ``open()`` + ``json.dump`` — those bypassed
+        ``_save_raw`` and would wipe any tier_state already seeded by
+        ``init_tier_state``.  Using this helper preserves tier_state AND
+        gets the atomic-write crash safety.
+        """
+        with _retry_meta_lock:
+            data = RetryMeta._load_raw(file_path)
+            # Preserve tier_state and any other fields; only bump the
+            # three v1 fields that the legacy writer ever set.
+            data['retries'] = 1
+            data['last_attempt'] = time.time()
+            data['alt_exhausted'] = True
+            return RetryMeta._save_raw(file_path, data)
+
+    @staticmethod
+    def is_alt_exhausted(file_path):
+        """Return True if alt-release search has already been exhausted."""
+        return bool(RetryMeta._load_raw(file_path).get('alt_exhausted', False))
+
+    # -- V2 tier-state helpers (plan 33) ----------------------------------
+
+    @staticmethod
+    def arr_url_hash(arr_url):
+        """SHA-256 of the arr base URL, truncated to 6 hex chars.
+
+        Disambiguates per-arr-instance compromise state without logging
+        the raw URL.  A user running ``sonarr-4k`` and ``sonarr-hd`` gets
+        independent decisions for the same release name because the
+        stored hash differs.  Six hex chars is ~1-in-16M collision risk,
+        acceptable because collisions only cross-contaminate state
+        between two distinct arrs serving the same filename — a rare
+        edge case where the fallout is a tier choice computed from the
+        wrong profile, not data loss.
+        """
+        if not arr_url:
+            return ''
+        return hashlib.sha256(arr_url.encode('utf-8')).hexdigest()[:6]
+
+    @staticmethod
+    def read_tier_state(file_path):
+        """Return the ``tier_state`` dict, or ``None`` for legacy entries.
+
+        Legacy sidecars (v1 schema without nested tier_state) yield
+        ``None`` so callers can seed fresh via ``init_tier_state`` —
+        this is the backward-compatibility hinge described in the plan.
+        Malformed or future-schema tier_state also yields ``None`` so
+        the decision loop degrades gracefully rather than crashing.
+        """
+        data = RetryMeta._load_raw(file_path)
+        return RetryMeta._validate_tier_state(data.get('tier_state'))
+
+    @staticmethod
+    def init_tier_state(file_path, arr_service, arr_url, profile_id,
+                        tier_order, now=None):
+        """Seed ``tier_state`` on the first attempt.  Idempotent.
+
+        Returns the persisted (or pre-existing) tier_state dict.  If
+        tier_state already exists AND passes shape validation, it is
+        returned unchanged — overwriting ``first_attempted_at`` would
+        let retries game the dwell timer (I3: dwell is measured from
+        the first preferred-tier attempt, not the most recent one).
+        A malformed pre-existing tier_state is replaced rather than
+        trusted.
+        """
+        with _retry_meta_lock:
+            data = RetryMeta._load_raw(file_path)
+            existing = RetryMeta._validate_tier_state(data.get('tier_state'))
+            if existing is not None:
+                return existing
+            if now is None:
+                now = time.time()
+            tier_state = {
+                'schema_version': RetryMeta.TIER_STATE_SCHEMA_VERSION,
+                'arr_service': arr_service,
+                'arr_url_hash': RetryMeta.arr_url_hash(arr_url),
+                'profile_id': profile_id,
+                'tier_order': list(tier_order or []),
+                'current_tier_index': 0,
+                'first_attempted_at': now,
+                'tier_attempts': [],
+                'compromise_fired_at': None,
+                'last_advance_reason': None,
+                'season_pack_attempted': False,
+            }
+            data['tier_state'] = tier_state
+            RetryMeta._save_raw(file_path, data)
+            return tier_state
+
+    @staticmethod
+    def record_tier_attempt(file_path, tier_index, cached_hits, uncached_hits,
+                            outcome, now=None):
+        """Upsert a tier_attempts entry for *tier_index*.
+
+        Existing entry for the same index: bump ``last_tried_at``,
+        increment ``attempts``, refresh hit counts and outcome.
+        No existing entry: append a fresh one with ``attempts=1``.
+
+        Returns True if persisted, False if ``tier_state`` is missing
+        (caller must have already called ``init_tier_state``) or if
+        ``tier_index`` is out of the profile's tier range (I1: never
+        record an attempt at a tier the profile doesn't allow).  Bool
+        tier_index rejected (bool is-a int in Python) to defend against
+        accidental truthy use.
+        """
+        if not isinstance(tier_index, int) or isinstance(tier_index, bool):
+            return False
+        if tier_index < 0:
+            return False
+        with _retry_meta_lock:
+            data = RetryMeta._load_raw(file_path)
+            ts = RetryMeta._validate_tier_state(data.get('tier_state'))
+            if ts is None:
+                return False
+            if now is None:
+                now = time.time()
+            order = ts.get('tier_order') or []
+            if tier_index >= len(order):
+                return False
+            tier_label = order[tier_index]
+            attempts = ts.setdefault('tier_attempts', [])
+            existing = None
+            for entry in attempts:
+                if (isinstance(entry, dict)
+                        and isinstance(entry.get('tier_index'), int)
+                        and not isinstance(entry.get('tier_index'), bool)
+                        and entry.get('tier_index') == tier_index):
+                    existing = entry
+                    break
+            cached_count = max(0, int(cached_hits or 0))
+            uncached_count = max(0, int(uncached_hits or 0))
+            if existing is None:
+                attempts.append({
+                    'tier': tier_label,
+                    'tier_index': tier_index,
+                    'first_tried_at': now,
+                    'last_tried_at': now,
+                    'attempts': 1,
+                    'cached_hits_found': cached_count,
+                    'uncached_hits_found': uncached_count,
+                    'outcome': outcome,
+                })
+            else:
+                prev_attempts = existing.get('attempts', 0)
+                if not isinstance(prev_attempts, int) or isinstance(prev_attempts, bool):
+                    prev_attempts = 0
+                existing['last_tried_at'] = now
+                existing['attempts'] = max(0, prev_attempts) + 1
+                existing['cached_hits_found'] = cached_count
+                existing['uncached_hits_found'] = uncached_count
+                existing['outcome'] = outcome
+            return RetryMeta._save_raw(file_path, data)
+
+    @staticmethod
+    def advance_tier(file_path, new_tier_index, reason, now=None):
+        """Advance ``current_tier_index`` downward (strictly increasing).
+
+        I2 — monotonic downward movement: refuses to stay at or move
+        above the current index.  Out-of-range indices are refused so
+        the compromise engine never lands outside the profile's allowed
+        tier list (I1: profile is the ceiling).  Sets
+        ``compromise_fired_at`` on the first advance only so history
+        records the initial compromise timestamp, not the most recent.
+
+        Returns True if persisted.  False means: tier_state missing,
+        new_tier_index invalid, or the advance would violate I1/I2.
+        """
+        if not isinstance(new_tier_index, int) or isinstance(new_tier_index, bool):
+            return False
+        with _retry_meta_lock:
+            data = RetryMeta._load_raw(file_path)
+            ts = RetryMeta._validate_tier_state(data.get('tier_state'))
+            if ts is None:
+                return False
+            current = ts.get('current_tier_index', 0)
+            if not isinstance(current, int) or isinstance(current, bool):
+                current = 0
+            if new_tier_index <= current:
+                return False
+            order = ts.get('tier_order') or []
+            if new_tier_index >= len(order):
+                return False
+            ts['current_tier_index'] = new_tier_index
+            if ts.get('compromise_fired_at') is None:
+                if now is None:
+                    now = time.time()
+                ts['compromise_fired_at'] = now
+            ts['last_advance_reason'] = reason
+            return RetryMeta._save_raw(file_path, data)
+
+    @staticmethod
+    def mark_season_pack_attempted(file_path):
+        """Flip ``season_pack_attempted`` so the pack probe fires only once.
+
+        Returns True if persisted, False if ``tier_state`` is missing.
+        """
+        with _retry_meta_lock:
+            data = RetryMeta._load_raw(file_path)
+            ts = RetryMeta._validate_tier_state(data.get('tier_state'))
+            if ts is None:
+                return False
+            ts['season_pack_attempted'] = True
+            return RetryMeta._save_raw(file_path, data)
 
 
 class BlackholeWatcher:
@@ -1412,14 +1731,7 @@ class BlackholeWatcher:
     @staticmethod
     def _alt_exhausted(file_path):
         """Check if alternative releases were already tried and exhausted."""
-        meta_path = RetryMeta.meta_path(file_path)
-        if not os.path.exists(meta_path):
-            return False
-        try:
-            with open(meta_path, 'r') as f:
-                return json.load(f).get('alt_exhausted', False)
-        except (json.JSONDecodeError, IOError):
-            return False
+        return RetryMeta.is_alt_exhausted(file_path)
 
     @classmethod
     def _is_debrid_rejection(cls, result_text):
@@ -1477,14 +1789,11 @@ class BlackholeWatcher:
             try:
                 os.rename(file_path, dest)
                 rename_ok = True
-                # Mark alt-exhausted in retry metadata
-                meta_path = RetryMeta.meta_path(dest)
-                try:
-                    with open(meta_path, 'w') as f:
-                        json.dump({'retries': 1, 'last_attempt': time.time(),
-                                   'alt_exhausted': True}, f)
-                except IOError:
-                    pass
+                # Mark alt-exhausted via the centralised helper so any
+                # tier_state already seeded on this sidecar is preserved
+                # (the old raw-write form clobbered the whole file and
+                # would wipe the dwell timer on every alt-exhaustion).
+                RetryMeta.mark_alt_exhausted(dest)
             except OSError as e:
                 logger.warning(f"[blackhole] Could not move {filename} to failed/: {e}")
 
@@ -1998,13 +2307,9 @@ class BlackholeWatcher:
                 dest = os.path.join(error_dir, f"{base}_{int(time.time())}{fext}")
             try:
                 os.rename(src, dest)
-                # Mark alt_exhausted so retries don't repeat the search
-                try:
-                    with open(RetryMeta.meta_path(dest), 'w') as f:
-                        json.dump({'retries': 1, 'last_attempt': time.time(),
-                                   'alt_exhausted': True}, f)
-                except IOError:
-                    pass
+                # Mark alt_exhausted via the centralised helper so
+                # tier_state on the recovered sidecar is preserved.
+                RetryMeta.mark_alt_exhausted(dest)
                 tag = f" [label={label}]" if label else ""
                 logger.warning(f"[blackhole] Recovered stranded alt-pending file: {filename}{tag}")
             except OSError as e:

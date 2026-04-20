@@ -79,15 +79,23 @@ def _urllib_get(url, headers=None, timeout=_SEARCH_TIMEOUT):
         return None
 
 
-def _urllib_post(url, data=None, json_body=None, headers=None, timeout=_ADD_TIMEOUT):
-    """POST request returning parsed JSON or None."""
+def _urllib_post(url, data=None, json_body=None, headers=None,
+                 timeout=_ADD_TIMEOUT, doseq=False):
+    """POST request returning parsed JSON or None.
+
+    ``doseq=True`` lets callers pass list-valued dict entries (or a list
+    of ``(key, value)`` tuples) so repeated form fields like ``magnets[]``
+    encode correctly — without it, ``urlencode`` stringifies the list as
+    a single ``['m1', 'm2']`` value.  Default stays False so existing
+    scalar-valued callers are unchanged.
+    """
     hdrs = dict(headers or {})
     hdrs['User-Agent'] = 'pd_zurg/1.0'
     if json_body is not None:
         body = json.dumps(json_body).encode('utf-8')
         hdrs['Content-Type'] = 'application/json'
     elif data is not None:
-        body = urllib.parse.urlencode(data).encode('utf-8')
+        body = urllib.parse.urlencode(data, doseq=doseq).encode('utf-8')
         hdrs['Content-Type'] = 'application/x-www-form-urlencoded'
     else:
         body = b''
@@ -238,17 +246,242 @@ def search_torrentio(imdb_id, media_type='movie', season=None, episode=None):
 
 
 # ---------------------------------------------------------------------------
-# F9.2 — Search + filter
+# F9.2 — Debrid cache probe (plan 33 Phase 3)
 # ---------------------------------------------------------------------------
 
-def search_torrents(imdb_id, media_type='movie', season=None, episode=None):
+# Cache-probe timeout per the plan: short enough to keep the decision loop
+# responsive, long enough that a slow but healthy debrid API doesn't
+# spuriously return "unknown".
+_CACHE_PROBE_TIMEOUT = 10
+
+# Cap TorBox per-hash fan-out so a large Torrentio result set cannot
+# produce a ``N * _CACHE_PROBE_TIMEOUT`` wall-clock stall holding the
+# status-server worker thread.  Callers that want more coverage should
+# pre-rank by quality/seeders and pass the top-K list.
+_TORBOX_MAX_PROBES = 25
+
+# Emit the "RD cache probe is a no-op" warning once per process so users
+# with RD + QUALITY_COMPROMISE_ONLY_CACHED=true understand why compromise
+# never fires.  A module-level flag avoids log-spam across many searches.
+_rd_cache_warning_emitted = False
+
+
+def check_debrid_cache(info_hashes, service=None, api_key=None):
+    """Check debrid-cache availability for a batch of info hashes.
+
+    Args:
+        info_hashes: Iterable of 40-char hex hashes.  Invalid / non-string
+            entries are dropped; duplicates are collapsed preserving
+            first-seen order.
+        service: Optional provider override (``'realdebrid'``,
+            ``'alldebrid'``, or ``'torbox'``).  Defaults to the
+            auto-detected service via ``_get_debrid_service()``.
+        api_key: Optional API key override.  Defaults to the auto-detected
+            key alongside the service.
+
+    Returns:
+        Mapping of hash -> True / False / None.  ``True`` = provider
+        confirms the release is cached (instant debrid download).
+        ``False`` = provider confirms uncached.  ``None`` = unknown
+        (timeout, API failure, no service configured, or the provider
+        does not expose a cache-query endpoint).  Per the plan's I4
+        contract, callers under ``QUALITY_COMPROMISE_ONLY_CACHED`` treat
+        ``None`` as "not cached" (safe) and under aggressive mode treat
+        it as "assume cached".
+
+    Real-Debrid note: RD deprecated ``/torrents/instantAvailability`` in
+    Nov 2024 and the endpoint now returns an empty object.  We return
+    ``{hash: None}`` for RD — there is no way to pre-check cache status
+    anymore.  AllDebrid (`/v4/magnet/instant`) and TorBox
+    (`/api/torrents/checkcached`) still expose working probes.
+
+    URL redaction: every HTTP URL logged by this function is passed
+    through ``_safe_log_url`` so API keys in query strings never leak
+    into the pd_zurg logs.
+    """
+    hashes = []
+    seen = set()
+    for h in info_hashes or ():
+        if not isinstance(h, str):
+            continue
+        h = h.strip().lower()
+        if not _HASH_RE.match(h) or h in seen:
+            continue
+        seen.add(h)
+        hashes.append(h)
+    if not hashes:
+        return {}
+
+    if service is None:
+        service, api_key = _get_debrid_service()
+    if not service or not api_key:
+        return {h: None for h in hashes}
+
+    try:
+        if service == 'realdebrid':
+            return _check_cache_rd(hashes, api_key)
+        if service == 'alldebrid':
+            return _check_cache_ad(hashes, api_key)
+        if service == 'torbox':
+            return _check_cache_tb(hashes, api_key)
+    except (urllib.error.URLError, urllib.error.HTTPError,
+            json.JSONDecodeError, OSError, ValueError) as e:
+        logger.warning(f"[search] Cache probe failed for {service}: {type(e).__name__}")
+    return {h: None for h in hashes}
+
+
+def _check_cache_rd(hashes, api_key):
+    """Real-Debrid cache probe stub.
+
+    ``/torrents/instantAvailability`` was deprecated by RD in Nov 2024
+    and no replacement exists — there is no pre-add way to know if a
+    hash is cached.  We return ``{hash: None}`` uniformly so the
+    compromise engine treats RD responses as "unknown"; users who want
+    aggressive escalation can set ``QUALITY_COMPROMISE_ONLY_CACHED=false``.
+    A one-time ``warning`` surfaces so users with RD + only-cached
+    mode understand why compromise never fires.
+    """
+    global _rd_cache_warning_emitted
+    if not _rd_cache_warning_emitted:
+        logger.warning(
+            "[search] Real-Debrid cache probes are a no-op — RD deprecated "
+            "instantAvailability in Nov 2024.  Cache-gated features "
+            "(QUALITY_COMPROMISE_ONLY_CACHED, cached_first sort) will treat "
+            "all RD releases as 'unknown' and refuse escalation; set "
+            "QUALITY_COMPROMISE_ONLY_CACHED=false to opt into aggressive "
+            "escalation without cache verification"
+        )
+        _rd_cache_warning_emitted = True
+    return {h: None for h in hashes}
+
+
+def _coerce_instant(value):
+    """Normalise AD's ``instant`` field to True/False/None.
+
+    The API returns a bool today; defensive coercion for ``"true"`` /
+    ``"false"`` strings guards against a silent server-side change
+    that would otherwise drop confirmed-uncached into None.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v == 'true':
+            return True
+        if v == 'false':
+            return False
+    return None
+
+
+def _check_cache_ad(hashes, api_key):
+    """AllDebrid batch cache probe via ``/v4/magnet/instant``.
+
+    AD accepts the full hash batch in a single POST and returns a
+    parallel array; we map by the hash the API echoes back so index
+    drift (e.g. AD dropping a hash from the response) cannot mis-tag
+    another hash.  Body uses repeated ``magnets[]`` fields via
+    ``_urllib_post(doseq=True)``.
+    """
+    magnets = [_hash_to_magnet(h) for h in hashes]
+    qs = urllib.parse.urlencode({'agent': 'pd_zurg', 'apikey': api_key})
+    url = f'https://api.alldebrid.com/v4/magnet/instant?{qs}'
+    data = _urllib_post(url, data=[('magnets[]', m) for m in magnets],
+                        timeout=_CACHE_PROBE_TIMEOUT, doseq=True)
+    result = {h: None for h in hashes}
+    if not data or data.get('status') != 'success':
+        return result
+    magnets_data = (data.get('data') or {}).get('magnets') or []
+    if not isinstance(magnets_data, list):
+        return result
+
+    hash_set = set(hashes)
+    for entry in magnets_data:
+        if not isinstance(entry, dict):
+            continue
+        entry_hash = (entry.get('hash') or '').strip().lower()
+        if entry_hash not in hash_set:
+            continue
+        coerced = _coerce_instant(entry.get('instant'))
+        if coerced is not None:
+            result[entry_hash] = coerced
+    return result
+
+
+def _check_cache_tb(hashes, api_key):
+    """TorBox per-hash cache probe via ``/api/torrents/checkcached``.
+
+    TB's endpoint is per-hash; the batch is capped at
+    ``_TORBOX_MAX_PROBES`` so a large Torrentio result set cannot
+    blow out the ``_CACHE_PROBE_TIMEOUT`` budget linearly (25 × 10 s
+    = ~4 min worst case instead of unbounded).  Hashes beyond the cap
+    stay as ``None`` (unknown) — the compromise engine already ranks
+    candidates so the top few always get probed.
+    """
+    headers = {
+        'Authorization': f'Bearer {api_key}',
+        'User-Agent': 'pd_zurg/1.0',
+    }
+    base_url = 'https://api.torbox.app/v1/api/torrents/checkcached'
+    result = {h: None for h in hashes}
+    for h in hashes[:_TORBOX_MAX_PROBES]:
+        url = f'{base_url}?hash={h}'
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=_CACHE_PROBE_TIMEOUT) as resp:
+                raw = resp.read(1 * 1024 * 1024)
+                if not raw:
+                    continue
+                data = json.loads(raw.decode('utf-8'))
+        except (urllib.error.URLError, urllib.error.HTTPError,
+                json.JSONDecodeError, OSError, ValueError) as e:
+            logger.warning(
+                f"[search] TB cache probe {_safe_log_url(url)} "
+                f"(hash={h[:8]}…): {type(e).__name__}"
+            )
+            continue
+        # TorBox returns {"success": true, "data": {<hash>: {...}} } when
+        # cached, and {"success": true, "data": {}} / [] when not.
+        # An unexpected type (None, string, etc.) is "unknown" per I4 —
+        # we must not conflate API error with a confirmed-uncached.
+        if not data.get('success'):
+            continue
+        payload = data.get('data')
+        if not isinstance(payload, dict):
+            continue
+        result[h] = h in payload
+    return result
+
+
+# ---------------------------------------------------------------------------
+# F9.3 — Search + filter
+# ---------------------------------------------------------------------------
+
+def search_torrents(imdb_id, media_type='movie', season=None, episode=None,
+                    annotate_cache=False, sort_mode='quality'):
     """Search Torrentio for torrents, sorted by quality then seeds.
 
-    Returns list of dicts sorted by quality (desc), then seeds (desc).
+    Args:
+        imdb_id / media_type / season / episode: forwarded to
+            ``search_torrentio`` (see that function for details).
+        annotate_cache: When True, every result carries ``cached``
+            (``True``/``False``/``None``) and ``cached_service`` fields
+            populated by ``check_debrid_cache`` for the auto-detected
+            provider.  Default False — the manual-search UI preserves
+            its existing behaviour unless the caller opts in.
+        sort_mode: ``'quality'`` (default) sorts by quality score then
+            seeders.  ``'cached_first'`` sorts by
+            (cached desc, quality desc, seeders desc) so a cached 1080p
+            outranks an uncached 2160p — useful when the caller wants
+            to grab something that will actually stream immediately.
+            Implies ``annotate_cache=True``.
+
+    Returns list of dicts sorted per the chosen ``sort_mode``.
     Blocklisted hashes are filtered out.
 
-    Note: Debrid cache checking was removed because Real-Debrid deprecated
-    their instantAvailability endpoint in Nov 2024.
+    Provider note: Real-Debrid's cache-query endpoint was deprecated in
+    Nov 2024, so RD annotations are always ``None`` and ``'cached_first'``
+    sort degrades to quality order for RD users.  AllDebrid and TorBox
+    return meaningful True/False.
     """
     results = search_torrentio(imdb_id, media_type, season, episode)
     if not results:
@@ -261,11 +494,37 @@ def search_torrents(imdb_id, media_type='movie', season=None, episode=None):
     except ImportError:
         pass
 
-    # Sort: quality score desc, then seeds desc
-    results.sort(key=lambda r: (
-        r['quality']['score'],
-        r['seeds'],
-    ), reverse=True)
+    # Cache annotation — requested explicitly, or implied by cached_first
+    # sort.  A single batched probe per search keeps the UI snappy.  We
+    # resolve the service once and pass it into ``check_debrid_cache``
+    # so the annotation label (``cached_service``) is provably the same
+    # as the service that produced the cache map — no double env-var
+    # read, no chance of a mid-call key rotation causing divergence.
+    want_cache = annotate_cache or sort_mode == 'cached_first'
+    if want_cache:
+        service, api_key = _get_debrid_service()
+        cache_map = check_debrid_cache(
+            [r['info_hash'] for r in results],
+            service=service, api_key=api_key,
+        )
+        for r in results:
+            r['cached'] = cache_map.get(r['info_hash'])
+            r['cached_service'] = service
+
+    if sort_mode == 'cached_first':
+        # Normalise None to 0 so the sort can compare uniformly (Python
+        # 3 refuses to order None against bool with <).  Unknown sorts
+        # equal to uncached — we never promote an unverified release.
+        results.sort(key=lambda r: (
+            1 if r.get('cached') is True else 0,
+            r['quality']['score'],
+            r['seeds'],
+        ), reverse=True)
+    else:
+        results.sort(key=lambda r: (
+            r['quality']['score'],
+            r['seeds'],
+        ), reverse=True)
 
     return results
 

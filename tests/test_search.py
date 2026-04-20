@@ -19,6 +19,9 @@ from utils.search import (
     search_torrentio,
     search_torrents,
     add_to_debrid,
+    check_debrid_cache,
+    _coerce_instant,
+    _TORBOX_MAX_PROBES,
 )
 
 
@@ -330,3 +333,477 @@ class TestAddToDebrid:
         result = add_to_debrid('a' * 40, title='Test')
         assert result['success'] is False
         assert result['error'] != ''
+
+
+# ---------------------------------------------------------------------------
+# Debrid cache probe (plan 33 Phase 3)
+# ---------------------------------------------------------------------------
+
+
+def _mock_urlopen_response(payload):
+    """Build a context-manager mock that yields *payload* as JSON bytes."""
+    resp = MagicMock()
+    resp.read.return_value = json.dumps(payload).encode('utf-8')
+    resp.__enter__ = MagicMock(return_value=resp)
+    resp.__exit__ = MagicMock(return_value=False)
+    return resp
+
+
+class TestCheckDebridCache:
+    """check_debrid_cache contract — batch probe, unknown semantics,
+    provider dispatch, URL redaction."""
+
+    def test_empty_input_returns_empty(self):
+        assert check_debrid_cache([]) == {}
+        assert check_debrid_cache(None) == {}
+
+    def test_invalid_hashes_filtered(self):
+        """Non-string and non-hex entries must be dropped before probing."""
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = (None, None)
+            result = check_debrid_cache(['not-a-hash', 'a' * 40, None, 123, 'b' * 39])
+        # Only the 40-char hex passes through
+        assert list(result.keys()) == ['a' * 40]
+
+    def test_hash_dedup_preserves_order(self):
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = (None, None)
+            result = check_debrid_cache(['a' * 40, 'b' * 40, 'a' * 40])
+        assert list(result.keys()) == ['a' * 40, 'b' * 40]
+
+    def test_no_service_configured_returns_none_map(self):
+        """All hashes map to None when no debrid is configured — the
+        'unknown, safe default' branch of the I4 contract."""
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = (None, None)
+            result = check_debrid_cache(['a' * 40, 'b' * 40])
+        assert result == {'a' * 40: None, 'b' * 40: None}
+
+    def test_real_debrid_returns_unknown(self):
+        """RD deprecated instantAvailability Nov 2024 — probe is a
+        deliberate no-op that returns None uniformly so compromise
+        logic treats RD responses as 'unknown' (safe default refuses
+        escalation unless QUALITY_COMPROMISE_ONLY_CACHED=false)."""
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('realdebrid', 'rd-key')
+            result = check_debrid_cache(['a' * 40, 'b' * 40])
+        assert result == {'a' * 40: None, 'b' * 40: None}
+
+    def test_real_debrid_does_not_hit_network(self):
+        """Regression: the RD stub must NOT emit an HTTP call — the
+        deprecated endpoint would just return {} but a stray call
+        wastes an RD API-rate-limit slot on every compromise decision."""
+        with patch('utils.search._get_debrid_service') as ms, \
+             patch('urllib.request.urlopen') as mock_urlopen:
+            ms.return_value = ('realdebrid', 'rd-key')
+            check_debrid_cache(['a' * 40])
+            assert mock_urlopen.call_count == 0
+
+    @patch('urllib.request.urlopen')
+    def test_alldebrid_batch_success(self, mock_urlopen):
+        """AD returns the batch in a single call; True/False mapped
+        back by the hash the API echoes (not by list index, so a
+        dropped entry can't mis-tag another hash)."""
+        mock_urlopen.return_value = _mock_urlopen_response({
+            'status': 'success',
+            'data': {
+                'magnets': [
+                    {'hash': 'a' * 40, 'instant': True},
+                    {'hash': 'b' * 40, 'instant': False},
+                ],
+            },
+        })
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('alldebrid', 'ad-key')
+            result = check_debrid_cache(['a' * 40, 'b' * 40])
+        assert result == {'a' * 40: True, 'b' * 40: False}
+        assert mock_urlopen.call_count == 1
+
+    @patch('urllib.request.urlopen')
+    def test_alldebrid_missing_hash_defaults_to_none(self, mock_urlopen):
+        """AD dropping a hash from the response must leave that hash
+        as None (unknown), not False (safe conservatism: absence is
+        not evidence of uncached)."""
+        mock_urlopen.return_value = _mock_urlopen_response({
+            'status': 'success',
+            'data': {'magnets': [{'hash': 'a' * 40, 'instant': True}]},
+        })
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('alldebrid', 'ad-key')
+            result = check_debrid_cache(['a' * 40, 'b' * 40])
+        assert result == {'a' * 40: True, 'b' * 40: None}
+
+    @patch('urllib.request.urlopen')
+    def test_alldebrid_status_failure_returns_none_map(self, mock_urlopen):
+        mock_urlopen.return_value = _mock_urlopen_response({
+            'status': 'error', 'data': {'error': {'message': 'bad key'}},
+        })
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('alldebrid', 'ad-key')
+            result = check_debrid_cache(['a' * 40])
+        assert result == {'a' * 40: None}
+
+    @patch('urllib.request.urlopen')
+    def test_alldebrid_timeout_returns_none_map(self, mock_urlopen):
+        """Silent failure returns None for every hash — per the plan
+        contract, the caller decides whether to treat unknown as
+        'not cached' or 'assume cached'."""
+        import socket
+        mock_urlopen.side_effect = socket.timeout('timed out')
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('alldebrid', 'ad-key')
+            result = check_debrid_cache(['a' * 40, 'b' * 40])
+        assert result == {'a' * 40: None, 'b' * 40: None}
+
+    @patch('urllib.request.urlopen')
+    def test_alldebrid_url_redaction(self, mock_urlopen, caplog):
+        """API key must NOT leak into warning logs on probe failure.
+        Query string (with apikey) is stripped by _safe_log_url."""
+        import logging
+        mock_urlopen.side_effect = OSError('boom')
+        with patch('utils.search._get_debrid_service') as ms, \
+             caplog.at_level(logging.WARNING, logger='ProjectDebridZurg'):
+            ms.return_value = ('alldebrid', 'SUPER-SECRET-KEY-42')
+            check_debrid_cache(['a' * 40])
+        for record in caplog.records:
+            assert 'SUPER-SECRET-KEY-42' not in record.message
+            assert 'apikey' not in record.message
+
+    @patch('urllib.request.urlopen')
+    def test_torbox_per_hash_success(self, mock_urlopen):
+        """TB returns per-hash payload; presence in ``data`` dict = cached."""
+        mock_urlopen.side_effect = [
+            _mock_urlopen_response({
+                'success': True,
+                'data': {'a' * 40: {'name': 'some.file'}},
+            }),
+            _mock_urlopen_response({'success': True, 'data': {}}),
+        ]
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('torbox', 'tb-key')
+            result = check_debrid_cache(['a' * 40, 'b' * 40])
+        assert result == {'a' * 40: True, 'b' * 40: False}
+        assert mock_urlopen.call_count == 2
+
+    @patch('urllib.request.urlopen')
+    def test_torbox_failure_per_hash_isolates_unknowns(self, mock_urlopen):
+        """A failure on one hash must not poison the other — each
+        probe is independent, and partial info is better than none."""
+        mock_urlopen.side_effect = [
+            _mock_urlopen_response({
+                'success': True, 'data': {'a' * 40: {'name': 'ok'}},
+            }),
+            OSError('transient'),
+        ]
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('torbox', 'tb-key')
+            result = check_debrid_cache(['a' * 40, 'b' * 40])
+        assert result == {'a' * 40: True, 'b' * 40: None}
+
+    @patch('urllib.request.urlopen')
+    def test_torbox_url_redaction(self, mock_urlopen, caplog):
+        import logging
+        mock_urlopen.side_effect = OSError('boom')
+        with patch('utils.search._get_debrid_service') as ms, \
+             caplog.at_level(logging.WARNING, logger='ProjectDebridZurg'):
+            ms.return_value = ('torbox', 'TB-SECRET-XYZ')
+            check_debrid_cache(['a' * 40])
+        for record in caplog.records:
+            assert 'TB-SECRET-XYZ' not in record.message
+
+    @patch('urllib.request.urlopen')
+    def test_alldebrid_uppercase_hash_in_response(self, mock_urlopen):
+        """Defensive: AD could return uppercase hashes.  The membership
+        check lowercases before comparing so the correct mapping still
+        holds — flagging a regression if someone removes that guard."""
+        mock_urlopen.return_value = _mock_urlopen_response({
+            'status': 'success',
+            'data': {
+                'magnets': [
+                    {'hash': ('A' * 40), 'instant': True},
+                ],
+            },
+        })
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('alldebrid', 'ad-key')
+            result = check_debrid_cache(['a' * 40])
+        assert result == {'a' * 40: True}
+
+    @patch('urllib.request.urlopen')
+    def test_alldebrid_coerces_string_instant(self, mock_urlopen):
+        """Defensive: if AD ever serialises instant as 'true'/'false'
+        strings, the coercion helper must still yield a bool rather
+        than dropping the value to None."""
+        mock_urlopen.return_value = _mock_urlopen_response({
+            'status': 'success',
+            'data': {
+                'magnets': [
+                    {'hash': 'a' * 40, 'instant': 'true'},
+                    {'hash': 'b' * 40, 'instant': 'FALSE'},
+                ],
+            },
+        })
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('alldebrid', 'ad-key')
+            result = check_debrid_cache(['a' * 40, 'b' * 40])
+        assert result == {'a' * 40: True, 'b' * 40: False}
+
+    @patch('urllib.request.urlopen')
+    def test_alldebrid_response_cannot_poison_with_extra_hashes(self, mock_urlopen):
+        """A hostile/buggy AD response echoing hashes the caller did
+        not ask about must not inject keys into the result map."""
+        mock_urlopen.return_value = _mock_urlopen_response({
+            'status': 'success',
+            'data': {
+                'magnets': [
+                    {'hash': 'a' * 40, 'instant': True},
+                    # Not requested — must be ignored
+                    {'hash': 'c' * 40, 'instant': True},
+                ],
+            },
+        })
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('alldebrid', 'ad-key')
+            result = check_debrid_cache(['a' * 40, 'b' * 40])
+        assert result == {'a' * 40: True, 'b' * 40: None}
+        assert 'c' * 40 not in result
+
+    def test_coerce_instant_helper(self):
+        assert _coerce_instant(True) is True
+        assert _coerce_instant(False) is False
+        assert _coerce_instant('true') is True
+        assert _coerce_instant('FALSE') is False
+        assert _coerce_instant(' True ') is True
+        assert _coerce_instant(None) is None
+        assert _coerce_instant(1) is None  # int is not a bool truthiness — safe
+        assert _coerce_instant('maybe') is None
+
+    @patch('urllib.request.urlopen')
+    def test_torbox_none_payload_returns_none_not_false(self, mock_urlopen):
+        """I4: unknown (null payload / non-dict) must stay None — not
+        be conflated with 'confirmed uncached'.  Previously the code
+        treated non-dict payload as False, violating the plan's
+        'caller decides how to treat unknown' contract."""
+        mock_urlopen.return_value = _mock_urlopen_response({
+            'success': True, 'data': None,
+        })
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('torbox', 'tb-key')
+            result = check_debrid_cache(['a' * 40])
+        assert result == {'a' * 40: None}
+
+    @patch('urllib.request.urlopen')
+    def test_torbox_non_dict_payload_returns_none(self, mock_urlopen):
+        """Similar: a list payload (broken TB response) also → None."""
+        mock_urlopen.return_value = _mock_urlopen_response({
+            'success': True, 'data': ['not', 'a', 'dict'],
+        })
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('torbox', 'tb-key')
+            result = check_debrid_cache(['a' * 40])
+        assert result == {'a' * 40: None}
+
+    @patch('urllib.request.urlopen')
+    def test_torbox_caps_hash_fan_out(self, mock_urlopen):
+        """HIGH: unbounded TB per-hash calls is a DoS vector
+        (50+ Torrentio results × 10 s timeout = 8-min worker stall).
+        The cap keeps the wall-clock budget bounded; hashes beyond
+        the cap stay as None (unknown)."""
+        mock_urlopen.return_value = _mock_urlopen_response({
+            'success': True, 'data': {},
+        })
+        n = _TORBOX_MAX_PROBES + 5
+        # Build N unique valid hashes (hex 40 chars each)
+        hashes = [f'{i:040x}' for i in range(n)]
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('torbox', 'tb-key')
+            result = check_debrid_cache(hashes)
+        # Exactly _TORBOX_MAX_PROBES HTTP calls — the overflow hashes
+        # never hit the network.
+        assert mock_urlopen.call_count == _TORBOX_MAX_PROBES
+        # Probed hashes get a confirmed False (empty dict = uncached);
+        # un-probed overflow hashes stay as None (unknown).
+        probed = [h for h, v in result.items() if v is False]
+        unprobed = [h for h, v in result.items() if v is None]
+        assert len(probed) == _TORBOX_MAX_PROBES
+        assert len(unprobed) == 5
+
+    def test_rd_warning_emits_once(self, caplog):
+        """Users with RD + only-cached mode must see a one-time warning
+        explaining why compromise never fires.  Repeated probes must
+        not spam the log."""
+        import logging
+        import utils.search as search_mod
+        # Reset the module-level flag so test order doesn't hide the emit
+        search_mod._rd_cache_warning_emitted = False
+        with patch('utils.search._get_debrid_service') as ms, \
+             caplog.at_level(logging.WARNING, logger='ProjectDebridZurg'):
+            ms.return_value = ('realdebrid', 'rd-key')
+            check_debrid_cache(['a' * 40])
+            check_debrid_cache(['b' * 40])
+            check_debrid_cache(['c' * 40])
+        rd_msgs = [r for r in caplog.records if 'RD' in r.message or 'Real-Debrid' in r.message]
+        assert len(rd_msgs) == 1
+        assert 'deprecated' in rd_msgs[0].message.lower()
+        # Reset so other tests start from a clean slate
+        search_mod._rd_cache_warning_emitted = False
+
+    def test_service_override(self):
+        """Explicit service+key must bypass auto-detect."""
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('realdebrid', 'auto-key')  # auto-detected RD
+            # Override to an unconfigured service — api_key must also be
+            # provided to enter the dispatch path
+            result = check_debrid_cache(['a' * 40], service='unknown-service',
+                                        api_key='x')
+            # Unknown service falls through to the default None map
+            assert result == {'a' * 40: None}
+            # Auto-detect must NOT have been consulted when both overrides
+            # supplied
+            ms.assert_not_called()
+
+
+class TestSearchTorrentsCacheAnnotation:
+    """search_torrents annotate_cache / sort_mode kwargs (plan 33 Phase 3)."""
+
+    @patch('utils.search.search_torrentio')
+    def test_annotate_cache_default_off(self, mock_search):
+        """Default annotate_cache=False: results carry no cached field.
+        The manual-search UI's behaviour is preserved unchanged."""
+        mock_search.return_value = [
+            {'info_hash': 'a' * 40, 'title': 'R1', 'seeds': 100,
+             'quality': {'label': '1080p', 'score': 3},
+             'size_bytes': 1000, 'source_name': 'S'},
+        ]
+        results = search_torrents('tt1234567')
+        assert 'cached' not in results[0]
+        assert 'cached_service' not in results[0]
+
+    @patch('utils.search.check_debrid_cache')
+    @patch('utils.search._get_debrid_service')
+    @patch('utils.search.search_torrentio')
+    def test_annotate_cache_populates_fields(self, mock_search, mock_service,
+                                             mock_check):
+        mock_search.return_value = [
+            {'info_hash': 'a' * 40, 'title': 'R1', 'seeds': 100,
+             'quality': {'label': '2160p', 'score': 4},
+             'size_bytes': 1000, 'source_name': 'S'},
+            {'info_hash': 'b' * 40, 'title': 'R2', 'seeds': 50,
+             'quality': {'label': '1080p', 'score': 3},
+             'size_bytes': 500, 'source_name': 'S'},
+        ]
+        mock_service.return_value = ('alldebrid', 'ad-key')
+        mock_check.return_value = {'a' * 40: False, 'b' * 40: True}
+        results = search_torrents('tt1234567', annotate_cache=True)
+        by_hash = {r['info_hash']: r for r in results}
+        assert by_hash['a' * 40]['cached'] is False
+        assert by_hash['a' * 40]['cached_service'] == 'alldebrid'
+        assert by_hash['b' * 40]['cached'] is True
+        assert by_hash['b' * 40]['cached_service'] == 'alldebrid'
+
+    @patch('utils.search.check_debrid_cache')
+    @patch('utils.search._get_debrid_service')
+    @patch('utils.search.search_torrentio')
+    def test_cached_first_sort_outranks_higher_quality_uncached(
+            self, mock_search, mock_service, mock_check):
+        """Plan 33 core demo: cached 1080p ranks above uncached 2160p
+        under sort_mode='cached_first' — the user gets something that
+        streams immediately rather than something that makes them wait."""
+        mock_search.return_value = [
+            {'info_hash': 'a' * 40, 'title': 'Uncached 2160p', 'seeds': 500,
+             'quality': {'label': '2160p', 'score': 4},
+             'size_bytes': 8000, 'source_name': 'S'},
+            {'info_hash': 'b' * 40, 'title': 'Cached 1080p', 'seeds': 10,
+             'quality': {'label': '1080p', 'score': 3},
+             'size_bytes': 4000, 'source_name': 'S'},
+        ]
+        mock_service.return_value = ('alldebrid', 'k')
+        mock_check.return_value = {'a' * 40: False, 'b' * 40: True}
+        results = search_torrents('tt1234567', sort_mode='cached_first')
+        assert results[0]['info_hash'] == 'b' * 40  # cached 1080p on top
+        assert results[1]['info_hash'] == 'a' * 40
+
+    @patch('utils.search.check_debrid_cache')
+    @patch('utils.search._get_debrid_service')
+    @patch('utils.search.search_torrentio')
+    def test_cached_first_sort_unknown_treated_as_uncached(
+            self, mock_search, mock_service, mock_check):
+        """cached=None must not promote a release — we only boost to
+        the top when the provider confirms True.  Unknown stays with
+        uncached."""
+        mock_search.return_value = [
+            {'info_hash': 'a' * 40, 'title': 'Unknown 2160p', 'seeds': 100,
+             'quality': {'label': '2160p', 'score': 4},
+             'size_bytes': 1000, 'source_name': 'S'},
+            {'info_hash': 'b' * 40, 'title': 'Cached 720p', 'seeds': 1,
+             'quality': {'label': '720p', 'score': 2},
+             'size_bytes': 500, 'source_name': 'S'},
+        ]
+        mock_service.return_value = ('realdebrid', 'k')
+        mock_check.return_value = {'a' * 40: None, 'b' * 40: True}
+        results = search_torrents('tt1234567', sort_mode='cached_first')
+        assert results[0]['info_hash'] == 'b' * 40  # cached wins over unknown
+
+    @patch('utils.search.check_debrid_cache')
+    @patch('utils.search._get_debrid_service')
+    @patch('utils.search.search_torrentio')
+    def test_cached_first_ties_fall_back_to_quality(
+            self, mock_search, mock_service, mock_check):
+        """Among all-cached or all-uncached, sort falls back to the
+        existing quality-then-seeders order."""
+        mock_search.return_value = [
+            {'info_hash': 'a' * 40, 'title': 'Cached 720p', 'seeds': 999,
+             'quality': {'label': '720p', 'score': 2},
+             'size_bytes': 500, 'source_name': 'S'},
+            {'info_hash': 'b' * 40, 'title': 'Cached 2160p', 'seeds': 1,
+             'quality': {'label': '2160p', 'score': 4},
+             'size_bytes': 8000, 'source_name': 'S'},
+        ]
+        mock_service.return_value = ('alldebrid', 'k')
+        mock_check.return_value = {'a' * 40: True, 'b' * 40: True}
+        results = search_torrents('tt1234567', sort_mode='cached_first')
+        # Both cached → quality wins
+        assert results[0]['info_hash'] == 'b' * 40
+        assert results[1]['info_hash'] == 'a' * 40
+
+    @patch('utils.search.check_debrid_cache')
+    @patch('utils.search._get_debrid_service')
+    @patch('utils.search.search_torrentio')
+    def test_annotated_search_resolves_service_once(
+            self, mock_search, mock_service, mock_check):
+        """search_torrents must call _get_debrid_service exactly once
+        and pass the resolved service into check_debrid_cache — no
+        double env-var read, no chance of a mid-call key rotation
+        making cached_service disagree with the probe service."""
+        mock_search.return_value = [
+            {'info_hash': 'a' * 40, 'title': 'R1', 'seeds': 10,
+             'quality': {'label': '1080p', 'score': 3},
+             'size_bytes': 1000, 'source_name': 'S'},
+        ]
+        mock_service.return_value = ('alldebrid', 'ad-key')
+        mock_check.return_value = {'a' * 40: True}
+        search_torrents('tt1234567', annotate_cache=True)
+        # Single resolution
+        assert mock_service.call_count == 1
+        # Probe got the explicit service, not None
+        _, kwargs = mock_check.call_args
+        assert kwargs['service'] == 'alldebrid'
+        assert kwargs['api_key'] == 'ad-key'
+
+    @patch('utils.search.search_torrentio')
+    def test_sort_mode_quality_preserves_existing_behaviour(self, mock_search):
+        """Regression guard: sort_mode='quality' (the default) must
+        never touch the cache probe and must preserve the pre-Phase-3
+        ordering contract."""
+        mock_search.return_value = [
+            {'info_hash': 'a' * 40, 'title': 'R', 'seeds': 10,
+             'quality': {'label': '720p', 'score': 2},
+             'size_bytes': 500, 'source_name': 'S'},
+            {'info_hash': 'b' * 40, 'title': 'R', 'seeds': 50,
+             'quality': {'label': '2160p', 'score': 4},
+             'size_bytes': 8000, 'source_name': 'S'},
+        ]
+        with patch('utils.search.check_debrid_cache') as mock_check:
+            results = search_torrents('tt1234567')  # defaults
+            mock_check.assert_not_called()
+        assert results[0]['info_hash'] == 'b' * 40

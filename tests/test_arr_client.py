@@ -1979,32 +1979,37 @@ _PROFILE_WITH_GROUP = {
     'id': 4,
     'name': 'HD-2160p',
     'items': [
-        # Bare top-level qualities (preference order: highest first)
-        {'quality': {'id': 19, 'name': 'Bluray-2160p', 'source': 'bluray', 'resolution': 2160},
-         'allowed': True, 'items': []},
-        {'quality': {'id': 18, 'name': 'WEBDL-2160p', 'source': 'web', 'resolution': 2160},
-         'allowed': True, 'items': []},
-        # Group — HD 1080p bucket with multiple sources collapsed to one tier
-        {'name': 'HD-1080p',
-         'allowed': True,
-         'items': [
-             {'quality': {'id': 7, 'name': 'Bluray-1080p', 'resolution': 1080},
-              'allowed': True, 'items': []},
-             {'quality': {'id': 3, 'name': 'WEBDL-1080p', 'resolution': 1080},
-              'allowed': True, 'items': []},
-         ]},
-        # Bare disallowed quality at a lower tier — must not appear in output
-        {'quality': {'id': 4, 'name': 'HDTV-720p', 'resolution': 720},
-         'allowed': False, 'items': []},
-        # Disallowed group — entire subtree suppressed even though inner items
-        # carry ``allowed: true`` (matches Sonarr UI: unticking the group hides
-        # everything inside it).
+        # Sonarr/Radarr return profile items in ASCENDING quality order
+        # (SDTV / lowest first, Remux-2160p / highest last — this is the
+        # engine's quality-weight ordering).  ``get_tier_order`` reverses
+        # this so callers see preferred (highest) first.
+        #
+        # Disallowed group — entire subtree suppressed even though inner
+        # items carry ``allowed: true`` (matches Sonarr UI: unticking the
+        # group hides everything inside it).
         {'name': 'SD',
          'allowed': False,
          'items': [
              {'quality': {'id': 1, 'name': 'SDTV', 'resolution': 480},
               'allowed': True, 'items': []},
          ]},
+        # Bare disallowed quality at a lower tier — must not appear in output
+        {'quality': {'id': 4, 'name': 'HDTV-720p', 'resolution': 720},
+         'allowed': False, 'items': []},
+        # Group — HD 1080p bucket with multiple sources collapsed to one tier
+        {'name': 'HD-1080p',
+         'allowed': True,
+         'items': [
+             {'quality': {'id': 3, 'name': 'WEBDL-1080p', 'resolution': 1080},
+              'allowed': True, 'items': []},
+             {'quality': {'id': 7, 'name': 'Bluray-1080p', 'resolution': 1080},
+              'allowed': True, 'items': []},
+         ]},
+        # Bare top-level qualities at the top of the profile (highest-weight)
+        {'quality': {'id': 18, 'name': 'WEBDL-2160p', 'source': 'web', 'resolution': 2160},
+         'allowed': True, 'items': []},
+        {'quality': {'id': 19, 'name': 'Bluray-2160p', 'source': 'bluray', 'resolution': 2160},
+         'allowed': True, 'items': []},
     ],
 }
 
@@ -2074,17 +2079,19 @@ class TestQualityProfileReader:
 
     @patch('urllib.request.urlopen')
     def test_get_tier_order_simple_profile(self, mock_urlopen, sonarr):
-        # Bare qualities at 1080p (two sources) + 720p — collapses 1080p
-        # duplicates into a single tier; preserves profile preference order.
+        # Bare qualities at 720p + 1080p (two sources) — the real Sonarr API
+        # returns items ASCENDING (lowest quality first); ``get_tier_order``
+        # reverses so the caller sees preferred-first.  720p below; 1080p
+        # duplicates collapse to one tier.
         mock_urlopen.return_value = _mock_urlopen({
             'id': 1,
             'name': 'HD',
             'items': [
-                {'quality': {'id': 7, 'name': 'Bluray-1080p', 'resolution': 1080},
+                {'quality': {'id': 4, 'name': 'HDTV-720p', 'resolution': 720},
                  'allowed': True, 'items': []},
                 {'quality': {'id': 3, 'name': 'WEBDL-1080p', 'resolution': 1080},
                  'allowed': True, 'items': []},
-                {'quality': {'id': 4, 'name': 'HDTV-720p', 'resolution': 720},
+                {'quality': {'id': 7, 'name': 'Bluray-1080p', 'resolution': 1080},
                  'allowed': True, 'items': []},
             ],
         })
@@ -2160,12 +2167,13 @@ class TestQualityProfileReader:
     def test_get_tier_order_falls_back_to_name_parse_when_resolution_missing(
             self, mock_urlopen, sonarr):
         # Older Sonarr might not populate resolution — name parser fallback.
+        # Items ASCENDING as the real API returns; reversed output.
         mock_urlopen.return_value = _mock_urlopen({
             'id': 7,
             'items': [
-                {'quality': {'id': 7, 'name': 'Bluray-1080p'},
-                 'allowed': True, 'items': []},
                 {'quality': {'id': 4, 'name': 'HDTV-720p'},
+                 'allowed': True, 'items': []},
+                {'quality': {'id': 7, 'name': 'Bluray-1080p'},
                  'allowed': True, 'items': []},
             ],
         })
@@ -2244,6 +2252,56 @@ class TestQualityProfileReader:
         sonarr_order = sonarr.get_tier_order(4)
         radarr_order = radarr.get_tier_order(4)
         assert sonarr_order == radarr_order == ['2160p', '1080p']
+
+    @patch('urllib.request.urlopen')
+    def test_get_tier_order_real_sonarr_any_profile(self, mock_urlopen, sonarr):
+        # Regression guard — frozen copy of the actual ``/api/v3/qualityprofile/1``
+        # response from a live Sonarr v3 instance for the "Any" profile.  The API
+        # returns items ASCENDING by quality weight (SDTV, 480p variants, DVD,
+        # 720p, 1080p variants, 2160p variants) — this is the engine's internal
+        # ordering and pre-dates any UI-level preference sorting.  The compromise
+        # engine expects preferred-first, so ``get_tier_order`` must reverse the
+        # API output.  Without the reversal the engine treats 480p as the
+        # "preferred" tier and compromise advancement goes UPWARD in quality —
+        # the opposite of user intent.
+        mock_urlopen.return_value = _mock_urlopen({
+            'id': 1, 'name': 'Any',
+            'cutoff': 7,
+            'items': [
+                {'quality': {'id': 0, 'name': 'Unknown'}, 'allowed': False, 'items': []},
+                {'quality': {'id': 1, 'name': 'SDTV', 'resolution': 480},
+                 'allowed': True, 'items': []},
+                {'name': 'WEB 480p', 'allowed': True, 'items': [
+                    {'quality': {'id': 12, 'name': 'WEBRip-480p', 'resolution': 480},
+                     'allowed': True, 'items': []},
+                    {'quality': {'id': 8, 'name': 'WEBDL-480p', 'resolution': 480},
+                     'allowed': True, 'items': []},
+                ]},
+                {'quality': {'id': 2, 'name': 'DVD', 'resolution': 480},
+                 'allowed': True, 'items': []},
+                {'quality': {'id': 4, 'name': 'HDTV-720p', 'resolution': 720},
+                 'allowed': True, 'items': []},
+                {'quality': {'id': 5, 'name': 'HDTV-1080p', 'resolution': 1080},
+                 'allowed': True, 'items': []},
+                {'name': 'WEB 720p', 'allowed': True, 'items': [
+                    {'quality': {'id': 14, 'name': 'WEBRip-720p', 'resolution': 720},
+                     'allowed': True, 'items': []},
+                    {'quality': {'id': 5, 'name': 'WEBDL-720p', 'resolution': 720},
+                     'allowed': True, 'items': []},
+                ]},
+                {'name': 'WEB 1080p', 'allowed': True, 'items': [
+                    {'quality': {'id': 15, 'name': 'WEBRip-1080p', 'resolution': 1080},
+                     'allowed': True, 'items': []},
+                    {'quality': {'id': 3, 'name': 'WEBDL-1080p', 'resolution': 1080},
+                     'allowed': True, 'items': []},
+                ]},
+                {'quality': {'id': 7, 'name': 'Bluray-1080p', 'resolution': 1080},
+                 'allowed': True, 'items': []},
+            ],
+        })
+        # Preferred-first: 1080p (the user's top-allowed tier) → 720p → 480p.
+        # A fall-through to 720p must NEVER be reached before a 1080p probe.
+        assert sonarr.get_tier_order(1) == ['1080p', '720p', '480p']
 
     @patch('urllib.request.urlopen')
     def test_profile_cache_is_per_client(self, mock_urlopen, sonarr, radarr):

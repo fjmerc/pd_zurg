@@ -390,6 +390,46 @@ class TestRetryMetaTierStateV2:
             json.dump(future, f)
         assert RetryMeta.read_tier_state(path) is None
 
+    def test_read_tier_state_rejects_pre_fix_v1_schema(self, tmp_dir):
+        """Backward-compat guard: v1 sidecars seeded under the inverted-
+        tier_order bug must be invalidated so ``init_tier_state`` re-seeds
+        with the corrected preferred-first order on the next retry pass.
+        The stored ``tier_order`` in a v1 sidecar could have ``tier_order[0]``
+        as the LOWEST-quality tier; trusting it would send compromise
+        upward in quality."""
+        path = os.path.join(tmp_dir, 'show.torrent')
+        meta = path + '.meta'
+        # Perfectly valid v1 shape — only the version number makes it stale.
+        # Note the ascending tier_order that pre-fix get_tier_order would
+        # have produced (buggy output shape).
+        stale = {
+            'tier_state': {
+                'schema_version': 1,
+                'arr_service': 'sonarr',
+                'arr_url_hash': 'a9f2c4',
+                'profile_id': 4,
+                'tier_order': ['480p', '720p', '1080p'],  # buggy ascending
+                'current_tier_index': 0,
+                'first_attempted_at': 100.0,
+                'tier_attempts': [],
+                'compromise_fired_at': None,
+                'last_advance_reason': None,
+                'season_pack_attempted': False,
+            }
+        }
+        with open(meta, 'w') as f:
+            json.dump(stale, f)
+        assert RetryMeta.read_tier_state(path) is None
+        # And a subsequent init_tier_state call seeds fresh with the new
+        # (correct) order, resetting the dwell clock to the new ``now``.
+        fresh = RetryMeta.init_tier_state(
+            path, 'sonarr', 'http://s:8989', 4,
+            ['1080p', '720p', '480p'], now=500.0,
+        )
+        assert fresh['schema_version'] == RetryMeta.TIER_STATE_SCHEMA_VERSION
+        assert fresh['tier_order'] == ['1080p', '720p', '480p']
+        assert fresh['first_attempted_at'] == 500.0
+
     def test_read_tier_state_rejects_malformed_tier_order(self, tmp_dir):
         """A sidecar with tier_order=dict (hand-edit / corruption) must
         degrade to None rather than crash downstream subscripting."""
@@ -398,7 +438,7 @@ class TestRetryMetaTierStateV2:
         with open(meta, 'w') as f:
             json.dump({
                 'tier_state': {
-                    'schema_version': 1,
+                    'schema_version': RetryMeta.TIER_STATE_SCHEMA_VERSION,
                     'tier_order': {'not': 'a list'},
                     'current_tier_index': 0,
                     'first_attempted_at': 100.0,
@@ -414,7 +454,7 @@ class TestRetryMetaTierStateV2:
         with open(meta, 'w') as f:
             json.dump({
                 'tier_state': {
-                    'schema_version': 1,
+                    'schema_version': RetryMeta.TIER_STATE_SCHEMA_VERSION,
                     'tier_order': ['2160p'],
                     'current_tier_index': -1,
                     'first_attempted_at': 100.0,
@@ -430,7 +470,10 @@ class TestRetryMetaTierStateV2:
         meta = path + '.meta'
         with open(meta, 'w') as f:
             json.dump({
-                'tier_state': {'schema_version': 1, 'tier_order': 'bogus'}
+                'tier_state': {
+                    'schema_version': RetryMeta.TIER_STATE_SCHEMA_VERSION,
+                    'tier_order': 'bogus',
+                }
             }, f)
         ts = RetryMeta.init_tier_state(
             path, 'sonarr', 'http://s:8989', 4, ['2160p', '1080p'], now=300.0,

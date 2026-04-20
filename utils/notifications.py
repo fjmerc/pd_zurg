@@ -51,6 +51,8 @@ ALL_EVENTS = {
     # Debrid search
     'debrid_add_success',         # Torrent added to debrid from interactive search
     'debrid_add_failed',          # Failed to add torrent to debrid
+    # Quality compromise (plan 33)
+    'compromise_grabbed',         # Grabbed a lower tier after dwell at preferred failed
     # Digest
     'daily_digest',               # Daily summary notification
 }

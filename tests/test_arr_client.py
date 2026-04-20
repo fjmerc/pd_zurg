@@ -11,6 +11,7 @@ from utils.arr_client import (
     get_download_service, get_configured_services,
     _NOT_FOUND,
     _force_grab_eligible, _force_grab_sort_key, _release_identifier,
+    _PROFILE_CACHE_TTL_SECONDS,
 )
 
 
@@ -1963,3 +1964,339 @@ class TestGetRecentGrabs:
         mock_urlopen.return_value = _mock_urlopen({'records': records})
         result = client.get_recent_grabs(page_size=30)
         assert len(result) == 30
+
+
+# ---------------------------------------------------------------------------
+# Quality profile reader (plan 33 Phase 1 — Sonarr/Radarr parity, I5)
+# ---------------------------------------------------------------------------
+
+# Fixture representing a real Sonarr/Radarr v3 profile response shape.
+# Top-level items are ordered top-to-bottom as the user ranked them in the
+# UI; that order drives preference.  Inner items within a group inherit the
+# group's allowed flag visually but still carry their own ``allowed`` field
+# (matches what the API actually returns — we respect partial group ticks).
+_PROFILE_WITH_GROUP = {
+    'id': 4,
+    'name': 'HD-2160p',
+    'items': [
+        # Bare top-level qualities (preference order: highest first)
+        {'quality': {'id': 19, 'name': 'Bluray-2160p', 'source': 'bluray', 'resolution': 2160},
+         'allowed': True, 'items': []},
+        {'quality': {'id': 18, 'name': 'WEBDL-2160p', 'source': 'web', 'resolution': 2160},
+         'allowed': True, 'items': []},
+        # Group — HD 1080p bucket with multiple sources collapsed to one tier
+        {'name': 'HD-1080p',
+         'allowed': True,
+         'items': [
+             {'quality': {'id': 7, 'name': 'Bluray-1080p', 'resolution': 1080},
+              'allowed': True, 'items': []},
+             {'quality': {'id': 3, 'name': 'WEBDL-1080p', 'resolution': 1080},
+              'allowed': True, 'items': []},
+         ]},
+        # Bare disallowed quality at a lower tier — must not appear in output
+        {'quality': {'id': 4, 'name': 'HDTV-720p', 'resolution': 720},
+         'allowed': False, 'items': []},
+        # Disallowed group — entire subtree suppressed even though inner items
+        # carry ``allowed: true`` (matches Sonarr UI: unticking the group hides
+        # everything inside it).
+        {'name': 'SD',
+         'allowed': False,
+         'items': [
+             {'quality': {'id': 1, 'name': 'SDTV', 'resolution': 480},
+              'allowed': True, 'items': []},
+         ]},
+    ],
+}
+
+
+class TestQualityProfileReader:
+    """Phase 1 of plan 33 — profile reader, tier ordering, TTL cache, parity."""
+
+    @patch('urllib.request.urlopen')
+    def test_get_quality_profile_fetches_single_profile(self, mock_urlopen, sonarr):
+        mock_urlopen.return_value = _mock_urlopen(_PROFILE_WITH_GROUP)
+        profile = sonarr.get_quality_profile(4)
+        assert profile is not None
+        assert profile['id'] == 4
+        # URL targets the specific-profile endpoint, not the collection listing
+        called_url = mock_urlopen.call_args[0][0].full_url
+        assert '/api/v3/qualityprofile/4' in called_url
+
+    def test_get_quality_profile_rejects_non_positive_ids(self, sonarr):
+        # Invalid IDs short-circuit without hitting HTTP — tests no mock needed
+        assert sonarr.get_quality_profile(0) is None
+        assert sonarr.get_quality_profile(-1) is None
+        assert sonarr.get_quality_profile(None) is None
+        assert sonarr.get_quality_profile('4') is None  # string, not int
+        assert sonarr.get_quality_profile(True) is None  # bool disallowed
+
+    @patch('urllib.request.urlopen')
+    def test_get_quality_profile_returns_none_on_http_error(self, mock_urlopen, sonarr):
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            'http://sonarr:8989/api/v3/qualityprofile/99', 404, 'Not Found', {}, None
+        )
+        assert sonarr.get_quality_profile(99) is None
+
+    @patch('urllib.request.urlopen')
+    def test_get_quality_profile_does_not_cache_failures(self, mock_urlopen, sonarr):
+        # First call fails, second succeeds — failed fetches must not be
+        # cached or a transient 5xx would lock the profile for 15 min.
+        mock_urlopen.side_effect = [
+            urllib.error.URLError('Connection refused'),
+            _mock_urlopen(_PROFILE_WITH_GROUP),
+        ]
+        assert sonarr.get_quality_profile(4) is None
+        assert sonarr.get_quality_profile(4) is not None
+        assert mock_urlopen.call_count == 2
+
+    @patch('urllib.request.urlopen')
+    def test_get_quality_profile_cache_hit_within_ttl(self, mock_urlopen, sonarr):
+        mock_urlopen.return_value = _mock_urlopen(_PROFILE_WITH_GROUP)
+        first = sonarr.get_quality_profile(4)
+        second = sonarr.get_quality_profile(4)
+        assert first is second  # cache returns same object reference
+        assert mock_urlopen.call_count == 1  # only one HTTP round-trip
+
+    @patch('utils.arr_client.time.monotonic')
+    @patch('urllib.request.urlopen')
+    def test_get_quality_profile_cache_expires_after_ttl(self, mock_urlopen, mock_mono, sonarr):
+        mock_urlopen.return_value = _mock_urlopen(_PROFILE_WITH_GROUP)
+        # Drive monotonic from a mutable clock so the test stays robust if
+        # get_quality_profile ever changes how many times it samples the
+        # clock per call.  First call is "now"; second is well past the
+        # 15-min TTL so the cache entry must be treated as expired.
+        current_time = {'now': 1000.0}
+        mock_mono.side_effect = lambda: current_time['now']
+        sonarr.get_quality_profile(4)
+        current_time['now'] = 1000.0 + _PROFILE_CACHE_TTL_SECONDS + 1.0
+        sonarr.get_quality_profile(4)
+        assert mock_urlopen.call_count == 2  # cache miss forced a second fetch
+
+    @patch('urllib.request.urlopen')
+    def test_get_tier_order_simple_profile(self, mock_urlopen, sonarr):
+        # Bare qualities at 1080p (two sources) + 720p — collapses 1080p
+        # duplicates into a single tier; preserves profile preference order.
+        mock_urlopen.return_value = _mock_urlopen({
+            'id': 1,
+            'name': 'HD',
+            'items': [
+                {'quality': {'id': 7, 'name': 'Bluray-1080p', 'resolution': 1080},
+                 'allowed': True, 'items': []},
+                {'quality': {'id': 3, 'name': 'WEBDL-1080p', 'resolution': 1080},
+                 'allowed': True, 'items': []},
+                {'quality': {'id': 4, 'name': 'HDTV-720p', 'resolution': 720},
+                 'allowed': True, 'items': []},
+            ],
+        })
+        assert sonarr.get_tier_order(1) == ['1080p', '720p']
+
+    @patch('urllib.request.urlopen')
+    def test_get_tier_order_grouped_profile(self, mock_urlopen, sonarr):
+        # HD-1080p group with multiple inner sources should collapse to a
+        # single 1080p tier.  The plan calls this out explicitly — groups are
+        # a user's way of saying "any of these sources at this resolution".
+        mock_urlopen.return_value = _mock_urlopen({
+            'id': 2,
+            'name': 'Grouped',
+            'items': [
+                {'name': 'HD-1080p',
+                 'allowed': True,
+                 'items': [
+                     {'quality': {'id': 7, 'name': 'Bluray-1080p', 'resolution': 1080},
+                      'allowed': True, 'items': []},
+                     {'quality': {'id': 3, 'name': 'WEBDL-1080p', 'resolution': 1080},
+                      'allowed': True, 'items': []},
+                     {'quality': {'id': 8, 'name': 'HDTV-1080p', 'resolution': 1080},
+                      'allowed': True, 'items': []},
+                 ]},
+            ],
+        })
+        assert sonarr.get_tier_order(2) == ['1080p']
+
+    @patch('urllib.request.urlopen')
+    def test_get_tier_order_skips_disallowed(self, mock_urlopen, sonarr):
+        # Mix of allowed/disallowed at every level — I1: profile is the
+        # ceiling, so disallowed items NEVER appear in the tier list.
+        mock_urlopen.return_value = _mock_urlopen(_PROFILE_WITH_GROUP)
+        # 720p is individually disallowed; SD group is disallowed (suppressing
+        # the inner allowed SDTV item); only 2160p + 1080p should surface.
+        assert sonarr.get_tier_order(4) == ['2160p', '1080p']
+
+    @patch('urllib.request.urlopen')
+    def test_get_tier_order_disallowed_group_suppresses_inner_allowed(
+            self, mock_urlopen, sonarr):
+        # Regression guard — a disallowed group must hide its inner items
+        # even when the API marks them as allowed individually.
+        mock_urlopen.return_value = _mock_urlopen({
+            'id': 5,
+            'name': 'SDOnlyOff',
+            'items': [
+                {'quality': {'id': 7, 'name': 'Bluray-1080p', 'resolution': 1080},
+                 'allowed': True, 'items': []},
+                {'name': 'SD',
+                 'allowed': False,
+                 'items': [
+                     {'quality': {'id': 1, 'name': 'SDTV', 'resolution': 480},
+                      'allowed': True, 'items': []},
+                 ]},
+            ],
+        })
+        assert sonarr.get_tier_order(5) == ['1080p']
+
+    @patch('urllib.request.urlopen')
+    def test_get_tier_order_uses_resolution_int_when_present(self, mock_urlopen, sonarr):
+        # resolution=1080 and a non-standard name string — we should still
+        # return 1080p via the numeric path rather than guessing from the name.
+        mock_urlopen.return_value = _mock_urlopen({
+            'id': 6,
+            'items': [
+                {'quality': {'id': 99, 'name': 'Custom-Unusual-Tag', 'resolution': 1080},
+                 'allowed': True, 'items': []},
+            ],
+        })
+        assert sonarr.get_tier_order(6) == ['1080p']
+
+    @patch('urllib.request.urlopen')
+    def test_get_tier_order_falls_back_to_name_parse_when_resolution_missing(
+            self, mock_urlopen, sonarr):
+        # Older Sonarr might not populate resolution — name parser fallback.
+        mock_urlopen.return_value = _mock_urlopen({
+            'id': 7,
+            'items': [
+                {'quality': {'id': 7, 'name': 'Bluray-1080p'},
+                 'allowed': True, 'items': []},
+                {'quality': {'id': 4, 'name': 'HDTV-720p'},
+                 'allowed': True, 'items': []},
+            ],
+        })
+        assert sonarr.get_tier_order(7) == ['1080p', '720p']
+
+    @patch('urllib.request.urlopen')
+    def test_get_tier_order_drops_custom_name_with_trailing_suffix(
+            self, mock_urlopen, sonarr):
+        # Regression: older arrs may not populate quality.resolution, so we
+        # parse the name — but the token must be at end-of-name.  A custom
+        # user quality named `Mobile-480p-low` must NOT be collapsed into
+        # the standard `480p` tier (I1: profile is the ceiling, never
+        # promote an unrecognised custom quality into a sibling tier).
+        mock_urlopen.return_value = _mock_urlopen({
+            'id': 10,
+            'items': [
+                {'quality': {'id': 50, 'name': 'Mobile-480p-low'},
+                 'allowed': True, 'items': []},
+                {'quality': {'id': 7, 'name': 'Bluray-1080p'},
+                 'allowed': True, 'items': []},
+            ],
+        })
+        assert sonarr.get_tier_order(10) == ['1080p']
+
+    @patch('urllib.request.urlopen')
+    def test_get_tier_order_drops_unrecognised_quality(self, mock_urlopen, sonarr):
+        # Unparseable name and no resolution → drop rather than guess.
+        # Invariant I1 demands we never invent a tier; dropping is safe.
+        mock_urlopen.return_value = _mock_urlopen({
+            'id': 8,
+            'items': [
+                {'quality': {'id': 42, 'name': 'Unknown-Quality'},
+                 'allowed': True, 'items': []},
+                {'quality': {'id': 7, 'name': 'Bluray-1080p', 'resolution': 1080},
+                 'allowed': True, 'items': []},
+            ],
+        })
+        assert sonarr.get_tier_order(8) == ['1080p']
+
+    @patch('urllib.request.urlopen')
+    def test_get_tier_order_empty_on_missing_profile(self, mock_urlopen, sonarr):
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            'http://sonarr:8989/api/v3/qualityprofile/99', 404, 'Not Found', {}, None
+        )
+        assert sonarr.get_tier_order(99) == []
+
+    @patch('urllib.request.urlopen')
+    def test_get_tier_order_empty_on_all_disallowed(self, mock_urlopen, sonarr):
+        mock_urlopen.return_value = _mock_urlopen({
+            'id': 9,
+            'items': [
+                {'quality': {'id': 1, 'name': 'SDTV', 'resolution': 480},
+                 'allowed': False, 'items': []},
+            ],
+        })
+        assert sonarr.get_tier_order(9) == []
+
+    @patch('urllib.request.urlopen')
+    def test_get_tier_order_cached(self, mock_urlopen, sonarr):
+        # Consecutive calls within TTL hit the cache once.
+        mock_urlopen.return_value = _mock_urlopen(_PROFILE_WITH_GROUP)
+        first = sonarr.get_tier_order(4)
+        second = sonarr.get_tier_order(4)
+        assert first == second == ['2160p', '1080p']
+        assert mock_urlopen.call_count == 1
+
+    @patch('urllib.request.urlopen')
+    def test_get_tier_order_parity_sonarr_radarr(self, mock_urlopen, sonarr, radarr):
+        # I5 parity: identical profile fixture → identical tier output.
+        # Two HTTP calls (one per client) — caches are per-client so the
+        # second call does not pick up the first client's cached entry.
+        mock_urlopen.side_effect = [
+            _mock_urlopen(_PROFILE_WITH_GROUP),
+            _mock_urlopen(_PROFILE_WITH_GROUP),
+        ]
+        sonarr_order = sonarr.get_tier_order(4)
+        radarr_order = radarr.get_tier_order(4)
+        assert sonarr_order == radarr_order == ['2160p', '1080p']
+
+    @patch('urllib.request.urlopen')
+    def test_profile_cache_is_per_client(self, mock_urlopen, sonarr, radarr):
+        # Each client has its own cache — Sonarr caching profile 4 must not
+        # affect Radarr's fetch for the same ID.
+        mock_urlopen.side_effect = [
+            _mock_urlopen(_PROFILE_WITH_GROUP),
+            _mock_urlopen(_PROFILE_WITH_GROUP),
+        ]
+        sonarr.get_quality_profile(4)
+        sonarr.get_quality_profile(4)  # cache hit
+        radarr.get_quality_profile(4)  # separate cache — cache miss
+        assert mock_urlopen.call_count == 2
+
+
+class TestProfileIdLookups:
+    """Phase 1 — convenience accessors off the series/movie record."""
+
+    @patch('urllib.request.urlopen')
+    def test_get_profile_id_for_series(self, mock_urlopen, sonarr):
+        mock_urlopen.return_value = _mock_urlopen({'id': 7, 'qualityProfileId': 4})
+        assert sonarr.get_profile_id_for_series(7) == 4
+
+    @patch('urllib.request.urlopen')
+    def test_get_profile_id_for_series_missing_field(self, mock_urlopen, sonarr):
+        mock_urlopen.return_value = _mock_urlopen({'id': 7})
+        assert sonarr.get_profile_id_for_series(7) is None
+
+    @patch('urllib.request.urlopen')
+    def test_get_profile_id_for_series_not_found(self, mock_urlopen, sonarr):
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            'http://sonarr:8989/api/v3/series/99', 404, 'Not Found', {}, None
+        )
+        assert sonarr.get_profile_id_for_series(99) is None
+
+    @patch('urllib.request.urlopen')
+    def test_get_profile_id_for_movie(self, mock_urlopen, radarr):
+        mock_urlopen.return_value = _mock_urlopen({'id': 12, 'qualityProfileId': 2})
+        assert radarr.get_profile_id_for_movie(12) == 2
+
+    @patch('urllib.request.urlopen')
+    def test_get_profile_id_for_movie_missing_field(self, mock_urlopen, radarr):
+        mock_urlopen.return_value = _mock_urlopen({'id': 12})
+        assert radarr.get_profile_id_for_movie(12) is None
+
+    @patch('urllib.request.urlopen')
+    def test_get_profile_id_rejects_bool(self, mock_urlopen, sonarr):
+        # bool is-a int in Python — a buggy serialiser returning True must
+        # not be promoted to profile ID 1 (mirrors _is_number bool guard).
+        mock_urlopen.return_value = _mock_urlopen({'id': 7, 'qualityProfileId': True})
+        assert sonarr.get_profile_id_for_series(7) is None
+
+    @patch('urllib.request.urlopen')
+    def test_get_profile_id_rejects_non_positive(self, mock_urlopen, radarr):
+        mock_urlopen.return_value = _mock_urlopen({'id': 12, 'qualityProfileId': 0})
+        assert radarr.get_profile_id_for_movie(12) is None

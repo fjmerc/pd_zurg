@@ -15,7 +15,9 @@ Service priority:
 import datetime
 import json
 import os
+import re
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -123,6 +125,84 @@ def _log_val(v):
 
 
 # ---------------------------------------------------------------------------
+# Quality-profile tier parsing (shared by Sonarr and Radarr — I5 parity)
+# ---------------------------------------------------------------------------
+
+# Per-profile cache TTL.  Profiles rarely change; paying an HTTP round trip
+# on every compromise decision would be wasteful.  15 min matches the plan.
+_PROFILE_CACHE_TTL_SECONDS = 15 * 60
+
+# Fallback resolution-label parser when quality.resolution is missing or 0.
+# Sonarr/Radarr quality names follow `<source>-<resolution>p` (`WEBDL-2160p`,
+# `Bluray-1080p`, `HDTV-720p`, `WEBRip-480p`), so the resolution token is
+# always at the end of the name.  Anchoring to end-of-string prevents a
+# custom user-defined quality like `Mobile-480p-low` from being silently
+# collapsed into the standard 480p tier (which would violate I1 — the
+# profile is the ceiling, never invent a tier).  Anything outside the
+# recognised tokens returns None and is dropped from the tier list.
+_RESOLUTION_NAME_PATTERN = re.compile(r'(?:^|[^0-9])(2160|1080|720|576|480|360)p\Z', re.IGNORECASE)
+
+
+def _resolution_label(quality):
+    """Return a canonical resolution tier label ('2160p'/'1080p'/...) or None.
+
+    Prefers the integer ``quality.resolution`` field (present since Sonarr v3
+    and Radarr v4, values in pixels — 2160, 1080, 720, 576, 480, 360).  Falls
+    back to parsing the quality name for older servers that don't populate
+    ``resolution``.  Anything unrecognised returns None; the caller treats
+    that as "drop this item" rather than assigning it to an arbitrary tier —
+    this preserves Invariant I1 (the profile is the ceiling: never grab a
+    tier we couldn't classify).
+    """
+    if not isinstance(quality, dict):
+        return None
+    res = quality.get('resolution')
+    if _is_number(res) and res > 0:
+        return f'{int(res)}p'
+    name = quality.get('name')
+    if not isinstance(name, str):
+        return None
+    m = _RESOLUTION_NAME_PATTERN.search(name)
+    if m:
+        return f'{m.group(1)}p'
+    return None
+
+
+def _iter_allowed_qualities(profile_items):
+    """Yield (resolution_label, quality_name) pairs for every allowed quality.
+
+    Handles both bare top-level items and groups:
+      - Bare item: ``{'quality': {...}, 'allowed': true, 'items': []}``
+      - Group:    ``{'name': 'HD-1080p', 'items': [...], 'allowed': true}``
+
+    A disallowed top-level entry suppresses its entire subtree (matches
+    Sonarr/Radarr UI semantics — unchecking a group hides every quality
+    inside it even if their inner ``allowed`` flags are still ``true``).
+    Inner items within an allowed group contribute only when their own
+    ``allowed`` is ``true`` so partial-group selections are respected.
+    """
+    if not isinstance(profile_items, list):
+        return
+    for entry in profile_items:
+        if not isinstance(entry, dict) or not entry.get('allowed'):
+            continue
+        inner_items = entry.get('items')
+        if isinstance(inner_items, list) and inner_items:
+            for inner in inner_items:
+                if not isinstance(inner, dict) or not inner.get('allowed'):
+                    continue
+                q = inner.get('quality')
+                label = _resolution_label(q)
+                if label is not None:
+                    yield label, (q or {}).get('name')
+            continue
+        q = entry.get('quality')
+        label = _resolution_label(q)
+        if label is not None:
+            yield label, (q or {}).get('name')
+
+
+# ---------------------------------------------------------------------------
 # Base HTTP helpers
 # ---------------------------------------------------------------------------
 
@@ -133,6 +213,12 @@ class _ArrClientBase:
         self._base = url.rstrip('/') if url else ''
         self._api_key = api_key or ''
         self._name = service_name
+        # profile_id -> (expiry_monotonic, profile_dict).  15-min TTL; see
+        # get_quality_profile.  Successful fetches only — failed fetches are
+        # not cached so a transient 5xx doesn't lock us out of a profile for
+        # 15 minutes.
+        self._profile_cache = {}
+        self._profile_cache_lock = threading.Lock()
 
     @property
     def configured(self):
@@ -195,6 +281,70 @@ class _ArrClientBase:
 
     def _delete(self, path, params=None):
         return self._request('DELETE', path, params=params)
+
+    # -- Quality profile reader (shared, Invariant I5 parity) --------------
+
+    def get_quality_profile(self, profile_id):
+        """Fetch a single quality profile by ID; 15-min in-memory cache.
+
+        Profiles rarely change and compromise checks can fire repeatedly for
+        the same item; caching amortises the HTTP cost across the dwell
+        window.  ``profile_id`` must be a positive int; anything else
+        returns None without an HTTP call.  Failed fetches (network error,
+        404) return None and are NOT cached.
+        """
+        if not _is_number(profile_id) or profile_id <= 0:
+            return None
+        profile_id = int(profile_id)
+        now = time.monotonic()
+        with self._profile_cache_lock:
+            entry = self._profile_cache.get(profile_id)
+            if entry and entry[0] > now:
+                return entry[1]
+        profile = self._get(f'/api/v3/qualityprofile/{profile_id}')
+        if not isinstance(profile, dict):
+            return None
+        with self._profile_cache_lock:
+            self._profile_cache[profile_id] = (
+                time.monotonic() + _PROFILE_CACHE_TTL_SECONDS,
+                profile,
+            )
+        return profile
+
+    def get_tier_order(self, profile_id):
+        """Return the profile's allowed resolutions in preference order.
+
+        Example: for a profile permitting Remux-2160p, WEBDL-2160p, Bluray-1080p,
+        WEBDL-1080p, HDTV-720p, returns ``['2160p', '1080p', '720p']`` — within-
+        resolution sources are collapsed (the arr's ``customFormatScore`` handles
+        that preference within a tier; see ``_force_grab_sort_key``).
+
+        Invariant I1 — profile is the ceiling: entries with ``allowed: false``
+        are excluded, groups marked not-allowed suppress their whole subtree,
+        and unrecognised resolution labels are dropped rather than guessed.
+
+        Returns an empty list if the profile is missing, malformed, or
+        contains no allowed resolvable qualities.
+        """
+        profile = self.get_quality_profile(profile_id)
+        if not profile:
+            return []
+        seen = set()
+        ordered = []
+        for label, _quality_name in _iter_allowed_qualities(profile.get('items')):
+            if label not in seen:
+                seen.add(label)
+                ordered.append(label)
+        return ordered
+
+    def _profile_id_from_record(self, record):
+        """Extract ``qualityProfileId`` from a series/movie record, or None."""
+        if not isinstance(record, dict):
+            return None
+        pid = record.get('qualityProfileId')
+        if _is_number(pid) and pid > 0:
+            return int(pid)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -684,6 +834,15 @@ class SonarrClient(_ArrClientBase):
     def get_series(self, series_id):
         """Get a series already in Sonarr by its internal ID."""
         return self._get(f'/api/v3/series/{series_id}')
+
+    def get_profile_id_for_series(self, series_id):
+        """Return the quality profile ID assigned to a series, or None.
+
+        Convenience wrapper around ``get_series`` that extracts the series
+        record's ``qualityProfileId`` field; used by the compromise engine
+        to look up which tier list to consult.
+        """
+        return self._profile_id_from_record(self.get_series(series_id))
 
     def get_all_series(self):
         """Get all series currently in Sonarr."""
@@ -1659,6 +1818,19 @@ class RadarrClient(_ArrClientBase):
         """Get all movies currently in Radarr."""
         result = self._get('/api/v3/movie')
         return result if isinstance(result, list) else []
+
+    def get_movie(self, movie_id):
+        """Get a movie already in Radarr by its internal ID."""
+        return self._get(f'/api/v3/movie/{movie_id}')
+
+    def get_profile_id_for_movie(self, movie_id):
+        """Return the quality profile ID assigned to a movie, or None.
+
+        Convenience wrapper around ``get_movie`` that extracts the movie
+        record's ``qualityProfileId`` field; mirrors Sonarr's
+        ``get_profile_id_for_series``.
+        """
+        return self._profile_id_from_record(self.get_movie(movie_id))
 
     def find_movie_in_library(self, tmdb_id=None, title=None):
         """Check if a movie is already added to Radarr.

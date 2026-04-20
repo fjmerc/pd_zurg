@@ -72,6 +72,8 @@ __all__ = [
     'BLOCKLIST_AUTO_ADD', 'BLOCKLIST_EXPIRY_DAYS',
     # Symlink repair
     'SYMLINK_REPAIR_AUTO_SEARCH',
+    # Routing audit
+    'ROUTING_AUTO_TAG_UNTAGGED',
     # Debrid search
     'TORRENTIO_URL',
 ]
@@ -209,6 +211,8 @@ class Config:
         self.BLOCKLIST_EXPIRY_DAYS = os.getenv('BLOCKLIST_EXPIRY_DAYS', '0')
         # Symlink repair
         self.SYMLINK_REPAIR_AUTO_SEARCH = os.getenv('SYMLINK_REPAIR_AUTO_SEARCH', 'false')
+        # Routing audit (auto-tag untagged monitored series/movies with debrid tag)
+        self.ROUTING_AUTO_TAG_UNTAGGED = os.getenv('ROUTING_AUTO_TAG_UNTAGGED', 'true')
         # Debrid search
         self.TORRENTIO_URL = os.getenv('TORRENTIO_URL')
 
@@ -286,4 +290,5 @@ NOTIFICATION_DIGEST_TIME = config.NOTIFICATION_DIGEST_TIME
 BLOCKLIST_AUTO_ADD = config.BLOCKLIST_AUTO_ADD
 BLOCKLIST_EXPIRY_DAYS = config.BLOCKLIST_EXPIRY_DAYS
 SYMLINK_REPAIR_AUTO_SEARCH = config.SYMLINK_REPAIR_AUTO_SEARCH
+ROUTING_AUTO_TAG_UNTAGGED = config.ROUTING_AUTO_TAG_UNTAGGED
 TORRENTIO_URL = config.TORRENTIO_URL

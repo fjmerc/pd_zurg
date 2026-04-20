@@ -977,6 +977,164 @@ class TestSonarrClient:
         assert 8 in put_body['tags']
         assert 9 in put_body['tags']
 
+    # -----------------------------------------------------------------------
+    # _audit_untagged_series (self-heal for Overseerr tag=[] misconfig)
+    # -----------------------------------------------------------------------
+
+    @patch('urllib.request.urlopen')
+    def test_audit_untagged_tags_and_searches(self, mock_urlopen, sonarr):
+        """Untagged monitored series gets the debrid tag + SeriesSearch fired."""
+        sonarr._blackhole_tag_id = 7
+        sonarr._local_tag_id = _NOT_FOUND
+        sonarr._usenet_tag_id = _NOT_FOUND
+        series_list = [
+            {'id': 1, 'title': 'Paradise', 'tags': [], 'monitored': True},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_urlopen(series_list),                                    # GET /series
+            _mock_urlopen(dict(series_list[0], tags=[7])),                 # PUT /series/1
+            _mock_urlopen({'id': 42}),                                     # POST /command SeriesSearch
+        ]
+        sonarr._audit_untagged_series()
+        # Verify PUT carried the debrid tag
+        put_body = json.loads(mock_urlopen.call_args_list[1][0][0].data)
+        assert 7 in put_body['tags']
+        # Verify SeriesSearch was called for that series id
+        cmd_body = json.loads(mock_urlopen.call_args_list[2][0][0].data)
+        assert cmd_body == {'name': 'SeriesSearch', 'seriesId': 1}
+
+    @patch('urllib.request.urlopen')
+    def test_audit_untagged_skips_already_routed(self, mock_urlopen, sonarr):
+        """Series already carrying a routing tag (debrid/local/usenet) left alone."""
+        sonarr._blackhole_tag_id = 7
+        sonarr._local_tag_id = 8
+        sonarr._usenet_tag_id = 9
+        series_list = [
+            {'id': 1, 'title': 'Debrid', 'tags': [7], 'monitored': True},
+            {'id': 2, 'title': 'Local', 'tags': [8], 'monitored': True},
+            {'id': 3, 'title': 'Usenet', 'tags': [9], 'monitored': True},
+            {'id': 4, 'title': 'Mixed', 'tags': [100, 7], 'monitored': True},
+        ]
+        mock_urlopen.side_effect = [_mock_urlopen(series_list)]
+        sonarr._audit_untagged_series()
+        # Only the GET — no PUTs, no searches
+        assert mock_urlopen.call_count == 1
+
+    @patch('urllib.request.urlopen')
+    def test_audit_untagged_skips_unmonitored(self, mock_urlopen, sonarr):
+        """Unmonitored series are not auto-tagged even if untagged."""
+        sonarr._blackhole_tag_id = 7
+        sonarr._local_tag_id = _NOT_FOUND
+        sonarr._usenet_tag_id = _NOT_FOUND
+        series_list = [{'id': 1, 'title': 'Archived', 'tags': [], 'monitored': False}]
+        mock_urlopen.side_effect = [_mock_urlopen(series_list)]
+        sonarr._audit_untagged_series()
+        assert mock_urlopen.call_count == 1
+
+    @patch('urllib.request.urlopen')
+    def test_audit_untagged_preserves_user_tags(self, mock_urlopen, sonarr):
+        """Non-routing user tags are preserved when adding the debrid tag."""
+        sonarr._blackhole_tag_id = 7
+        sonarr._local_tag_id = 8
+        sonarr._usenet_tag_id = _NOT_FOUND
+        series = {'id': 1, 'title': 'Tagged', 'tags': [42], 'monitored': True}
+        mock_urlopen.side_effect = [
+            _mock_urlopen([series]),
+            _mock_urlopen(dict(series, tags=[42, 7])),
+            _mock_urlopen({'id': 99}),
+        ]
+        sonarr._audit_untagged_series()
+        put_body = json.loads(mock_urlopen.call_args_list[1][0][0].data)
+        assert 42 in put_body['tags']
+        assert 7 in put_body['tags']
+
+    @patch('urllib.request.urlopen')
+    def test_audit_untagged_respects_cap(self, mock_urlopen, sonarr):
+        """More than 25 untagged series: only the first 25 are processed."""
+        sonarr._blackhole_tag_id = 7
+        sonarr._local_tag_id = _NOT_FOUND
+        sonarr._usenet_tag_id = _NOT_FOUND
+        series_list = [
+            {'id': i, 'title': f'S{i}', 'tags': [], 'monitored': True}
+            for i in range(30)
+        ]
+        responses = [_mock_urlopen(series_list)]
+        # Implementation PUTs all 25 first, then searches all 25
+        for s in series_list[:25]:
+            responses.append(_mock_urlopen(dict(s, tags=[7])))
+        for _ in range(25):
+            responses.append(_mock_urlopen({'id': 1}))
+        mock_urlopen.side_effect = responses
+        sonarr._audit_untagged_series()
+        # 1 GET + 25 PUT + 25 search = 51 calls
+        assert mock_urlopen.call_count == 51
+
+    @patch('urllib.request.urlopen')
+    def test_audit_untagged_no_blackhole_tag(self, mock_urlopen, sonarr):
+        """No blackhole tag configured → early return, no API calls."""
+        sonarr._blackhole_tag_id = _NOT_FOUND
+        sonarr._audit_untagged_series()
+        mock_urlopen.assert_not_called()
+
+    def test_audit_untagged_kill_switch(self, sonarr, monkeypatch):
+        """ROUTING_AUTO_TAG_UNTAGGED=false disables the sweep entirely."""
+        monkeypatch.setenv('ROUTING_AUTO_TAG_UNTAGGED', 'false')
+        sonarr._blackhole_tag_id = 7
+        with patch('urllib.request.urlopen') as mock_urlopen:
+            sonarr._audit_untagged_series()
+            mock_urlopen.assert_not_called()
+
+    @patch('urllib.request.urlopen')
+    def test_audit_untagged_search_only_for_successfully_tagged(self, mock_urlopen, sonarr):
+        """PUT failure on one series means that series is not searched."""
+        sonarr._blackhole_tag_id = 7
+        sonarr._local_tag_id = _NOT_FOUND
+        sonarr._usenet_tag_id = _NOT_FOUND
+        series_list = [
+            {'id': 1, 'title': 'OK', 'tags': [], 'monitored': True},
+            {'id': 2, 'title': 'Fails', 'tags': [], 'monitored': True},
+        ]
+        # GET, PUT-OK, PUT-fail (HTTPError), then only ONE search for id=1
+        mock_urlopen.side_effect = [
+            _mock_urlopen(series_list),
+            _mock_urlopen(dict(series_list[0], tags=[7])),
+            urllib.error.HTTPError('u', 500, 'err', {}, None),
+            _mock_urlopen({'id': 99}),
+        ]
+        sonarr._audit_untagged_series()
+        # Last call should be SeriesSearch for id=1 only
+        last_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
+        assert last_body == {'name': 'SeriesSearch', 'seriesId': 1}
+
+    @patch('urllib.request.urlopen')
+    def test_audit_untagged_empty_body_put_still_triggers_search(self, mock_urlopen, sonarr):
+        """200-with-empty-body PUT (proxy strips body) must still count as success.
+
+        Regression guard: an earlier revision relied on `_ensure_debrid_routing`'s
+        return-shape check, which treated empty-body responses as failure and
+        silently skipped the search for series that were actually tagged
+        server-side.
+        """
+        sonarr._blackhole_tag_id = 7
+        sonarr._local_tag_id = _NOT_FOUND
+        sonarr._usenet_tag_id = _NOT_FOUND
+        series = {'id': 1, 'title': 'EmptyBody', 'tags': [], 'monitored': True}
+        # Mock a 200 response with empty body (urlopen -> empty bytes -> {})
+        empty_resp = MagicMock()
+        empty_resp.read.return_value = b''
+        empty_resp.__enter__ = MagicMock(return_value=empty_resp)
+        empty_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.side_effect = [
+            _mock_urlopen([series]),
+            empty_resp,                    # PUT returns 200 with empty body
+            _mock_urlopen({'id': 42}),     # Search should still fire
+        ]
+        sonarr._audit_untagged_series()
+        # Verify a search was actually fired for id=1
+        assert mock_urlopen.call_count == 3
+        last_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
+        assert last_body == {'name': 'SeriesSearch', 'seriesId': 1}
+
 
 # ---------------------------------------------------------------------------
 # Radarr client
@@ -1499,6 +1657,126 @@ class TestRadarrClient:
         put_body = json.loads(mock_urlopen.call_args_list[1][0][0].data)
         assert 5 in put_body['tags']
         assert 6 in put_body['tags']
+
+    # -----------------------------------------------------------------------
+    # _audit_untagged_movies (self-heal for Overseerr tag=[] misconfig)
+    # -----------------------------------------------------------------------
+
+    @patch('urllib.request.urlopen')
+    def test_audit_untagged_tags_and_searches(self, mock_urlopen, radarr):
+        """Untagged monitored movie gets the debrid tag + MoviesSearch fired for its id."""
+        radarr._blackhole_tag_id = 3
+        radarr._local_tag_id = _NOT_FOUND
+        radarr._usenet_tag_id = _NOT_FOUND
+        movies = [{'id': 10, 'title': 'Inception', 'tags': [], 'monitored': True}]
+        mock_urlopen.side_effect = [
+            _mock_urlopen(movies),                                       # GET /movie
+            _mock_urlopen(dict(movies[0], tags=[3])),                    # PUT /movie/10
+            _mock_urlopen({'id': 55}),                                   # POST /command MoviesSearch
+        ]
+        radarr._audit_untagged_movies()
+        put_body = json.loads(mock_urlopen.call_args_list[1][0][0].data)
+        assert 3 in put_body['tags']
+        cmd_body = json.loads(mock_urlopen.call_args_list[2][0][0].data)
+        assert cmd_body == {'name': 'MoviesSearch', 'movieIds': [10]}
+
+    @patch('urllib.request.urlopen')
+    def test_audit_untagged_skips_already_routed(self, mock_urlopen, radarr):
+        """Movie already carrying a routing tag (debrid/local/usenet) left alone."""
+        radarr._blackhole_tag_id = 3
+        radarr._local_tag_id = 5
+        radarr._usenet_tag_id = 6
+        movies = [
+            {'id': 1, 'title': 'Debrid', 'tags': [3], 'monitored': True},
+            {'id': 2, 'title': 'Local', 'tags': [5], 'monitored': True},
+            {'id': 3, 'title': 'Usenet', 'tags': [6], 'monitored': True},
+            {'id': 4, 'title': 'Mixed', 'tags': [99, 3], 'monitored': True},
+        ]
+        mock_urlopen.side_effect = [_mock_urlopen(movies)]
+        radarr._audit_untagged_movies()
+        assert mock_urlopen.call_count == 1
+
+    @patch('urllib.request.urlopen')
+    def test_audit_untagged_skips_unmonitored(self, mock_urlopen, radarr):
+        """Unmonitored movies are not auto-tagged even if untagged."""
+        radarr._blackhole_tag_id = 3
+        radarr._local_tag_id = _NOT_FOUND
+        radarr._usenet_tag_id = _NOT_FOUND
+        movies = [{'id': 1, 'title': 'Archived', 'tags': [], 'monitored': False}]
+        mock_urlopen.side_effect = [_mock_urlopen(movies)]
+        radarr._audit_untagged_movies()
+        assert mock_urlopen.call_count == 1
+
+    @patch('urllib.request.urlopen')
+    def test_audit_untagged_preserves_user_tags(self, mock_urlopen, radarr):
+        """Non-routing user tags are preserved when adding the debrid tag."""
+        radarr._blackhole_tag_id = 3
+        radarr._local_tag_id = 5
+        radarr._usenet_tag_id = _NOT_FOUND
+        movie = {'id': 1, 'title': 'Tagged', 'tags': [42], 'monitored': True}
+        mock_urlopen.side_effect = [
+            _mock_urlopen([movie]),
+            _mock_urlopen(dict(movie, tags=[42, 3])),
+            _mock_urlopen({'id': 99}),
+        ]
+        radarr._audit_untagged_movies()
+        put_body = json.loads(mock_urlopen.call_args_list[1][0][0].data)
+        assert 42 in put_body['tags']
+        assert 3 in put_body['tags']
+
+    @patch('urllib.request.urlopen')
+    def test_audit_untagged_respects_cap(self, mock_urlopen, radarr):
+        """More than 25 untagged movies: only the first 25 tagged, one batched search."""
+        radarr._blackhole_tag_id = 3
+        radarr._local_tag_id = _NOT_FOUND
+        radarr._usenet_tag_id = _NOT_FOUND
+        movies = [{'id': i, 'title': f'M{i}', 'tags': [], 'monitored': True} for i in range(30)]
+        responses = [_mock_urlopen(movies)]
+        for m in movies[:25]:
+            responses.append(_mock_urlopen(dict(m, tags=[3])))
+        responses.append(_mock_urlopen({'id': 1}))  # single batched MoviesSearch
+        mock_urlopen.side_effect = responses
+        radarr._audit_untagged_movies()
+        # 1 GET + 25 PUT + 1 batched search = 27
+        assert mock_urlopen.call_count == 27
+        last_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
+        assert last_body['name'] == 'MoviesSearch'
+        assert len(last_body['movieIds']) == 25
+
+    @patch('urllib.request.urlopen')
+    def test_audit_untagged_no_blackhole_tag(self, mock_urlopen, radarr):
+        """No blackhole tag configured → early return, no API calls."""
+        radarr._blackhole_tag_id = _NOT_FOUND
+        radarr._audit_untagged_movies()
+        mock_urlopen.assert_not_called()
+
+    def test_audit_untagged_kill_switch(self, radarr, monkeypatch):
+        """ROUTING_AUTO_TAG_UNTAGGED=false disables the sweep entirely."""
+        monkeypatch.setenv('ROUTING_AUTO_TAG_UNTAGGED', 'false')
+        radarr._blackhole_tag_id = 3
+        with patch('urllib.request.urlopen') as mock_urlopen:
+            radarr._audit_untagged_movies()
+            mock_urlopen.assert_not_called()
+
+    @patch('urllib.request.urlopen')
+    def test_audit_untagged_search_only_for_successfully_tagged(self, mock_urlopen, radarr):
+        """PUT failure on one movie means its id is not in the MoviesSearch batch."""
+        radarr._blackhole_tag_id = 3
+        radarr._local_tag_id = _NOT_FOUND
+        radarr._usenet_tag_id = _NOT_FOUND
+        movies = [
+            {'id': 1, 'title': 'OK', 'tags': [], 'monitored': True},
+            {'id': 2, 'title': 'Fails', 'tags': [], 'monitored': True},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_urlopen(movies),
+            _mock_urlopen(dict(movies[0], tags=[3])),
+            urllib.error.HTTPError('u', 500, 'err', {}, None),
+            _mock_urlopen({'id': 1}),
+        ]
+        radarr._audit_untagged_movies()
+        last_body = json.loads(mock_urlopen.call_args_list[-1][0][0].data)
+        assert last_body == {'name': 'MoviesSearch', 'movieIds': [1]}
 
 
 # ---------------------------------------------------------------------------

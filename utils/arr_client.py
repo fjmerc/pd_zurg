@@ -324,12 +324,29 @@ class _ArrClientBase:
         return profile
 
     def get_tier_order(self, profile_id):
-        """Return the profile's allowed resolutions in preference order.
+        """Return the profile's allowed resolutions in preference order,
+        preferred (highest-quality) first.
 
-        Example: for a profile permitting Remux-2160p, WEBDL-2160p, Bluray-1080p,
-        WEBDL-1080p, HDTV-720p, returns ``['2160p', '1080p', '720p']`` — within-
-        resolution sources are collapsed (the arr's ``customFormatScore`` handles
-        that preference within a tier; see ``_force_grab_sort_key``).
+        Example: for a profile permitting HDTV-720p, WEBDL-1080p, Bluray-1080p,
+        WEBDL-2160p, Remux-2160p, returns ``['2160p', '1080p', '720p']`` —
+        within-resolution sources are collapsed (the arr's
+        ``customFormatScore`` handles that preference within a tier; see
+        ``_force_grab_sort_key``).
+
+        Sonarr/Radarr's ``qualityprofile`` API returns ``items`` in ASCENDING
+        quality order (SDTV first, Remux-2160p last) — this is the arrs'
+        stable internal quality-weight ordering (each quality has a fixed
+        integer weight in the arr's source, and the profile serializer
+        sorts by that weight before returning), not implementation accident.
+        The compromise engine expects ``tier_order[0]`` to be the USER'S
+        PREFERRED tier (what they actually want to grab), with subsequent
+        entries being progressively lower fallbacks.  We therefore iterate
+        the API response (preserving de-dup-first-win semantics for
+        collapsed within-resolution sources) and reverse the final list
+        so preferred-first is the contract.  If the arrs ever change that
+        API ordering the fix will surface as a sudden engine-wide inversion,
+        caught by the frozen real-Sonarr regression test in
+        ``tests/test_arr_client.py::test_get_tier_order_real_sonarr_any_profile``.
 
         Invariant I1 — profile is the ceiling: entries with ``allowed: false``
         are excluded, groups marked not-allowed suppress their whole subtree,
@@ -347,6 +364,7 @@ class _ArrClientBase:
             if label not in seen:
                 seen.add(label)
                 ordered.append(label)
+        ordered.reverse()
         return ordered
 
     def _profile_id_from_record(self, record):

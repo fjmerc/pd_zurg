@@ -21,8 +21,14 @@ DWELL_3D = 3 * 86400
 
 def _tier_state(tier_order=('2160p', '1080p', '720p'), current=0,
                 first_attempted_at=NOW):
+    # should_compromise doesn't inspect schema_version — it reads the
+    # validated dict from RetryMeta.read_tier_state — so any plausible
+    # version works here.  Keep the synthesizer aligned with the current
+    # writer so future schema bumps keep this test-only helper in sync
+    # without requiring hand-edits across every should_compromise case.
+    from utils.blackhole import RetryMeta
     return {
-        'schema_version': 1,
+        'schema_version': RetryMeta.TIER_STATE_SCHEMA_VERSION,
         'arr_service': 'sonarr',
         'arr_url_hash': 'abcdef',
         'profile_id': 4,

@@ -68,8 +68,9 @@ def compromise_env(monkeypatch):
 
 def _tier_state(tier_order=('2160p', '1080p', '720p'), current=0,
                 first_attempted_at=NOW):
+    from utils.blackhole import RetryMeta
     return {
-        'schema_version': 1,
+        'schema_version': RetryMeta.TIER_STATE_SCHEMA_VERSION,
         'arr_service': 'sonarr',
         'arr_url_hash': 'abcdef',
         'profile_id': 4,

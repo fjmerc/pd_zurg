@@ -412,11 +412,22 @@ class RetryMeta:
     re-seeds the dwell clock.
     """
 
-    # Bump whenever the nested tier_state shape changes so upgrades can
-    # migrate forward.  A reader encountering a HIGHER version than it
-    # knows falls back to "no tier state" (re-seeded fresh) rather than
-    # operating on unknown fields — see ``read_tier_state``.
-    TIER_STATE_SCHEMA_VERSION = 1
+    # Bump whenever the nested tier_state shape or semantics change so
+    # upgrades can migrate forward.  A reader encountering a HIGHER version
+    # than it knows falls back to "no tier state" (re-seeded fresh) rather
+    # than operating on unknown fields.  A reader encountering a LOWER
+    # version than the minimum it trusts ALSO falls back to re-seed — see
+    # ``_validate_tier_state`` and ``_MIN_TRUSTED_TIER_STATE_VERSION`` below.
+    #
+    # Version history:
+    #   1 — initial schema (plan 33 Phase 2).  Had an inverted ``tier_order``
+    #       semantic: ``get_tier_order`` preserved Sonarr's ASCENDING API
+    #       order but consumers treated ``tier_order[0]`` as preferred.
+    #       Any v1 sidecar seeded under the buggy code is unreliable.
+    #   2 — ``tier_order`` is guaranteed preferred-first (post-fix for the
+    #       inverted-ordering bug).  Shape is otherwise unchanged from v1.
+    TIER_STATE_SCHEMA_VERSION = 2
+    _MIN_TRUSTED_TIER_STATE_VERSION = 2
 
     @staticmethod
     def meta_path(file_path):
@@ -486,6 +497,22 @@ class RetryMeta:
             logger.warning(
                 f"[blackhole] Ignoring tier_state with schema_version={version} "
                 f"(this code supports up to {RetryMeta.TIER_STATE_SCHEMA_VERSION})"
+            )
+            return None
+        if version < RetryMeta._MIN_TRUSTED_TIER_STATE_VERSION:
+            # Backward-compat guard: v1 sidecars were written under the
+            # inverted-tier_order bug; the stored ``tier_order`` may have
+            # ``tier_order[0]`` as the LOWEST-quality tier.  Treating it as
+            # preferred would send compromise upward in quality — the
+            # opposite of user intent.  Return None so ``init_tier_state``
+            # re-seeds fresh with the corrected (preferred-first) order on
+            # the next retry pass, at the cost of resetting that item's
+            # dwell clock (acceptable: the alternative is permanently wrong
+            # decisions for items seeded pre-fix).
+            logger.info(
+                f"[blackhole] Re-seeding tier_state with schema_version={version} "
+                f"(minimum trusted: {RetryMeta._MIN_TRUSTED_TIER_STATE_VERSION} "
+                f"— pre-fix v1 sidecars had inverted tier_order)"
             )
             return None
         if not isinstance(ts.get('tier_order', []), list):

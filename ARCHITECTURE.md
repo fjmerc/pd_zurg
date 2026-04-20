@@ -321,7 +321,7 @@ The blackhole retry sidecar (`<file>.meta`) now carries an optional nested `tier
   "alt_exhausted": true,
 
   "tier_state": {
-    "schema_version": 1,
+    "schema_version": 2,
     "arr_service": "sonarr",
     "arr_url_hash": "a9f2c4",
     "profile_id": 4,

@@ -1200,6 +1200,47 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     self._send_json_response(200, json.dumps(None))
                 else:
                     self._send_json_response(200, json.dumps(result))
+        elif (self.path == '/api/blackhole/compromises' or
+              self.path.startswith('/api/blackhole/compromises?')):
+            # Recent quality-compromise grabs — plan 33 observability.
+            # Surface the structured fields (preferred/grabbed tier, reason,
+            # strategy, dwell, hit counts) so the dashboard can answer
+            # "why did pd_zurg grab 1080p when 2160p was in the profile?"
+            # without re-parsing the detail body.
+            from utils import history as history_mod
+            parsed = urlparse(self.path)
+            params = parse_qs(parsed.query)
+            try:
+                limit = max(1, min(int(params.get('limit', ['50'])[0]), 200))
+            except (ValueError, TypeError):
+                limit = 50
+            result = history_mod.query(type='compromise_grabbed', limit=limit)
+            compromises = []
+            for ev in result.get('events') or []:
+                # Guard against corrupt JSONL rows or future writers that
+                # stash a non-dict under ``meta`` — ``.get()`` on a string
+                # would 500 the whole endpoint otherwise.
+                raw_meta = ev.get('meta')
+                meta = raw_meta if isinstance(raw_meta, dict) else {}
+                dwell_seconds = meta.get('dwell_seconds')
+                try:
+                    dwell_days = (int(dwell_seconds) // 86400) if dwell_seconds is not None else None
+                except (TypeError, ValueError):
+                    dwell_days = None
+                compromises.append({
+                    'title': ev.get('title'),
+                    'media_title': ev.get('media_title'),
+                    'episode': ev.get('episode'),
+                    'preferred_tier': meta.get('preferred_tier'),
+                    'grabbed_tier': meta.get('grabbed_tier'),
+                    'reason': meta.get('reason'),
+                    'strategy': meta.get('strategy'),
+                    'compromised_at': ev.get('ts'),
+                    'dwell_days': dwell_days,
+                    'cached_alts_at_preferred': meta.get('cached_alts_at_preferred'),
+                    'uncached_alts_at_preferred': meta.get('uncached_alts_at_preferred'),
+                })
+            self._send_json_response(200, json.dumps({'compromises': compromises}))
         elif self.path.startswith('/api/history/show/'):
             # Strip query string before extracting title
             parsed = urlparse(self.path)

@@ -167,6 +167,8 @@ __NAV_HTML__
 [data-theme="light"] .badge-quality-2160p{background:#a855f71a;border-color:#a855f740}
 [data-theme="light"] .badge-quality-1080p{background:#0969da1a;border-color:#0969da40}
 [data-theme="light"] .badge-quality-720p{background:#bc4c001a;border-color:#bc4c0040}
+.badge-compromise{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#f973160f;color:#f97316;border:1px solid #f9731633;white-space:nowrap;cursor:help}
+[data-theme="light"] .badge-compromise{background:#c2410c1a;border-color:#c2410c40;color:#c2410c}
 .ep-size{font-size:.78em;color:var(--text3);white-space:nowrap}
 
 /* Spinner (override shared 14px to 16px for library) */
@@ -2190,6 +2192,7 @@ function _renderMovieDetail(movie, meta) {
     var movieSzStr = _formatBytes(movie.size_bytes);
     if (movieSzStr) html += ' <span class="ep-size">' + esc(movieSzStr) + '</span>';
   }
+  html += ' <span id="compromise-badge-slot"></span>';
   html += '</div>';
   var movieErrText = (moviePeDir === 'to-debrid' || moviePeDir === 'to-local') ? formatPendingDetail(moviePe) : '';
   if (movieErrText) {
@@ -2576,7 +2579,7 @@ function _renderShowDetail(show, meta) {
   if (show.year) html += ' <span class="card-year">(' + esc(String(show.year)) + ')</span>';
   if (meta && meta.status) html += '<span class="detail-status">' + esc(meta.status) + '</span>';
   html += '</h2>';
-  html += '<div class="card-badges">' + buildBadges(show.source) + '</div>';
+  html += '<div class="card-badges">' + buildBadges(show.source) + ' <span id="compromise-badge-slot"></span></div>';
   var showPe = _pending[nk];
   var showPeDir = showPe ? (showPe.direction || '') : '';
   var showErrText = (showPeDir === 'to-debrid' || showPeDir === 'to-local') ? formatPendingDetail(showPe) : '';
@@ -2748,6 +2751,7 @@ function hideDetail() {
 var _HS_EXCLUDE = {task_completed:1, cleanup:1, repair:1, blocklisted:1};
 var _HS_CATEGORIES = {
   grabbed:'acquisition', cached:'acquisition', symlink_created:'acquisition', debrid_add:'acquisition',
+  compromise_grabbed:'acquisition',
   failed:'failure', debrid_add_failed:'failure', symlink_failed:'failure', debrid_unavailable:'failure',
   search_triggered:'action', rescan_triggered:'action', local_fallback_triggered:'action',
   switched_source:'management', arr_deleted:'management', blocklist_added:'management',
@@ -2755,6 +2759,7 @@ var _HS_CATEGORIES = {
 };
 var _HS_ICONS = {
   grabbed:'\u2B07', cached:'\u2705', symlink_created:'\uD83D\uDD17', debrid_add:'\u2601',
+  compromise_grabbed:'\u2193',
   failed:'\u274C', debrid_add_failed:'\u274C', symlink_failed:'\u274C', debrid_unavailable:'\u26A0',
   search_triggered:'\uD83D\uDD0D', rescan_triggered:'\uD83D\uDD04', local_fallback_triggered:'\u21B3',
   switched_source:'\u21C4', arr_deleted:'\uD83D\uDDD1', blocklist_added:'\uD83D\uDEAB',
@@ -2762,6 +2767,7 @@ var _HS_ICONS = {
 };
 var _HS_LABELS = {
   grabbed:'Grabbed', cached:'Cached', symlink_created:'Symlinked', debrid_add:'Added to Debrid',
+  compromise_grabbed:'Quality Compromise',
   failed:'Failed', debrid_add_failed:'Add Failed', symlink_failed:'Symlink Failed', debrid_unavailable:'Debrid N/A',
   search_triggered:'Search', rescan_triggered:'Rescan', local_fallback_triggered:'Local Fallback',
   switched_source:'Source Switch', arr_deleted:'Deleted', blocklist_added:'Blocklisted',
@@ -2778,6 +2784,7 @@ function _loadHistorySidebar() {
     .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
     .then(function(events) {
       if (gen !== _historySidebarGen) return;
+      _updateCompromiseBadge(events);
       var c = document.getElementById('history-sidebar-content');
       if (c) _renderHistorySidebar(c, events);
     })
@@ -2786,6 +2793,41 @@ function _loadHistorySidebar() {
       var c = document.getElementById('history-sidebar-content');
       if (c) c.innerHTML = '<h3>Activity</h3><div class="hs-empty" style="color:var(--red)">Failed to load</div>';
     });
+}
+
+// Plan 33: surface quality-compromise grabs inline on the detail view so
+// users can see *why* a lower tier landed without digging into the
+// activity feed.  The slot element is rendered by movie/show detail; this
+// fills it with a ↓<tier> pill + tooltip once history data is back.
+//
+// Events arrive newest-first.  Walking them in that order lets us suppress
+// the badge when Sonarr's upgrade path has since replaced the compromised
+// grab with a preferred-tier acquisition — a plain ``grabbed`` or
+// ``symlink_created`` event newer than the most recent ``compromise_grabbed``
+// means the item is no longer at the compromised tier and the badge would
+// lie.  Only the relative recency matters, so we stop at the first
+// acquisition-like event we hit.
+var _COMPROMISE_UPGRADE_TYPES = {grabbed:1, symlink_created:1, cached:1};
+function _updateCompromiseBadge(events) {
+  var slot = document.getElementById('compromise-badge-slot');
+  if (!slot) return;
+  var ev = null;
+  for (var i = 0; i < events.length; i++) {
+    var e = events[i];
+    if (_COMPROMISE_UPGRADE_TYPES[e.type]) { ev = null; break; }
+    if (e.type === 'compromise_grabbed') { ev = e; break; }
+  }
+  if (!ev) { slot.innerHTML = ''; return; }
+  var meta = ev.meta || {};
+  var grabbed = meta.grabbed_tier || '';
+  var preferred = meta.preferred_tier || '';
+  var reason = meta.reason || '';
+  var tipParts = [];
+  if (preferred) tipParts.push('Compromised from ' + preferred);
+  if (reason) tipParts.push('reason=' + reason);
+  var tip = tipParts.join(' \u2014 ');
+  var label = grabbed ? ('\u2193 ' + grabbed) : '\u2193 compromised';
+  slot.innerHTML = '<span class="badge-compromise" title="' + escAttr(tip) + '">' + esc(label) + '</span>';
 }
 
 function _renderHistorySidebar(container, events) {

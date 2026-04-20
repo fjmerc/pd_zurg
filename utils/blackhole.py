@@ -1991,6 +1991,22 @@ class BlackholeWatcher:
             current_idx = tier_state['current_tier_index']
             preferred_tier = tier_order[current_idx]
 
+            # Observability: capture dwell + per-tier hit counts from the
+            # tier_state attempt log BEFORE we advance state.  These ride
+            # along on compromise_meta into history + pending_monitors so
+            # the dashboard can answer "why did this compromise fire?"
+            # without re-deriving from the sidecar (which gets cleaned up
+            # after a successful submit).
+            first_attempted_at = tier_state.get('first_attempted_at') or time.time()
+            dwell_seconds = max(0, int(time.time() - first_attempted_at))
+            cached_alts_at_preferred = 0
+            uncached_alts_at_preferred = 0
+            for _att in tier_state.get('tier_attempts') or []:
+                if _att.get('tier_index') == current_idx:
+                    cached_alts_at_preferred = _att.get('cached_hits_found', 0) or 0
+                    uncached_alts_at_preferred = _att.get('uncached_hits_found', 0) or 0
+                    break
+
             imdb_id = record.get('imdbId')
             if not imdb_id:
                 logger.info(f"[blackhole] Compromise skipped for {orig_filename}: "
@@ -2027,6 +2043,9 @@ class BlackholeWatcher:
                             'grabbed_tier': preferred_tier,
                             'reason': 'season_pack_before_tier_drop',
                             'strategy': 'season_pack',
+                            'dwell_seconds': dwell_seconds,
+                            'cached_alts_at_preferred': cached_alts_at_preferred,
+                            'uncached_alts_at_preferred': uncached_alts_at_preferred,
                         },
                         advance_state=None,
                     )
@@ -2070,6 +2089,9 @@ class BlackholeWatcher:
                     'grabbed_tier': next_tier,
                     'reason': reason,
                     'strategy': 'tier_drop',
+                    'dwell_seconds': dwell_seconds,
+                    'cached_alts_at_preferred': cached_alts_at_preferred,
+                    'uncached_alts_at_preferred': uncached_alts_at_preferred,
                 },
                 advance_state={
                     'new_tier_index': current_idx + 1,
@@ -2162,6 +2184,7 @@ class BlackholeWatcher:
                 'compromise_grabbed', orig_filename,
                 episode=_ep, source='blackhole',
                 detail=body, media_title=_mt,
+                meta=compromise_meta,
             )
         return True
 

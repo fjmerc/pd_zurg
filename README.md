@@ -162,6 +162,12 @@ volumes:
 
 See the **[Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md)** for complete setup including Sonarr/Radarr download client configuration, multi-host NFS, verification steps, and troubleshooting.
 
+#### Quality compromise & season-pack fallback
+
+When a strict Sonarr/Radarr profile (e.g. "2160p REMUX only") turns up no cached release on your debrid provider, pd_zurg's default behavior is to cycle through the arr's alternatives at the same tier and eventually move the torrent to `failed/`. The quality-compromise engine is an **opt-in** escalation path that, after a configurable dwell window, probes one tier below the preferred tier within the same profile and grabs the best cached release there — so an uncached 2160p with a perfectly cached 1080p available doesn't leave the episode missing. The arr's profile is always the ceiling: pd_zurg never grabs a tier the profile doesn't permit, even after dwell, even if cached. When the preferred tier later appears on debrid, Sonarr/Radarr's normal upgrade logic reclaims it — compromises are not permanent.
+
+Flow: set `QUALITY_COMPROMISE_ENABLED=true`, wait `QUALITY_COMPROMISE_DWELL_DAYS` (default 3) at the preferred tier, then the engine probes the next allowed tier with `QUALITY_COMPROMISE_ONLY_CACHED=true` (default, safest — unknown/not-cached releases are refused) and grabs the best cached candidate. Every compromise fires a `compromise_grabbed` history event, annotates the dashboard, and is surfaced via `GET /api/blackhole/compromises`. Setting `QUALITY_COMPROMISE_NOTIFY=false` silences Apprise but keeps the dashboard trail. Opt-in season-pack fallback (`SEASON_PACK_FALLBACK_ENABLED=true`) probes a cached pack at the **preferred** tier before any tier drop for shows with many holes. See the [Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md#smart-quality-compromise) for full setup, the rollback path, and debrid-provider caveats (Real-Debrid's deprecated cache endpoint).
+
 ### Option C: Both
 
 You can run plex_debrid and blackhole simultaneously. Set `PD_ENABLED=true` and `BLACKHOLE_ENABLED=true`. Use tags in Sonarr/Radarr to route specific content through the blackhole while plex_debrid handles watchlist items.
@@ -354,6 +360,15 @@ All settings are documented in [`.env.example`](.env.example) with inline commen
 | `BLACKHOLE_DEDUP_ENABLED` | Check local library before submitting to debrid | `false` |
 | `BLACKHOLE_LOCAL_LIBRARY_TV` | Container path to TV library for dedup. Required when dedup enabled | |
 | `BLACKHOLE_LOCAL_LIBRARY_MOVIES` | Container path to movie library for dedup. Required when dedup enabled | |
+| `QUALITY_COMPROMISE_ENABLED` | Opt-in master toggle for cache-aware tier escalation within the arr's profile after a dwell window. All `QUALITY_COMPROMISE_*` / `SEASON_PACK_FALLBACK_*` vars below are inert while OFF. See [Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md#smart-quality-compromise) | `false` |
+| `QUALITY_COMPROMISE_DWELL_DAYS` | Days at the preferred tier before the first compromise may fire (range 1–30) | `3` |
+| `QUALITY_COMPROMISE_MIN_SEEDERS` | Seeder floor for compromise candidates (range 0–1000) | `3` |
+| `QUALITY_COMPROMISE_ONLY_CACHED` | Require the compromise candidate to be cached on your debrid provider. Real-Debrid users will effectively never compromise under strict mode (RD deprecated instant-availability Nov 2024) — flip OFF for aggressive escalation, or use AllDebrid/TorBox | `true` |
+| `QUALITY_COMPROMISE_MAX_TIER_DROP` | Cap on how far below the preferred tier the engine may descend (range 1–10; `1`=one drop only, `10`≈unlimited — profile ceiling still applies) | `2` |
+| `QUALITY_COMPROMISE_NOTIFY` | Send an Apprise notification on each compromise grab. OFF silences Apprise only — history events + dashboard trail still fire | `true` |
+| `SEASON_PACK_FALLBACK_ENABLED` | TV-only: probe a cached pack at the preferred tier before any tier drop. Requires `QUALITY_COMPROMISE_ENABLED=true` | `false` |
+| `SEASON_PACK_FALLBACK_MIN_MISSING` | Minimum missing-episode count in the target season before a pack probe (range 1–100) | `4` |
+| `SEASON_PACK_FALLBACK_MIN_RATIO` | Minimum missing/total ratio for the target season (range 0.0–1.0; `0.0`=disable ratio gate, rely on MIN_MISSING alone) | `0.4` |
 
 </details>
 

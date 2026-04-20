@@ -257,7 +257,120 @@ LibraryScanner.scan() — two-phase design
          Arr rescans → Plex discovers new content
 ```
 
-### 4.3 Config Reload
+### 4.3 Quality Compromise State Machine
+
+When `QUALITY_COMPROMISE_ENABLED=true`, the blackhole alt-retry loop runs a per-file state machine that escalates to a lower quality tier (within the arr's profile) after a dwell window at the preferred tier. State lives in the `<file>.meta` sidecar under a `tier_state` object; legacy sidecars without `tier_state` load as `None` and the engine short-circuits with `('stay', 'legacy_no_tier_state')` — fully backward compatible.
+
+```
+          ┌─────────────┐
+          │   QUEUED    │  .torrent/.magnet landed, no attempt yet
+          └──────┬──────┘
+                 │ first attempt
+                 ▼
+          ┌─────────────┐
+          │ PREFERRED   │  trying tier 0 (user's top preference from profile)
+          │   TIER      │  RetryMeta.tier_state seeded: current_tier_index=0,
+          └──────┬──────┘  first_attempted_at=now
+                 │
+    ┌────────────┼────────────┐
+    │            │            │
+    │ cached     │ uncached   │ dwell elapsed AND
+    │ grab OK    │ alt list   │ all tier-0 alts failed
+    │            │ exhausted  │ AND cached option
+    │            │ (normal    │ exists at tier 1
+    │            │  retry)    │ AND current_tier_index < max_tier_drop
+    ▼            ▼            ▼
+┌────────┐  ┌─────────┐  ┌──────────────┐
+│ GRABBED│  │ WAITING │  │ COMPROMISED  │  tier_index=1
+│ (tier 0)│  │ (tier 0)│  │ tier 1 cached│
+└────────┘  └────┬────┘  │  grab push   │
+                 │       └──────┬───────┘
+                 │ dwell        │
+                 │ keeps        ▼
+                 │ counting┌─────────┐
+                 └────────▶│ GRABBED │ (or: WAITING tier 1, then tier 2...)
+                           │ (tier N)│
+                           └─────────┘
+
+Terminal states:
+  GRABBED   — push_release succeeded; Sonarr's normal upgrade logic handles
+              future replacement with the preferred tier (compromises are
+              never permanent — critical semantic)
+  FAILED    — all profile-permitted tiers exhausted, or max_tier_drop cap
+              hit before a cached candidate appeared; notify + move to failed/
+```
+
+**Invariants** (enforced across `utils/quality_compromise.py`, `utils/blackhole.py::_try_compromise`, `utils/arr_client.py::get_tier_order`):
+
+- **I1 — Profile is the ceiling.** `get_tier_order(profile_id)` reads the arr's allowed qualities from `/api/v3/qualityprofile/{id}`; the engine never grabs a tier absent from that list. `_filter_candidates` double-checks the returned tier label.
+- **I2 — Monotonic downward movement.** `RetryMeta.advance_tier` refuses decrement or stay. `first_attempted_at` is never reset — alt-exhaustion writes go through `mark_alt_exhausted` which preserves `tier_state`.
+- **I3 — Dwell before compromise.** `should_compromise` returns `('stay', 'dwell_not_elapsed')` until `now - first_attempted_at >= dwell_seconds`.
+- **I4 — Cache-aware or don't compromise.** `only_cached=True` (default) treats `cached=None` as not cached. RD users post-Nov-2024 never compromise under strict mode (documented in `utils/search.py::check_debrid_cache`).
+- **I5 — Sonarr/Radarr parity.** `get_quality_profile` / `get_tier_order` live on `_ArrClientBase`; `_try_compromise` handles both series and movie contexts in one call site.
+- **I6 — Opt-in.** `QUALITY_COMPROMISE_ENABLED=false` (default) — `_try_compromise` returns False without running any decision logic.
+- **I7 — Observable.** Every compromise writes a `compromise_grabbed` history event, annotates `pending_monitors.json`, and is queryable via `GET /api/blackhole/compromises` — independent of `QUALITY_COMPROMISE_NOTIFY`.
+
+### `RetryMeta` v2 schema
+
+The blackhole retry sidecar (`<file>.meta`) now carries an optional nested `tier_state` object. Legacy v1 entries (`{retries, last_attempt, alt_exhausted}` with no `tier_state`) are fully supported — `RetryMeta.read_tier_state` returns `None`, and the compromise decision loop degrades to `('stay', 'legacy_no_tier_state')`.
+
+```json
+{
+  "retries": 2,
+  "last_attempt": 1713664800.0,
+  "alt_exhausted": true,
+
+  "tier_state": {
+    "schema_version": 1,
+    "arr_service": "sonarr",
+    "arr_url_hash": "a9f2c4",
+    "profile_id": 4,
+    "tier_order": ["2160p", "1080p", "720p"],
+    "current_tier_index": 0,
+    "first_attempted_at": 1713580000.0,
+    "tier_attempts": [
+      {
+        "tier": "2160p",
+        "tier_index": 0,
+        "first_tried_at": 1713580000.0,
+        "last_tried_at": 1713664800.0,
+        "attempts": 3,
+        "cached_hits_found": 0,
+        "uncached_hits_found": 5,
+        "outcome": "no_cached_alts_exhausted"
+      }
+    ],
+    "compromise_fired_at": null,
+    "last_advance_reason": null,
+    "season_pack_attempted": false
+  }
+}
+```
+
+`arr_url_hash` is SHA-256 of the arr's base URL truncated to 6 hex chars — disambiguates state for users running multiple arr instances (e.g. `sonarr-4k` + `sonarr-hd`) without logging raw URLs. Writes route through `utils.file_utils.atomic_write` and a module-level `threading.RLock` serializes load-modify-save so the blackhole worker and alt-retry thread can't drop a tier advance.
+
+### `pending_monitors.json` compromise annotation
+
+Post-compromise entries carry four extra fields so the dashboard and library detail view can surface the event:
+
+```json
+{
+  "torrent_id": "ABC123",
+  "filename": "Show.S01E03.torrent",
+  "service": "realdebrid",
+  "timestamp": 1713664800.0,
+  "label": "sonarr",
+  "compromised": true,
+  "preferred_tier": "2160p",
+  "grabbed_tier": "1080p",
+  "compromise_reason": "dwell_elapsed",
+  "compromise_strategy": "tier_drop"
+}
+```
+
+Legacy entries without these fields load with `compromised=False`.
+
+### 4.4 Config Reload
 
 ```
 docker kill -s HUP pd_zurg
@@ -290,7 +403,7 @@ Restart affected services:
   └─ Notify: 'Config Reloaded' notification
 ```
 
-### 4.4 Symlink Lifecycle
+### 4.5 Symlink Lifecycle
 
 ```
 CREATION (two separate systems):

@@ -19,6 +19,7 @@ This guide explains how to use pd_zurg's blackhole feature with symlink mode to 
   - [Sonarr Setup](#sonarr-setup)
   - [Radarr Setup](#radarr-setup)
 - [Migration from Flat Layout](#migration-from-flat-layout)
+- [Smart quality compromise](#smart-quality-compromise)
 - [Verification](#verification)
 - [Troubleshooting](#troubleshooting)
 - [FAQ](#faq)
@@ -428,6 +429,81 @@ If you're upgrading from a pre-label-routing setup where Sonarr and Radarr share
 Existing release folders under `/opt/completed/` root (from before the migration) are still valid — pd_zurg's cleanup task will expire them on the normal schedule (`BLACKHOLE_SYMLINK_MAX_AGE`, default 72h). You don't need to move them.
 
 If you prefer to stay on flat layout with a single arr, no change is required. The code treats both layouts as first-class.
+
+## Smart quality compromise
+
+### What it does
+
+If you run a strict Sonarr/Radarr profile — say "2160p REMUX only" or "1080p BluRay only" — and the debrid service has no cached copy at that tier, the blackhole will normally cycle through the arr's alternatives at the same tier and eventually move the file to `failed/`. The episode stays missing until you manually relax the profile or pick a different release, even when a perfectly good cached copy one tier down is sitting right there.
+
+Smart quality compromise is an opt-in safety net for this case. After a waiting period at the preferred tier, pd_zurg probes one tier below within the same profile, checks your debrid cache, and grabs the best cached release at that lower tier. **The arr's quality profile is always the ceiling** — pd_zurg never grabs a tier your profile doesn't permit, no matter how long it waits. When the preferred tier later appears on debrid, Sonarr's/Radarr's normal upgrade logic reclaims it automatically — compromises are temporary placeholders, not permanent decisions.
+
+### How to enable
+
+The feature ships OFF. Flip it on with the master toggle:
+
+```bash
+QUALITY_COMPROMISE_ENABLED=true
+```
+
+Sensible defaults are set for the rest; you typically don't need to touch them:
+
+```bash
+QUALITY_COMPROMISE_DWELL_DAYS=3          # days at preferred tier before compromise fires
+QUALITY_COMPROMISE_MIN_SEEDERS=3         # candidate seeder floor
+QUALITY_COMPROMISE_ONLY_CACHED=true      # refuse to compromise to an uncached release
+QUALITY_COMPROMISE_MAX_TIER_DROP=2       # how far below preferred to allow (1=one drop only)
+QUALITY_COMPROMISE_NOTIFY=true           # Apprise notification on each compromise
+```
+
+Apply via SIGHUP (no restart needed):
+
+```bash
+docker kill -s HUP pd_zurg
+```
+
+Or use the **Settings → Quality Compromise** section of the web UI.
+
+#### Decide on `ONLY_CACHED` for your debrid provider
+
+- **Default (`true`, recommended):** pd_zurg only compromises to a release the debrid service already has cached. A compromise to an uncached release is worse than no compromise — you'd trade quality and still wait on the debrid download.
+- **Real-Debrid caveat:** Real-Debrid deprecated their cache-availability endpoint in November 2024, so pd_zurg cannot tell whether a Real-Debrid release is cached. Under the default `ONLY_CACHED=true`, RD users will effectively never see a compromise fire (every candidate is "unknown" and treated as not cached). If you're on RD and want compromises anyway, set `QUALITY_COMPROMISE_ONLY_CACHED=false` — this is aggressive (the compromise candidate may need to download from peers) but will let the engine escalate.
+- **AllDebrid and TorBox:** Their cache endpoints still work, so strict mode behaves as expected. No change needed.
+
+#### Season-pack fallback (opt-in on top)
+
+For shows with many missing episodes in a single season (e.g. 5/10 holes), the engine can probe a cached **season pack at the preferred tier** before considering any tier drop. This backfills the holes in one grab without any quality compromise. It's opt-in on top of the master toggle:
+
+```bash
+SEASON_PACK_FALLBACK_ENABLED=true       # requires QUALITY_COMPROMISE_ENABLED=true
+SEASON_PACK_FALLBACK_MIN_MISSING=4      # absolute floor: at least this many missing
+SEASON_PACK_FALLBACK_MIN_RATIO=0.4      # AND at least 40% of the season missing
+```
+
+The ratio gate (belt-and-suspenders with `MIN_MISSING`) prevents a 40-episode season with 4 holes (only 10%) from grabbing a whole-season pack when just a few episodes are legitimately missing. Set `SEASON_PACK_FALLBACK_MIN_RATIO=0.0` to disable the ratio gate and rely on `MIN_MISSING` alone.
+
+### How to read the compromise trail
+
+Every compromise grab is recorded in three places:
+
+1. **Activity history** — filter the Activity page for event type `compromise_grabbed`. Each entry shows the preferred tier, the grabbed tier, the reason (`dwell_elapsed` or `season_pack_before_tier_drop`), how long the item waited at the preferred tier, and how many cached/uncached candidates existed at the preferred tier.
+
+2. **Library detail page** — titles with a recent compromise grab show a small `↓ <tier>` pill next to the normal quality badge (e.g. `↓ 1080p` when the preferred was 2160p). Hover for the full tooltip: "Compromised from 2160p — reason=dwell_elapsed".
+
+3. **API endpoint** — `GET /api/blackhole/compromises` returns the latest 50 compromise events as structured JSON (title, episode, preferred_tier, grabbed_tier, reason, strategy, timestamp, dwell_days, cached/uncached candidate counts). Useful for dashboards or post-mortem analysis.
+
+All three surfaces fire regardless of `QUALITY_COMPROMISE_NOTIFY` — if you silence the Apprise notification, you don't lose the audit trail.
+
+### How to roll back
+
+Flip the master toggle off:
+
+```bash
+QUALITY_COMPROMISE_ENABLED=false
+docker kill -s HUP pd_zurg
+```
+
+The blackhole returns to pre-feature behavior immediately: no tier escalation, no season-pack probes, no new `compromise_grabbed` events. **No data migration is required** — existing `.meta` sidecars with `tier_state` are simply ignored by the decision loop, and they keep working if you flip the toggle back on later. Past `compromise_grabbed` history events stay in the log (they're audit records, not operational state); the `↓ <tier>` badge on the library detail page fades out naturally as those events age past the history retention window.
 
 ## Verification
 

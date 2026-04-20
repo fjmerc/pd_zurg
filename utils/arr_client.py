@@ -224,6 +224,18 @@ class _ArrClientBase:
     def configured(self):
         return bool(self._base and self._api_key)
 
+    @property
+    def base_url(self):
+        """Public accessor for the arr's base URL.
+
+        Used by callers that need a stable identifier for the instance
+        (e.g. the compromise engine's ``arr_url_hash`` that disambiguates
+        per-arr tier state in multi-instance setups).  Reaching into
+        ``_base`` directly couples to the private layout; this property
+        is the contract.
+        """
+        return self._base
+
     def _request(self, method, path, body=None, params=None, timeout=None):
         """Make an HTTP request. Returns parsed JSON or None on error."""
         if not self.configured:

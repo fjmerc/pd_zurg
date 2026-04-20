@@ -110,7 +110,7 @@ ENV_SCHEMA = [
              'Comma-separated event types: startup, shutdown, download_complete, download_error, '
              'library_refresh, symlink_created, symlink_failed, debrid_unavailable, pending_warning, '
              'local_fallback_triggered, blocklist_added, arr_deleted, health_error, symlink_repaired, '
-             'daily_digest, debrid_add_success, debrid_add_failed. '
+             'daily_digest, debrid_add_success, debrid_add_failed, compromise_grabbed. '
              'Leave empty for all events'),
             ('NOTIFICATION_LEVEL', 'Minimum Level', 'select:info,warning,error', False, 'Minimum severity to send notifications'),
             ('NOTIFICATION_DIGEST_ENABLED', 'Daily Digest', 'boolean', False, 'Send a daily summary notification'),

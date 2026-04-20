@@ -1322,8 +1322,15 @@ class BlackholeWatcher:
         except (IOError, OSError) as e:
             logger.debug(f"[blackhole] Could not write pending monitors: {e}")
 
-    def _add_pending(self, torrent_id, filename, label=None):
-        """Add a torrent to the pending monitors file."""
+    def _add_pending(self, torrent_id, filename, label=None, compromise=None):
+        """Add a torrent to the pending monitors file.
+
+        *compromise* is an optional dict annotating this grab as a
+        quality-compromise result: ``{preferred_tier, grabbed_tier,
+        reason, strategy}`` where strategy is ``'tier_drop'`` or
+        ``'season_pack'``.  Legacy entries without this field load as
+        uncompromised per the plan-33 schema additions.
+        """
         with self._monitors_lock:
             entries = self._load_pending()
             if any(e['torrent_id'] == torrent_id for e in entries):
@@ -1337,6 +1344,12 @@ class BlackholeWatcher:
             # Persist label alongside the torrent so restart/resume keeps routing
             if label is not None:
                 entry['label'] = label
+            if compromise:
+                entry['compromised'] = True
+                entry['preferred_tier'] = compromise.get('preferred_tier')
+                entry['grabbed_tier'] = compromise.get('grabbed_tier')
+                entry['compromise_reason'] = compromise.get('reason')
+                entry['compromise_strategy'] = compromise.get('strategy')
             entries.append(entry)
             self._save_pending(entries)
 
@@ -1350,15 +1363,20 @@ class BlackholeWatcher:
 
     # ── Monitor orchestration ────────────────────────────────────────
 
-    def _start_monitor(self, torrent_id, filename, label=None):
-        """Spawn a background thread to monitor a torrent and create symlinks."""
+    def _start_monitor(self, torrent_id, filename, label=None, compromise=None):
+        """Spawn a background thread to monitor a torrent and create symlinks.
+
+        *compromise* is an optional dict forwarded to ``_add_pending`` so
+        the on-disk pending entry records the compromise lineage; see
+        ``_add_pending`` for the expected keys.
+        """
         with self._monitors_lock:
             if torrent_id in self._active_monitors:
                 logger.debug(f"[blackhole] Already monitoring torrent {torrent_id}")
                 return
             self._active_monitors.add(torrent_id)
 
-        self._add_pending(torrent_id, filename, label=label)
+        self._add_pending(torrent_id, filename, label=label, compromise=compromise)
         t = threading.Thread(
             target=self._monitor_and_symlink,
             args=(torrent_id, filename, label),
@@ -1819,6 +1837,11 @@ class BlackholeWatcher:
         if not client.configured:
             return False
 
+        series = client.find_series_in_library(title=series_name)
+        if not series:
+            logger.debug(f"[blackhole] Cannot find series '{series_name}' in Sonarr")
+            return False
+
         ep_num = min(episodes)  # primary episode number
         episode_id = client.get_episode_id(series_name, season, ep_num)
         if not episode_id:
@@ -1828,9 +1851,21 @@ class BlackholeWatcher:
         releases = client.get_episode_releases(episode_id)
         if not releases:
             logger.debug(f"[blackhole] No alternative releases found for {series_name} S{season:02d}E{ep_num:02d}")
-            return False
+            # Empty arr-alt list is the strongest signal that the
+            # preferred tier isn't reachable via the arr's indexers;
+            # still allow the compromise path to probe Torrentio.
+            releases = []
 
-        return self._try_releases(releases, debrid_handler, orig_filename, orig_path, label=label)
+        self._seed_tier_state(client, 'series', series, orig_path)
+        if self._try_releases(releases, debrid_handler, orig_filename, orig_path, label=label):
+            return True
+        return self._try_compromise(
+            client, 'series', series,
+            context={'media_type': 'series', 'season': season, 'episode': ep_num,
+                     'series_id': series.get('id')},
+            debrid_handler=debrid_handler,
+            orig_filename=orig_filename, orig_path=orig_path, label=label,
+        )
 
     def _try_alt_movie(self, movie_name, debrid_handler, orig_filename, orig_path, label=None):
         """Try alternative releases for a movie via Radarr."""
@@ -1848,9 +1883,287 @@ class BlackholeWatcher:
         releases = client.get_movie_releases(movie['id'])
         if not releases:
             logger.debug(f"[blackhole] No alternative releases found for '{movie_name}'")
+            releases = []
+
+        self._seed_tier_state(client, 'movie', movie, orig_path)
+        if self._try_releases(releases, debrid_handler, orig_filename, orig_path, label=label):
+            return True
+        return self._try_compromise(
+            client, 'movie', movie,
+            context={'media_type': 'movie'},
+            debrid_handler=debrid_handler,
+            orig_filename=orig_filename, orig_path=orig_path, label=label,
+        )
+
+    @staticmethod
+    def _compromise_enabled():
+        return str(os.environ.get('QUALITY_COMPROMISE_ENABLED', 'false')).lower() == 'true'
+
+    @staticmethod
+    def _season_pack_enabled():
+        return str(os.environ.get('SEASON_PACK_FALLBACK_ENABLED', 'false')).lower() == 'true'
+
+    @staticmethod
+    def _int_env(name, default, minimum=0):
+        """Read an int env var with a default and a floor.
+
+        *minimum* clamps the returned value so a misconfigured negative
+        dwell doesn't make the dwell gate bypass (-86400 seconds would
+        make ``now - first_attempted_at >= -86400`` vacuously true) and
+        a negative ``min_missing`` doesn't make the season-pack probe
+        always trigger.  Non-int or empty values return *default*
+        (which callers set above *minimum*).
+        """
+        raw = os.environ.get(name)
+        if raw is None or raw == '':
+            return default
+        try:
+            return max(minimum, int(raw))
+        except (ValueError, TypeError):
+            return default
+
+    def _seed_tier_state(self, arr_client, media_type, record, file_path):
+        """Read the arr's profile + tier order and seed RetryMeta.tier_state.
+
+        Idempotent: ``RetryMeta.init_tier_state`` refuses to overwrite an
+        existing valid tier_state, so re-seeding on every alt-retry is
+        safe and keeps the dwell baseline pinned to the first attempt
+        (I3).  Failures (no profile, empty tier order, arr offline) are
+        logged at debug and left to the caller — the compromise path
+        will short-circuit on the resulting ``tier_state=None``.
+        """
+        if not self._compromise_enabled():
+            return
+        try:
+            if media_type == 'series':
+                profile_id = arr_client.get_profile_id_for_series(record.get('id'))
+                arr_service = 'sonarr'
+            else:
+                profile_id = arr_client.get_profile_id_for_movie(record.get('id'))
+                arr_service = 'radarr'
+            if not profile_id:
+                return
+            tier_order = arr_client.get_tier_order(profile_id)
+            if not tier_order:
+                return
+            arr_url = getattr(arr_client, 'base_url', '') or ''
+            RetryMeta.init_tier_state(
+                file_path, arr_service=arr_service, arr_url=arr_url,
+                profile_id=profile_id, tier_order=tier_order,
+            )
+        except Exception as e:
+            logger.debug(f"[blackhole] Could not seed tier_state for {file_path}: {e}")
+
+    def _try_compromise(self, arr_client, media_type, record, context,
+                        debrid_handler, orig_filename, orig_path, label=None):
+        """On arr-alt exhaustion, attempt a cache-aware tier drop.
+
+        Returns True iff a compromise candidate was successfully
+        submitted to the debrid service (and, if symlink mode is on, a
+        monitor started).  Never raises — any unexpected failure falls
+        through to the caller's existing ``failed/`` path.
+        """
+        if not self._compromise_enabled():
+            return False
+        try:
+            from utils.quality_compromise import (
+                should_compromise, find_compromise_candidate,
+                find_season_pack_candidate,
+            )
+
+            tier_state = RetryMeta.read_tier_state(orig_path)
+            dwell_days = self._int_env('QUALITY_COMPROMISE_DWELL_DAYS', 3, minimum=0)
+            min_seeders = self._int_env('QUALITY_COMPROMISE_MIN_SEEDERS', 3, minimum=0)
+            only_cached = str(os.environ.get(
+                'QUALITY_COMPROMISE_ONLY_CACHED', 'true')).lower() == 'true'
+
+            action, reason = should_compromise(
+                tier_state, time.time(),
+                dwell_seconds=dwell_days * 86400,
+                only_cached=only_cached,
+            )
+            if action != 'advance':
+                logger.debug(f"[blackhole] Compromise decision for {orig_filename}: "
+                             f"action={action} reason={reason}")
+                return False
+
+            tier_order = tier_state['tier_order']
+            current_idx = tier_state['current_tier_index']
+            preferred_tier = tier_order[current_idx]
+
+            imdb_id = record.get('imdbId')
+            if not imdb_id:
+                logger.info(f"[blackhole] Compromise skipped for {orig_filename}: "
+                            "no IMDb ID on arr record")
+                return False
+
+            # Season-pack probe (shows only, opt-in) tries for a cached
+            # PACK at the PREFERRED tier BEFORE dropping — a cached pack
+            # at 2160p beats a cached episode at 1080p for a show with
+            # many holes.  A successful pack grab does NOT advance the
+            # tier: per-episode grabs stay at the preferred tier going
+            # forward, and the pack just back-fills holes.
+            if (self._season_pack_enabled()
+                    and media_type == 'series'
+                    and not tier_state.get('season_pack_attempted')):
+                min_missing = self._int_env('SEASON_PACK_FALLBACK_MIN_MISSING', 4, minimum=1)
+                pack = find_season_pack_candidate(
+                    arr_client=arr_client,
+                    series_id=context['series_id'],
+                    season_number=context.get('season'),
+                    tier_label=preferred_tier,
+                    min_missing=min_missing,
+                    min_seeders=min_seeders,
+                    only_cached=only_cached,
+                )
+                if pack:
+                    logger.info(f"[blackhole] Compromise: season-pack candidate "
+                                f"{pack.get('title')} at {preferred_tier} for "
+                                f"{orig_filename}")
+                    submitted = self._submit_compromise_candidate(
+                        pack, debrid_handler, orig_filename, orig_path, label,
+                        compromise_meta={
+                            'preferred_tier': preferred_tier,
+                            'grabbed_tier': preferred_tier,
+                            'reason': 'season_pack_before_tier_drop',
+                            'strategy': 'season_pack',
+                        },
+                        advance_state=None,
+                    )
+                    if submitted:
+                        # Only consume the pack-probe flag on success —
+                        # a transient debrid failure on a GOOD pack
+                        # candidate must not prevent the next retry
+                        # from trying the pack again.
+                        RetryMeta.mark_season_pack_attempted(orig_path)
+                        return True
+                    # Pack submit failed — fall through to tier-drop
+                    # on this same pass rather than wasting a full
+                    # retry cycle on the already-fetched tier_state.
+                    logger.info(f"[blackhole] Pack submit failed; falling "
+                                f"through to tier-drop for {orig_filename}")
+                else:
+                    # No pack candidate — mark the probe so we don't hit
+                    # Torrentio every retry cycle for a show that has
+                    # nothing cached at the preferred tier.
+                    RetryMeta.mark_season_pack_attempted(orig_path)
+
+            # Tier-drop compromise: probe one tier down, grab best cached.
+            next_tier = tier_order[current_idx + 1]
+            candidate = find_compromise_candidate(
+                arr_client=arr_client, imdb_id=imdb_id,
+                tier_label=next_tier, min_seeders=min_seeders,
+                only_cached=only_cached, context=context,
+            )
+            if not candidate:
+                logger.info(f"[blackhole] Compromise: no cached {next_tier} "
+                            f"candidate for {orig_filename}")
+                return False
+
+            logger.info(f"[blackhole] Compromise: grabbing {next_tier} candidate "
+                        f"{candidate.get('title')} for {orig_filename} "
+                        f"(dropped from {preferred_tier})")
+            return self._submit_compromise_candidate(
+                candidate, debrid_handler, orig_filename, orig_path, label,
+                compromise_meta={
+                    'preferred_tier': preferred_tier,
+                    'grabbed_tier': next_tier,
+                    'reason': reason,
+                    'strategy': 'tier_drop',
+                },
+                advance_state={
+                    'new_tier_index': current_idx + 1,
+                    'reason': reason,
+                },
+            )
+        except Exception as e:
+            logger.warning(f"[blackhole] Compromise evaluation failed for "
+                           f"{orig_filename}: {e}")
             return False
 
-        return self._try_releases(releases, debrid_handler, orig_filename, orig_path, label=label)
+    def _submit_compromise_candidate(self, candidate, debrid_handler,
+                                     orig_filename, orig_path, label,
+                                     compromise_meta, advance_state):
+        """Submit the candidate's magnet via *debrid_handler*.
+
+        Mirrors the magnet-submission shape of ``_try_releases``'s inner
+        loop — factored separately because the compromise path needs to
+        record distinct pending/history/notification lineage and tier
+        state on success.  Returns True iff the debrid service accepted
+        the magnet; on False the caller falls through to the existing
+        ``failed/`` path.
+        """
+        import tempfile
+
+        info_hash = (candidate.get('info_hash') or '').strip()
+        # Defence-in-depth: Torrentio results flow through search.py's
+        # _HASH_RE filter, but a future caller could feed us a handcrafted
+        # candidate dict.  Re-validate before building a magnet URI — a
+        # malformed hash would get POSTed to the debrid provider as-is.
+        if not info_hash or not re.match(r'^[a-fA-F0-9]{40}$', info_hash):
+            logger.warning("[blackhole] Compromise candidate has malformed info_hash")
+            return False
+        magnet = f'magnet:?xt=urn:btih:{info_hash}'
+
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix='.magnet', prefix='_compromise_')
+        success = False
+        result = None
+        try:
+            with os.fdopen(tmp_fd, 'w') as f:
+                f.write(magnet)
+            success, result = debrid_handler(tmp_path)
+        except Exception as e:
+            logger.warning(f"[blackhole] Compromise submit errored: {e}")
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+        if not success:
+            logger.info(f"[blackhole] Compromise submission rejected by debrid: "
+                        f"{str(result)[:100]}")
+            return False
+
+        # Remove the original so retries don't resubmit the rejected hash
+        try:
+            os.remove(orig_path)
+        except OSError as e:
+            logger.warning(f"[blackhole] Could not remove original after compromise: {e}")
+
+        # Advance tier state BEFORE starting the monitor so a crash between
+        # submit and monitor does not leave the item stuck at the old tier.
+        # NB: RetryMeta addresses the sidecar ``<orig_path>.meta``, not
+        # ``orig_path`` itself — removing the torrent/magnet above does
+        # not invalidate the sidecar we're about to mutate.
+        if advance_state:
+            RetryMeta.advance_tier(
+                orig_path, advance_state['new_tier_index'], advance_state['reason'],
+            )
+
+        if self.symlink_enabled:
+            torrent_id = self._extract_torrent_id(result)
+            if torrent_id:
+                self._start_monitor(torrent_id, orig_filename, label=label,
+                                    compromise=compromise_meta)
+
+        title = candidate.get('title', '?')
+        preferred = compromise_meta['preferred_tier']
+        grabbed = compromise_meta['grabbed_tier']
+        strategy = compromise_meta['strategy']
+        body = (f'{orig_filename}: grabbed {grabbed} '
+                f'(preferred {preferred}, strategy={strategy}) — {title[:80]}')
+        if _notify:
+            _notify('compromise_grabbed', 'Blackhole: Quality Compromise', body,
+                    level='info')
+        if _history:
+            _mt, _ep = _enrich_for_history(orig_filename)
+            _history.log_event(
+                'compromise_grabbed', orig_filename,
+                episode=_ep, source='blackhole',
+                detail=body, media_title=_mt,
+            )
+        return True
 
     def _try_releases(self, releases, debrid_handler, orig_filename, orig_path, label=None):
         """Try magnet releases one by one until one succeeds on the debrid service.
@@ -1927,7 +2240,15 @@ class BlackholeWatcher:
                 except OSError:
                     pass
 
-        logger.warning(f"[blackhole] No working alternative found for {orig_filename} (tried {tried})")
+        # Phase 5 feeds an empty release list through when the arr's
+        # indexers return nothing — demote to debug in that case because
+        # the compromise path may still succeed and the WARNING would
+        # otherwise fire in every normal "no arr alts, Torrentio saves
+        # the day" flow.
+        if tried > 0:
+            logger.warning(f"[blackhole] No working alternative found for {orig_filename} (tried {tried})")
+        else:
+            logger.debug(f"[blackhole] No arr alternatives to try for {orig_filename}")
         return False
 
     @staticmethod

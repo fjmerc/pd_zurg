@@ -24,7 +24,8 @@ from utils.search import search_torrents
 _EPISODE_TOKEN_RE = re.compile(r'S\d{1,2}E\d+', re.IGNORECASE)
 
 
-def should_compromise(tier_state, now, dwell_seconds, only_cached):
+def should_compromise(tier_state, now, dwell_seconds, only_cached,
+                      max_tier_drop=None):
     """Decide whether to advance to the next tier.  Pure function, no I/O.
 
     Args:
@@ -42,6 +43,17 @@ def should_compromise(tier_state, now, dwell_seconds, only_cached):
             with ``find_compromise_candidate``.  The cache gate itself
             fires in that helper; history/notification callers can log
             the flag alongside the returned reason.
+        max_tier_drop: Optional cap on how far the engine may descend
+            from the preferred tier (Phase 7 ``QUALITY_COMPROMISE_MAX_TIER_DROP``).
+            ``current_tier_index`` counts drops already taken — index 0
+            is the preferred tier, index 1 is one drop down, etc. — so
+            once ``current_tier_index >= max_tier_drop`` we've used the
+            user's allowance and further advancement is refused with
+            ``('exhausted', 'max_tier_drop_reached')``.  The env-var
+            surface enforces a minimum of 1 (``_int_env(..., minimum=1)``);
+            ``None`` / 0 / negative here are defence-in-depth against
+            caller bugs and disable the cap so the profile ceiling
+            (``no_lower_tier_in_profile``) stays the only wall.
 
     Returns:
         ``(action, reason)`` where ``action`` is one of ``'stay'``,
@@ -66,6 +78,17 @@ def should_compromise(tier_state, now, dwell_seconds, only_cached):
 
     if current + 1 >= len(tier_order):
         return ('exhausted', 'no_lower_tier_in_profile')
+
+    # Per-user cap on how far we'll descend.  Checked BEFORE the dwell
+    # gate so an exhausted allowance fails fast without waiting another
+    # dwell window.  ``current_tier_index`` is the number of drops taken
+    # so far — cap=1 permits exactly one drop (index 0 -> 1) and refuses
+    # the second.  Non-positive/invalid caps disable the feature.
+    if (isinstance(max_tier_drop, int)
+            and not isinstance(max_tier_drop, bool)
+            and max_tier_drop > 0
+            and current >= max_tier_drop):
+        return ('exhausted', 'max_tier_drop_reached')
 
     first = tier_state.get('first_attempted_at')
     if not isinstance(first, (int, float)) or isinstance(first, bool):
@@ -182,13 +205,17 @@ def _looks_like_single_season_pack(title, season_number):
 
 def find_season_pack_candidate(arr_client, series_id, season_number,
                                tier_label, min_missing, min_seeders,
-                               only_cached):
+                               only_cached, min_ratio=0.0):
     """Return the best cached season pack at ``tier_label`` for *series_id*, or ``None``.
 
     TV-only.  Preflight: the series must have at least ``min_missing``
-    episodes in *season_number* with ``hasFile=False`` — the pack
-    strategy only pays off when enough individual searches have failed
-    to justify grabbing the whole season.
+    episodes in *season_number* with ``hasFile=False`` AND the missing
+    share of the season must be at least ``min_ratio`` (missing / total
+    episodes in that season) — belt-and-suspenders against a small
+    season falsely tripping the threshold (e.g. 4 missing of 6 is a
+    legitimate 67% hole, but 4 of 40 is only 10% and should not grab
+    a 40-episode pack).  ``min_ratio=0`` (default) disables the ratio
+    gate and keeps back-compat with pre-Phase-7 callers.
 
     ``season_number`` is coerced to ``int`` so callers handing a string
     through from ``pending_monitors.json`` or a URL query param don't
@@ -208,15 +235,26 @@ def find_season_pack_candidate(arr_client, series_id, season_number,
 
     episodes = arr_client.get_episodes(series_id) or []
     missing = 0
+    season_total = 0
     for ep in episodes:
         if not isinstance(ep, dict):
             continue
         if ep.get('seasonNumber') != season_number:
             continue
+        season_total += 1
         if not ep.get('hasFile'):
             missing += 1
     if missing < min_missing:
         return None
+    # Phase 7 ratio gate.  Only checked when min_ratio > 0 so callers
+    # that don't pass the kwarg behave exactly as before.  Guarded
+    # against season_total==0 (empty arr response) — with no episodes
+    # known we can't compute a meaningful ratio, so treat as failed gate.
+    if min_ratio > 0:
+        if season_total <= 0:
+            return None
+        if (missing / season_total) < min_ratio:
+            return None
 
     series = arr_client.get_series(series_id) or {}
     imdb_id = series.get('imdbId')

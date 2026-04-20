@@ -79,7 +79,9 @@ __all__ = [
     # Quality compromise (plan 33)
     'QUALITY_COMPROMISE_ENABLED', 'QUALITY_COMPROMISE_DWELL_DAYS',
     'QUALITY_COMPROMISE_MIN_SEEDERS', 'QUALITY_COMPROMISE_ONLY_CACHED',
+    'QUALITY_COMPROMISE_MAX_TIER_DROP', 'QUALITY_COMPROMISE_NOTIFY',
     'SEASON_PACK_FALLBACK_ENABLED', 'SEASON_PACK_FALLBACK_MIN_MISSING',
+    'SEASON_PACK_FALLBACK_MIN_RATIO',
 ]
 
 load_dotenv(find_dotenv('./config/.env'))
@@ -220,14 +222,18 @@ class Config:
         # Debrid search
         self.TORRENTIO_URL = os.getenv('TORRENTIO_URL')
         # Quality compromise (plan 33) — opt-in, strict defaults.  Phase 7
-        # will expose these in the settings UI and add them to the soft-
-        # reload set; for Phase 5 they are env-read at Config.load() time.
+        # exposes these in the settings UI and the soft-reload set; string
+        # shapes are preserved so ``str(VAR).lower() == 'true'`` keeps
+        # working uniformly across boolean toggles (CLAUDE.md rule).
         self.QUALITY_COMPROMISE_ENABLED = os.getenv('QUALITY_COMPROMISE_ENABLED', 'false')
         self.QUALITY_COMPROMISE_DWELL_DAYS = os.getenv('QUALITY_COMPROMISE_DWELL_DAYS', '3')
         self.QUALITY_COMPROMISE_MIN_SEEDERS = os.getenv('QUALITY_COMPROMISE_MIN_SEEDERS', '3')
         self.QUALITY_COMPROMISE_ONLY_CACHED = os.getenv('QUALITY_COMPROMISE_ONLY_CACHED', 'true')
+        self.QUALITY_COMPROMISE_MAX_TIER_DROP = os.getenv('QUALITY_COMPROMISE_MAX_TIER_DROP', '2')
+        self.QUALITY_COMPROMISE_NOTIFY = os.getenv('QUALITY_COMPROMISE_NOTIFY', 'true')
         self.SEASON_PACK_FALLBACK_ENABLED = os.getenv('SEASON_PACK_FALLBACK_ENABLED', 'false')
         self.SEASON_PACK_FALLBACK_MIN_MISSING = os.getenv('SEASON_PACK_FALLBACK_MIN_MISSING', '4')
+        self.SEASON_PACK_FALLBACK_MIN_RATIO = os.getenv('SEASON_PACK_FALLBACK_MIN_RATIO', '0.4')
 
 
 # Default singleton instance — used by existing code via module-level globals
@@ -309,5 +315,8 @@ QUALITY_COMPROMISE_ENABLED = config.QUALITY_COMPROMISE_ENABLED
 QUALITY_COMPROMISE_DWELL_DAYS = config.QUALITY_COMPROMISE_DWELL_DAYS
 QUALITY_COMPROMISE_MIN_SEEDERS = config.QUALITY_COMPROMISE_MIN_SEEDERS
 QUALITY_COMPROMISE_ONLY_CACHED = config.QUALITY_COMPROMISE_ONLY_CACHED
+QUALITY_COMPROMISE_MAX_TIER_DROP = config.QUALITY_COMPROMISE_MAX_TIER_DROP
+QUALITY_COMPROMISE_NOTIFY = config.QUALITY_COMPROMISE_NOTIFY
 SEASON_PACK_FALLBACK_ENABLED = config.SEASON_PACK_FALLBACK_ENABLED
 SEASON_PACK_FALLBACK_MIN_MISSING = config.SEASON_PACK_FALLBACK_MIN_MISSING
+SEASON_PACK_FALLBACK_MIN_RATIO = config.SEASON_PACK_FALLBACK_MIN_RATIO

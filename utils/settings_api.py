@@ -141,6 +141,21 @@ ENV_SCHEMA = [
         ],
     },
     {
+        'name': 'Quality Compromise',
+        'description': 'Cache-aware tier escalation + season-pack fallback for the blackhole pipeline (plan 33). Opt-in via the master toggle below — all other fields in this section are inert while it is OFF.',
+        'fields': [
+            ('QUALITY_COMPROMISE_ENABLED', 'Enable Quality Compromise', 'boolean', False, 'Master toggle. Turn ON to let the blackhole escalate to a lower tier (within the arr\'s profile) when the preferred tier has no cached option after a dwell window. All other QUALITY_COMPROMISE_* / SEASON_PACK_FALLBACK_* fields below are inert while this is OFF.'),
+            ('QUALITY_COMPROMISE_DWELL_DAYS', 'Dwell Days at Preferred Tier', 'number:1-30', False, 'Days of failed preferred-tier attempts before the first compromise may fire (default: 3). Invariant I3 — the dwell clock measures from the first preferred-tier attempt, not the most recent retry.'),
+            ('QUALITY_COMPROMISE_MIN_SEEDERS', 'Compromise Min Seeders', 'number:0-1000', False, 'Compromise candidates below this seeder floor are skipped (default: 3). Keeps poorly-seeded releases from landing in a compromise grab.'),
+            ('QUALITY_COMPROMISE_ONLY_CACHED', 'Only Cached Compromises', 'boolean', False, 'Require the compromise candidate to be CACHED on your debrid provider (default: ON). Invariant I4 — trading quality for an uncached release is worse than no compromise. Real-Debrid deprecated instant-availability Nov 2024, so RD users under strict mode will never compromise; flip OFF for aggressive escalation.'),
+            ('QUALITY_COMPROMISE_MAX_TIER_DROP', 'Max Tier Drop', 'number:1-10', False, 'Cap on how far below the preferred tier the engine may descend. 1 = one drop only (e.g. 2160p → 1080p). 2 = up to two drops (default). Set to a large value (e.g. 10) to effectively disable the cap — the arr\'s profile ceiling always remains authoritative.'),
+            ('QUALITY_COMPROMISE_NOTIFY', 'Notify on Compromise', 'boolean', False, 'Send an Apprise notification on each compromise grab (default: ON). Setting OFF silences Apprise only — the dashboard history event and pending_monitors annotation still fire (invariant I7 — observability is non-negotiable).'),
+            ('SEASON_PACK_FALLBACK_ENABLED', 'Enable Season-Pack Fallback', 'boolean', False, 'TV-only: probe a cached pack at the PREFERRED tier before dropping tier, so a show with many missing episodes gets filled in without a quality compromise. Still opt-in on top of the master toggle above.'),
+            ('SEASON_PACK_FALLBACK_MIN_MISSING', 'Pack Probe Min Missing Episodes', 'number:1-100', False, 'Minimum missing-episode count in the target season before a pack probe is attempted (absolute floor, default: 4).'),
+            ('SEASON_PACK_FALLBACK_MIN_RATIO', 'Pack Probe Min Missing Ratio', 'string', False, 'Minimum missing/total ratio for the target season (0.0–1.0, default: 0.4). Belt-and-suspenders with MIN_MISSING — prevents a 40-episode season with 4 holes (10%) from grabbing a 40-episode pack when only a few are missing. Set to 0.0 to disable the ratio gate and rely on MIN_MISSING alone.'),
+        ],
+    },
+    {
         'name': 'Status UI',
         'description': 'Web dashboard and API settings',
         'fields': [
@@ -231,6 +246,12 @@ _ALL_KEYS = {field[0] for cat in ENV_SCHEMA for field in cat['fields']}
 _ENV_DEFAULTS = {
     'BLOCKLIST_AUTO_ADD': 'true',
     'ROUTING_AUTO_TAG_UNTAGGED': 'true',
+    # Quality compromise true-defaults — see Config.load() in base/__init__.py.
+    # Listed so the Settings UI renders the matching toggles as ON out of
+    # the box instead of misleading the user with an OFF toggle when the
+    # master switch is also off.
+    'QUALITY_COMPROMISE_ONLY_CACHED': 'true',
+    'QUALITY_COMPROMISE_NOTIFY': 'true',
 }
 
 # Sensitive key patterns — values should be masked in certain contexts
@@ -511,6 +532,11 @@ def validate_env_values(values):
         'BLACKHOLE_MOUNT_POLL_TIMEOUT': (30, 3600),
         'BLACKHOLE_MOUNT_POLL_INTERVAL': (5, 120),
         'BLACKHOLE_SYMLINK_MAX_AGE': (0, 720),
+        # Quality compromise (plan 33) — integer fields
+        'QUALITY_COMPROMISE_DWELL_DAYS': (1, 30),
+        'QUALITY_COMPROMISE_MIN_SEEDERS': (0, 1000),
+        'QUALITY_COMPROMISE_MAX_TIER_DROP': (1, 10),
+        'SEASON_PACK_FALLBACK_MIN_MISSING': (1, 100),
     }
     for var, (lo, hi) in numeric_ranges.items():
         val = values.get(var, '')
@@ -521,6 +547,32 @@ def validate_env_values(values):
                     warnings.append(f"{var}={n} is outside recommended range [{lo}-{hi}]")
             except ValueError:
                 errors.append(f"{var}='{val}' is not a valid integer")
+
+    # Quality compromise ratio — float in [0, 1].  Declared as 'string'
+    # in the schema because the number:MIN-MAX renderer coerces to int,
+    # which would round 0.4 down to 0 and disable the gate silently.
+    # NaN/inf must be rejected explicitly: NaN compares False to every
+    # bound so ``r < 0.0 or r > 1.0`` lets it through, and the runtime
+    # ratio-gate (``missing/total < min_ratio``) also compares False
+    # against NaN — a NaN would silently disable the gate with no error.
+    ratio_val = values.get('SEASON_PACK_FALLBACK_MIN_RATIO', '')
+    if ratio_val:
+        import math
+        try:
+            r = float(ratio_val)
+            if math.isnan(r) or math.isinf(r):
+                errors.append(
+                    f"SEASON_PACK_FALLBACK_MIN_RATIO={ratio_val!r} must be a finite number in [0.0, 1.0]."
+                )
+            elif r < 0.0 or r > 1.0:
+                errors.append(
+                    f"SEASON_PACK_FALLBACK_MIN_RATIO={r} is outside [0.0, 1.0]. "
+                    "0.0 disables the ratio gate; 1.0 requires the entire season missing."
+                )
+        except ValueError:
+            errors.append(
+                f"SEASON_PACK_FALLBACK_MIN_RATIO='{ratio_val}' is not a valid number"
+            )
 
     # Logical consistency
     if _truthy('PD_ENABLED') and not _truthy('ZURG_ENABLED'):

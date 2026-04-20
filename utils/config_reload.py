@@ -57,6 +57,15 @@ SOFT_RELOAD = {
     'NOTIFICATION_EVENTS', 'DUPLICATE_CLEANUP', 'CLEANUP_INTERVAL', 'DUPLICATE_CLEANUP_KEEP',
     'PLEX_REFRESH', 'SKIP_VALIDATION', 'LIBRARY_PREFERENCE_AUTO_ENFORCE',
     'BLOCKLIST_AUTO_ADD',
+    # Quality compromise (plan 33): all nine toggles are read fresh
+    # from os.environ on each blackhole retry cycle via `_compromise_enabled`,
+    # `_int_env`, `_float_env`, etc. — no module globals to restart,
+    # so SIGHUP gets them with zero service churn.
+    'QUALITY_COMPROMISE_ENABLED', 'QUALITY_COMPROMISE_DWELL_DAYS',
+    'QUALITY_COMPROMISE_MIN_SEEDERS', 'QUALITY_COMPROMISE_ONLY_CACHED',
+    'QUALITY_COMPROMISE_MAX_TIER_DROP', 'QUALITY_COMPROMISE_NOTIFY',
+    'SEASON_PACK_FALLBACK_ENABLED', 'SEASON_PACK_FALLBACK_MIN_MISSING',
+    'SEASON_PACK_FALLBACK_MIN_RATIO',
 }
 
 

@@ -1922,6 +1922,35 @@ class BlackholeWatcher:
         except (ValueError, TypeError):
             return default
 
+    @staticmethod
+    def _float_env(name, default, minimum=0.0, maximum=None):
+        """Read a float env var clamped to ``[minimum, maximum]``.
+
+        Mirrors ``_int_env`` for Phase 7's ratio gate: a misconfigured
+        ``SEASON_PACK_FALLBACK_MIN_RATIO=1.5`` would otherwise require
+        150% of the season to be missing (gate never trips) and a
+        negative ratio would always trip.  Non-float/empty values
+        return *default*; NaN/inf do the same because they sneak past
+        ``<minimum`` / ``>maximum`` comparisons (NaN compares False to
+        everything) and would silently disable the ratio gate without
+        failing validation.  *default* must already satisfy the bounds.
+        """
+        import math
+        raw = os.environ.get(name)
+        if raw is None or raw == '':
+            return default
+        try:
+            val = float(raw)
+        except (ValueError, TypeError):
+            return default
+        if math.isnan(val) or math.isinf(val):
+            return default
+        if val < minimum:
+            val = minimum
+        if maximum is not None and val > maximum:
+            val = maximum
+        return val
+
     def _seed_tier_state(self, arr_client, media_type, record, file_path):
         """Read the arr's profile + tier order and seed RetryMeta.tier_state.
 
@@ -1972,15 +2001,28 @@ class BlackholeWatcher:
             )
 
             tier_state = RetryMeta.read_tier_state(orig_path)
-            dwell_days = self._int_env('QUALITY_COMPROMISE_DWELL_DAYS', 3, minimum=0)
+            # minimum=1: a 0-day dwell is effectively "fire compromise on
+            # the first retry" which defeats invariant I3 and the UI
+            # validator range (1-30).  Clamp at the runtime level so the
+            # two surfaces agree (Phase 7 code-review finding).
+            dwell_days = self._int_env('QUALITY_COMPROMISE_DWELL_DAYS', 3, minimum=1)
             min_seeders = self._int_env('QUALITY_COMPROMISE_MIN_SEEDERS', 3, minimum=0)
             only_cached = str(os.environ.get(
                 'QUALITY_COMPROMISE_ONLY_CACHED', 'true')).lower() == 'true'
+            # Phase 7 cap: how far down the profile we're allowed to
+            # descend.  minimum=1 at the runtime surface — ``0`` would
+            # intuitively read as "zero drops allowed" but the
+            # should_compromise contract treats 0 as "unlimited cap",
+            # which is the dangerous opposite.  Users who genuinely
+            # want unlimited set a large number (e.g. 10); the profile
+            # ceiling still short-circuits via ``no_lower_tier_in_profile``.
+            max_tier_drop = self._int_env('QUALITY_COMPROMISE_MAX_TIER_DROP', 2, minimum=1)
 
             action, reason = should_compromise(
                 tier_state, time.time(),
                 dwell_seconds=dwell_days * 86400,
                 only_cached=only_cached,
+                max_tier_drop=max_tier_drop,
             )
             if action != 'advance':
                 logger.debug(f"[blackhole] Compromise decision for {orig_filename}: "
@@ -2023,6 +2065,14 @@ class BlackholeWatcher:
                     and media_type == 'series'
                     and not tier_state.get('season_pack_attempted')):
                 min_missing = self._int_env('SEASON_PACK_FALLBACK_MIN_MISSING', 4, minimum=1)
+                # Clamp ratio to [0, 1] so a typo in .env can't permanently
+                # disable or over-trigger the gate.  Default 0.4 matches
+                # Phase 7 plan; min_ratio=0 (user override) disables the
+                # ratio check and falls back to pure min_missing.
+                min_ratio = self._float_env(
+                    'SEASON_PACK_FALLBACK_MIN_RATIO', 0.4,
+                    minimum=0.0, maximum=1.0,
+                )
                 pack = find_season_pack_candidate(
                     arr_client=arr_client,
                     series_id=context['series_id'],
@@ -2031,6 +2081,7 @@ class BlackholeWatcher:
                     min_missing=min_missing,
                     min_seeders=min_seeders,
                     only_cached=only_cached,
+                    min_ratio=min_ratio,
                 )
                 if pack:
                     logger.info(f"[blackhole] Compromise: season-pack candidate "
@@ -2175,7 +2226,13 @@ class BlackholeWatcher:
         strategy = compromise_meta['strategy']
         body = (f'{orig_filename}: grabbed {grabbed} '
                 f'(preferred {preferred}, strategy={strategy}) — {title[:80]}')
-        if _notify:
+        # Phase 7: Apprise-only opt-out.  Invariant I7 is preserved —
+        # history + pending_monitors annotation still fire below, so the
+        # dashboard compromise trail stays intact even when the user
+        # silences external notifications.
+        notify_enabled = str(os.environ.get(
+            'QUALITY_COMPROMISE_NOTIFY', 'true')).lower() == 'true'
+        if _notify and notify_enabled:
             _notify('compromise_grabbed', 'Blackhole: Quality Compromise', body,
                     level='info')
         if _history:

@@ -167,6 +167,7 @@ ENV_SCHEMA = [
             ('RADARR_URL', 'Radarr URL', 'url', False, 'Radarr base URL (e.g. http://radarr:7878). Used for downloads, rescans, and folder naming'),
             ('RADARR_API_KEY', 'Radarr API Key', 'secret', False, 'Radarr API key (Settings > General in Radarr)'),
             ('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'Auto-Enforce Preferences', 'boolean', False, 'Automatically switch sources when content arrives matching a stored preference'),
+            ('ROUTING_AUTO_TAG_UNTAGGED', 'Auto-Tag Untagged Media', 'boolean', False, 'During the 6h routing audit, auto-apply the debrid tag to monitored Sonarr series / Radarr movies that have no routing tag. Self-heals Overseerr requests that arrive with empty tags and silently fail with "0 active indexers" (default: true)'),
             ('DEBRID_UNAVAILABLE_THRESHOLD_DAYS', 'Debrid Unavailable After (days)', 'number:1-30', False, 'Days of failed searches before marking content as debrid-unavailable (default: 3)'),
             ('PENDING_WARNING_HOURS', 'Pending Warning After (hours)', 'number:0-168', False, 'Hours before sending a warning notification for stuck pending items (default: 24, 0 to disable)'),
         ],
@@ -221,6 +222,17 @@ ENV_SCHEMA = [
 # All known env var keys from the schema
 _ALL_KEYS = {field[0] for cat in ENV_SCHEMA for field in cat['fields']}
 
+# Env vars whose application default is non-empty (typically boolean toggles
+# that default to ON when unset). Used by read_env_values() and
+# get_env_defaults() to surface the real default in the UI — without this,
+# a true-default boolean would render as OFF when the var isn't in .env or
+# os.environ, even though the runtime behavior is ON. Values here MUST match
+# the corresponding defaults in base/__init__.py Config.__init__.
+_ENV_DEFAULTS = {
+    'BLOCKLIST_AUTO_ADD': 'true',
+    'ROUTING_AUTO_TAG_UNTAGGED': 'true',
+}
+
 # Sensitive key patterns — values should be masked in certain contexts
 _SENSITIVE_PATTERNS = {'KEY', 'TOKEN', 'PASS', 'SECRET', 'AUTH'}
 
@@ -264,8 +276,13 @@ def read_env_values():
     """Read current .env file and return key-value dict.
 
     Reads from the .env file first, then falls back to os.environ for
-    values set via docker-compose or other mechanisms. This ensures the
-    form shows what's actually active, not just what's in the file.
+    values set via docker-compose or other mechanisms, and finally to
+    application defaults (_ENV_DEFAULTS) so the UI shows true-default
+    booleans as ON when the var isn't set anywhere.
+
+    When a key IS present in the .env file, its value is honored as-is
+    (including an explicit empty string) — the default only fills in
+    when the user hasn't declared an intent for the key at all.
     """
     file_values = {}
     if os.path.exists(ENV_FILE):
@@ -274,9 +291,11 @@ def read_env_values():
     result = {}
     for key in sorted(_ALL_KEYS):
         if key in file_values:
+            # Explicit declaration in .env (even `KEY=`) wins over default
             result[key] = file_values[key] or ''
         else:
-            result[key] = os.environ.get(key, '')
+            # Not in .env — try os.environ, then fall back to declared default
+            result[key] = os.environ.get(key, '') or _ENV_DEFAULTS.get(key, '')
     return result
 
 
@@ -1601,5 +1620,12 @@ def get_plex_debrid_defaults():
 
 
 def get_env_defaults():
-    """Return empty values for all env schema keys (the application defaults)."""
-    return {key: '' for key in _ALL_KEYS}
+    """Return application defaults for all env schema keys.
+
+    Most keys default to empty string. Keys listed in _ENV_DEFAULTS return
+    their declared default (e.g. `'true'` for boolean toggles that are on
+    out of the box) so the UI's "reset to defaults" button restores the
+    true application default, not a bare empty string that would render as
+    OFF for a feature that's actually ON when unset.
+    """
+    return {key: _ENV_DEFAULTS.get(key, '') for key in _ALL_KEYS}

@@ -16,6 +16,7 @@ from utils.settings_api import (
     _format_env_line,
     ENV_SCHEMA,
     _ALL_KEYS,
+    _ENV_DEFAULTS,
     get_plex_debrid_schema,
     read_plex_debrid_values,
     write_plex_debrid_values,
@@ -207,7 +208,46 @@ class TestReadEnvValues:
             monkeypatch.delenv(key, raising=False)
         with patch('utils.settings_api.ENV_FILE', '/nonexistent/.env'):
             values = read_env_values()
-        assert all(v == '' for v in values.values())
+        # Empty except for keys with declared non-empty application defaults
+        # (e.g. true-default boolean toggles that should render as ON in the UI).
+        for key, val in values.items():
+            assert val == _ENV_DEFAULTS.get(key, '')
+
+    def test_true_default_booleans_surface_when_unset(self, monkeypatch):
+        """Regression: boolean toggles with 'true' Config defaults must render ON
+        in the UI even when the var isn't set in .env or os.environ."""
+        for key in _ALL_KEYS:
+            monkeypatch.delenv(key, raising=False)
+        with patch('utils.settings_api.ENV_FILE', '/nonexistent/.env'):
+            values = read_env_values()
+        # Every true-default key must return 'true' so the UI toggle is checked
+        for key, expected in _ENV_DEFAULTS.items():
+            assert values[key] == expected, f"{key} should surface default {expected!r}"
+
+    def test_explicit_false_overrides_default(self, tmp_path, monkeypatch):
+        """A user who explicitly sets a true-default var to 'false' must see OFF,
+        not the default."""
+        for key in _ALL_KEYS:
+            monkeypatch.delenv(key, raising=False)
+        env_file = tmp_path / '.env'
+        env_file.write_text('BLOCKLIST_AUTO_ADD=false\nROUTING_AUTO_TAG_UNTAGGED=false\n')
+        with patch('utils.settings_api.ENV_FILE', str(env_file)):
+            values = read_env_values()
+        assert values['BLOCKLIST_AUTO_ADD'] == 'false'
+        assert values['ROUTING_AUTO_TAG_UNTAGGED'] == 'false'
+
+    def test_explicit_empty_in_file_is_honored(self, tmp_path, monkeypatch):
+        """An explicit `KEY=` in .env declares intent and must not be overridden
+        by _ENV_DEFAULTS — only truly absent keys fall back to the default."""
+        for key in _ALL_KEYS:
+            monkeypatch.delenv(key, raising=False)
+        env_file = tmp_path / '.env'
+        env_file.write_text('BLOCKLIST_AUTO_ADD=\n')
+        with patch('utils.settings_api.ENV_FILE', str(env_file)):
+            values = read_env_values()
+        assert values['BLOCKLIST_AUTO_ADD'] == ''
+        # But a key NOT in the file still gets the default
+        assert values['ROUTING_AUTO_TAG_UNTAGGED'] == 'true'
 
     def test_reads_existing_file(self, tmp_path):
         env_file = tmp_path / '.env'
@@ -871,7 +911,39 @@ class TestReset:
     def test_env_defaults_returns_all_keys(self):
         defaults = get_env_defaults()
         assert len(defaults) == len(_ALL_KEYS)
-        assert all(v == '' for v in defaults.values())
+        for key, val in defaults.items():
+            # Keys with a declared default return that value; all others are empty
+            assert val == _ENV_DEFAULTS.get(key, ''), f"{key} should default to {_ENV_DEFAULTS.get(key, '')!r}"
+
+    def test_env_defaults_surfaces_true_booleans(self):
+        """Reset-to-defaults must restore true-default toggles to ON, not to empty
+        (which would render as OFF)."""
+        defaults = get_env_defaults()
+        for key, expected in _ENV_DEFAULTS.items():
+            assert defaults[key] == expected
+
+    def test_env_defaults_stays_in_sync_with_config(self, monkeypatch):
+        """Drift guard: every _ENV_DEFAULTS entry must match the default baked
+        into base.Config.__init__. If Config is changed to default to 'false'
+        but _ENV_DEFAULTS still says 'true' (or vice-versa), the UI and the
+        runtime will disagree about what "unset" means. This test catches it."""
+        # Clear the env so Config picks up its own defaults, not inherited values
+        for key in _ENV_DEFAULTS:
+            monkeypatch.delenv(key, raising=False)
+        from base import Config
+        fresh = Config()
+        for key, declared in _ENV_DEFAULTS.items():
+            assert hasattr(fresh, key), (
+                f"_ENV_DEFAULTS references {key!r} but Config has no attribute "
+                f"by that name — the drift guard assumes env key == Config attr "
+                f"name. Either rename the Config attr or remove this key from "
+                f"_ENV_DEFAULTS."
+            )
+            actual = getattr(fresh, key)
+            assert actual == declared, (
+                f"_ENV_DEFAULTS[{key!r}]={declared!r} but Config defaults to "
+                f"{actual!r} — one of them is stale."
+            )
 
     def test_plex_debrid_defaults_from_file(self, tmp_path):
         defaults_file = tmp_path / 'defaults.json'

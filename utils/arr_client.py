@@ -478,6 +478,91 @@ class SonarrClient(_ArrClientBase):
             if result is None:
                 logger.warning(f"[sonarr] Failed to trigger search for series {series_id}")
 
+    def _audit_untagged_series(self):
+        """Find monitored series with no routing tag and apply the debrid tag.
+
+        Self-heals the silent-failure mode where Overseerr (or a direct
+        Sonarr-UI add) creates a series with an empty tag list: torrent
+        indexers tagged with a routing tag treat untagged series as
+        ineligible, so the post-add search returns "0 active indexers" and
+        the series sits idle forever.
+
+        Considers a series untagged iff its tag list shares no element with
+        {debrid, local, usenet} — any routing tag is treated as a deliberate
+        user choice and left alone. Unmonitored series are also skipped.
+
+        Capped at 25 per run to bound search pressure on Sonarr.
+        """
+        if os.environ.get('ROUTING_AUTO_TAG_UNTAGGED', 'true').strip().lower() != 'true':
+            return
+        debrid_tag = self._blackhole_tag_id
+        if debrid_tag is None or debrid_tag is _NOT_FOUND:
+            return
+        routing_tags = {debrid_tag}
+        if self._local_tag_id not in (None, _NOT_FOUND):
+            routing_tags.add(self._local_tag_id)
+        if self._usenet_tag_id not in (None, _NOT_FOUND):
+            routing_tags.add(self._usenet_tag_id)
+
+        series_list = self._get('/api/v3/series')
+        if not series_list:
+            return
+        candidates = [
+            s for s in series_list
+            if s.get('monitored')
+            and routing_tags.isdisjoint(s.get('tags') or [])
+        ]
+        if not candidates:
+            return
+
+        max_batch = 25
+        if len(candidates) > max_batch:
+            logger.warning(
+                f"[sonarr] {len(candidates)} untagged monitored series — "
+                f"tagging first {max_batch} this cycle (remainder next run)"
+            )
+            candidates = candidates[:max_batch]
+
+        # Apply the debrid tag directly (bypassing _ensure_debrid_routing)
+        # so the audit can trust _put's None/non-None return as the success
+        # signal. _ensure_debrid_routing's return-shape-based detection breaks
+        # on 200-with-empty-body responses, which would skip the search for a
+        # series that was actually tagged on Sonarr's side. Candidates are
+        # known to lack local/usenet tags (filtered by routing_tags.isdisjoint),
+        # so there's nothing to strip — a plain append is sufficient.
+        tagged_ids = []
+        for series in candidates:
+            new_tags = list(series.get('tags') or []) + [debrid_tag]
+            result = self._put(f'/api/v3/series/{series["id"]}', dict(series, tags=new_tags))
+            if result is None:
+                logger.warning(f"[sonarr] Failed to auto-tag untagged series: {series.get('title')}")
+                continue
+            logger.info(f"[sonarr] Auto-tagged untagged series with debrid tag: {series.get('title')}")
+            tagged_ids.append(series['id'])
+
+        if not tagged_ids:
+            return
+
+        search_count = 0
+        for series_id in tagged_ids:
+            result = self._post('/api/v3/command', {'name': 'SeriesSearch', 'seriesId': series_id})
+            if result is None:
+                logger.warning(f"[sonarr] Failed to trigger search for auto-tagged series {series_id}")
+            else:
+                search_count += 1
+
+        logger.info(
+            f"[sonarr] Auto-tagged {len(tagged_ids)} untagged monitored series with debrid tag, "
+            f"triggered {search_count} search(es)"
+        )
+        if _history:
+            _history.log_event(
+                'routing_repaired',
+                f'Sonarr auto-tagged {len(tagged_ids)} series',
+                source='scheduler',
+                detail=f'Applied debrid tag + triggered {search_count} search(es)',
+            )
+
     def _clear_stale_queue_items(self, client_names):
         """Remove queue items stuck as unavailable for newly-tagged clients."""
         queue = self._get('/api/v3/queue', {'pageSize': 1000, 'includeUnknownSeriesItems': 'true'})
@@ -1041,12 +1126,15 @@ class SonarrClient(_ArrClientBase):
 
         Resets cached tag state and re-runs discovery so any manual changes
         in Sonarr are detected and corrected. Fixes are logged individually
-        by _discover_routing_tags.
+        by _discover_routing_tags. Also sweeps for series that were added
+        without a routing tag (e.g. via Overseerr with empty tag config) and
+        applies the debrid tag so their searches succeed.
         """
         self._blackhole_tag_id = None
         self._local_tag_id = None
         self._usenet_tag_id = None
         self._discover_routing_tags()
+        self._audit_untagged_series()
 
     def clean_all_stale_queue_items(self, max_age_seconds=120):
         """Remove ALL downloadClientUnavailable queue items older than max_age.
@@ -1342,6 +1430,83 @@ class RadarrClient(_ArrClientBase):
             return
         logger.info(f"[radarr] Searching {len(missing_ids)} debrid-tagged missing movie(s) after indexer routing fix")
         self._post('/api/v3/command', {'name': 'MoviesSearch', 'movieIds': missing_ids})
+
+    def _audit_untagged_movies(self):
+        """Find monitored movies with no routing tag and apply the debrid tag.
+
+        Self-heals the silent-failure mode where Overseerr (or a direct
+        Radarr-UI add) creates a movie with an empty tag list: torrent
+        indexers tagged with a routing tag treat untagged movies as
+        ineligible, so the post-add search returns "0 active indexers" and
+        the movie sits idle forever.
+
+        Considers a movie untagged iff its tag list shares no element with
+        {debrid, local, usenet} — any routing tag is treated as a deliberate
+        user choice and left alone. Unmonitored movies are also skipped.
+
+        Capped at 25 per run to bound search pressure on Radarr.
+        """
+        if os.environ.get('ROUTING_AUTO_TAG_UNTAGGED', 'true').strip().lower() != 'true':
+            return
+        debrid_tag = self._blackhole_tag_id
+        if debrid_tag is None or debrid_tag is _NOT_FOUND:
+            return
+        routing_tags = {debrid_tag}
+        if self._local_tag_id not in (None, _NOT_FOUND):
+            routing_tags.add(self._local_tag_id)
+        if self._usenet_tag_id not in (None, _NOT_FOUND):
+            routing_tags.add(self._usenet_tag_id)
+
+        movies = self._get('/api/v3/movie')
+        if not movies:
+            return
+        candidates = [
+            m for m in movies
+            if m.get('monitored')
+            and routing_tags.isdisjoint(m.get('tags') or [])
+        ]
+        if not candidates:
+            return
+
+        max_batch = 25
+        if len(candidates) > max_batch:
+            logger.warning(
+                f"[radarr] {len(candidates)} untagged monitored movies — "
+                f"tagging first {max_batch} this cycle (remainder next run)"
+            )
+            candidates = candidates[:max_batch]
+
+        # Direct PUT (see Sonarr counterpart for rationale — avoids response
+        # shape fragility in _ensure_debrid_routing).
+        tagged_ids = []
+        for movie in candidates:
+            new_tags = list(movie.get('tags') or []) + [debrid_tag]
+            result = self._put(f'/api/v3/movie/{movie["id"]}', dict(movie, tags=new_tags))
+            if result is None:
+                logger.warning(f"[radarr] Failed to auto-tag untagged movie: {movie.get('title')}")
+                continue
+            logger.info(f"[radarr] Auto-tagged untagged movie with debrid tag: {movie.get('title')}")
+            tagged_ids.append(movie['id'])
+
+        if not tagged_ids:
+            return
+
+        search_ok = self._post('/api/v3/command', {'name': 'MoviesSearch', 'movieIds': tagged_ids}) is not None
+        if not search_ok:
+            logger.warning(f"[radarr] Failed to trigger search for {len(tagged_ids)} auto-tagged movie(s)")
+        search_count = len(tagged_ids) if search_ok else 0
+
+        logger.info(
+            f"[radarr] Auto-tagged {len(tagged_ids)} untagged monitored movie(s) with debrid tag, "
+            f"triggered {search_count} search(es)"
+        )
+        if _history:
+            _history.log_event(
+                'routing_repaired',
+                f'Radarr auto-tagged {len(tagged_ids)} movie(s)',
+                source='scheduler',
+                detail=f'Applied debrid tag + triggered {search_count} search(es)',
+            )
 
     def _clear_stale_queue_items(self, client_names):
         """Remove queue items stuck as unavailable for newly-tagged clients."""
@@ -1798,12 +1963,15 @@ class RadarrClient(_ArrClientBase):
 
         Resets cached tag state and re-runs discovery so any manual changes
         in Radarr are detected and corrected. Fixes are logged individually
-        by _discover_routing_tags.
+        by _discover_routing_tags. Also sweeps for movies that were added
+        without a routing tag (e.g. via Overseerr with empty tag config) and
+        applies the debrid tag so their searches succeed.
         """
         self._blackhole_tag_id = None
         self._local_tag_id = None
         self._usenet_tag_id = None
         self._discover_routing_tags()
+        self._audit_untagged_movies()
 
     def clean_all_stale_queue_items(self, max_age_seconds=120):
         """Remove ALL downloadClientUnavailable queue items older than max_age.

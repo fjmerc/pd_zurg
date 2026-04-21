@@ -432,9 +432,9 @@ All settings are documented in [`.env.example`](.env.example) with inline commen
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `PDZURG_LOG_LEVEL` | Zurgarr [log level](https://docs.python.org/3/library/logging.html#logging-levels). (Variable name retained from the project's pd_zurg lineage for backward compatibility.) | `INFO` |
-| `PDZURG_LOG_COUNT` | Number of rotated log files to retain | `2` |
-| `PDZURG_LOG_SIZE` | Max log file size before rotation (`K`/`M`/`G`) | `10M` |
+| `ZURGARR_LOG_LEVEL` | Zurgarr [log level](https://docs.python.org/3/library/logging.html#logging-levels). Legacy `PDZURG_LOG_LEVEL` is still accepted through 2.20.0 and fires a one-shot deprecation warning at startup. | `INFO` |
+| `ZURGARR_LOG_COUNT` | Number of rotated log files to retain. Legacy `PDZURG_LOG_COUNT` still accepted through 2.20.0. | `2` |
+| `ZURGARR_LOG_SIZE` | Max log file size before rotation (`K`/`M`/`G`). Legacy `PDZURG_LOG_SIZE` still accepted through 2.20.0. | `10M` |
 | `COLOR_LOG_ENABLED` | Enable colored console output | `false` |
 | `GITHUB_TOKEN` | [GitHub token](https://github.com/settings/tokens) for Zurg private repo / nightly builds | |
 | `SKIP_VALIDATION` | Skip startup config validation | `false` |
@@ -516,7 +516,7 @@ Remove the corresponding environment variables when using secrets.
 **Migrating from pd_zurg**
 - Container/image renamed `pd_zurg` → `zurgarr`. Update `container_name`, `image`, and the service key in your `docker-compose.yml`. Old Docker Hub images under `fjmerc/pd_zurg` remain accessible but new pushes go to `fjmerc/zurgarr`.
 - Default rclone mount name is now `zurgarr` (was `pd_zurg`). If you set `RCLONE_MOUNT_NAME` explicitly in `.env`, nothing changes. If you relied on the default, your mount path becomes `/data/zurgarr` instead of `/data/pd_zurg` — update `BLACKHOLE_RCLONE_MOUNT` and `PLEX_MOUNT_DIR` accordingly.
-- Env var keys (`PDZURG_LOG_LEVEL`, etc.) and Prometheus metric names (`pd_zurg_*` prefix) are deliberately retained for backward compatibility — your `.env` files and Grafana dashboards keep working.
+- Env var keys and Prometheus metric names are being renamed across a two-release window. **2.19.0** reads BOTH the new `ZURGARR_LOG_*` and legacy `PDZURG_LOG_*` env vars (new name wins when both are set; a one-shot deprecation warning fires when a legacy name is read) and emits metrics under BOTH the `pd_zurg_*` and `zurgarr_*` prefixes. Your existing `.env` files and Grafana dashboards keep working. **2.20.0** drops the legacy names — before upgrading to 2.20.0, rename your `.env` entries to `ZURGARR_LOG_*` and update Grafana dashboard queries from `pd_zurg_*` to `zurgarr_*`.
 - Browser-saved Basic Auth credentials for `/settings` may need to be re-saved (the auth realm changed from `pd_zurg` to `Zurgarr`).
 
 ## Community

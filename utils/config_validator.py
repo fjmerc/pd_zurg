@@ -95,7 +95,12 @@ def validate_config():
         )
 
     log_levels = ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
-    for var in ('ZURG_LOG_LEVEL', 'RCLONE_LOG_LEVEL', 'PDZURG_LOG_LEVEL', 'PD_LOG_LEVEL'):
+    log_level_vars = (
+        'ZURG_LOG_LEVEL', 'RCLONE_LOG_LEVEL',
+        'ZURGARR_LOG_LEVEL', 'PDZURG_LOG_LEVEL',
+        'PD_LOG_LEVEL',
+    )
+    for var in log_level_vars:
         val = os.environ.get(var, '').upper()
         if val and val not in log_levels:
             result.warn(

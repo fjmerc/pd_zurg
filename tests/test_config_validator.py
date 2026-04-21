@@ -145,6 +145,20 @@ class TestConfigValidation:
         assert any('ZURG_LOG_LEVEL' in w for w in result.warnings)
         assert not any('ZURG_LOG_LEVEL' in e for e in result.errors)
 
+    def test_bad_log_level_warns_legacy_pdzurg(self, clean_env, env_vars):
+        """Legacy PDZURG_LOG_LEVEL should still be validated during the 2.19.x window."""
+        env_vars(PDZURG_LOG_LEVEL='BOGUS')
+        result = _validate_with_reload()
+        assert any('PDZURG_LOG_LEVEL' in w for w in result.warnings)
+        assert not any('PDZURG_LOG_LEVEL' in e for e in result.errors)
+
+    def test_bad_log_level_warns_new_zurgarr(self, clean_env, env_vars):
+        """New ZURGARR_LOG_LEVEL should warn on invalid value just like the legacy name."""
+        env_vars(ZURGARR_LOG_LEVEL='BOGUS')
+        result = _validate_with_reload()
+        assert any('ZURGARR_LOG_LEVEL' in w for w in result.warnings)
+        assert not any('ZURGARR_LOG_LEVEL' in e for e in result.errors)
+
     def test_duplicate_cleanup_keep_valid_local(self, clean_env, env_vars):
         """DUPLICATE_CLEANUP_KEEP=local should pass."""
         env_vars(DUPLICATE_CLEANUP_KEEP='local')

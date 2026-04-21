@@ -40,7 +40,7 @@ __all__ = [
     'ColoredFormatter', 'YAML',
     # Functions
     'load_secret_or_env', 'is_port_available', 'find_available_port',
-    'refresh_globals',
+    'refresh_globals', '_env_dual',
     # Config
     'Config', 'config',
     # Config variables
@@ -94,6 +94,26 @@ def load_secret_or_env(secret_name, default=None):
             return file.read().strip()
     except IOError:
         return os.getenv(secret_name.upper(), default)
+
+
+def _env_dual(new_name, old_name, default=''):
+    """Dual-read an env var during the pd_zurg → Zurgarr rename window.
+
+    Prefers ``new_name`` when set. Falls back to ``old_name`` and fires a
+    one-shot deprecation warning. Returns ``default`` when neither is set.
+    Values are stripped; empty strings are treated as unset so a user who
+    explicitly sets ``NEW_NAME=`` to blank still falls through to the old
+    name (matches bash-style ``${VAR:-default}`` semantics).
+    """
+    new_val = os.environ.get(new_name, '').strip()
+    if new_val:
+        return new_val
+    old_val = os.environ.get(old_name, '').strip()
+    if old_val:
+        from utils.deprecation import warn_once
+        warn_once(old_name, new_name, 'env var', '2.19.0', '2.20.0')
+        return old_val
+    return default
 
 
 def is_port_available(port):

@@ -96,7 +96,7 @@ Developer reference for pd_zurg internals. Complements [CLAUDE.md](CLAUDE.md) (r
 │  zurg/    (setup, update, download)                          │
 │  rclone/  (setup, config generation)                         │
 │  plex_debrid_/  (setup, update, download — project wrappers) │
-│  plex_debrid/   (git submodule — upstream code, don't edit)  │
+│  plex_debrid/   (vendored upstream code — see ATTRIBUTION)   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -580,7 +580,7 @@ if target.startswith(symlink_target_real):
 | **Radarr** | `arr_client`, `scheduled_tasks` | HTTP REST (v3) | `RADARR_URL` + `RADARR_API_KEY` | Skip operations; log warnings |
 | **Overseerr** | `arr_client` | HTTP REST (v1) | `SEERR_ADDRESS` + `SEERR_API_KEY` | Fallback source; non-critical |
 | **Plex** | `duplicate_cleanup`, `plex_debrid` | HTTP (PlexAPI) | `PLEX_ADDRESS` + `PLEX_TOKEN` | Dedup disabled; plex_debrid crashes/restarts |
-| **Jellyfin** | `plex_debrid` (submodule) | HTTP REST | `JF_ADDRESS` + `JF_API_KEY` | plex_debrid crashes/restarts |
+| **Jellyfin** | `plex_debrid` (vendored) | HTTP REST | `JF_ADDRESS` + `JF_API_KEY` | plex_debrid crashes/restarts |
 | **TMDB** | `utils/tmdb.py` | HTTPS REST (v3) | `TMDB_API_KEY` | Posters/metadata unavailable; library scan still works |
 | **Torrentio** | `utils/search.py` | HTTPS REST | `TORRENTIO_URL` (no key) | Search unavailable; non-critical |
 | **GitHub** | `utils/download.py`, `zurg/download.py` | HTTPS REST | `GITHUB_TOKEN` (optional) | Auto-update disabled |

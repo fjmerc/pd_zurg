@@ -526,3 +526,15 @@ pd_zurg builds on the work of:
 - **[yowmamasita](https://github.com/yowmamasita)** — Zurg ([sponsor](https://github.com/sponsors/debridmediamanager))
 - **[ncw](https://github.com/ncw)** — rclone ([sponsor](https://rclone.org/sponsor/))
 - **[I-am-PUID-0](https://github.com/I-am-PUID-0)** — original pd_zurg
+
+## Licensing
+
+Code authored for the pd_zurg project is released under the MIT License — see [LICENSE](LICENSE).
+
+This repository also redistributes or vendors third-party components, each governed by its own upstream terms:
+
+- **rclone** — MIT, see [LICENSES/rclone.LICENSE](LICENSES/rclone.LICENSE)
+- **Zurg** — no license declared upstream; downloaded as a binary at image build time
+- **plex_debrid** — no license declared upstream; vendored under [plex_debrid/](plex_debrid/) with notes in [plex_debrid/ATTRIBUTION.md](plex_debrid/ATTRIBUTION.md)
+
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the full inventory.

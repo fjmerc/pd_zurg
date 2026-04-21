@@ -1,7 +1,10 @@
-"""Prometheus metrics exposition for pd_zurg.
+"""Prometheus metrics exposition for Zurgarr.
 
 Generates metrics in Prometheus text exposition format from
 the existing StatusData singleton. No external dependencies.
+
+Metric names retain the historical ``pd_zurg_*`` prefix from before the
+rename so existing Grafana dashboards keep working without migration.
 """
 
 import threading

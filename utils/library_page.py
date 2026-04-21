@@ -15,7 +15,7 @@ def get_library_html(current_page='library'):
     from utils.ui_common import (get_base_head, get_nav_html, THEME_TOGGLE_JS,
                                  KEYBOARD_JS, TOAST_JS)
     html = _LIBRARY_HTML
-    html = html.replace('__BASE_HEAD__', get_base_head('pd_zurg Library'))
+    html = html.replace('__BASE_HEAD__', get_base_head('Zurgarr Library'))
     html = html.replace('__NAV_HTML__', get_nav_html(current_page))
     html = html.replace('__THEME_TOGGLE_JS__', THEME_TOGGLE_JS + KEYBOARD_JS + TOAST_JS)
     return html
@@ -2036,7 +2036,7 @@ function showDetail(index) {
   _lastTransferText = '';
   _lastTransferType = '';
   if (_transferClearTimer) { clearTimeout(_transferClearTimer); _transferClearTimer = null; }
-  document.title = (item.title || '') + ' \u2014 pd_zurg Library';
+  document.title = (item.title || '') + ' \u2014 Zurgarr Library';
 
   document.querySelector('.toolbar-sticky').style.display = 'none';
   document.querySelector('.tabs').style.display = 'none';
@@ -2720,7 +2720,7 @@ function hideDetail() {
   _stopSmartPoll();
   if (_refreshTimer) { clearTimeout(_refreshTimer); _refreshTimer = null; }
   if (_pendingConfirmCleanup) { _pendingConfirmCleanup(); _pendingConfirmCleanup = null; }
-  document.title = 'pd_zurg Library';
+  document.title = 'Zurgarr Library';
   var _hUrl = new URL(window.location);
   _hUrl.searchParams.delete('detail');
   _hUrl.searchParams.delete('type');

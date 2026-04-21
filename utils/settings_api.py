@@ -1,7 +1,7 @@
 """Settings API for the web-based settings editor.
 
 Provides schema definitions, read/write, and validation for both
-pd_zurg environment variables and plex_debrid settings.json.
+Zurgarr environment variables and plex_debrid settings.json.
 Used by the status server to power the /settings UI and
 /api/settings/* endpoints.
 """
@@ -209,7 +209,7 @@ ENV_SCHEMA = [
         'name': 'Logging',
         'description': 'Application logging configuration',
         'fields': [
-            ('PDZURG_LOG_LEVEL', 'pd_zurg Log Level', 'select:DEBUG,INFO,WARNING,ERROR,CRITICAL', False, 'Main application log level'),
+            ('PDZURG_LOG_LEVEL', 'Zurgarr Log Level', 'select:DEBUG,INFO,WARNING,ERROR,CRITICAL', False, 'Main application log level'),
             ('PDZURG_LOG_COUNT', 'Log File Count', 'string', False, 'Number of rotated log files to keep'),
             ('PDZURG_LOG_SIZE', 'Max Log Size', 'string', False, 'Max size per log file (e.g., 10M)'),
             ('COLOR_LOG_ENABLED', 'Color Logs', 'boolean', False, 'Enable colored console log output'),
@@ -397,7 +397,7 @@ def write_env_values(values):
         # Write .env file atomically
         try:
             with atomic_write(ENV_FILE) as f:
-                f.write('# pd_zurg configuration — managed by settings editor\n')
+                f.write('# Zurgarr configuration — managed by settings editor\n')
                 f.write('# Manual edits are preserved on next save\n\n')
                 for cat in ENV_SCHEMA:
                     cat_has_values = False
@@ -1131,7 +1131,7 @@ def _sync_plex_debrid_to_env(values):
 
         try:
             with atomic_write(ENV_FILE) as f:
-                f.write('# pd_zurg configuration — managed by settings editor\n')
+                f.write('# Zurgarr configuration — managed by settings editor\n')
                 f.write('# Manual edits are preserved on next save\n\n')
                 for cat in ENV_SCHEMA:
                     cat_has_values = False
@@ -1476,7 +1476,7 @@ def oauth_start(service):
             client_id = os.environ.get('TRAKT_CLIENT_ID', '')
             if not client_id:
                 return {'error': 'TRAKT_CLIENT_ID environment variable is not set. '
-                        'Set it in the pd_zurg tab first.'}
+                        'Set it in the Zurgarr tab first.'}
             resp = requests.post(
                 'https://api.trakt.tv/oauth/device/code',
                 json={'client_id': client_id},

@@ -11,7 +11,7 @@ def get_system_html():
     from utils.ui_common import (get_base_head, get_nav_html, THEME_TOGGLE_JS,
                                  WANTED_BADGE_JS, KEYBOARD_JS, TOAST_JS)
     html = _SYSTEM_HTML
-    html = html.replace('__BASE_HEAD__', get_base_head('pd_zurg System',
+    html = html.replace('__BASE_HEAD__', get_base_head('Zurgarr System',
                                                        _SYSTEM_EXTRA_CSS))
     html = html.replace('__NAV_HTML__', get_nav_html('system'))
     html = html.replace('__THEME_TOGGLE_JS__',
@@ -146,7 +146,7 @@ __NAV_HTML__
           <div class="wf-row">
             <div class="wf-node orange">Blackhole<small>/watch folder</small></div>
             <div class="wf-arrow">&rarr;</div>
-            <div class="wf-node orange">pd_zurg<small>Send to RD</small></div>
+            <div class="wf-node orange">Zurgarr<small>Send to RD</small></div>
             <div class="wf-arrow">&rarr;</div>
             <div class="wf-node yellow">Real-Debrid<small>Cache</small></div>
             <div class="wf-arrow">&rarr;</div>
@@ -179,7 +179,7 @@ __NAV_HTML__
         <dt style="color:var(--blue)">Zurg</dt>
         <dd>Connects to your debrid API and serves your cached content as a WebDAV file server. Makes your cloud library look like local files.</dd>
         <dt style="color:var(--blue)">rclone</dt>
-        <dd>Mounts the Zurg WebDAV server as a local directory at <code style="color:var(--green);font-size:.95em">/data/pd_zurg</code> so your media server can access the files.</dd>
+        <dd>Mounts the Zurg WebDAV server as a local directory at <code style="color:var(--green);font-size:.95em">/data/zurgarr</code> so your media server can access the files.</dd>
         <dt style="color:var(--orange)">Blackhole</dt>
         <dd>Watches a folder for .torrent/.magnet files dropped by Sonarr/Radarr. Sends them to Real-Debrid, waits for content on the mount, then creates symlinks in a completed directory for Sonarr/Radarr to import. Optional dedup checks your local library first.</dd>
         <dt>qBittorrent / Usenet</dt>

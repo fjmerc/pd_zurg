@@ -532,7 +532,7 @@ def get_nav_html(current_page='status'):
         '<aside class="sidebar" id="sidebar">'
         '<div class="sidebar-brand">'
         '<div class="sidebar-brand-info">'
-        '<a href="/status">pd_zurg</a>'
+        '<a href="/status">Zurgarr</a>'
         '<span class="sidebar-version" id="header-meta"></span>'
         '</div>'
         '<button class="sidebar-theme" onclick="toggleTheme()" '

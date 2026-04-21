@@ -1,6 +1,7 @@
 MIT License
 
-Copyright (c) 2026-present fjmerc and pd_zurg contributors
+Copyright (c) 2026-present fjmerc and Zurgarr contributors
+(formerly the pd_zurg fork — see README "Why This Project?")
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -22,7 +23,8 @@ THE SOFTWARE.
 
 ---
 
-This license covers code authored for the pd_zurg project. Bundled and
+This license covers code authored for the Zurgarr project, including
+the work inherited from its pd_zurg lineage. Bundled and
 vendored third-party code retains its own copyright and license terms;
 see THIRD_PARTY_NOTICES.md at the repository root for an inventory of
 third-party components and their licensing status.

@@ -301,7 +301,7 @@ def replace_local_with_symlinks(episodes, local_tv_path, rclone_mount, symlink_t
     Args:
         episodes: list of dicts with 'local_path' and 'debrid_path' keys
         local_tv_path: root local TV path — local paths must be under this
-        rclone_mount: mount path inside pd_zurg (e.g., /data/pd_zurg)
+        rclone_mount: mount path inside Zurgarr (e.g., /data/zurgarr)
         symlink_target_base: mount path from Sonarr's perspective (e.g., /mnt/debrid)
 
     Returns dict with status, count switched, and any errors.
@@ -322,7 +322,7 @@ def replace_local_with_symlinks(episodes, local_tv_path, rclone_mount, symlink_t
             errors.append(f"Path outside local library: {local_path}")
             continue
 
-        # Translate debrid path from pd_zurg namespace to Sonarr namespace
+        # Translate debrid path from Zurgarr namespace to Sonarr namespace
         real_debrid = os.path.realpath(debrid_path)
         real_mount = os.path.realpath(rclone_mount)
         if not real_debrid.startswith(real_mount + os.sep) and real_debrid != real_mount:

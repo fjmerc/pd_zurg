@@ -246,7 +246,7 @@ class _ArrClientBase:
             url += '?' + urllib.parse.urlencode(params)
 
         headers = {
-            'User-Agent': 'pd_zurg/1.0',
+            'User-Agent': 'zurgarr/1.0',
             'Accept': 'application/json',
         }
 

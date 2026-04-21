@@ -69,7 +69,7 @@ def _safe_log_url(url):
 def _urllib_get(url, headers=None, timeout=_SEARCH_TIMEOUT):
     """GET request returning parsed JSON or None."""
     req = urllib.request.Request(url, headers=headers or {})
-    req.add_header('User-Agent', 'pd_zurg/1.0')
+    req.add_header('User-Agent', 'zurgarr/1.0')
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read(10 * 1024 * 1024).decode('utf-8'))
@@ -90,7 +90,7 @@ def _urllib_post(url, data=None, json_body=None, headers=None,
     scalar-valued callers are unchanged.
     """
     hdrs = dict(headers or {})
-    hdrs['User-Agent'] = 'pd_zurg/1.0'
+    hdrs['User-Agent'] = 'zurgarr/1.0'
     if json_body is not None:
         body = json.dumps(json_body).encode('utf-8')
         hdrs['Content-Type'] = 'application/json'
@@ -297,7 +297,7 @@ def check_debrid_cache(info_hashes, service=None, api_key=None):
 
     URL redaction: every HTTP URL logged by this function is passed
     through ``_safe_log_url`` so API keys in query strings never leak
-    into the pd_zurg logs.
+    into the Zurgarr logs.
     """
     hashes = []
     seen = set()
@@ -383,7 +383,7 @@ def _check_cache_ad(hashes, api_key):
     ``_urllib_post(doseq=True)``.
     """
     magnets = [_hash_to_magnet(h) for h in hashes]
-    qs = urllib.parse.urlencode({'agent': 'pd_zurg', 'apikey': api_key})
+    qs = urllib.parse.urlencode({'agent': 'zurgarr', 'apikey': api_key})
     url = f'https://api.alldebrid.com/v4/magnet/instant?{qs}'
     data = _urllib_post(url, data=[('magnets[]', m) for m in magnets],
                         timeout=_CACHE_PROBE_TIMEOUT, doseq=True)
@@ -419,7 +419,7 @@ def _check_cache_tb(hashes, api_key):
     """
     headers = {
         'Authorization': f'Bearer {api_key}',
-        'User-Agent': 'pd_zurg/1.0',
+        'User-Agent': 'zurgarr/1.0',
     }
     base_url = 'https://api.torbox.app/v1/api/torrents/checkcached'
     result = {h: None for h in hashes}
@@ -641,7 +641,7 @@ def _add_to_rd(magnet, api_key):
 
 def _add_to_ad(magnet, api_key):
     """Add magnet to AllDebrid."""
-    qs = urllib.parse.urlencode({'agent': 'pd_zurg', 'apikey': api_key})
+    qs = urllib.parse.urlencode({'agent': 'zurgarr', 'apikey': api_key})
     resp = _urllib_post(
         f'https://api.alldebrid.com/v4/magnet/upload?{qs}',
         data={'magnets[]': magnet},

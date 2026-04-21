@@ -11,7 +11,7 @@ def get_activity_html():
     from utils.ui_common import (get_base_head, get_nav_html, THEME_TOGGLE_JS,
                                  WANTED_BADGE_JS, KEYBOARD_JS, TOAST_JS)
     html = _ACTIVITY_HTML
-    html = html.replace('__BASE_HEAD__', get_base_head('pd_zurg Activity',
+    html = html.replace('__BASE_HEAD__', get_base_head('Zurgarr Activity',
                                                        _ACTIVITY_EXTRA_CSS))
     html = html.replace('__NAV_HTML__', get_nav_html('activity'))
     html = html.replace('__THEME_TOGGLE_JS__',

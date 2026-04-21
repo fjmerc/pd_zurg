@@ -1,6 +1,6 @@
 # Blackhole Symlink Guide — Sonarr/Radarr Integration with Real-Debrid
 
-This guide explains how to use pd_zurg's blackhole feature with symlink mode to integrate Sonarr and Radarr with Real-Debrid (or AllDebrid/TorBox). This enables zero-copy, automated media management where Sonarr/Radarr handle content discovery and tracking while debrid provides the actual media files.
+This guide explains how to use Zurgarr's blackhole feature with symlink mode to integrate Sonarr and Radarr with Real-Debrid (or AllDebrid/TorBox). This enables zero-copy, automated media management where Sonarr/Radarr handle content discovery and tracking while debrid provides the actual media files.
 
 ## Table of Contents
 
@@ -14,7 +14,7 @@ This guide explains how to use pd_zurg's blackhole feature with symlink mode to 
   - [Single-Arr Quick Start (Flat)](#single-arr-quick-start-flat)
   - [Multi-Host Setup](#multi-host-setup)
 - [Configuration](#configuration)
-  - [pd_zurg Environment Variables](#pd_zurg-environment-variables)
+  - [Zurgarr Environment Variables](#zurgarr-environment-variables)
   - [Docker Compose](#docker-compose)
   - [Sonarr Setup](#sonarr-setup)
   - [Radarr Setup](#radarr-setup)
@@ -30,7 +30,7 @@ This guide explains how to use pd_zurg's blackhole feature with symlink mode to 
 
 The blackhole symlink feature bridges the gap between Sonarr/Radarr and debrid services. Without it, Sonarr/Radarr can send torrents to Real-Debrid via the blackhole, but they never know when the download completes — so they can't track episodes, auto-grab new releases, or manage your library.
 
-With symlink mode enabled, pd_zurg:
+With symlink mode enabled, Zurgarr:
 
 1. Accepts `.torrent` and `.magnet` files from Sonarr/Radarr
 2. Submits them to your debrid service
@@ -53,18 +53,18 @@ Sonarr/Radarr see the symlinks as completed downloads and import them into their
 │  2. Drops .torrent/.magnet in the blackhole watch directory      │
 │          │                                                       │
 │          ▼                                                       │
-│  3. pd_zurg picks up the file, submits to Real-Debrid API       │
+│  3. Zurgarr picks up the file, submits to Real-Debrid API       │
 │          │                                                       │
 │          ▼                                                       │
-│  4. pd_zurg polls RD API until torrent status = "downloaded"     │
+│  4. Zurgarr polls RD API until torrent status = "downloaded"     │
 │     (cached torrents are instant, uncached may take minutes)     │
 │          │                                                       │
 │          ▼                                                       │
-│  5. pd_zurg waits for content to appear on the rclone mount      │
+│  5. Zurgarr waits for content to appear on the rclone mount      │
 │     (Zurg detects the new torrent and serves it via WebDAV)      │
 │          │                                                       │
 │          ▼                                                       │
-│  6. pd_zurg creates symlinks in the completed directory          │
+│  6. Zurgarr creates symlinks in the completed directory          │
 │     /completed/Release.Name/episode.mkv                          │
 │       → /mnt/debrid/shows/Release.Name/episode.mkv              │
 │          │                                                       │
@@ -80,42 +80,42 @@ Sonarr/Radarr see the symlinks as completed downloads and import them into their
 
 ## Prerequisites
 
-- **pd_zurg** running with Zurg + rclone (the debrid mount must be working)
+- **Zurgarr** running with Zurg + rclone (the debrid mount must be working)
 - **Sonarr** and/or **Radarr** installed
 - A **debrid API key** (Real-Debrid, AllDebrid, or TorBox)
 - Torrent **indexers** configured in Sonarr/Radarr (Jackett, Prowlarr, or direct Torznab)
 
 ## Directory Layout: Labeled vs Flat
 
-pd_zurg supports two directory layouts. **Labeled mode is the recommended pattern** whenever you run more than one arr against pd_zurg. Flat mode is retained for simple single-arr installs.
+Zurgarr supports two directory layouts. **Labeled mode is the recommended pattern** whenever you run more than one arr against Zurgarr. Flat mode is retained for simple single-arr installs.
 
 ### Labeled mode (recommended)
 
-Each arr gets its own subdirectory under `BLACKHOLE_DIR` and `BLACKHOLE_COMPLETED_DIR`. pd_zurg auto-detects the layout — no new environment variable is required. You just reshape your folders and mount each arr's subdir into its container.
+Each arr gets its own subdirectory under `BLACKHOLE_DIR` and `BLACKHOLE_COMPLETED_DIR`. Zurgarr auto-detects the layout — no new environment variable is required. You just reshape your folders and mount each arr's subdir into its container.
 
 ```
-/opt/blackhole/                ← mounted as /watch inside pd_zurg
-├── sonarr/                    ← Sonarr writes here; pd_zurg picks up with label="sonarr"
-├── radarr/                    ← Radarr writes here; pd_zurg picks up with label="radarr"
-├── failed/                    ← shared retry staging (managed by pd_zurg)
-└── .alt_pending/              ← shared alt-retry staging (managed by pd_zurg)
+/opt/blackhole/                ← mounted as /watch inside Zurgarr
+├── sonarr/                    ← Sonarr writes here; Zurgarr picks up with label="sonarr"
+├── radarr/                    ← Radarr writes here; Zurgarr picks up with label="radarr"
+├── failed/                    ← shared retry staging (managed by Zurgarr)
+└── .alt_pending/              ← shared alt-retry staging (managed by Zurgarr)
 
-/opt/completed/                ← mounted as /completed inside pd_zurg
+/opt/completed/                ← mounted as /completed inside Zurgarr
 ├── sonarr/                    ← Sonarr Watch Folder; contains only Sonarr's releases
 ├── radarr/                    ← Radarr Watch Folder; contains only Radarr's releases
 └── pending_monitors.json      ← internal state; safe to leave alone
 ```
 
-pd_zurg mounts the **parents** (`/opt/blackhole`, `/opt/completed`). Each arr container mounts only its **own label subdir**, so Sonarr physically cannot see Radarr's items (and vice versa). This eliminates the "Directory not empty" orphan warnings that appear when two arrs share the same folder.
+Zurgarr mounts the **parents** (`/opt/blackhole`, `/opt/completed`). Each arr container mounts only its **own label subdir**, so Sonarr physically cannot see Radarr's items (and vice versa). This eliminates the "Directory not empty" orphan warnings that appear when two arrs share the same folder.
 
 Label name rules: alphanumeric plus `-` / `_`, max 64 characters. The names `failed` and `.alt_pending` are reserved for staging. `sonarr`, `radarr`, `readarr`, `lidarr`, `sonarr-4k`, `sonarr-hd`, etc. are all fine.
 
 ### Flat mode (single-arr installs)
 
-If you run only one arr against pd_zurg, you can drop `.torrent` / `.magnet` files directly in the root of `BLACKHOLE_DIR` and symlinks land directly in `BLACKHOLE_COMPLETED_DIR`. This is the original behavior and continues to work unchanged:
+If you run only one arr against Zurgarr, you can drop `.torrent` / `.magnet` files directly in the root of `BLACKHOLE_DIR` and symlinks land directly in `BLACKHOLE_COMPLETED_DIR`. This is the original behavior and continues to work unchanged:
 
 ```
-/opt/blackhole/Release.torrent         → picked up by pd_zurg
+/opt/blackhole/Release.torrent         → picked up by Zurgarr
 /opt/completed/Release.Name/file.mkv   → symlink created here
 ```
 
@@ -125,11 +125,11 @@ Mixed mode also works: loose files in the root are treated as unlabeled, while s
 
 ### Single-Host Setup (Labeled)
 
-If pd_zurg, Sonarr, and Radarr all run on the **same Docker host**, the setup is straightforward — all containers share directories via Docker bind mounts, and each arr sees only its own label subdir.
+If Zurgarr, Sonarr, and Radarr all run on the **same Docker host**, the setup is straightforward — all containers share directories via Docker bind mounts, and each arr sees only its own label subdir.
 
 ```
 Docker Host
-├── pd_zurg container
+├── Zurgarr container
 │   ├── /watch       ← /opt/blackhole  (parent — sees all labels)
 │   ├── /completed   ← /opt/completed  (parent — writes each label subdir)
 │   └── /data        ← rclone mount (Zurg WebDAV)
@@ -168,16 +168,16 @@ This is identical to the pre-label-routing behavior. Each container mounts the s
 
 ### Multi-Host Setup
 
-If pd_zurg runs on a different host than Sonarr/Radarr, you need to share the blackhole and completed directories between hosts. NFS is the simplest approach.
+If Zurgarr runs on a different host than Sonarr/Radarr, you need to share the blackhole and completed directories between hosts. NFS is the simplest approach.
 
 ```
-Host A (Sonarr/Radarr)                    Host B (pd_zurg)
+Host A (Sonarr/Radarr)                    Host B (Zurgarr)
 ├── /opt/blackhole/ ──NFS export──────────→ /mnt/blackhole/
 ├── /opt/completed/ ──NFS export──────────→ /mnt/completed/
 └── /mnt/debrid/    ──rclone WebDAV──────→ Zurg on Host B
 ```
 
-**Important:** The Sonarr/Radarr host exports the directories, and the pd_zurg host mounts them. This is because:
+**Important:** The Sonarr/Radarr host exports the directories, and the Zurgarr host mounts them. This is because:
 - Sonarr/Radarr need fast local access to the completed directory for imports
 - Symlink targets must resolve on the Sonarr/Radarr host (where `/mnt/debrid` exists)
 
@@ -187,13 +187,13 @@ Host A (Sonarr/Radarr)                    Host B (pd_zurg)
 sudo mkdir -p /opt/blackhole /opt/completed
 sudo chmod 777 /opt/blackhole /opt/completed
 
-# Export via NFS (replace 10.0.0.2 with your pd_zurg host's IP)
+# Export via NFS (replace 10.0.0.2 with your Zurgarr host's IP)
 echo "/opt/blackhole 10.0.0.2(rw,sync,no_subtree_check,no_root_squash)" | sudo tee -a /etc/exports
 echo "/opt/completed 10.0.0.2(rw,sync,no_subtree_check,no_root_squash)" | sudo tee -a /etc/exports
 sudo exportfs -ra
 ```
 
-**NFS setup on Host B (pd_zurg host):**
+**NFS setup on Host B (Zurgarr host):**
 ```bash
 # Create mount points
 sudo mkdir -p /mnt/blackhole /mnt/completed
@@ -209,7 +209,7 @@ echo "10.0.0.1:/opt/completed /mnt/completed nfs defaults,_netdev 0 0" | sudo te
 
 ## Configuration
 
-### pd_zurg Environment Variables
+### Zurgarr Environment Variables
 
 Add these to your `.env` file or set them directly in `docker-compose.yml`:
 
@@ -221,15 +221,15 @@ Add these to your `.env` file or set them directly in `docker-compose.yml`:
 | `BLACKHOLE_DEBRID` | No | auto-detect | Debrid service: `realdebrid`, `alldebrid`, or `torbox`. Auto-detected from API keys if not set. |
 | `BLACKHOLE_SYMLINK_ENABLED` | Yes | `false` | Enable symlink creation after debrid download |
 | `BLACKHOLE_COMPLETED_DIR` | No | `/completed` | Directory where symlinks are created |
-| `BLACKHOLE_RCLONE_MOUNT` | No | `/data` | Path to the rclone mount inside the container. If `RCLONE_MOUNT_NAME` is set (e.g., `pd_zurg`), use `/data/<mount_name>` (e.g., `/data/pd_zurg`). |
+| `BLACKHOLE_RCLONE_MOUNT` | No | `/data` | Path to the rclone mount inside the container. If `RCLONE_MOUNT_NAME` is set (e.g., `zurgarr`), use `/data/<mount_name>` (e.g., `/data/zurgarr`). |
 | `BLACKHOLE_SYMLINK_TARGET_BASE` | Yes* | _(empty)_ | **How the rclone mount path looks on the Sonarr/Radarr host.** This is critical for cross-host setups. See [Understanding BLACKHOLE_SYMLINK_TARGET_BASE](#understanding-blackhole_symlink_target_base). |
 | `BLACKHOLE_MOUNT_POLL_TIMEOUT` | No | `300` | Seconds to wait for debrid to process the torrent AND for content to appear on the mount |
 | `BLACKHOLE_MOUNT_POLL_INTERVAL` | No | `10` | Seconds between status/mount checks |
 | `BLACKHOLE_SYMLINK_MAX_AGE` | No | `72` | Hours before completed symlink directories are cleaned up |
 | `SYMLINK_REPAIR_AUTO_SEARCH` | No | `false` | When the verify task finds broken symlinks that can't be repaired from the mount, trigger Sonarr/Radarr to re-search. Uses a 2-hour cooldown per item. |
-| `BLACKHOLE_DEDUP_ENABLED` | No | `false` | Enable local library duplicate checking before sending torrents to debrid. When enabled, pd_zurg compares incoming torrents against your existing TV and movie libraries to avoid re-downloading content you already have. |
-| `BLACKHOLE_LOCAL_LIBRARY_TV` | Yes* | _(empty)_ | Path to your local TV library inside the container for dedup checking (e.g., `/data/media/tv`). Must be mounted read-only in the pd_zurg container. |
-| `BLACKHOLE_LOCAL_LIBRARY_MOVIES` | Yes* | _(empty)_ | Path to your local movies library inside the container for dedup checking (e.g., `/data/media/movies`). Must be mounted read-only in the pd_zurg container. |
+| `BLACKHOLE_DEDUP_ENABLED` | No | `false` | Enable local library duplicate checking before sending torrents to debrid. When enabled, Zurgarr compares incoming torrents against your existing TV and movie libraries to avoid re-downloading content you already have. |
+| `BLACKHOLE_LOCAL_LIBRARY_TV` | Yes* | _(empty)_ | Path to your local TV library inside the container for dedup checking (e.g., `/data/media/tv`). Must be mounted read-only in the Zurgarr container. |
+| `BLACKHOLE_LOCAL_LIBRARY_MOVIES` | Yes* | _(empty)_ | Path to your local movies library inside the container for dedup checking (e.g., `/data/media/movies`). Must be mounted read-only in the Zurgarr container. |
 
 \* Required when symlink mode is enabled.
 
@@ -237,11 +237,11 @@ Add these to your `.env` file or set them directly in `docker-compose.yml`:
 
 #### Understanding BLACKHOLE_SYMLINK_TARGET_BASE
 
-This is the most important setting. Symlinks are created inside the pd_zurg container, but they must resolve on **every host that reads them** — Plex, Sonarr, Radarr, and any other service that accesses your media library.
+This is the most important setting. Symlinks are created inside the Zurgarr container, but they must resolve on **every host that reads them** — Plex, Sonarr, Radarr, and any other service that accesses your media library.
 
-**Inside pd_zurg**, a file might be at:
+**Inside Zurgarr**, a file might be at:
 ```
-/data/pd_zurg/shows/Release.Name/episode.mkv
+/data/zurgarr/shows/Release.Name/episode.mkv
 ```
 
 **On the host**, the same file is accessible at:
@@ -251,15 +251,15 @@ This is the most important setting. Symlinks are created inside the pd_zurg cont
 
 So you set `BLACKHOLE_SYMLINK_TARGET_BASE=/mnt/debrid` — this replaces the container-internal mount path with the host-visible path in the symlink target.
 
-**Single-host example:** If your rclone mount is at `/mnt/debrid` on the host and mounted into both pd_zurg (`/data`) and Sonarr (`/mnt/debrid`):
+**Single-host example:** If your rclone mount is at `/mnt/debrid` on the host and mounted into both Zurgarr (`/data`) and Sonarr (`/mnt/debrid`):
 ```
 BLACKHOLE_SYMLINK_TARGET_BASE=/mnt/debrid
 ```
 
 **Multi-host example:** If Plex and Sonarr/Radarr run on different hosts with different mount paths, the `BLACKHOLE_SYMLINK_TARGET_BASE` path must resolve on **all** of them. If the rclone mount has different paths on each host, create a symlink on hosts where the path doesn't match:
 ```bash
-# On a host where the mount is at /mnt/remote/realdebrid/pd_zurg but symlinks use /mnt/debrid:
-sudo ln -s /mnt/remote/realdebrid/pd_zurg /mnt/debrid
+# On a host where the mount is at /mnt/remote/realdebrid/zurgarr but symlinks use /mnt/debrid:
+sudo ln -s /mnt/remote/realdebrid/zurgarr /mnt/debrid
 ```
 ```
 BLACKHOLE_SYMLINK_TARGET_BASE=/mnt/debrid
@@ -275,7 +275,7 @@ BLACKHOLE_DIR=/watch
 # Blackhole Symlink Settings
 BLACKHOLE_SYMLINK_ENABLED=true
 BLACKHOLE_COMPLETED_DIR=/completed
-BLACKHOLE_RCLONE_MOUNT=/data/pd_zurg
+BLACKHOLE_RCLONE_MOUNT=/data/zurgarr
 BLACKHOLE_SYMLINK_TARGET_BASE=/mnt/debrid
 BLACKHOLE_MOUNT_POLL_TIMEOUT=300
 BLACKHOLE_MOUNT_POLL_INTERVAL=10
@@ -291,21 +291,21 @@ BLACKHOLE_LOCAL_LIBRARY_MOVIES=/data/media/movies
 
 These snippets show the **labeled layout** (recommended). For flat-mode single-arr installs, drop the label subdirs from the volume paths — everything else is identical.
 
-#### pd_zurg
+#### Zurgarr
 
 ```yaml
 services:
-  pd_zurg:
-    image: pd_zurg:latest
-    container_name: pd_zurg
+  zurgarr:
+    image: zurgarr:latest
+    container_name: zurgarr
     volumes:
       - ./zurg_config.yml:/zurg/config.yml
       - config:/config
       - log:/log
       - rd:/zurg/RD
       - /mnt/remote/realdebrid:/data:shared      # rclone mount
-      - /opt/blackhole:/watch                      # PARENT dir — pd_zurg sees all labels
-      - /opt/completed:/completed                  # PARENT dir — pd_zurg writes all labels
+      - /opt/blackhole:/watch                      # PARENT dir — Zurgarr sees all labels
+      - /opt/completed:/completed                  # PARENT dir — Zurgarr writes all labels
       # Local library for dedup (read-only)
       - /mnt/truenas/data/media/tv:/data/media/tv:ro
       - /mnt/truenas/data/media/movies:/data/media/movies:ro
@@ -314,9 +314,9 @@ services:
       - BLACKHOLE_DIR=/watch
       - BLACKHOLE_SYMLINK_ENABLED=true
       - BLACKHOLE_COMPLETED_DIR=/completed
-      - BLACKHOLE_RCLONE_MOUNT=/data/pd_zurg       # adjust to match your RCLONE_MOUNT_NAME
+      - BLACKHOLE_RCLONE_MOUNT=/data/zurgarr       # adjust to match your RCLONE_MOUNT_NAME
       - BLACKHOLE_SYMLINK_TARGET_BASE=/mnt/debrid   # path as seen by Sonarr/Radarr
-      # ... other pd_zurg settings ...
+      # ... other Zurgarr settings ...
     devices:
       - /dev/fuse:/dev/fuse:rwm
     cap_add:
@@ -405,9 +405,9 @@ Same as Sonarr — go to **Settings → Download Clients → Add → Torrent Bla
 
 If you're upgrading from a pre-label-routing setup where Sonarr and Radarr shared `/opt/blackhole` and `/opt/completed`, follow these steps once. Existing in-flight torrents and symlinks keep working throughout.
 
-1. **Stop pd_zurg and all arrs** so nothing writes new files during the reshape.
+1. **Stop Zurgarr and all arrs** so nothing writes new files during the reshape.
    ```bash
-   docker stop pd_zurg sonarr radarr
+   docker stop zurgarr sonarr radarr
    ```
 
 2. **Create label subdirs on the host**:
@@ -418,15 +418,15 @@ If you're upgrading from a pre-label-routing setup where Sonarr and Radarr share
 
 3. **(Optional) Move any in-flight files** into the correct label dir. Anything left at the root of `/opt/blackhole` keeps working in flat mode — only new drops from the arrs need to land in the label subdirs.
 
-4. **Update each arr's docker-compose volume mounts** to point at the label subdir (see the Sonarr/Radarr snippets above). pd_zurg keeps mounting the parents.
+4. **Update each arr's docker-compose volume mounts** to point at the label subdir (see the Sonarr/Radarr snippets above). Zurgarr keeps mounting the parents.
 
-5. **Start pd_zurg first, then the arrs**:
+5. **Start Zurgarr first, then the arrs**:
    ```bash
-   docker start pd_zurg
+   docker start zurgarr
    docker start sonarr radarr
    ```
 
-Existing release folders under `/opt/completed/` root (from before the migration) are still valid — pd_zurg's cleanup task will expire them on the normal schedule (`BLACKHOLE_SYMLINK_MAX_AGE`, default 72h). You don't need to move them.
+Existing release folders under `/opt/completed/` root (from before the migration) are still valid — Zurgarr's cleanup task will expire them on the normal schedule (`BLACKHOLE_SYMLINK_MAX_AGE`, default 72h). You don't need to move them.
 
 If you prefer to stay on flat layout with a single arr, no change is required. The code treats both layouts as first-class.
 
@@ -436,7 +436,7 @@ If you prefer to stay on flat layout with a single arr, no change is required. T
 
 If you run a strict Sonarr/Radarr profile — say "2160p REMUX only" or "1080p BluRay only" — and the debrid service has no cached copy at that tier, the blackhole will normally cycle through the arr's alternatives at the same tier and eventually move the file to `failed/`. The episode stays missing until you manually relax the profile or pick a different release, even when a perfectly good cached copy one tier down is sitting right there.
 
-Smart quality compromise is an opt-in safety net for this case. After a waiting period at the preferred tier, pd_zurg probes one tier below within the same profile, checks your debrid cache, and grabs the best cached release at that lower tier. **The arr's quality profile is always the ceiling** — pd_zurg never grabs a tier your profile doesn't permit, no matter how long it waits. When the preferred tier later appears on debrid, Sonarr's/Radarr's normal upgrade logic reclaims it automatically — compromises are temporary placeholders, not permanent decisions.
+Smart quality compromise is an opt-in safety net for this case. After a waiting period at the preferred tier, Zurgarr probes one tier below within the same profile, checks your debrid cache, and grabs the best cached release at that lower tier. **The arr's quality profile is always the ceiling** — Zurgarr never grabs a tier your profile doesn't permit, no matter how long it waits. When the preferred tier later appears on debrid, Sonarr's/Radarr's normal upgrade logic reclaims it automatically — compromises are temporary placeholders, not permanent decisions.
 
 ### How to enable
 
@@ -459,15 +459,15 @@ QUALITY_COMPROMISE_NOTIFY=true           # Apprise notification on each compromi
 Apply via SIGHUP (no restart needed):
 
 ```bash
-docker kill -s HUP pd_zurg
+docker kill -s HUP zurgarr
 ```
 
 Or use the **Settings → Quality Compromise** section of the web UI.
 
 #### Decide on `ONLY_CACHED` for your debrid provider
 
-- **Default (`true`, recommended):** pd_zurg only compromises to a release the debrid service already has cached. A compromise to an uncached release is worse than no compromise — you'd trade quality and still wait on the debrid download.
-- **Real-Debrid caveat:** Real-Debrid deprecated their cache-availability endpoint in November 2024, so pd_zurg cannot tell whether a Real-Debrid release is cached. Under the default `ONLY_CACHED=true`, RD users will effectively never see a compromise fire (every candidate is "unknown" and treated as not cached). If you're on RD and want compromises anyway, set `QUALITY_COMPROMISE_ONLY_CACHED=false` — this is aggressive (the compromise candidate may need to download from peers) but will let the engine escalate.
+- **Default (`true`, recommended):** Zurgarr only compromises to a release the debrid service already has cached. A compromise to an uncached release is worse than no compromise — you'd trade quality and still wait on the debrid download.
+- **Real-Debrid caveat:** Real-Debrid deprecated their cache-availability endpoint in November 2024, so Zurgarr cannot tell whether a Real-Debrid release is cached. Under the default `ONLY_CACHED=true`, RD users will effectively never see a compromise fire (every candidate is "unknown" and treated as not cached). If you're on RD and want compromises anyway, set `QUALITY_COMPROMISE_ONLY_CACHED=false` — this is aggressive (the compromise candidate may need to download from peers) but will let the engine escalate.
 - **AllDebrid and TorBox:** Their cache endpoints still work, so strict mode behaves as expected. No change needed.
 
 #### Season-pack fallback (opt-in on top)
@@ -500,18 +500,18 @@ Flip the master toggle off:
 
 ```bash
 QUALITY_COMPROMISE_ENABLED=false
-docker kill -s HUP pd_zurg
+docker kill -s HUP zurgarr
 ```
 
 The blackhole returns to pre-feature behavior immediately: no tier escalation, no season-pack probes, no new `compromise_grabbed` events. **No data migration is required** — existing `.meta` sidecars with `tier_state` are simply ignored by the decision loop, and they keep working if you flip the toggle back on later. Past `compromise_grabbed` history events stay in the log (they're audit records, not operational state); the `↓ <tier>` badge on the library detail page fades out naturally as those events age past the history retention window.
 
 ## Verification
 
-### Step 1: Check pd_zurg logs at startup
+### Step 1: Check Zurgarr logs at startup
 
 ```
 [blackhole] Watching /watch (poll: 5s, service: realdebrid)
-[blackhole] Symlink mode enabled: completed=/completed, mount=/data/pd_zurg, target_base=/mnt/debrid, timeout=300s, interval=10s, max_age=72h
+[blackhole] Symlink mode enabled: completed=/completed, mount=/data/zurgarr, target_base=/mnt/debrid, timeout=300s, interval=10s, max_age=72h
 ```
 
 If you see this, the blackhole with symlink mode is running.
@@ -532,7 +532,7 @@ You should see this sequence:
 [blackhole] Added to realdebrid: test.magnet
 [blackhole] Monitoring torrent XXXXX for test.magnet
 [blackhole] Torrent ready: test.magnet (release: Release.Name)
-[blackhole] Found on mount: /data/pd_zurg/shows/Release.Name (category: shows)
+[blackhole] Found on mount: /data/zurgarr/shows/Release.Name (category: shows)
 [blackhole] Symlink: episode.mkv -> /mnt/debrid/shows/Release.Name/episode.mkv
 [blackhole] Created N symlink(s) for Release.Name
 ```
@@ -560,8 +560,8 @@ In Sonarr, go to **Activity → Queue**. You should see the download appear as "
 ### Symlinks not being created
 
 **Check the logs for "Waiting for ... on mount":**
-This means pd_zurg submitted the torrent to debrid and it's ready, but the content hasn't appeared on the rclone mount yet. Possible causes:
-- `BLACKHOLE_RCLONE_MOUNT` is wrong. If `RCLONE_MOUNT_NAME=pd_zurg`, the mount is at `/data/pd_zurg`, not `/data`.
+This means Zurgarr submitted the torrent to debrid and it's ready, but the content hasn't appeared on the rclone mount yet. Possible causes:
+- `BLACKHOLE_RCLONE_MOUNT` is wrong. If `RCLONE_MOUNT_NAME=zurgarr`, the mount is at `/data/zurgarr`, not `/data`.
 - Zurg hasn't detected the new torrent yet. Zurg checks for changes every N seconds (configured via `check_for_changes_every_secs` in zurg config). Wait or reduce this interval.
 - The release name from the debrid API doesn't match the folder name on the mount. Check what Zurg created vs what the API returned.
 
@@ -599,19 +599,19 @@ Check that:
 - Releases aren't blocklisted (check **Activity → Blocklist**)
 - The download client is enabled and passes the test
 
-### Content on debrid mount but not found by pd_zurg
+### Content on debrid mount but not found by Zurgarr
 
 The release name from the debrid API may not match the folder name Zurg creates. Check:
 ```bash
-# What the API returned (in pd_zurg logs):
+# What the API returned (in Zurgarr logs):
 # "release: Something.S01E01.1080p.WEB.mkv"
 
 # What Zurg created:
-docker exec pd_zurg ls /data/pd_zurg/shows/ | grep -i "something"
+docker exec zurgarr ls /data/zurgarr/shows/ | grep -i "something"
 # "Something.S01E01.1080p.WEB"  ← Zurg stripped the .mkv extension
 ```
 
-pd_zurg handles this automatically by trying both the original name and the extension-stripped name. If you're still having issues, check if there are other naming differences.
+Zurgarr handles this automatically by trying both the original name and the extension-stripped name. If you're still having issues, check if there are other naming differences.
 
 ### Multi-host: NFS "access denied"
 
@@ -623,7 +623,7 @@ Make sure:
 
 ## Auto-Symlinks for Debrid-Only Content
 
-In addition to the blackhole pipeline (where Sonarr/Radarr submit torrents), pd_zurg can automatically create symlinks for content that was added to debrid through other means — direct uploads, other tools, or shared debrid accounts.
+In addition to the blackhole pipeline (where Sonarr/Radarr submit torrents), Zurgarr can automatically create symlinks for content that was added to debrid through other means — direct uploads, other tools, or shared debrid accounts.
 
 ### How it works
 
@@ -643,7 +643,7 @@ All of these must be set:
 | Variable | Purpose | Example |
 |----------|---------|---------|
 | `BLACKHOLE_SYMLINK_ENABLED` | Enable symlink features | `true` |
-| `BLACKHOLE_RCLONE_MOUNT` | rclone mount path inside pd_zurg container | `/data/pd_zurg` |
+| `BLACKHOLE_RCLONE_MOUNT` | rclone mount path inside Zurgarr container | `/data/zurgarr` |
 | `BLACKHOLE_SYMLINK_TARGET_BASE` | Same mount as seen by Sonarr/Radarr | `/mnt/debrid` |
 | `BLACKHOLE_LOCAL_LIBRARY_TV` | Local TV library (must be **read-write**) | `/data/media/tv` |
 | `BLACKHOLE_LOCAL_LIBRARY_MOVIES` | Local movie library (must be **read-write**) | `/data/media/movies` |
@@ -652,7 +652,7 @@ For the Sonarr/Radarr rescan trigger, also configure `SONARR_URL`/`SONARR_API_KE
 
 ### Important: read-write mounts
 
-The local library paths **must be mounted read-write** in the pd_zurg container. If they are read-only (`:ro`), symlink creation will fail with `Read-only file system` errors. In your pd_zurg `docker-compose.yml`:
+The local library paths **must be mounted read-write** in the Zurgarr container. If they are read-only (`:ro`), symlink creation will fail with `Read-only file system` errors. In your Zurgarr `docker-compose.yml`:
 
 ```yaml
 volumes:
@@ -690,11 +690,11 @@ Yes. Any media server that follows symlinks will work. Point your library at the
 
 Nearly instant. Cached torrents on Real-Debrid are available in 1-2 seconds. The full pipeline (submit → ready → mount scan → symlink creation) typically completes in under 10 seconds.
 
-### What if I only run pd_zurg and Sonarr on the same host?
+### What if I only run Zurgarr and Sonarr on the same host?
 
 The setup is simpler — you don't need NFS. Just use the same host directory for both containers:
 ```yaml
-# pd_zurg
+# Zurgarr
 volumes:
   - /opt/blackhole:/watch
   - /opt/completed:/completed

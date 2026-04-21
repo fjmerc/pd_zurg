@@ -185,7 +185,7 @@ class AllDebridClient(DebridClientBase):
         super().__init__(api_key, 'alldebrid')
 
     def _params(self):
-        return {'agent': 'pd_zurg', 'apikey': self._api_key}
+        return {'agent': 'zurgarr', 'apikey': self._api_key}
 
     def list_torrents(self):
         resp = tracked_request(

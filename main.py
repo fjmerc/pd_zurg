@@ -37,7 +37,7 @@ def shutdown(signum, frame):
 
     # Best-effort shutdown notification after critical cleanup
     t = threading.Thread(target=notifications.notify,
-                         args=('shutdown', 'pd_zurg Shutting Down', 'Shutdown complete'))
+                         args=('shutdown', 'Zurgarr Shutting Down', 'Shutdown complete'))
     t.daemon = True
     t.start()
     t.join(timeout=5)
@@ -52,7 +52,7 @@ def main():
     banner = (
         "\n"
         "============================================================\n"
-        f"  pd_zurg v{version}\n"
+        f"  Zurgarr v{version}\n"
         "============================================================\n"
     )
 
@@ -62,12 +62,12 @@ def main():
         sys.exit(1)
 
     status_server.setup()
-    status_server.status_data.add_event('main', f'pd_zurg v{version} starting')
+    status_server.status_data.add_event('main', f'Zurgarr v{version} starting')
 
     history.init()
     blocklist.init()
     notifications.init()
-    notifications.notify('startup', 'pd_zurg Started', f'Version {version}')
+    notifications.notify('startup', 'Zurgarr Started', f'Version {version}')
 
     if str(ZURG).lower() == 'true':
         if not (RDAPIKEY or ADAPIKEY):

@@ -247,7 +247,7 @@ _CONFIG_PREFIXES = (
 
 
 def get_sanitized_config():
-    """Return current pd_zurg config with sensitive values masked."""
+    """Return current Zurgarr config with sensitive values masked."""
     config = {}
     for key in sorted(os.environ.keys()):
         if not any(key.startswith(p) for p in _CONFIG_PREFIXES):
@@ -333,7 +333,7 @@ def check_services():
     if ad_key:
         svc, resp = _check_service(
             'AllDebrid', 'debrid',
-            f'https://api.alldebrid.com/v4/user?agent=pd_zurg&apikey={ad_key}')
+            f'https://api.alldebrid.com/v4/user?agent=zurgarr&apikey={ad_key}')
         if resp:
             try:
                 data = resp.json()
@@ -547,7 +547,7 @@ _SETTINGS_SETUP_HTML = '''<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>pd_zurg Settings - Setup</title>
+<title>Zurgarr Settings - Setup</title>
 <style>
 :root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--blue:#58a6ff;--green:#3fb950}
 [data-theme="light"]{--bg:#f6f8fa;--card:#ffffff;--border:#d0d7de;--text:#1f2328;--text2:#656d76;--blue:#0969da;--green:#1a7f37}
@@ -569,7 +569,7 @@ pre{background:var(--bg);border:1px solid var(--border);border-radius:8px;paddin
 </style>
 </head>
 <body>
-<h1>pd_zurg Settings Editor</h1>
+<h1>Zurgarr Settings Editor</h1>
 <p class="subtitle">Configure everything from your browser — no SSH or file editing needed.</p>
 
 <div class="card">
@@ -598,7 +598,7 @@ pre{background:var(--bg);border:1px solid var(--border);border-radius:8px;paddin
 </div>
 
 <div class="note">
-  The settings editor lets you configure all pd_zurg environment variables and plex_debrid settings through the browser, with live validation and reload — no container restart needed for most changes.
+  The settings editor lets you configure all Zurgarr environment variables and plex_debrid settings through the browser, with live validation and reload — no container restart needed for most changes.
   <br><br>
   <a href="/status">&larr; Back to Dashboard</a>
 </div>
@@ -1035,7 +1035,7 @@ def get_dashboard_html():
     from utils.ui_common import (get_base_head, get_nav_html, THEME_TOGGLE_JS,
                                  WANTED_BADGE_JS, KEYBOARD_JS, TOAST_JS)
     html = _DASHBOARD_HTML
-    html = html.replace('__BASE_HEAD__', get_base_head('pd_zurg Status', _DASHBOARD_EXTRA_CSS))
+    html = html.replace('__BASE_HEAD__', get_base_head('Zurgarr Status', _DASHBOARD_EXTRA_CSS))
     html = html.replace('__NAV_HTML__', get_nav_html('status'))
     html = html.replace('__THEME_TOGGLE_JS__', THEME_TOGGLE_JS + KEYBOARD_JS + TOAST_JS)
     html = html.replace('__WANTED_BADGE_JS__', WANTED_BADGE_JS)
@@ -1206,7 +1206,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             # Recent quality-compromise grabs — plan 33 observability.
             # Surface the structured fields (preferred/grabbed tier, reason,
             # strategy, dwell, hit counts) so the dashboard can answer
-            # "why did pd_zurg grab 1080p when 2160p was in the profile?"
+            # "why did Zurgarr grab 1080p when 2160p was in the profile?"
             # without re-parsing the detail body.
             from utils import history as history_mod
             parsed = urlparse(self.path)
@@ -2014,7 +2014,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     return
 
                 if result.get('status') == 'deleted':
-                    # --- Cleanup pd_zurg artifacts for the deleted title ---
+                    # --- Cleanup Zurgarr artifacts for the deleted title ---
                     from utils.library import normalize_title, remove_title_symlinks
                     norm = normalize_title(title)
                     cleanup = {}
@@ -2427,7 +2427,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
 
     def _send_auth_required(self):
         self.send_response(401)
-        self.send_header('WWW-Authenticate', 'Basic realm="pd_zurg"')
+        self.send_header('WWW-Authenticate', 'Basic realm="Zurgarr"')
         self.end_headers()
 
     def _accepts_gzip(self):

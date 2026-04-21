@@ -313,7 +313,7 @@ class TestTrackedRequest:
 
     def test_exception_error_sanitizes_credentials(self):
         """API keys in exception messages should be redacted."""
-        url_with_key = 'https://api.alldebrid.com/v4/magnet/upload?agent=pd_zurg&apikey=SECRET123KEY'
+        url_with_key = 'https://api.alldebrid.com/v4/magnet/upload?agent=zurgarr&apikey=SECRET123KEY'
         mock_method = MagicMock(side_effect=ConnectionError(url_with_key))
 
         with patch('utils.api_metrics.api_metrics') as mock_metrics:

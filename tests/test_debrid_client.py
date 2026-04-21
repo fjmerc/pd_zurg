@@ -365,7 +365,7 @@ class TestAllDebrid:
         ad.list_torrents()
         params = mock_get.call_args[1]['params']
         assert params['apikey'] == 'test-ad-key'
-        assert params['agent'] == 'pd_zurg'
+        assert params['agent'] == 'zurgarr'
 
 
 # ---------------------------------------------------------------------------
@@ -435,7 +435,7 @@ class TestErrorSanitization:
         assert sanitized == 'some error'
 
     def test_sanitize_ad_key_in_url(self, ad):
-        error = Exception('https://api.alldebrid.com/v4/magnet/status?agent=pd_zurg&apikey=test-ad-key')
+        error = Exception('https://api.alldebrid.com/v4/magnet/status?agent=zurgarr&apikey=test-ad-key')
         sanitized = ad._sanitize_error(error)
         assert 'test-ad-key' not in sanitized
 

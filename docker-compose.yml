@@ -1,26 +1,26 @@
 services:
-  pd_zurg:
-    container_name: pd_zurg
-    image: pd_zurg:latest  # Build locally: docker build -t pd_zurg https://github.com/fjmerc/pd_zurg.git
+  zurgarr:
+    container_name: zurgarr
+    image: zurgarr:latest  # Build locally: docker build -t zurgarr https://github.com/fjmerc/zurgarr.git
     stdin_open: true # docker run -i
     tty: true        # docker run -t
     volumes:
       ## Location of configuration files
-      - /pd_zurg/config:/config
+      - /zurgarr/config:/config
       ## Location for logs
-      - /pd_zurg/log:/log
+      - /zurgarr/log:/log
       ## Location for rclone cache if enabled
-      - /pd_zurg/cache:/cache
+      - /zurgarr/cache:/cache
       ## Location for Zurg RealDebrid active configuration
-      - /pd_zurg/RD:/zurg/RD
+      - /zurgarr/RD:/zurg/RD
       ## Location for Zurg AllDebrid active configuration
-      - /pd_zurg/AD:/zurg/AD
+      - /zurgarr/AD:/zurg/AD
       ## Location for rclone mount to host
-      - /pd_zurg/mnt:/data:shared
+      - /zurgarr/mnt:/data:shared
       ## Blackhole watch folder for .torrent/.magnet files (uncomment to enable)
-      # - /pd_zurg/watch:/watch
+      # - /zurgarr/watch:/watch
       ## Completed symlinks directory for Sonarr/Radarr import (uncomment to enable)
-      # - /pd_zurg/completed:/completed
+      # - /zurgarr/completed:/completed
     environment:
       ## ---------------------------------------------------------------
       ## All values are read from your .env file (see .env.example)
@@ -41,7 +41,7 @@ services:
       - ZURG_USER=${ZURG_USER:-}
       - ZURG_PASS=${ZURG_PASS:-}
       ## rclone
-      - RCLONE_MOUNT_NAME=${RCLONE_MOUNT_NAME:-pd_zurg}
+      - RCLONE_MOUNT_NAME=${RCLONE_MOUNT_NAME:-zurgarr}
       - RCLONE_LOG_LEVEL=${RCLONE_LOG_LEVEL:-}
       - NFS_ENABLED=${NFS_ENABLED:-}
       - NFS_PORT=${NFS_PORT:-}

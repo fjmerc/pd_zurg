@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## Version [2.18.0] - 2026-04-21
+
+### Changed
+
+- **Project renamed from pd_zurg to Zurgarr**: The fork has substantially diverged from the now-archived upstream [I-am-PUID-0/pd_zurg](https://github.com/I-am-PUID-0/pd_zurg) — 327+ commits ahead with new subsystems (library browser, debrid search, blackhole automation, history, blocklist, notifications, metrics, ffprobe monitor, MDBList integration), ~22k lines of tests, and full architecture documentation that don't exist upstream. The project is renamed to **Zurgarr** to fit the *arr ecosystem naming convention (Sonarr/Radarr/Lidarr/Prowlarr) and signal that it is its own project rather than a thin downstream of pd_zurg. The MIT-licensed lineage is preserved with attribution in `README.md` ("Why This Project?" section), `LICENSE`, and `THIRD_PARTY_NOTICES.md`. Scope is **branding only** — internal Python module names, env var keys (`PDZURG_LOG_LEVEL`, `BLACKHOLE_*`, etc.), Prometheus metric names (`pd_zurg_*` prefix), localStorage keys, and the `.pd_zurg_backup` file extension are all deliberately retained for full backward compatibility. Existing `.env` files, Grafana dashboards, and on-disk state continue to work without migration.
+
+- **User-facing rename surfaces**: Startup banner, status events, Apprise notification titles (`Zurgarr Started`, `Zurgarr Shutting Down`, `Zurgarr Daily Summary`), all WebUI page titles (`Zurgarr Status`, `Zurgarr Library`, `Zurgarr Activity`, `Zurgarr System`, `Zurgarr Settings`), the settings editor's "Zurgarr" tab label, the sidebar nav link, the workflow diagram node, the AllDebrid `agent` query parameter (`agent=zurgarr`), the User-Agent header sent to Torrentio/TMDB/Sonarr/Radarr (`zurgarr/1.0`), and the Basic Auth realm (`Basic realm="Zurgarr"` — browsers may prompt to re-save credentials once). Docker container name, image name, and service key in the example `docker-compose.yml` are now `zurgarr`. The default `RCLONE_MOUNT_NAME` in `.env.example` and `update_docker_compose.sh` is now `zurgarr` (was `pd_zurg`) — only affects fresh installs that rely on the default; existing deployments that set `RCLONE_MOUNT_NAME` explicitly are unchanged. README, ARCHITECTURE.md, and BLACKHOLE_SYMLINK_GUIDE.md fully rebranded with a new "Migrating from pd_zurg" section. CI workflow auto-derives the published Docker image name from the GitHub repo name, so the image moves to `fjmerc/zurgarr` once the repository is renamed on GitHub; old `fjmerc/pd_zurg` images on Docker Hub remain pullable but are no longer pushed to.
+
+- **Version bumped to 2.18.0** to mark the rename as a deliberate release boundary. The renamed Basic Auth realm is the only behavioural change requiring user action (re-saving browser credentials).
+
 ## Version [2.17.8] - 2026-04-17
 
 ### Fixed

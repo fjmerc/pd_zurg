@@ -1,6 +1,6 @@
 """HTML template for the web-based settings editor.
 
-Generates a single-page settings form with two tabs (pd_zurg env vars
+Generates a single-page settings form with two tabs (Zurgarr env vars
 and plex_debrid settings.json). Communicates with /api/settings/* endpoints.
 """
 
@@ -20,7 +20,7 @@ def get_settings_html(env_schema, pd_schema):
     env_json = json.dumps(env_schema).replace('</', '<\\/')
     pd_json = json.dumps(pd_schema).replace('</', '<\\/')
     html = _SETTINGS_HTML
-    html = html.replace('__BASE_HEAD__', get_base_head('pd_zurg Settings'))
+    html = html.replace('__BASE_HEAD__', get_base_head('Zurgarr Settings'))
     html = html.replace('__NAV_HTML__', get_nav_html('settings'))
     html = html.replace('__THEME_TOGGLE_JS__', THEME_TOGGLE_JS + KEYBOARD_JS + TOAST_JS)
     html = html.replace('__WANTED_BADGE_JS__', WANTED_BADGE_JS)
@@ -214,13 +214,13 @@ mark{background:var(--yellow);color:#0d1117;border-radius:2px;padding:0 1px}
 </style>
 
 <div class="tabs" role="tablist">
-  <div class="tab active" role="tab" tabindex="0" aria-selected="true" aria-controls="tab-env" data-kb="tab-1" onclick="switchTab('env')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('env')}">pd_zurg</div>
+  <div class="tab active" role="tab" tabindex="0" aria-selected="true" aria-controls="tab-env" data-kb="tab-1" onclick="switchTab('env')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('env')}">Zurgarr</div>
   <div class="tab" role="tab" tabindex="0" aria-selected="false" aria-controls="tab-pd" data-kb="tab-2" onclick="switchTab('pd')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('pd')}">plex_debrid</div>
 </div>
 
 <div class="banner" id="banner"></div>
 
-<!-- pd_zurg env vars tab -->
+<!-- Zurgarr env vars tab -->
 <div class="tab-content active" id="tab-env" role="tabpanel">
   <div class="tab-toolbar">
     <a class="btn btn-ghost btn-sm" href="/api/settings/export/env" download=".env">Export .env</a>
@@ -252,7 +252,7 @@ mark{background:var(--yellow);color:#0d1117;border-radius:2px;padding:0 1px}
   </div>
 </div>
 
-<div class="footer">pd_zurg changes apply via SIGHUP reload. plex_debrid changes trigger a service restart.</div>
+<div class="footer">Zurgarr changes apply via SIGHUP reload. plex_debrid changes trigger a service restart.</div>
 
 <div class="save-bar" id="save-bar" role="status" aria-live="polite">
   <span class="change-count" id="save-bar-count"></span>
@@ -347,7 +347,7 @@ function setButtonLoading(id, loading, text) {
 }
 
 // -----------------------------------------------------------------------
-// pd_zurg env var tab
+// Zurgarr env var tab
 // -----------------------------------------------------------------------
 function renderEnvField(field, value) {
   const id = 'env-' + field.key;
@@ -1253,7 +1253,7 @@ function oauthCancel(service, fieldId) {
 // Import / Export / Reset
 // -----------------------------------------------------------------------
 async function envResetDefaults() {
-  if (!confirm('Reset all pd_zurg settings to empty defaults? You will still need to click Save to apply.')) return;
+  if (!confirm('Reset all Zurgarr settings to empty defaults? You will still need to click Save to apply.')) return;
   try {
     const resp = await fetch('/api/settings/reset/env', {method: 'POST'});
     const defaults = await resp.json();
@@ -1574,8 +1574,8 @@ async function init() {
   try {
     const resp = await fetch('/api/settings/env');
     if (resp.ok) { envValues = await resp.json(); }
-    else { showBanner('error', 'Failed to load pd_zurg settings (HTTP ' + resp.status + '). Check authentication.'); }
-  } catch (e) { showBanner('error', 'Failed to load pd_zurg settings: ' + esc(e.message)); }
+    else { showBanner('error', 'Failed to load Zurgarr settings (HTTP ' + resp.status + '). Check authentication.'); }
+  } catch (e) { showBanner('error', 'Failed to load Zurgarr settings: ' + esc(e.message)); }
   renderEnvCategories(envValues);
 
   // Load plex_debrid values

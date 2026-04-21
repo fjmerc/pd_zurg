@@ -830,7 +830,7 @@ def _check_local_library_health():
 
     When a network mount (NFS/SMB) drops silently, the bind-mounted path
     inside the container still exists but only contains debrid symlinks
-    that pd_zurg created locally.  Detecting the absence of real files
+    that Zurgarr created locally.  Detecting the absence of real files
     catches this early and sends a notification.
     """
     local_movies = os.environ.get('BLACKHOLE_LOCAL_LIBRARY_MOVIES', '').strip()
@@ -951,7 +951,7 @@ def notification_digest():
 
     try:
         from utils.notifications import notify
-        notify('daily_digest', 'pd_zurg Daily Summary', body)
+        notify('daily_digest', 'Zurgarr Daily Summary', body)
     except Exception as e:
         logger.error(f"[scheduler] Digest notification failed: {e}")
         return {'status': 'error', 'message': str(e)}

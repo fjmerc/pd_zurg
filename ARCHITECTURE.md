@@ -1,6 +1,6 @@
 # Architecture Guide
 
-Developer reference for pd_zurg internals. Complements [CLAUDE.md](CLAUDE.md) (rules, gotchas, commands) and [README.md](README.md) (user setup, env var reference). Use this document when implementing features to understand how the pieces connect, what data flows will be affected, and what side effects to expect.
+Developer reference for Zurgarr internals. Complements [CLAUDE.md](CLAUDE.md) (rules, gotchas, commands) and [README.md](README.md) (user setup, env var reference). Use this document when implementing features to understand how the pieces connect, what data flows will be affected, and what side effects to expect.
 
 ---
 
@@ -8,7 +8,7 @@ Developer reference for pd_zurg internals. Complements [CLAUDE.md](CLAUDE.md) (r
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  pd_zurg container                                              │
+│  Zurgarr container                                              │
 │                                                                 │
 │  main.py (PID 1)                                                │
 │  ├── Zurg RD          (child process — WebDAV server)           │
@@ -203,7 +203,7 @@ BlackholeWatcher._create_symlinks(label=…)
   │   (up to BLACKHOLE_MOUNT_POLL_TIMEOUT, default 300s)
   ├─ flat:    {COMPLETED_DIR}/release/file.mkv          → SYMLINK_TARGET_BASE/…
   ├─ labeled: {COMPLETED_DIR}/<label>/release/file.mkv  → SYMLINK_TARGET_BASE/…
-  │   NOTE: Target path resolves in arr/Plex containers, NOT in pd_zurg
+  │   NOTE: Target path resolves in arr/Plex containers, NOT in Zurgarr
   ├─ Record: history.log_event('symlink_created')
   └─ Notify: notifications.notify('symlink_created')
          │
@@ -215,7 +215,7 @@ Radarr imports from /completed/radarr/ (labeled) — each arr sees only its own 
   └─ Updates: episode/movie status in database
 ```
 
-**Label routing invariant.** When the host directory layout includes label subdirs under `BLACKHOLE_DIR` (e.g. `sonarr/`, `radarr/`), pd_zurg routes each completed symlink into the same-named subdir under `BLACKHOLE_COMPLETED_DIR`. Each arr mounts only its own label subdir. Flat layout (no subdirs) remains fully supported. Any new consumer of `BLACKHOLE_COMPLETED_DIR` must use `utils.blackhole.iter_release_dirs()` rather than assuming top-level entries are release dirs.
+**Label routing invariant.** When the host directory layout includes label subdirs under `BLACKHOLE_DIR` (e.g. `sonarr/`, `radarr/`), Zurgarr routes each completed symlink into the same-named subdir under `BLACKHOLE_COMPLETED_DIR`. Each arr mounts only its own label subdir. Flat layout (no subdirs) remains fully supported. Any new consumer of `BLACKHOLE_COMPLETED_DIR` must use `utils.blackhole.iter_release_dirs()` rather than assuming top-level entries are release dirs.
 
 ### 4.2 Library Scan Cycle
 
@@ -373,7 +373,7 @@ Legacy entries without these fields load with `compromised=False`.
 ### 4.4 Config Reload
 
 ```
-docker kill -s HUP pd_zurg
+docker kill -s HUP zurgarr
   or: Settings editor "Save & Reload"
          │
          ▼
@@ -427,7 +427,7 @@ CREATION (two separate systems):
 VERIFICATION (scheduled_tasks.verify_symlinks — default: every 6 hours)
   ├─ Walk library dirs for symlinks pointing to debrid mount
   ├─ Translate: BLACKHOLE_SYMLINK_TARGET_BASE → BLACKHOLE_RCLONE_MOUNT
-  │   (symlink targets resolve in arr containers, not pd_zurg)
+  │   (symlink targets resolve in arr containers, not Zurgarr)
   ├─ Check: does the translated target exist on the FUSE mount?
   ├─ Mount health guard: abort if mount missing, empty, or categories empty
   │
@@ -461,14 +461,14 @@ HOUSEKEEPING (scheduled_tasks.housekeeping — default: every 24 hours)
 
 ## 5. Cross-Container Path Model
 
-This is the most common source of confusion. Symlinks are created inside pd_zurg but must resolve inside other containers.
+This is the most common source of confusion. Symlinks are created inside Zurgarr but must resolve inside other containers.
 
 ```
 ┌─────────────────────────────────────┐
-│  pd_zurg container                  │
+│  Zurgarr container                  │
 │                                     │
 │  rclone FUSE mount:                 │
-│  /data/pd_zurg/                     │
+│  /data/zurgarr/                     │
 │    ├── movies/                      │
 │    │   └── Movie.Name/file.mkv      │  ← actual file (via WebDAV → debrid CDN)
 │    └── shows/                       │
@@ -479,7 +479,7 @@ This is the most common source of confusion. Symlinks are created inside pd_zurg
 │    → /mnt/debrid/movies/Movie.Name/ │  ← points to TARGET_BASE path
 │      file.mkv                       │     (does NOT resolve here!)
 │                                     │
-│  BLACKHOLE_RCLONE_MOUNT=/data/pd_zurg │
+│  BLACKHOLE_RCLONE_MOUNT=/data/zurgarr │
 │  BLACKHOLE_SYMLINK_TARGET_BASE=     │
 │    /mnt/debrid                      │
 └─────────────────────────────────────┘
@@ -490,7 +490,7 @@ This is the most common source of confusion. Symlinks are created inside pd_zurg
 ┌─────────────────────────────────────┐
 │  Sonarr / Radarr container          │
 │                                     │
-│  /mnt/debrid/pd_zurg/               │  ← same mount, different path
+│  /mnt/debrid/zurgarr/               │  ← same mount, different path
 │    ├── movies/                      │
 │    │   └── Movie.Name/file.mkv      │  ← symlink resolves HERE
 │    └── shows/                       │
@@ -502,11 +502,11 @@ This is the most common source of confusion. Symlinks are created inside pd_zurg
 ┌─────────────────────────────────────┐
 │  Plex container                     │
 │                                     │
-│  /rclone/pd_zurg/                   │  ← same mount, yet another path
+│  /rclone/zurgarr/                   │  ← same mount, yet another path
 │    ├── movies/                      │
 │    └── shows/                       │
 │                                     │
-│  Library points to: /rclone/pd_zurg │
+│  Library points to: /rclone/zurgarr │
 │  Plex sees media files directly     │
 └─────────────────────────────────────┘
 ```
@@ -522,12 +522,12 @@ target = BLACKHOLE_SYMLINK_TARGET_BASE + "/movies/Movie.Name/file.mkv"
 When **verifying** symlinks exist (scheduled_tasks.py, blackhole.py):
 ```
 # Symlink target: /mnt/debrid/movies/Movie.Name/file.mkv
-# Can't check that path — it doesn't exist in pd_zurg container!
+# Can't check that path — it doesn't exist in Zurgarr container!
 # Translate back using anchored prefix check (NOT .replace()):
 symlink_target_real = os.path.realpath(BLACKHOLE_SYMLINK_TARGET_BASE) + '/'
 if target.startswith(symlink_target_real):
     check_path = BLACKHOLE_RCLONE_MOUNT + '/' + target[len(symlink_target_real):]
-# = /data/pd_zurg/movies/Movie.Name/file.mkv
+# = /data/zurgarr/movies/Movie.Name/file.mkv
 # Now check: os.path.exists(check_path)
 ```
 

@@ -638,13 +638,13 @@ class TestSettingsPage:
     def test_returns_html(self):
         html = self._get_html()
         assert '<!DOCTYPE html>' in html
-        assert 'pd_zurg Settings' in html
+        assert 'Zurgarr Settings' in html
 
     def test_has_both_tabs(self):
         html = self._get_html()
         assert 'tab-env' in html
         assert 'tab-pd' in html
-        assert 'pd_zurg' in html
+        assert 'Zurgarr' in html
         assert 'plex_debrid' in html
 
     def test_env_schema_embedded(self):

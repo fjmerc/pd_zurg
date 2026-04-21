@@ -189,7 +189,7 @@ def setup():
                 poll_interval = (os.environ.get('RCLONE_POLL_INTERVAL') or '').strip() or '15s'
                 rclone_command = ["rclone", "mount", f"{mn}:", f"/data/{mn}", "--config", "/config/rclone.config", "--allow-other", f"--poll-interval={poll_interval}", f"--dir-cache-time={dir_cache_time}"]
 
-            # Enable RC API so pd_zurg can refresh dir cache on demand.
+            # Enable RC API so Zurgarr can refresh dir cache on demand.
             # --daemon is intentionally omitted: it forks rclone into a new
             # process that discards the RC server.  ProcessHandler manages the
             # lifecycle instead, keeping the RC port alive for vfs/refresh calls.

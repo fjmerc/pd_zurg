@@ -2464,7 +2464,7 @@ class LibraryScanner:
             tid = info.get('tmdb_id')
             if tid:
                 sonarr_by_tmdb[tid] = info
-        # Load cached TMDB IDs so we can translate pd_zurg titles → TMDB IDs
+        # Load cached TMDB IDs so we can translate Zurgarr titles → TMDB IDs
         from utils.tmdb import get_cached_tmdb_ids, find_show_tmdb_id_by_season
         cached_tmdb_ids = get_cached_tmdb_ids()
         cached_tmdb_movies = cached_tmdb_ids.get('movies', {})

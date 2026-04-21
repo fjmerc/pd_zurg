@@ -5,7 +5,7 @@ only the affected services. Eliminates the need for full
 container restart on config changes.
 
 Usage:
-    docker kill -s HUP pd_zurg
+    docker kill -s HUP zurgarr
 """
 
 import os

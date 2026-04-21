@@ -847,7 +847,7 @@ class BlackholeWatcher:
     def _add_to_alldebrid(self, file_path):
         """Add a torrent/magnet to AllDebrid."""
         ext = os.path.splitext(file_path)[1].lower()
-        params = {'agent': 'pd_zurg', 'apikey': self.debrid_api_key}
+        params = {'agent': 'zurgarr', 'apikey': self.debrid_api_key}
 
         if ext == '.magnet':
             with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
@@ -921,7 +921,7 @@ class BlackholeWatcher:
 
     def _check_alldebrid_status(self, torrent_id):
         """Check torrent status on AllDebrid. Returns (status, info_dict)."""
-        params = {'agent': 'pd_zurg', 'apikey': self.debrid_api_key, 'id': torrent_id}
+        params = {'agent': 'zurgarr', 'apikey': self.debrid_api_key, 'id': torrent_id}
         url = 'https://api.alldebrid.com/v4/magnet/status'
         response = tracked_request('alldebrid', requests.get, url, params=params, timeout=30)
         if response.status_code == 200:

@@ -56,7 +56,7 @@ def _api_get(path, params=None):
     params['api_key'] = api_key
 
     url = _TMDB_BASE + path + '?' + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={'User-Agent': 'pd_zurg/1.0'})
+    req = urllib.request.Request(url, headers={'User-Agent': 'zurgarr/1.0'})
 
     try:
         with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:

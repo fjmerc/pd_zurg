@@ -1,24 +1,24 @@
-# pd_zurg
+# Zurgarr
 
 Stream your Real-Debrid library through Plex or Jellyfin — one container, zero local storage.
 
-![Build Status](https://img.shields.io/github/actions/workflow/status/fjmerc/pd_zurg/docker-image.yml)
+![Build Status](https://img.shields.io/github/actions/workflow/status/fjmerc/zurgarr/docker-image.yml)
 
-## What is pd_zurg?
+## What is Zurgarr?
 
-pd_zurg packages three tools into a single Docker container: **[Zurg](https://github.com/debridmediamanager/zurg-testing)** (connects to your debrid account and serves files via WebDAV), **[rclone](https://github.com/rclone/rclone)** (mounts those files as a local directory), and optionally **[plex_debrid](https://github.com/itsToggle/plex_debrid)** (automates content discovery from your watchlists). Your media server sees the debrid library as local files and streams them on demand — no downloading, no local storage needed.
+Zurgarr packages three tools into a single Docker container: **[Zurg](https://github.com/debridmediamanager/zurg-testing)** (connects to your debrid account and serves files via WebDAV), **[rclone](https://github.com/rclone/rclone)** (mounts those files as a local directory), and optionally **[plex_debrid](https://github.com/itsToggle/plex_debrid)** (automates content discovery from your watchlists). Your media server sees the debrid library as local files and streams them on demand — no downloading, no local storage needed.
 
 ~150MB Alpine image. 3 services. That's it.
 
-## Why This Fork?
+## Why This Project?
 
 > [!NOTE]
-> The original pd_zurg by [I-am-PUID-0](https://github.com/I-am-PUID-0) has been deprecated in favor of [DUMB](https://github.com/I-am-PUID-0/DUMB). This fork keeps pd_zurg alive with a focus on simplicity and reliability.
+> Zurgarr started life as a fork of [pd_zurg](https://github.com/I-am-PUID-0/pd_zurg) by [I-am-PUID-0](https://github.com/I-am-PUID-0), which was deprecated in favor of [DUMB](https://github.com/I-am-PUID-0/DUMB). After substantial divergence (new subsystems, ~22k lines of tests, full architecture docs, and a different feature direction) the project was renamed to Zurgarr to fit the *arr ecosystem naming convention and signal that it's its own thing now. The MIT-licensed lineage is preserved with full attribution.
 
-**What this fork adds:**
+**What Zurgarr adds over the original pd_zurg:**
 
 - **Process auto-restart** — crashed services restart with exponential backoff (5s → 300s), resets after 1 hour of stability
-- **Blackhole watch folder** — Sonarr/Radarr drop `.torrent`/`.magnet` files, pd_zurg sends them to debrid and creates symlinks when ready. Supports **per-arr label routing** so Sonarr and Radarr never see each other's items. See the [Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md)
+- **Blackhole watch folder** — Sonarr/Radarr drop `.torrent`/`.magnet` files, Zurgarr sends them to debrid and creates symlinks when ready. Supports **per-arr label routing** so Sonarr and Radarr never see each other's items. See the [Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md)
 - **Local library dedup** — checks your existing library before submitting to debrid to avoid duplicates
 - **Notifications** — 90+ services via [Apprise](https://github.com/caronc/apprise) (Discord, Telegram, Slack, email, etc.)
 - **Status dashboard** — process health, mount status, system resources, and a browser-based settings editor
@@ -30,7 +30,7 @@ pd_zurg packages three tools into a single Docker container: **[Zurg](https://gi
 
 ## How It Works
 
-pd_zurg supports two workflows. You can use either or both.
+Zurgarr supports two workflows. You can use either or both.
 
 **Watchlist Flow** — plex_debrid monitors your watchlists automatically:
 
@@ -52,7 +52,7 @@ Overseerr (requests) → Sonarr / Radarr (tag-based routing)
   │
   └─ Debrid path (tag: debrid — no VPN needed):
        Blackhole (/watch)
-         → pd_zurg (submit to Real-Debrid)
+         → Zurgarr (submit to Real-Debrid)
            → Zurg / rclone (mount)
              → Symlinks (/completed)
                → Sonarr / Radarr (import) → Plex (stream)
@@ -62,22 +62,22 @@ Overseerr (requests) → Sonarr / Radarr (tag-based routing)
 
 ### Prerequisites
 
-- A **Linux Docker host** (not Docker Desktop — it lacks [mount propagation](https://docs.docker.com/storage/bind-mounts/#configure-bind-propagation) support. See the [wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki/Setup-Guides) for WSL2 alternatives on Windows)
+- A **Linux Docker host** (not Docker Desktop — it lacks [mount propagation](https://docs.docker.com/storage/bind-mounts/#configure-bind-propagation) support. See the [upstream pd_zurg wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki/Setup-Guides) for WSL2 alternatives on Windows — most setup notes still apply)
 - A [Real-Debrid](https://real-debrid.com/apitoken), [AllDebrid](https://alldebrid.com/apikeys/), or [TorBox](https://torbox.app/settings) account with an API key
 - FUSE support on the host (`/dev/fuse`)
 
 ### 1. Build the image
 
 ```bash
-docker build -t pd_zurg https://github.com/fjmerc/pd_zurg.git
+docker build -t zurgarr https://github.com/fjmerc/zurgarr.git
 ```
 
 ### 2. Configure
 
 ```bash
 # Download the example config and compose file
-wget https://raw.githubusercontent.com/fjmerc/pd_zurg/master/.env.example -O .env
-wget https://raw.githubusercontent.com/fjmerc/pd_zurg/master/docker-compose.yml
+wget https://raw.githubusercontent.com/fjmerc/zurgarr/master/.env.example -O .env
+wget https://raw.githubusercontent.com/fjmerc/zurgarr/master/docker-compose.yml
 
 # Edit — at minimum set these:
 #   RD_API_KEY        (your debrid API key)
@@ -103,7 +103,7 @@ docker compose up -d
 
 - Open the status dashboard at `http://your-host:8080/status`
 - Check that Zurg and rclone show as **Running**
-- Verify the mount: `ls mnt/pd_zurg/` should show your debrid library categories
+- Verify the mount: `ls mnt/zurgarr/` should show your debrid library categories
 
 ## Choose Your Workflow
 
@@ -121,7 +121,7 @@ PLEX_ADDRESS=http://192.168.1.100:32400
 
 # Optional: auto-refresh Plex library when new content appears
 PLEX_REFRESH=true
-PLEX_MOUNT_DIR=/pd_zurg
+PLEX_MOUNT_DIR=/zurgarr
 
 # Optional: Overseerr integration
 SEERR_API_KEY=your_key
@@ -140,7 +140,7 @@ Best if you already use Sonarr/Radarr and want debrid as a download client along
 PD_ENABLED=false                # Not needed — Sonarr/Radarr handle discovery
 BLACKHOLE_ENABLED=true
 BLACKHOLE_SYMLINK_ENABLED=true
-BLACKHOLE_RCLONE_MOUNT=/data/pd_zurg
+BLACKHOLE_RCLONE_MOUNT=/data/zurgarr
 BLACKHOLE_SYMLINK_TARGET_BASE=/mnt/debrid   # Path as seen by Plex/Sonarr/Radarr host(s)
 
 # Optional: skip content you already have
@@ -154,7 +154,7 @@ BLACKHOLE_LOCAL_LIBRARY_MOVIES=/data/media/movies
 ```yaml
 volumes:
   - /opt/blackhole:/watch            # Sonarr/Radarr drop .torrent files here
-  - /opt/completed:/completed        # pd_zurg creates symlinks here
+  - /opt/completed:/completed        # Zurgarr creates symlinks here
   # Local library (read-write — needed for auto debrid symlinks):
   - /path/to/library/tv:/data/media/tv
   - /path/to/library/movies:/data/media/movies
@@ -164,7 +164,7 @@ See the **[Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md)** for complete s
 
 #### Quality compromise & season-pack fallback
 
-When a strict Sonarr/Radarr profile (e.g. "2160p REMUX only") turns up no cached release on your debrid provider, pd_zurg's default behavior is to cycle through the arr's alternatives at the same tier and eventually move the torrent to `failed/`. The quality-compromise engine is an **opt-in** escalation path that, after a configurable dwell window, probes one tier below the preferred tier within the same profile and grabs the best cached release there — so an uncached 2160p with a perfectly cached 1080p available doesn't leave the episode missing. The arr's profile is always the ceiling: pd_zurg never grabs a tier the profile doesn't permit, even after dwell, even if cached. When the preferred tier later appears on debrid, Sonarr/Radarr's normal upgrade logic reclaims it — compromises are not permanent.
+When a strict Sonarr/Radarr profile (e.g. "2160p REMUX only") turns up no cached release on your debrid provider, Zurgarr's default behavior is to cycle through the arr's alternatives at the same tier and eventually move the torrent to `failed/`. The quality-compromise engine is an **opt-in** escalation path that, after a configurable dwell window, probes one tier below the preferred tier within the same profile and grabs the best cached release there — so an uncached 2160p with a perfectly cached 1080p available doesn't leave the episode missing. The arr's profile is always the ceiling: Zurgarr never grabs a tier the profile doesn't permit, even after dwell, even if cached. When the preferred tier later appears on debrid, Sonarr/Radarr's normal upgrade logic reclaims it — compromises are not permanent.
 
 Flow: set `QUALITY_COMPROMISE_ENABLED=true`, wait `QUALITY_COMPROMISE_DWELL_DAYS` (default 3) at the preferred tier, then the engine probes the next allowed tier with `QUALITY_COMPROMISE_ONLY_CACHED=true` (default, safest — unknown/not-cached releases are refused) and grabs the best cached candidate. Every compromise fires a `compromise_grabbed` history event, annotates the dashboard, and is surfaced via `GET /api/blackhole/compromises`. Setting `QUALITY_COMPROMISE_NOTIFY=false` silences Apprise but keeps the dashboard trail. Opt-in season-pack fallback (`SEASON_PACK_FALLBACK_ENABLED=true`) probes a cached pack at the **preferred** tier before any tier drop for shows with many holes. See the [Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md#smart-quality-compromise) for full setup, the rollback path, and debrid-provider caveats (Real-Debrid's deprecated cache endpoint).
 
@@ -181,9 +181,9 @@ You can run plex_debrid and blackhole simultaneously. Set `PD_ENABLED=true` and 
 
 ```yaml
 services:
-  pd_zurg:
-    container_name: pd_zurg
-    image: pd_zurg:latest
+  zurgarr:
+    container_name: zurgarr
+    image: zurgarr:latest
     stdin_open: true
     tty: true
     env_file: .env
@@ -213,7 +213,7 @@ services:
 
 ### Plex Companion
 
-The Plex container should wait for pd_zurg's mount to be ready:
+The Plex container should wait for Zurgarr's mount to be ready:
 
 ```yaml
   plex:
@@ -224,13 +224,13 @@ The Plex container should wait for pd_zurg's mount to be ready:
     volumes:
       - /path/to/plex/config:/config
       - /path/to/plex/transcode:/transcode
-      - ./mnt:/rclone               # rclone mount from pd_zurg — add to Plex library
+      - ./mnt:/rclone               # rclone mount from Zurgarr — add to Plex library
     environment:
       - TZ=America/New_York
     ports:
       - "32400:32400"
     depends_on:
-      pd_zurg:
+      zurgarr:
         condition: service_healthy
 ```
 
@@ -260,7 +260,7 @@ The **status dashboard** at `/status` shows:
 - Recent events and filtered log viewer
 
 The **settings editor** at `/settings` provides:
-- **pd_zurg tab** — edit all environment variables with toggles, dropdowns, password fields, inline validation, and SIGHUP reload (no restart needed)
+- **Zurgarr tab** — edit all environment variables with toggles, dropdowns, password fields, inline validation, and SIGHUP reload (no restart needed)
 - **plex_debrid tab** — edit settings.json with multi-select pickers, list editors, and quality profile JSON editor
 - **OAuth tab** — connect Trakt, Debrid Link, Put.io, and Orionoid via device code flow
 - **Import/Export** — download or upload settings for backup and migration
@@ -351,7 +351,7 @@ All settings are documented in [`.env.example`](.env.example) with inline commen
 | `BLACKHOLE_DEBRID` | Debrid service: `realdebrid`, `alldebrid`, `torbox`. Auto-detected if not set | auto |
 | `BLACKHOLE_SYMLINK_ENABLED` | Enable symlink creation after download. See [Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md) | `false` |
 | `BLACKHOLE_COMPLETED_DIR` | Directory for completed symlinks. Under the per-arr label layout, symlinks are nested one level deeper (`BLACKHOLE_COMPLETED_DIR/sonarr/…`). Flat layout still works when no label subdirs are present | `/completed` |
-| `BLACKHOLE_RCLONE_MOUNT` | rclone mount path inside container. Append mount name if set (e.g., `/data/pd_zurg`) | `/data` |
+| `BLACKHOLE_RCLONE_MOUNT` | rclone mount path inside container. Append mount name if set (e.g., `/data/zurgarr`) | `/data` |
 | `BLACKHOLE_SYMLINK_TARGET_BASE` | Mount path as seen by Plex/Sonarr/Radarr host(s). Must resolve on every host that reads symlinks. **Required** for symlink mode | |
 | `BLACKHOLE_MOUNT_POLL_TIMEOUT` | Max seconds to wait for content on mount | `300` |
 | `BLACKHOLE_MOUNT_POLL_INTERVAL` | Seconds between mount checks | `10` |
@@ -432,7 +432,7 @@ All settings are documented in [`.env.example`](.env.example) with inline commen
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `PDZURG_LOG_LEVEL` | pd_zurg [log level](https://docs.python.org/3/library/logging.html#logging-levels) | `INFO` |
+| `PDZURG_LOG_LEVEL` | Zurgarr [log level](https://docs.python.org/3/library/logging.html#logging-levels). (Variable name retained from the project's pd_zurg lineage for backward compatibility.) | `INFO` |
 | `PDZURG_LOG_COUNT` | Number of rotated log files to retain | `2` |
 | `PDZURG_LOG_SIZE` | Max log file size before rotation (`K`/`M`/`G`) | `10M` |
 | `COLOR_LOG_ENABLED` | Enable colored console output | `false` |
@@ -457,14 +457,14 @@ All settings are documented in [`.env.example`](.env.example) with inline commen
 <details>
 <summary><strong>Docker Secrets</strong></summary>
 
-pd_zurg supports Docker secrets for sensitive values. Create files containing each secret and reference them in your compose:
+Zurgarr supports Docker secrets for sensitive values. Create files containing each secret and reference them in your compose:
 
 **Supported:** `github_token`, `rd_api_key`, `ad_api_key`, `torbox_api_key`, `plex_user`, `plex_token`, `plex_address`, `jf_api_key`, `jf_address`, `seerr_api_key`, `seerr_address`
 
 ```yaml
 services:
-  pd_zurg:
-    image: pd_zurg:latest
+  zurgarr:
+    image: zurgarr:latest
     secrets:
       - rd_api_key
       - plex_token
@@ -489,21 +489,21 @@ Remove the corresponding environment variables when using secrets.
 
 **Mount not available / empty `/data` directory**
 - Ensure `/dev/fuse` is mapped and `SYS_ADMIN` capability is set in your compose file
-- Check rclone logs: `docker logs pd_zurg 2>&1 | grep rclone`
+- Check rclone logs: `docker logs zurgarr 2>&1 | grep rclone`
 - Verify your debrid API key is valid and the account is active
 
 **Docker Desktop: mount propagation error**
 - Docker Desktop does not support `rshared` mount propagation required by rclone
 - Use a Linux VM, WSL2, or bare-metal Docker instead
-- See the [wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki/Setup-Guides) for WSL2 setup instructions
+- See the [upstream pd_zurg wiki](https://github.com/I-am-PUID-0/pd_zurg/wiki/Setup-Guides) for WSL2 setup instructions (most steps still apply)
 
 **Plex not seeing debrid content**
-- The Plex library must point to the rclone mount shared from pd_zurg
-- If using `depends_on: service_healthy`, ensure pd_zurg's healthcheck passes first
+- The Plex library must point to the rclone mount shared from Zurgarr
+- If using `depends_on: service_healthy`, ensure Zurgarr's healthcheck passes first
 - Try `PLEX_REFRESH=true` with `PLEX_MOUNT_DIR` set to the mount path as Plex sees it
 
 **Blackhole: symlinks created but broken**
-- `BLACKHOLE_SYMLINK_TARGET_BASE` must match the mount path on every host that reads symlinks (Plex, Sonarr, Radarr), not inside the pd_zurg container
+- `BLACKHOLE_SYMLINK_TARGET_BASE` must match the mount path on every host that reads symlinks (Plex, Sonarr, Radarr), not inside the Zurgarr container
 - If services run on different hosts with different mount paths, create a symlink (e.g., `ln -s /actual/mount/path /mnt/debrid`) so the path resolves everywhere
 - Verify the rclone/WebDAV mount is accessible from where Plex/Sonarr/Radarr run
 - See the [Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md#troubleshooting) for detailed diagnostics
@@ -512,24 +512,30 @@ Remove the corresponding environment variables when using secrets.
 - Normal when Plex scans expired debrid links — the monitor handles it automatically
 - Increase `FFPROBE_STUCK_TIMEOUT` if you see false positives during large library scans
 
+**Migrating from pd_zurg**
+- Container/image renamed `pd_zurg` → `zurgarr`. Update `container_name`, `image`, and the service key in your `docker-compose.yml`. Old Docker Hub images under `fjmerc/pd_zurg` remain accessible but new pushes go to `fjmerc/zurgarr`.
+- Default rclone mount name is now `zurgarr` (was `pd_zurg`). If you set `RCLONE_MOUNT_NAME` explicitly in `.env`, nothing changes. If you relied on the default, your mount path becomes `/data/zurgarr` instead of `/data/pd_zurg` — update `BLACKHOLE_RCLONE_MOUNT` and `PLEX_MOUNT_DIR` accordingly.
+- Env var keys (`PDZURG_LOG_LEVEL`, etc.) and Prometheus metric names (`pd_zurg_*` prefix) are deliberately retained for backward compatibility — your `.env` files and Grafana dashboards keep working.
+- Browser-saved Basic Auth credentials for `/settings` may need to be re-saved (the auth realm changed from `pd_zurg` to `Zurgarr`).
+
 ## Community
 
-- **Bug reports & feature requests:** [GitHub Issues](https://github.com/fjmerc/pd_zurg/issues)
-- **Upstream pd_zurg:** [Discussions](https://github.com/I-am-PUID-0/pd_zurg/discussions) | [Discord](https://discord.gg/EPSWqmeeXM)
+- **Bug reports & feature requests:** [GitHub Issues](https://github.com/fjmerc/zurgarr/issues)
+- **Upstream pd_zurg (archived):** [Discussions](https://github.com/I-am-PUID-0/pd_zurg/discussions) | [Discord](https://discord.gg/EPSWqmeeXM)
 - **plex_debrid:** [Discussions](https://github.com/itsToggle/plex_debrid/discussions) | [Discord](https://discord.gg/u3vTDGjeKE)
 
 ## Credits
 
-pd_zurg builds on the work of:
+Zurgarr builds on the work of:
 
 - **[itsToggle](https://github.com/itsToggle)** — plex_debrid ([affiliate](http://real-debrid.com/?id=5708990) | [PayPal](https://www.paypal.com/paypalme/oidulibbe))
 - **[yowmamasita](https://github.com/yowmamasita)** — Zurg ([sponsor](https://github.com/sponsors/debridmediamanager))
 - **[ncw](https://github.com/ncw)** — rclone ([sponsor](https://rclone.org/sponsor/))
-- **[I-am-PUID-0](https://github.com/I-am-PUID-0)** — original pd_zurg
+- **[I-am-PUID-0](https://github.com/I-am-PUID-0)** — original pd_zurg, the project Zurgarr was forked from
 
 ## Licensing
 
-Code authored for the pd_zurg project is released under the MIT License — see [LICENSE](LICENSE).
+Code authored for the Zurgarr project (and its pd_zurg lineage in this fork) is released under the MIT License — see [LICENSE](LICENSE).
 
 This repository also redistributes or vendors third-party components, each governed by its own upstream terms:
 

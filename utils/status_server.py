@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs, unquote as url_unquote
 from utils.api_metrics import api_metrics as _api_metrics
 from utils.logger import get_logger
+from version import VERSION
 
 logger = get_logger()
 
@@ -418,7 +419,7 @@ class StatusData:
 
     def __init__(self):
         self.start_time = time.time()
-        self.version = '2.11.0'
+        self.version = VERSION
         self.recent_events = collections.deque(maxlen=100)
         self.error_count = 0
         self._lock = threading.Lock()

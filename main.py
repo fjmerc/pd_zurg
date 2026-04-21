@@ -1,5 +1,6 @@
 from base import *
 from utils.logger import *
+from version import VERSION
 import plex_debrid_ as p
 import zurg as z
 from rclone import rclone
@@ -46,7 +47,7 @@ def shutdown(signum, frame):
 def main():
     logger = get_logger()
 
-    version = '2.17.6'
+    version = VERSION
 
     ascii_art = f'''
 

@@ -3,12 +3,23 @@
 Generates metrics in Prometheus text exposition format from
 the existing StatusData singleton. No external dependencies.
 
-Metric names retain the historical ``pd_zurg_*`` prefix from before the
-rename so existing Grafana dashboards keep working without migration.
+During the 2.19.0 → 2.20.0 deprecation window every metric is exported
+under BOTH the legacy ``pd_zurg_*`` prefix and the new ``zurgarr_*``
+prefix so existing Grafana dashboards keep working while users migrate
+their queries. The legacy prefix's ``# HELP`` line carries a
+``DEPRECATED`` marker pointing at the new name and the removal version.
+Sample values and labels are byte-identical between prefixes — only the
+metric name changes. 2.20.0 drops the ``pd_zurg_*`` side of every pair.
 """
 
 import threading
 import time
+
+
+_LEGACY_PREFIX = 'pd_zurg'
+_NEW_PREFIX = 'zurgarr'
+_DEPRECATED_SINCE = '2.19.0'
+_REMOVED_IN = '2.20.0'
 
 
 class MetricsRegistry:
@@ -39,158 +50,171 @@ class MetricsRegistry:
         lines = []
         data = status_data.to_dict()
 
-        # Up gauge
-        lines.append('# HELP pd_zurg_up Whether pd_zurg is running')
-        lines.append('# TYPE pd_zurg_up gauge')
-        lines.append('pd_zurg_up 1')
-        lines.append('')
+        _emit(lines, 'up', 'Whether Zurgarr is running', 'gauge',
+              [('', 1)])
 
-        # Uptime
-        lines.append('# HELP pd_zurg_uptime_seconds Seconds since pd_zurg started')
-        lines.append('# TYPE pd_zurg_uptime_seconds gauge')
-        lines.append(f'pd_zurg_uptime_seconds {data["uptime_seconds"]}')
-        lines.append('')
+        _emit(lines, 'uptime_seconds', 'Seconds since Zurgarr started', 'gauge',
+              [('', data['uptime_seconds'])])
 
-        # Process status
         procs = data.get('processes', [])
         if procs:
-            lines.append('# HELP pd_zurg_process_running Whether a managed process is running')
-            lines.append('# TYPE pd_zurg_process_running gauge')
-            for proc in procs:
-                name = _sanitize_label(proc.get('name', 'unknown'))
-                running = 1 if proc.get('running') else 0
-                lines.append(f'pd_zurg_process_running{{name="{name}"}} {running}')
-            lines.append('')
+            samples = [
+                (f'name="{_sanitize_label(p.get("name", "unknown"))}"',
+                 1 if p.get('running') else 0)
+                for p in procs
+            ]
+            _emit(lines, 'process_running',
+                  'Whether a managed process is running', 'gauge', samples)
 
-            lines.append('# HELP pd_zurg_process_restart_total Total restart count per process')
-            lines.append('# TYPE pd_zurg_process_restart_total counter')
-            for proc in procs:
-                name = _sanitize_label(proc.get('name', 'unknown'))
-                restarts = proc.get('restart_count', 0)
-                lines.append(f'pd_zurg_process_restart_total{{name="{name}"}} {restarts}')
-            lines.append('')
+            samples = [
+                (f'name="{_sanitize_label(p.get("name", "unknown"))}"',
+                 p.get('restart_count', 0))
+                for p in procs
+            ]
+            _emit(lines, 'process_restart_total',
+                  'Total restart count per process', 'counter', samples)
 
-        # Mount status
         mounts = data.get('mounts', [])
         if mounts:
-            lines.append('# HELP pd_zurg_mount_mounted Whether a mount point is mounted')
-            lines.append('# TYPE pd_zurg_mount_mounted gauge')
-            for mount in mounts:
-                path = _sanitize_label(mount.get('path', ''))
-                mounted = 1 if mount.get('mounted') else 0
-                lines.append(f'pd_zurg_mount_mounted{{path="{path}"}} {mounted}')
-            lines.append('')
+            samples = [
+                (f'path="{_sanitize_label(m.get("path", ""))}"',
+                 1 if m.get('mounted') else 0)
+                for m in mounts
+            ]
+            _emit(lines, 'mount_mounted',
+                  'Whether a mount point is mounted', 'gauge', samples)
 
-            lines.append('# HELP pd_zurg_mount_accessible Whether a mount point is readable')
-            lines.append('# TYPE pd_zurg_mount_accessible gauge')
-            for mount in mounts:
-                path = _sanitize_label(mount.get('path', ''))
-                accessible = 1 if mount.get('accessible') else 0
-                lines.append(f'pd_zurg_mount_accessible{{path="{path}"}} {accessible}')
-            lines.append('')
+            samples = [
+                (f'path="{_sanitize_label(m.get("path", ""))}"',
+                 1 if m.get('accessible') else 0)
+                for m in mounts
+            ]
+            _emit(lines, 'mount_accessible',
+                  'Whether a mount point is readable', 'gauge', samples)
 
-        # Blackhole counters
         with self._lock:
-            bh_counters = self._counters.get('blackhole_processed', {})
+            bh_counters = dict(self._counters.get('blackhole_processed', {}))
         if bh_counters:
-            lines.append('# HELP pd_zurg_blackhole_processed_total Torrent files processed by blackhole')
-            lines.append('# TYPE pd_zurg_blackhole_processed_total counter')
-            for label_key, val in bh_counters.items():
-                labels_str = _format_labels(label_key)
-                lines.append(f'pd_zurg_blackhole_processed_total{{{labels_str}}} {val}')
-            lines.append('')
+            samples = [
+                (_format_labels(label_key), val)
+                for label_key, val in bh_counters.items()
+            ]
+            _emit(lines, 'blackhole_processed_total',
+                  'Torrent files processed by blackhole', 'counter', samples)
 
-        # Blackhole retry counter
         retry_val = self.get_counter('blackhole_retry')
         if retry_val:
-            lines.append('# HELP pd_zurg_blackhole_retry_total Total retry attempts for failed files')
-            lines.append('# TYPE pd_zurg_blackhole_retry_total counter')
-            lines.append(f'pd_zurg_blackhole_retry_total {retry_val}')
-            lines.append('')
+            _emit(lines, 'blackhole_retry_total',
+                  'Total retry attempts for failed files', 'counter',
+                  [('', retry_val)])
 
-        # Event counters
-        lines.append('# HELP pd_zurg_events_total Total events by level')
-        lines.append('# TYPE pd_zurg_events_total counter')
-        for level in ('info', 'warning', 'error'):
-            val = self.get_counter('events', {'level': level})
-            lines.append(f'pd_zurg_events_total{{level="{level}"}} {val}')
-        lines.append('')
+        event_samples = [
+            (f'level="{level}"', self.get_counter('events', {'level': level}))
+            for level in ('info', 'warning', 'error')
+        ]
+        _emit(lines, 'events_total', 'Total events by level', 'counter',
+              event_samples)
 
-        # System stats
         system = data.get('system', {})
         if 'memory_percent' in system:
-            lines.append('# HELP pd_zurg_memory_usage_percent Container memory usage percentage')
-            lines.append('# TYPE pd_zurg_memory_usage_percent gauge')
-            lines.append(f'pd_zurg_memory_usage_percent {system["memory_percent"]}')
-            lines.append('')
-
+            _emit(lines, 'memory_usage_percent',
+                  'Container memory usage percentage', 'gauge',
+                  [('', system['memory_percent'])])
         if 'memory_used_bytes' in system:
-            lines.append('# HELP pd_zurg_memory_used_bytes Container memory used in bytes')
-            lines.append('# TYPE pd_zurg_memory_used_bytes gauge')
-            lines.append(f'pd_zurg_memory_used_bytes {system["memory_used_bytes"]}')
-            lines.append('')
-
+            _emit(lines, 'memory_used_bytes',
+                  'Container memory used in bytes', 'gauge',
+                  [('', system['memory_used_bytes'])])
         if 'cpu_percent' in system:
-            lines.append('# HELP pd_zurg_cpu_usage_percent Container CPU usage percentage')
-            lines.append('# TYPE pd_zurg_cpu_usage_percent gauge')
-            lines.append(f'pd_zurg_cpu_usage_percent {system["cpu_percent"]}')
-            lines.append('')
-
+            _emit(lines, 'cpu_usage_percent',
+                  'Container CPU usage percentage', 'gauge',
+                  [('', system['cpu_percent'])])
         if 'disk_used_bytes' in system:
-            lines.append('# HELP pd_zurg_disk_used_bytes Config volume disk used in bytes')
-            lines.append('# TYPE pd_zurg_disk_used_bytes gauge')
-            lines.append(f'pd_zurg_disk_used_bytes {system["disk_used_bytes"]}')
-            lines.append('')
-
+            _emit(lines, 'disk_used_bytes',
+                  'Config volume disk used in bytes', 'gauge',
+                  [('', system['disk_used_bytes'])])
         if 'disk_total_bytes' in system:
-            lines.append('# HELP pd_zurg_disk_total_bytes Config volume disk total in bytes')
-            lines.append('# TYPE pd_zurg_disk_total_bytes gauge')
-            lines.append(f'pd_zurg_disk_total_bytes {system["disk_total_bytes"]}')
-            lines.append('')
-
+            _emit(lines, 'disk_total_bytes',
+                  'Config volume disk total in bytes', 'gauge',
+                  [('', system['disk_total_bytes'])])
         if 'disk_percent' in system:
-            lines.append('# HELP pd_zurg_disk_usage_percent Config volume disk usage percentage')
-            lines.append('# TYPE pd_zurg_disk_usage_percent gauge')
-            lines.append(f'pd_zurg_disk_usage_percent {system["disk_percent"]}')
-            lines.append('')
-
+            _emit(lines, 'disk_usage_percent',
+                  'Config volume disk usage percentage', 'gauge',
+                  [('', system['disk_percent'])])
         if 'fd_open' in system:
-            lines.append('# HELP pd_zurg_fd_open Current number of open file descriptors')
-            lines.append('# TYPE pd_zurg_fd_open gauge')
-            lines.append(f'pd_zurg_fd_open {system["fd_open"]}')
-            lines.append('')
-
+            _emit(lines, 'fd_open',
+                  'Current number of open file descriptors', 'gauge',
+                  [('', system['fd_open'])])
         if 'fd_max' in system:
-            lines.append('# HELP pd_zurg_fd_max Maximum file descriptor limit (soft)')
-            lines.append('# TYPE pd_zurg_fd_max gauge')
-            lines.append(f'pd_zurg_fd_max {system["fd_max"]}')
-            lines.append('')
-
+            _emit(lines, 'fd_max',
+                  'Maximum file descriptor limit (soft)', 'gauge',
+                  [('', system['fd_max'])])
         if 'net_rx_bytes' in system:
-            lines.append('# HELP pd_zurg_net_rx_bytes_total Total network bytes received')
-            lines.append('# TYPE pd_zurg_net_rx_bytes_total counter')
-            lines.append(f'pd_zurg_net_rx_bytes_total {system["net_rx_bytes"]}')
-            lines.append('')
-
+            _emit(lines, 'net_rx_bytes_total',
+                  'Total network bytes received', 'counter',
+                  [('', system['net_rx_bytes'])])
         if 'net_tx_bytes' in system:
-            lines.append('# HELP pd_zurg_net_tx_bytes_total Total network bytes transmitted')
-            lines.append('# TYPE pd_zurg_net_tx_bytes_total counter')
-            lines.append(f'pd_zurg_net_tx_bytes_total {system["net_tx_bytes"]}')
-            lines.append('')
+            _emit(lines, 'net_tx_bytes_total',
+                  'Total network bytes transmitted', 'counter',
+                  [('', system['net_tx_bytes'])])
 
-        # Service health
         services = data.get('services', [])
         if services:
-            lines.append('# HELP pd_zurg_service_up Whether an external service is reachable')
-            lines.append('# TYPE pd_zurg_service_up gauge')
-            for svc in services:
-                name = _sanitize_label(svc.get('name', 'unknown'))
-                stype = _sanitize_label(svc.get('type', 'unknown'))
-                up = 1 if svc.get('status') == 'ok' else 0
-                lines.append(f'pd_zurg_service_up{{name="{name}",type="{stype}"}} {up}')
-            lines.append('')
+            samples = [
+                (f'name="{_sanitize_label(s.get("name", "unknown"))}",'
+                 f'type="{_sanitize_label(s.get("type", "unknown"))}"',
+                 1 if s.get('status') == 'ok' else 0)
+                for s in services
+            ]
+            _emit(lines, 'service_up',
+                  'Whether an external service is reachable', 'gauge', samples)
 
         return '\n'.join(lines) + '\n'
+
+
+def _emit(lines, name, help_text, metric_type, samples):
+    """Emit a metric under both ``pd_zurg_*`` and ``zurgarr_*`` prefixes.
+
+    During the 2.19.0 → 2.20.0 deprecation window every metric is
+    exported twice so existing Grafana dashboards keyed on the legacy
+    prefix keep working while users migrate queries to the new prefix.
+    The legacy ``# HELP`` line carries a DEPRECATED marker naming the
+    new metric and the removal version; sample values and labels are
+    byte-identical between the two prefixes.
+
+    ``samples`` is an iterable of ``(labels_str, value)`` pairs where
+    ``labels_str`` is the already-formatted ``k="v",k2="v2"`` payload
+    (empty string for metrics without labels). The iterable is
+    materialised to a list on entry so callers can safely pass a
+    generator without the second prefix's iteration silently reading
+    an exhausted source.
+
+    When ``labels_str`` is empty the sample renders as ``metric value``
+    (no braces), matching the conventional Prometheus exporter format
+    for unlabelled counters/gauges. Production call sites that go
+    through this helper with no labels (``up``, ``uptime_seconds``,
+    system gauges) always passed labelless strings in the pre-2.19
+    output too, so the legacy prefix's bytes are preserved for those
+    metrics. The hypothetical labelled-counter-called-with-empty-labels
+    path (reachable only via ``m.inc('blackhole_processed')`` with no
+    labels dict, which no production call site does) did previously
+    render as ``metric{} value`` and now renders as ``metric value``;
+    Prometheus treats the two as equivalent.
+    """
+    samples = list(samples)
+    legacy_help_suffix = (
+        f' (DEPRECATED since {_DEPRECATED_SINCE} — use {_NEW_PREFIX}_{name}; '
+        f'removed in {_REMOVED_IN})'
+    )
+    for prefix, suffix in ((_LEGACY_PREFIX, legacy_help_suffix), (_NEW_PREFIX, '')):
+        full = f'{prefix}_{name}'
+        lines.append(f'# HELP {full} {help_text}{suffix}')
+        lines.append(f'# TYPE {full} {metric_type}')
+        for labels_str, value in samples:
+            if labels_str:
+                lines.append(f'{full}{{{labels_str}}} {value}')
+            else:
+                lines.append(f'{full} {value}')
+    lines.append('')
 
 
 def _sanitize_label(value):

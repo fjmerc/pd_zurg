@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs, unquote as url_unquote
 from utils.api_metrics import api_metrics as _api_metrics
 from utils.logger import get_logger
+from utils.ui_common import LS_MIGRATION_JS
 from version import VERSION
 
 logger = get_logger()
@@ -602,9 +603,9 @@ pre{background:var(--bg);border:1px solid var(--border);border-radius:8px;paddin
   <br><br>
   <a href="/status">&larr; Back to Dashboard</a>
 </div>
-<script>(function(){var t=localStorage.getItem('pd_zurg_theme');if(t)document.documentElement.setAttribute('data-theme',t);})()</script>
+<script>__LS_MIGRATION_JS__(function(){try{var t=window._zurgarrLSGet('theme');if(t)document.documentElement.setAttribute('data-theme',t);}catch(e){}})()</script>
 </body>
-</html>'''
+</html>'''.replace('__LS_MIGRATION_JS__', LS_MIGRATION_JS)
 
 
 # ---------------------------------------------------------------------------

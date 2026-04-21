@@ -230,6 +230,115 @@ class TestGetSanitizedConfig:
 
 
 # ---------------------------------------------------------------------------
+# localStorage migration (plan 35 Phase 3)
+# ---------------------------------------------------------------------------
+
+class TestLocalStorageMigration:
+    """pd_zurg_* localStorage keys are renamed to zurgarr_* via a one-shot
+    migration helper embedded in every served page. These tests lock down
+    the invariants: helper present everywhere it's needed, no literal legacy
+    keys surviving in any write path, theme + log_wrap both routed through
+    the helper, and the standalone settings-setup fallback page carries its
+    own inline migration.
+    """
+
+    def test_base_head_embeds_migration_helper(self):
+        from utils.ui_common import get_base_head
+        html = get_base_head('Test')
+        assert '_zurgarrLSGet' in html
+        assert '_zurgarrLSSet' in html
+        # Helper dual-reads: new key then legacy + migrate + delete
+        assert "'zurgarr_'" in html
+        assert "'pd_zurg_'" in html
+        assert 'removeItem' in html
+
+    def test_base_head_has_no_literal_legacy_theme_key(self):
+        """No caller reads or writes the literal 'pd_zurg_theme' key —
+        all access goes through ``_zurgarrLS{Get,Set}('theme')``. The
+        helper itself concatenates `'pd_zurg_' + key`, so the full literal
+        `pd_zurg_theme` must not appear anywhere in the served head."""
+        from utils.ui_common import get_base_head
+        html = get_base_head('Test')
+        assert 'pd_zurg_theme' not in html
+        assert 'zurgarr_theme' not in html
+
+    def test_theme_init_reads_via_helper(self):
+        """The FOUC-preventing head script must use the migration helper
+        so a user who only has the legacy key still gets the right theme
+        on the page load that also migrates the key."""
+        from utils.ui_common import get_base_head, THEME_INIT_SCRIPT
+        assert "_zurgarrLSGet('theme')" in THEME_INIT_SCRIPT
+        # And is actually embedded in the served head output
+        assert "_zurgarrLSGet('theme')" in get_base_head('Test')
+        # FOUC behaviour preserved
+        assert "setAttribute('data-theme'" in THEME_INIT_SCRIPT
+
+    def test_theme_toggle_writes_via_helper(self):
+        from utils.ui_common import THEME_TOGGLE_JS
+        assert "_zurgarrLSSet('theme'" in THEME_TOGGLE_JS
+        # No surviving direct writes to legacy or literal new key
+        assert "setItem('pd_zurg_theme'" not in THEME_TOGGLE_JS
+        assert "setItem('zurgarr_theme'" not in THEME_TOGGLE_JS
+
+    def test_system_page_log_wrap_uses_helper(self):
+        from utils.system_page import get_system_html
+        html = get_system_html()
+        assert "_zurgarrLSGet('log_wrap')" in html
+        assert "_zurgarrLSSet('log_wrap'" in html
+        # No literal legacy key appears anywhere on the system page
+        assert 'pd_zurg_log_wrap' not in html
+        assert 'zurgarr_log_wrap' not in html
+
+    def test_settings_setup_fallback_embeds_shared_helper(self):
+        """The auth-not-configured settings page is a self-contained HTML
+        string that doesn't share ``get_base_head()``. To avoid a hand-rolled
+        migration snippet drifting from the canonical helper, it must embed
+        ``LS_MIGRATION_JS`` verbatim and read via ``_zurgarrLSGet`` — the
+        same contract the other pages have.
+        """
+        from utils.status_server import _SETTINGS_SETUP_HTML
+        from utils.ui_common import LS_MIGRATION_JS
+        assert LS_MIGRATION_JS in _SETTINGS_SETUP_HTML
+        assert "_zurgarrLSGet('theme')" in _SETTINGS_SETUP_HTML
+        # FOUC contract preserved for the fallback page
+        assert "setAttribute('data-theme'" in _SETTINGS_SETUP_HTML
+        # No literal legacy key should leak out of the helper's concat-path
+        assert 'pd_zurg_theme' not in _SETTINGS_SETUP_HTML
+
+    def test_migration_helper_copies_before_deleting_legacy(self):
+        """The dual-read path must write the new key BEFORE removing the
+        legacy key — if the order inverted, a crash between the two calls
+        (or a storage-quota failure on the setItem) would destroy the
+        user's preference instead of preserving it.
+        """
+        from utils.ui_common import LS_MIGRATION_JS
+        set_idx = LS_MIGRATION_JS.index('setItem(nk,ov)')
+        rm_idx = LS_MIGRATION_JS.index('removeItem(ok)')
+        assert set_idx < rm_idx, (
+            'copy-then-delete invariant violated: setItem(nk,ov) must '
+            'precede removeItem(ok) in LS_MIGRATION_JS'
+        )
+
+    def test_no_writes_to_legacy_keys_anywhere(self):
+        """Sanity sweep across every surface: no JS path writes to the
+        pd_zurg_* keys. A write would defeat the migration, because the
+        next page load would see the legacy key again and re-migrate an
+        outdated value."""
+        from utils.ui_common import get_base_head, THEME_TOGGLE_JS
+        from utils.system_page import get_system_html
+        from utils.status_server import _SETTINGS_SETUP_HTML
+        surfaces = [
+            get_base_head('Test'),
+            THEME_TOGGLE_JS,
+            get_system_html(),
+            _SETTINGS_SETUP_HTML,
+        ]
+        for html in surfaces:
+            assert "setItem('pd_zurg_theme'" not in html
+            assert "setItem('pd_zurg_log_wrap'" not in html
+
+
+# ---------------------------------------------------------------------------
 # restart_service
 # ---------------------------------------------------------------------------
 

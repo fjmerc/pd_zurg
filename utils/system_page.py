@@ -211,9 +211,9 @@ function toggleLogWrap(){
   var el=document.getElementById('log-content');
   var wrap=document.getElementById('log-wrap').checked;
   el.classList.toggle('nowrap',!wrap);
-  try{localStorage.setItem('pd_zurg_log_wrap',wrap?'1':'0');}catch(e){}
+  try{window._zurgarrLSSet('log_wrap',wrap?'1':'0');}catch(e){}
 }
-(function(){try{var w=localStorage.getItem('pd_zurg_log_wrap');if(w==='0'){document.getElementById('log-wrap').checked=false;document.getElementById('log-content').classList.add('nowrap');}}catch(e){}})();
+(function(){try{var w=window._zurgarrLSGet('log_wrap');if(w==='0'){document.getElementById('log-wrap').checked=false;document.getElementById('log-content').classList.add('nowrap');}}catch(e){}})();
 
 function updateLogs(){
   var level=document.getElementById('log-level').value;

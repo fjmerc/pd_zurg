@@ -180,7 +180,7 @@ class TestGetSanitizedConfig:
         assert config.get('ZURG_ENABLED') == 'true'
 
     def test_excludes_unrelated_vars(self, monkeypatch):
-        """Non-pd_zurg env vars should be excluded."""
+        """Non-Zurgarr env vars should be excluded."""
         monkeypatch.setenv('HOME', '/root')
         monkeypatch.setenv('PATH', '/usr/bin')
         config = get_sanitized_config()

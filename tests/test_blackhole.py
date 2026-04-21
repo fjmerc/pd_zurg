@@ -119,7 +119,7 @@ class TestRetryMetaTierStateV2:
         """Legacy v1 sidecar (no tier_state) must load as None, not raise.
 
         Backward compat is the load-bearing promise of the v2 schema —
-        a user upgrading pd_zurg mid-retry must not lose retry state
+        a user upgrading Zurgarr mid-retry must not lose retry state
         or crash the blackhole on the first legacy sidecar it reads.
         """
         path = os.path.join(tmp_dir, 'legacy.torrent')

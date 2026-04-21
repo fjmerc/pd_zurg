@@ -188,7 +188,7 @@ class TestConfigValidation:
 
     def test_rclone_mount_name_valid(self, clean_env, env_vars):
         """Valid mount name should pass."""
-        env_vars(RCLONE_MOUNT_NAME='pd_zurg-RD')
+        env_vars(RCLONE_MOUNT_NAME='zurgarr_mount-RD')
         result = _validate_with_reload()
         assert not any('RCLONE_MOUNT_NAME' in w for w in result.warnings)
 

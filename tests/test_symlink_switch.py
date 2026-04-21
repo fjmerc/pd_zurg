@@ -96,7 +96,7 @@ class TestReplaceLocalWithSymlinks:
             assert os.path.islink(ep['local_path'])
 
     def test_path_translation(self, local_tv, debrid_mount):
-        """Debrid path is translated from pd_zurg namespace to Sonarr namespace."""
+        """Debrid path is translated from Zurgarr namespace to Sonarr namespace."""
         local_path = os.path.join(local_tv, 'Show Name (2025)', 'Season 01',
                                   'Show Name - S01E01 - Episode Title.mkv')
         debrid_path = os.path.join(debrid_mount, 'shows',

@@ -132,7 +132,7 @@ class TestVerifySymlinks:
         """Symlinks pointing to SYMLINK_TARGET_BASE are checked against the
         rclone mount, not the target base path itself.  This handles the
         common case where target_base (e.g. /mnt/debrid) is only mounted in
-        Radarr/Sonarr's container but not in pd_zurg's."""
+        Radarr/Sonarr's container but not in Zurgarr's."""
         from utils.scheduled_tasks import verify_symlinks
         # Create real file on the rclone mount
         mount_file = os.path.join(symlink_env['mount'], 'movies', 'F1', 'f1.mkv')

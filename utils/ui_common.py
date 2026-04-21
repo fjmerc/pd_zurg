@@ -107,11 +107,39 @@ a:hover{text-decoration:underline}
 """
 
 # ---------------------------------------------------------------------------
+# localStorage migration helper (plan 35 Phase 3)
+#
+# pd_zurg_* localStorage keys are being renamed to zurgarr_*. The helper is
+# defined on ``window`` in the head script block so it is available both to
+# the FOUC-preventing theme init (same block) and to every later script
+# block (theme toggle, system-page log-wrap, etc.). Idempotent: after the
+# first page load that carries a legacy value, the old key is removed and
+# subsequent reads fall through to the plain new-key path.
+# ---------------------------------------------------------------------------
+
+LS_MIGRATION_JS = r"""
+window._zurgarrLSGet=function(key){
+  try{
+    var nk='zurgarr_'+key,ok='pd_zurg_'+key;
+    var v=localStorage.getItem(nk);
+    if(v!==null)return v;
+    var ov=localStorage.getItem(ok);
+    if(ov!==null){localStorage.setItem(nk,ov);localStorage.removeItem(ok);return ov;}
+    return null;
+  }catch(e){return null;}
+};
+window._zurgarrLSSet=function(key,val){
+  try{localStorage.setItem('zurgarr_'+key,val);}catch(e){}
+};
+"""
+
+# ---------------------------------------------------------------------------
 # Theme initialisation script (goes in <head> to prevent FOUC)
 # ---------------------------------------------------------------------------
 
 THEME_INIT_SCRIPT = (
-    "<script>(function(){try{var t=localStorage.getItem('pd_zurg_theme');"
+    "<script>" + LS_MIGRATION_JS +
+    "(function(){try{var t=window._zurgarrLSGet('theme');"
     "if(t){document.documentElement.setAttribute('data-theme',t);"
     "document.querySelector('meta[name=\"color-scheme\"]').content="
     "t==='light'?'light':'dark';}}catch(e){}})()</script>"
@@ -131,7 +159,7 @@ function toggleTheme(){
   var cur=document.documentElement.getAttribute('data-theme')||'dark';
   var next=cur==='dark'?'light':'dark';
   applyTheme(next);
-  try{localStorage.setItem('pd_zurg_theme',next);}catch(e){}
+  try{window._zurgarrLSSet('theme',next);}catch(e){}
 }
 (function(){var t=document.documentElement.getAttribute('data-theme');if(t)applyTheme(t);})();
 """

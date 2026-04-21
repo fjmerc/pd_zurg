@@ -46,7 +46,7 @@ jobs:
       - name: Extract version and set environment variables
         id: setup_env_vars
         run: |
-          VERSION=$(grep -Po "(?<=version = ')[^']+" main.py)
+          VERSION=$(grep -Po "(?<=^VERSION = ')[^']+" version.py)
           REPO_OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           REPO_NAME=$(basename "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           echo "VERSION=$VERSION" >> $GITHUB_ENV

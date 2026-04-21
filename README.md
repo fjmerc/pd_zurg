@@ -484,6 +484,7 @@ Remove the corresponding environment variables when using secrets.
 
 - **[Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md)** — complete Sonarr/Radarr setup including symlink mode, multi-host NFS, dedup, and troubleshooting
 - **[Changelog](CHANGELOG.md)** — version history and release notes
+- **[Brand assets](assets/README.md)** — icon SVG, social-preview SVG, and instructions for regenerating PNG exports for Docker Hub or GitHub social previews
 
 ## Troubleshooting
 

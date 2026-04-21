@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## Version [2.18.1] - 2026-04-21
+
+### Added
+
+- **Zurgarr brand mark and favicon**: First proper visual identity for the project. New `assets/zurgarr.svg` (1024×1024 master) is a flat-shaded violet (`#7c3aed`) rounded square with a bold geometric white "Z" — same shape language as Sonarr/Lidarr/Prowlarr (rounded square, ~12.5% corner radius, single-colour glyph, no gradients) but in an unclaimed colour slot (Sonarr/Bazarr=blue, Radarr=yellow, Lidarr=green, Prowlarr=orange, Whisparr=pink, Tdarr=teal, Readarr=red — purple was open). The favicon is wired in via the existing `FAVICON_JS` machinery so it preserves the dynamic system-health colour swap that the lightning-bolt favicon used to do — the Z stays white, the rounded-square background fills with the brand violet at rest and shifts to amber on `warn` / red on `crit`. The sidebar header in every WebUI page now renders a 22×22 SVG of the same mark before the "Zurgarr" wordmark for at-a-glance brand recognition. New `assets/zurgarr-social.svg` (1280×640) is a matching social-preview card with the icon, wordmark, and tagline — drop into GitHub repo settings as the social preview after exporting to PNG. `assets/README.md` documents the design choices and the three regeneration paths (`rsvg-convert`, ImageMagick, Inkscape) for users who need PNG exports for Docker Hub or GitHub uploads. No raster assets are committed — modern browsers render the SVG favicon natively, and the only PNG-required destinations (Docker Hub logo, GitHub social preview) are upload-once manual steps where the user can convert the SVG once and forget about it.
+
 ## Version [2.18.0] - 2026-04-21
 
 ### Fixed

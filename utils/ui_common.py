@@ -28,6 +28,8 @@ a:hover{text-decoration:underline}
 .sidebar-brand a{font-size:1.2em;font-weight:700;color:var(--blue);text-decoration:none}
 .sidebar-brand a:hover{text-decoration:none;opacity:.85}
 .sidebar-brand-info{flex:1;min-width:0}
+.sidebar-brand-link{display:inline-flex;align-items:center;gap:8px}
+.sidebar-brand-mark{flex-shrink:0;display:block}
 .sidebar-version{display:block;font-size:.7em;color:var(--text3);margin-top:1px}
 .sidebar-nav{display:flex;flex-direction:column;padding:8px 0}
 .sidebar-link{display:flex;align-items:center;gap:10px;padding:9px 16px;color:var(--text2);font-size:.85em;font-weight:500;text-decoration:none;border-left:3px solid transparent;transition:color var(--motion-fast),background var(--motion-fast),border-color var(--motion-fast)}
@@ -162,9 +164,9 @@ WANTED_BADGE_JS = r"""
 FAVICON_JS = r"""
 (function(){
   var _fts=0;
-  function _fsvg(c){return 'data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path d="M58 2L22 52h20L34 98 78 42H54z" fill="'+c+'"/></svg>');}
+  function _fsvg(c){return 'data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="12.5" fill="'+c+'"/><path d="M 25 28 L 75 28 L 75 40 L 47 60 L 75 60 L 75 72 L 25 72 L 25 60 L 53 40 L 25 40 Z" fill="#fff"/></svg>');}
   window.updateFavicon=function(h){
-    var c=h==='crit'?'#f85149':h==='warn'?'#d29922':'#3fb950';
+    var c=h==='crit'?'#f85149':h==='warn'?'#d29922':'#7c3aed';
     var l=document.querySelector('link[rel="icon"]');
     if(l)l.href=_fsvg(c);
     _fts=Date.now();
@@ -481,7 +483,7 @@ def get_base_head(title, extra_css=''):
         '<meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
         '<meta name="color-scheme" content="dark light">',
-        '<link rel="icon" href="data:image/svg+xml,<svg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 100 100\'><path d=\'M58 2L22 52h20L34 98 78 42H54z\' fill=\'%233fb950\'/></svg>">',
+        '<link rel="icon" href="data:image/svg+xml,<svg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 100 100\'><rect width=\'100\' height=\'100\' rx=\'12.5\' fill=\'%237c3aed\'/><path d=\'M 25 28 L 75 28 L 75 40 L 47 60 L 75 60 L 75 72 L 25 72 L 25 60 L 53 40 L 25 40 Z\' fill=\'%23fff\'/></svg>">',
         '<title>' + title + '</title>',
         '<style>' + BASE_CSS + KEYBOARD_CSS + TOAST_CSS + dialog_css,
     ]
@@ -532,7 +534,15 @@ def get_nav_html(current_page='status'):
         '<aside class="sidebar" id="sidebar">'
         '<div class="sidebar-brand">'
         '<div class="sidebar-brand-info">'
-        '<a href="/status">Zurgarr</a>'
+        '<a href="/status" class="sidebar-brand-link">'
+        '<svg class="sidebar-brand-mark" viewBox="0 0 100 100" '
+        'aria-hidden="true" width="22" height="22">'
+        '<rect width="100" height="100" rx="12.5" fill="#7c3aed"/>'
+        '<path d="M 25 28 L 75 28 L 75 40 L 47 60 L 75 60 L 75 72 '
+        'L 25 72 L 25 60 L 53 40 L 25 40 Z" fill="#fff"/>'
+        '</svg>'
+        '<span>Zurgarr</span>'
+        '</a>'
         '<span class="sidebar-version" id="header-meta"></span>'
         '</div>'
         '<button class="sidebar-theme" onclick="toggleTheme()" '

@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" role="img" aria-label="Zurgarr — Stream debrid. Zero local storage.">
+  <title>Zurgarr</title>
+  <!-- Background -->
+  <rect width="1280" height="640" fill="#0f0f17"/>
+
+  <!-- Subtle violet accent gradient on the right edge so the dark canvas isn't dead-flat -->
+  <defs>
+    <linearGradient id="accentGlow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%"   stop-color="#7c3aed" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#7c3aed" stop-opacity="0.18"/>
+    </linearGradient>
+  </defs>
+  <rect x="640" width="640" height="640" fill="url(#accentGlow)"/>
+
+  <!-- Icon at left, 384x384, vertically centered (y = (640-384)/2 = 128), 96px left margin -->
+  <g transform="translate(96 128) scale(0.375)">
+    <rect width="1024" height="1024" rx="128" ry="128" fill="#7c3aed"/>
+    <path d="M 256 280 L 768 280 L 768 408 L 480 616 L 768 616 L 768 744 L 256 744 L 256 616 L 544 408 L 256 408 Z" fill="#ffffff"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text x="544" y="320"
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+        font-size="128" font-weight="700" fill="#ffffff"
+        dominant-baseline="middle">Zurgarr</text>
+
+  <!-- Tagline -->
+  <text x="544" y="400"
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+        font-size="36" font-weight="400" fill="#9ca3af"
+        dominant-baseline="middle">Stream Real-Debrid through Plex or Jellyfin.</text>
+  <text x="544" y="450"
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+        font-size="36" font-weight="400" fill="#9ca3af"
+        dominant-baseline="middle">One container. Zero local storage.</text>
+</svg>

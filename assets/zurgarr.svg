@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Zurgarr">
+  <title>Zurgarr</title>
+  <rect width="1024" height="1024" rx="128" ry="128" fill="#7c3aed"/>
+  <path d="M 256 280 L 768 280 L 768 408 L 480 616 L 768 616 L 768 744 L 256 744 L 256 616 L 544 408 L 256 408 Z" fill="#ffffff"/>
+</svg>

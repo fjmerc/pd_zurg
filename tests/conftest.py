@@ -1,4 +1,4 @@
-"""Shared test fixtures for pd_zurg test suite."""
+"""Shared test fixtures for the Zurgarr test suite."""
 
 import os
 import sys
@@ -31,7 +31,7 @@ def env_vars(monkeypatch):
 
 @pytest.fixture
 def clean_env(monkeypatch):
-    """Remove all pd_zurg-related env vars for a clean test slate."""
+    """Remove all Zurgarr-related env vars for a clean test slate."""
     pd_vars = [
         'ZURG_ENABLED', 'RD_API_KEY', 'AD_API_KEY', 'PLEX_TOKEN',
         'PLEX_ADDRESS', 'JF_ADDRESS', 'JF_API_KEY', 'PD_ENABLED',
@@ -44,7 +44,10 @@ def clean_env(monkeypatch):
         'NOTIFICATION_EVENTS', 'STATUS_UI_ENABLED', 'STATUS_UI_PORT',
         'STATUS_UI_AUTH', 'DUPLICATE_CLEANUP', 'PLEX_REFRESH',
         'SKIP_VALIDATION', 'RCLONE_MOUNT_NAME', 'ZURG_LOG_LEVEL',
-        'RCLONE_LOG_LEVEL', 'PDZURG_LOG_LEVEL', 'PD_LOG_LEVEL',
+        'RCLONE_LOG_LEVEL',
+        'ZURGARR_LOG_LEVEL', 'ZURGARR_LOG_COUNT', 'ZURGARR_LOG_SIZE',
+        'PDZURG_LOG_LEVEL', 'PDZURG_LOG_COUNT', 'PDZURG_LOG_SIZE',
+        'PD_LOG_LEVEL',
         'TORBOX_API_KEY', 'SEERR_ADDRESS', 'SEERR_API_KEY',
         'ZURG_PORT', 'NFS_PORT', 'FFPROBE_STUCK_TIMEOUT',
         'FFPROBE_POLL_INTERVAL', 'AUTO_UPDATE_INTERVAL', 'CLEANUP_INTERVAL',

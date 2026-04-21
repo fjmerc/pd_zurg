@@ -112,6 +112,12 @@ services:
       - FFPROBE_POLL_INTERVAL=${FFPROBE_POLL_INTERVAL:-}
       - AUTO_UPDATE_INTERVAL=${AUTO_UPDATE_INTERVAL:-}
       ## Logging
+      ## New ZURGARR_LOG_* names are preferred; legacy PDZURG_LOG_* are
+      ## forwarded through 2.20.0 for backward compatibility. Setting
+      ## either in .env works; if both are set the new name wins.
+      - ZURGARR_LOG_LEVEL=${ZURGARR_LOG_LEVEL:-}
+      - ZURGARR_LOG_COUNT=${ZURGARR_LOG_COUNT:-}
+      - ZURGARR_LOG_SIZE=${ZURGARR_LOG_SIZE:-}
       - PDZURG_LOG_LEVEL=${PDZURG_LOG_LEVEL:-}
       - PDZURG_LOG_COUNT=${PDZURG_LOG_COUNT:-}
       - PDZURG_LOG_SIZE=${PDZURG_LOG_SIZE:-}

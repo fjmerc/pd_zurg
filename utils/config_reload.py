@@ -53,6 +53,10 @@ SERVICE_DEPENDENCIES = {
 
 # Changes that only need variable reload, no service restart
 SOFT_RELOAD = {
+    # Log levels — dual-read window (2.19.0 → 2.20.0). New ZURGARR_LOG_*
+    # names are preferred; legacy PDZURG_LOG_* still trigger soft-reload so
+    # users mid-migration don't see a regression.
+    'ZURGARR_LOG_LEVEL', 'ZURGARR_LOG_COUNT', 'ZURGARR_LOG_SIZE',
     'PDZURG_LOG_LEVEL', 'PD_LOG_LEVEL', 'NOTIFICATION_LEVEL',
     'NOTIFICATION_EVENTS', 'DUPLICATE_CLEANUP', 'CLEANUP_INTERVAL', 'DUPLICATE_CLEANUP_KEEP',
     'PLEX_REFRESH', 'SKIP_VALIDATION', 'LIBRARY_PREFERENCE_AUTO_ENFORCE',

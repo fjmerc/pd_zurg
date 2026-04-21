@@ -301,21 +301,21 @@ def get_logger(log_name='PDZURG', log_dir='./log'):
     current_date = time.strftime("%Y-%m-%d")
     log_filename = f"{log_name}-{current_date}.log"
     logger = logging.getLogger(log_name)
-    backupCount_env = os.getenv('PDZURG_LOG_COUNT')
+    backupCount_env = _env_dual('ZURGARR_LOG_COUNT', 'PDZURG_LOG_COUNT', '')
     try:
         backupCount = int(backupCount_env)
     except (ValueError, TypeError):
         backupCount = 2
-    log_level_env = os.getenv('PDZURG_LOG_LEVEL')
+    log_level_env = _env_dual('ZURGARR_LOG_LEVEL', 'PDZURG_LOG_LEVEL', '')
     if log_level_env:
         log_level = log_level_env.upper()
         os.environ['LOG_LEVEL'] = log_level
         os.environ['RCLONE_LOG_LEVEL'] = log_level
     else:
         log_level = 'INFO'
-    numeric_level = getattr(logging, log_level, logging.INFO)   
-    logger.setLevel(numeric_level)  
-    max_log_size_env = os.getenv('PDZURG_LOG_SIZE')
+    numeric_level = getattr(logging, log_level, logging.INFO)
+    logger.setLevel(numeric_level)
+    max_log_size_env = _env_dual('ZURGARR_LOG_SIZE', 'PDZURG_LOG_SIZE', '')
     try:
         max_log_size = parse_size(max_log_size_env) if max_log_size_env else 10 * 1024 * 1024
     except (ValueError, TypeError):
@@ -370,4 +370,9 @@ def get_logger(log_name='PDZURG', log_dir='./log'):
         logger.removeHandler(hdlr)
     logger.addHandler(handler)
     logger.addHandler(stdout_handler)
+    # Any deprecation warnings that fired during the env reads above
+    # were buffered because handlers weren't attached yet — flush them
+    # now so they land in the rotating log file alongside everything else.
+    from utils.deprecation import flush_pending
+    flush_pending()
     return logger

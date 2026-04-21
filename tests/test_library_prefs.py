@@ -161,10 +161,7 @@ class TestRemoveLocalEpisodes:
 
 class TestReplaceLocalWithSymlinks:
     """Covers the atomic local→symlink swap used by the prefer-debrid
-    preference path, including the plan 35 Phase 4 migration that renames
-    stranded ``.pd_zurg_backup`` sidecars (from a crashed pre-2.19 run)
-    forward to ``.zurgarr_backup`` before creating a fresh backup on the
-    same path.
+    preference path.
     """
 
     def _setup_paths(self, tmp_dir):
@@ -191,11 +188,9 @@ class TestReplaceLocalWithSymlinks:
             'symlink_target_base': '/mnt/debrid',
         }
 
-    def test_clean_swap_uses_new_backup_extension(self, tmp_dir):
+    def test_clean_swap_creates_symlink(self, tmp_dir):
         """Normal successful swap: local file is replaced by a symlink,
-        and both the new-name AND the legacy-name backup sidecars are
-        absent on completion (the new-name one was transient and deleted
-        on success; the legacy-name one was never created at all)."""
+        and the transient sidecar is deleted on success."""
         p = self._setup_paths(tmp_dir)
         result = lp.replace_local_with_symlinks(
             [{'local_path': p['local_ep'], 'debrid_path': p['debrid_ep']}],
@@ -206,65 +201,10 @@ class TestReplaceLocalWithSymlinks:
         assert os.path.islink(p['local_ep'])
         assert os.readlink(p['local_ep']) == '/mnt/debrid/Show/Season 1/ep.mkv'
         assert not os.path.exists(p['local_ep'] + '.zurgarr_backup')
-        assert not os.path.exists(p['local_ep'] + '.pd_zurg_backup')
-
-    def test_migrates_stranded_legacy_backup_forward(self, tmp_dir):
-        """A .pd_zurg_backup left over from a crashed pre-2.19 run on the
-        same file must be renamed forward to .zurgarr_backup before the
-        new swap uses it — so after a successful swap, neither sidecar
-        name remains on disk (legacy was renamed to new, new was deleted
-        on success)."""
-        p = self._setup_paths(tmp_dir)
-        legacy_sidecar = p['local_ep'] + '.pd_zurg_backup'
-        # Seed stranded legacy sidecar alongside the current file
-        with open(legacy_sidecar, 'w') as f:
-            f.write('legacy backup contents')
-
-        result = lp.replace_local_with_symlinks(
-            [{'local_path': p['local_ep'], 'debrid_path': p['debrid_ep']}],
-            p['local_tv'], p['rclone_mount'], p['symlink_target_base'],
-        )
-        assert result['switched'] == 1
-        assert os.path.islink(p['local_ep'])
-        # Legacy stranded backup was renamed forward to the new name,
-        # which the swap then consumed as its own transient backup and
-        # removed on successful symlink creation.
-        assert not os.path.exists(legacy_sidecar)
-        assert not os.path.exists(p['local_ep'] + '.zurgarr_backup')
-
-    def test_migration_never_clobbers_existing_new_name_backup(self, tmp_dir):
-        """If a .zurgarr_backup already exists at the target path (racing
-        operation, prior incomplete run, whatever), the migration pass
-        MUST NOT rename a stranded .pd_zurg_backup over it — the guard
-        `not os.path.exists(backup_path)` is what locks this down."""
-        p = self._setup_paths(tmp_dir)
-        legacy_sidecar = p['local_ep'] + '.pd_zurg_backup'
-        new_sidecar = p['local_ep'] + '.zurgarr_backup'
-        with open(legacy_sidecar, 'w') as f:
-            f.write('legacy stranded')
-        with open(new_sidecar, 'w') as f:
-            f.write('new-name stranded')
-
-        lp.replace_local_with_symlinks(
-            [{'local_path': p['local_ep'], 'debrid_path': p['debrid_ep']}],
-            p['local_tv'], p['rclone_mount'], p['symlink_target_base'],
-        )
-        # The legacy sidecar is untouched by the migration pass — the
-        # guard saw new_sidecar already present and skipped the rename.
-        # (The subsequent atomic swap clobbers new_sidecar via os.rename
-        # semantics, which is pre-existing behaviour; Phase 4 doesn't
-        # change it. The invariant under test is specifically that the
-        # legacy sidecar is not renamed forward when doing so would
-        # destroy a pre-existing new-name backup.)
-        assert os.path.exists(legacy_sidecar)
-        with open(legacy_sidecar) as f:
-            assert f.read() == 'legacy stranded'
 
     def test_rollback_restores_original_on_symlink_failure(self, tmp_dir, monkeypatch):
         """When os.symlink raises, the rollback rename restores the
-        original file and no sidecar under either extension is left
-        behind. This exercises the atomic-swap's failure path with the
-        new extension in place."""
+        original file and no sidecar is left behind."""
         p = self._setup_paths(tmp_dir)
         with open(p['local_ep'], 'w') as f:
             f.write('original contents')
@@ -290,88 +230,6 @@ class TestReplaceLocalWithSymlinks:
         with open(p['local_ep']) as f:
             assert f.read() == 'original contents'
         assert not os.path.exists(p['local_ep'] + '.zurgarr_backup')
-        assert not os.path.exists(p['local_ep'] + '.pd_zurg_backup')
-
-    def test_migration_rejects_legacy_sidecar_that_is_a_directory(self, tmp_dir):
-        """A directory named ``.pd_zurg_backup`` at the target path is
-        NEVER renamed forward — the ``isfile`` guard rejects non-regular
-        entries. If we blindly renamed it, the subsequent atomic swap's
-        ``os.rename(real_local, backup_path)`` into a non-empty directory
-        would fail unpredictably (EISDIR / ENOTDIR depending on state)
-        and leave the user with an orphaned directory under the new name
-        plus a broken intermediate state.
-        """
-        p = self._setup_paths(tmp_dir)
-        legacy_dir = p['local_ep'] + '.pd_zurg_backup'
-        os.mkdir(legacy_dir)
-        with open(os.path.join(legacy_dir, 'squatter.txt'), 'w') as f:
-            f.write('not a backup')
-
-        lp.replace_local_with_symlinks(
-            [{'local_path': p['local_ep'], 'debrid_path': p['debrid_ep']}],
-            p['local_tv'], p['rclone_mount'], p['symlink_target_base'],
-        )
-        # Legacy directory untouched; the swap proceeds on real_local
-        # as if no legacy sidecar were present at all.
-        assert os.path.isdir(legacy_dir)
-        assert os.path.isfile(os.path.join(legacy_dir, 'squatter.txt'))
-        assert os.path.islink(p['local_ep'])
-
-    def test_migration_rejects_legacy_sidecar_that_is_a_symlink(self, tmp_dir):
-        """A symlink named ``.pd_zurg_backup`` — even one pointing at a
-        regular file — is NEVER renamed forward. Silently renaming a
-        symlink would move the reference; the subsequent atomic swap's
-        ``os.rename`` would then replace the symlink (not its target)
-        with the user's original local file, orphaning whatever the
-        symlink pointed at under no known path.
-        """
-        p = self._setup_paths(tmp_dir)
-        some_file = os.path.join(tmp_dir, 'target.txt')
-        with open(some_file, 'w') as f:
-            f.write('symlink target contents')
-        legacy_symlink = p['local_ep'] + '.pd_zurg_backup'
-        os.symlink(some_file, legacy_symlink)
-
-        lp.replace_local_with_symlinks(
-            [{'local_path': p['local_ep'], 'debrid_path': p['debrid_ep']}],
-            p['local_tv'], p['rclone_mount'], p['symlink_target_base'],
-        )
-        # Legacy symlink untouched; its target is untouched.
-        assert os.path.islink(legacy_symlink)
-        assert os.readlink(legacy_symlink) == some_file
-        with open(some_file) as f:
-            assert f.read() == 'symlink target contents'
-        # Real swap on real_local still completed
-        assert os.path.islink(p['local_ep'])
-
-    def test_migration_rejects_broken_symlink_at_new_name_path(self, tmp_dir):
-        """``os.path.exists`` returns False for a broken symlink, so the
-        earlier ``exists``-based guard would have passed and the legacy
-        rename would have silently replaced the broken-symlink entry.
-        The ``lexists`` guard correctly treats ANY entry (regular file,
-        directory, live symlink, or dangling symlink) at the new-name
-        path as "something's already there — do not clobber".
-        """
-        p = self._setup_paths(tmp_dir)
-        legacy_sidecar = p['local_ep'] + '.pd_zurg_backup'
-        broken_new_sidecar = p['local_ep'] + '.zurgarr_backup'
-        with open(legacy_sidecar, 'w') as f:
-            f.write('legacy stranded')
-        # Broken symlink: target does not exist, lexists() returns True
-        # but exists() returns False.
-        os.symlink('/nonexistent/dangling/target', broken_new_sidecar)
-        assert os.path.lexists(broken_new_sidecar)
-        assert not os.path.exists(broken_new_sidecar)
-
-        lp.replace_local_with_symlinks(
-            [{'local_path': p['local_ep'], 'debrid_path': p['debrid_ep']}],
-            p['local_tv'], p['rclone_mount'], p['symlink_target_base'],
-        )
-        # Legacy sidecar preserved — the guard saw an existing entry
-        # (dangling symlink) at backup_path and skipped the migration.
-        assert os.path.isfile(legacy_sidecar)
-        with open(legacy_sidecar) as f:
-            assert f.read() == 'legacy stranded'
 
 
 # ---------------------------------------------------------------------------

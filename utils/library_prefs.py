@@ -338,37 +338,6 @@ def replace_local_with_symlinks(episodes, local_tv_path, rclone_mount, symlink_t
             # Atomic swap: rename to backup, create symlink, remove backup on success
             backup_path = real_local + '.zurgarr_backup'
 
-            # Plan 35 Phase 4 migration: if a stranded legacy-named backup
-            # is left over from a crashed pre-2.19 run on this same file,
-            # rename it forward so future code finds it under the new
-            # extension. Guards:
-            #   - ``isfile() and not islink()`` on the legacy path — only
-            #     regular files are renamed; a manually-placed directory,
-            #     symlink, or FIFO under that name is not touched. The
-            #     pre-2.19 code path that created the sidecar always
-            #     produced a regular file, so any non-file at that path
-            #     is hostile or spurious and must not be promoted.
-            #   - ``lexists()`` (not ``exists``) on the new-name path —
-            #     rejects a pre-existing broken-symlink ``.zurgarr_backup``
-            #     that plain ``exists`` would report as missing.
-            # Removed in 2.20.0 along with the other Phase 6 backward-
-            # compat drops.
-            legacy_backup_path = real_local + '.pd_zurg_backup'
-            if (os.path.isfile(legacy_backup_path)
-                    and not os.path.islink(legacy_backup_path)
-                    and not os.path.lexists(backup_path)):
-                try:
-                    os.rename(legacy_backup_path, backup_path)
-                except OSError as mig_err:
-                    # Leave legacy in place — the next swap on this path
-                    # retries the migration. A debug line surfaces the
-                    # reason (EACCES, EXDEV, etc.) for post-mortem
-                    # diagnosis without flooding INFO/WARN.
-                    logger.debug(
-                        f"[library_prefs] Legacy backup forward-migration "
-                        f"skipped for {legacy_backup_path}: {mig_err}"
-                    )
-
             os.rename(real_local, backup_path)
             try:
                 os.symlink(symlink_target, real_local)

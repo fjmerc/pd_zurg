@@ -2,24 +2,10 @@
 
 Generates metrics in Prometheus text exposition format from
 the existing StatusData singleton. No external dependencies.
-
-During the 2.19.0 → 2.20.0 deprecation window every metric is exported
-under BOTH the legacy ``pd_zurg_*`` prefix and the new ``zurgarr_*``
-prefix so existing Grafana dashboards keep working while users migrate
-their queries. The legacy prefix's ``# HELP`` line carries a
-``DEPRECATED`` marker pointing at the new name and the removal version.
-Sample values and labels are byte-identical between prefixes — only the
-metric name changes. 2.20.0 drops the ``pd_zurg_*`` side of every pair.
 """
 
 import threading
 import time
-
-
-_LEGACY_PREFIX = 'pd_zurg'
-_NEW_PREFIX = 'zurgarr'
-_DEPRECATED_SINCE = '2.19.0'
-_REMOVED_IN = '2.20.0'
 
 
 class MetricsRegistry:
@@ -172,48 +158,23 @@ class MetricsRegistry:
 
 
 def _emit(lines, name, help_text, metric_type, samples):
-    """Emit a metric under both ``pd_zurg_*`` and ``zurgarr_*`` prefixes.
-
-    During the 2.19.0 → 2.20.0 deprecation window every metric is
-    exported twice so existing Grafana dashboards keyed on the legacy
-    prefix keep working while users migrate queries to the new prefix.
-    The legacy ``# HELP`` line carries a DEPRECATED marker naming the
-    new metric and the removal version; sample values and labels are
-    byte-identical between the two prefixes.
+    """Emit a metric under the ``zurgarr_*`` prefix.
 
     ``samples`` is an iterable of ``(labels_str, value)`` pairs where
     ``labels_str`` is the already-formatted ``k="v",k2="v2"`` payload
-    (empty string for metrics without labels). The iterable is
-    materialised to a list on entry so callers can safely pass a
-    generator without the second prefix's iteration silently reading
-    an exhausted source.
-
-    When ``labels_str`` is empty the sample renders as ``metric value``
-    (no braces), matching the conventional Prometheus exporter format
-    for unlabelled counters/gauges. Production call sites that go
-    through this helper with no labels (``up``, ``uptime_seconds``,
-    system gauges) always passed labelless strings in the pre-2.19
-    output too, so the legacy prefix's bytes are preserved for those
-    metrics. The hypothetical labelled-counter-called-with-empty-labels
-    path (reachable only via ``m.inc('blackhole_processed')`` with no
-    labels dict, which no production call site does) did previously
-    render as ``metric{} value`` and now renders as ``metric value``;
-    Prometheus treats the two as equivalent.
+    (empty string for metrics without labels). When ``labels_str`` is
+    empty the sample renders as ``metric value`` (no braces), matching
+    the conventional Prometheus exporter format for unlabelled
+    counters/gauges.
     """
-    samples = list(samples)
-    legacy_help_suffix = (
-        f' (DEPRECATED since {_DEPRECATED_SINCE} — use {_NEW_PREFIX}_{name}; '
-        f'removed in {_REMOVED_IN})'
-    )
-    for prefix, suffix in ((_LEGACY_PREFIX, legacy_help_suffix), (_NEW_PREFIX, '')):
-        full = f'{prefix}_{name}'
-        lines.append(f'# HELP {full} {help_text}{suffix}')
-        lines.append(f'# TYPE {full} {metric_type}')
-        for labels_str, value in samples:
-            if labels_str:
-                lines.append(f'{full}{{{labels_str}}} {value}')
-            else:
-                lines.append(f'{full} {value}')
+    full = f'zurgarr_{name}'
+    lines.append(f'# HELP {full} {help_text}')
+    lines.append(f'# TYPE {full} {metric_type}')
+    for labels_str, value in samples:
+        if labels_str:
+            lines.append(f'{full}{{{labels_str}}} {value}')
+        else:
+            lines.append(f'{full} {value}')
     lines.append('')
 
 

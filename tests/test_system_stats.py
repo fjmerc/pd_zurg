@@ -324,9 +324,9 @@ class TestMetricsNewGauges:
             'disk_total_bytes': 1000000,
             'disk_percent': 50.0,
         })
-        assert 'pd_zurg_disk_used_bytes 500000' in output
-        assert 'pd_zurg_disk_total_bytes 1000000' in output
-        assert 'pd_zurg_disk_usage_percent 50.0' in output
+        assert 'zurgarr_disk_used_bytes 500000' in output
+        assert 'zurgarr_disk_total_bytes 1000000' in output
+        assert 'zurgarr_disk_usage_percent 50.0' in output
 
     def test_fd_metrics_included(self):
         """FD gauges should appear when fd stats are available."""
@@ -334,8 +334,8 @@ class TestMetricsNewGauges:
             'fd_open': 142,
             'fd_max': 1048576,
         })
-        assert 'pd_zurg_fd_open 142' in output
-        assert 'pd_zurg_fd_max 1048576' in output
+        assert 'zurgarr_fd_open 142' in output
+        assert 'zurgarr_fd_max 1048576' in output
 
     def test_network_metrics_included(self):
         """Network counters should appear when network stats are available."""
@@ -343,9 +343,9 @@ class TestMetricsNewGauges:
             'net_rx_bytes': 5000000,
             'net_tx_bytes': 2000000,
         })
-        assert 'pd_zurg_net_rx_bytes_total 5000000' in output
-        assert 'pd_zurg_net_tx_bytes_total 2000000' in output
-        assert '# TYPE pd_zurg_net_rx_bytes_total counter' in output
+        assert 'zurgarr_net_rx_bytes_total 5000000' in output
+        assert 'zurgarr_net_tx_bytes_total 2000000' in output
+        assert '# TYPE zurgarr_net_rx_bytes_total counter' in output
 
     def test_missing_stats_omitted(self):
         """Metrics should be omitted when stats are missing."""
@@ -361,6 +361,6 @@ class TestMetricsNewGauges:
             'fd_open': 10,
             'net_rx_bytes': 500,
         })
-        assert '# TYPE pd_zurg_disk_used_bytes gauge' in output
-        assert '# HELP pd_zurg_fd_open' in output
-        assert '# TYPE pd_zurg_net_rx_bytes_total counter' in output
+        assert '# TYPE zurgarr_disk_used_bytes gauge' in output
+        assert '# HELP zurgarr_fd_open' in output
+        assert '# TYPE zurgarr_net_rx_bytes_total counter' in output

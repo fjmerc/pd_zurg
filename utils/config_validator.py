@@ -97,8 +97,7 @@ def validate_config():
     log_levels = ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
     log_level_vars = (
         'ZURG_LOG_LEVEL', 'RCLONE_LOG_LEVEL',
-        'ZURGARR_LOG_LEVEL', 'PDZURG_LOG_LEVEL',
-        'PD_LOG_LEVEL',
+        'ZURGARR_LOG_LEVEL', 'PD_LOG_LEVEL',
     )
     for var in log_level_vars:
         val = os.environ.get(var, '').upper()
@@ -107,6 +106,13 @@ def validate_config():
                 f"{var}='{val}' is not a standard log level. "
                 f"Expected one of: {', '.join(log_levels)}"
             )
+
+    legacy_pdzurg_vars = sorted(k for k in os.environ if k.startswith('PDZURG_'))
+    if legacy_pdzurg_vars:
+        result.warn(
+            f"Legacy env vars ignored since 2.20.0 (rename to ZURGARR_*): "
+            f"{', '.join(legacy_pdzurg_vars)}"
+        )
 
     notification_level = os.environ.get('NOTIFICATION_LEVEL', '').lower()
     if notification_level and notification_level not in ('info', 'warning', 'error'):

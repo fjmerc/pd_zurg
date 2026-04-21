@@ -258,54 +258,21 @@ class TestReadEnvValues:
         assert values['RD_API_KEY'] == 'test123'
         assert values['AD_API_KEY'] == ''
 
-    def test_legacy_log_level_in_file_surfaces_under_new_key(self, tmp_path, monkeypatch):
-        """plan 35 Phase 1: a user who still has PDZURG_LOG_LEVEL in their .env
-        sees the value under the new ZURGARR_LOG_LEVEL slot so the UI doesn't
-        render an empty field while the runtime is honouring the legacy name."""
+    def test_legacy_pdzurg_in_file_does_not_surface(self, tmp_path, monkeypatch):
+        """Plan 35 Phase 6: the `_LEGACY_ENV_ALIASES` fallback is removed
+        at 2.20.0. A user whose .env still carries only `PDZURG_LOG_LEVEL`
+        sees a blank `ZURGARR_LOG_LEVEL` field in the Settings UI — no
+        alias-fallback surfaces the legacy value. The startup warning in
+        `utils/config_validator.py` is the signal that the legacy var is
+        being ignored; the Settings UI showing blank reinforces it.
+        """
         for key in ('ZURGARR_LOG_LEVEL', 'PDZURG_LOG_LEVEL'):
             monkeypatch.delenv(key, raising=False)
         env_file = tmp_path / '.env'
         env_file.write_text('PDZURG_LOG_LEVEL=DEBUG\n')
         with patch('utils.settings_api.ENV_FILE', str(env_file)):
             values = read_env_values()
-        assert values['ZURGARR_LOG_LEVEL'] == 'DEBUG'
-
-    def test_legacy_log_level_in_env_surfaces_under_new_key(self, tmp_path, monkeypatch):
-        """Same alias fallback must work for values coming from os.environ
-        (docker-compose forwarding, for example)."""
-        for key in ('ZURGARR_LOG_LEVEL', 'PDZURG_LOG_LEVEL'):
-            monkeypatch.delenv(key, raising=False)
-        monkeypatch.setenv('PDZURG_LOG_LEVEL', 'WARNING')
-        with patch('utils.settings_api.ENV_FILE', '/nonexistent/.env'):
-            values = read_env_values()
-        assert values['ZURGARR_LOG_LEVEL'] == 'WARNING'
-
-    def test_new_log_level_wins_over_legacy(self, tmp_path, monkeypatch):
-        """When both names are set in .env the new name's value is surfaced."""
-        for key in ('ZURGARR_LOG_LEVEL', 'PDZURG_LOG_LEVEL'):
-            monkeypatch.delenv(key, raising=False)
-        env_file = tmp_path / '.env'
-        env_file.write_text('ZURGARR_LOG_LEVEL=INFO\nPDZURG_LOG_LEVEL=DEBUG\n')
-        with patch('utils.settings_api.ENV_FILE', str(env_file)):
-            values = read_env_values()
-        assert values['ZURGARR_LOG_LEVEL'] == 'INFO'
-
-    def test_save_under_new_name_drops_legacy_entry(self, tmp_path, monkeypatch):
-        """Writing via the UI with only ZURGARR_LOG_LEVEL in the schema must
-        drop the pre-existing PDZURG_LOG_LEVEL line from .env — cleanly
-        migrating the user without leaving a stale legacy entry that would
-        keep firing the deprecation warning on each process start."""
-        for key in ('ZURGARR_LOG_LEVEL', 'PDZURG_LOG_LEVEL'):
-            monkeypatch.delenv(key, raising=False)
-        env_file = tmp_path / '.env'
-        env_file.write_text('PDZURG_LOG_LEVEL=DEBUG\n')
-        with patch('utils.settings_api.ENV_FILE', str(env_file)), \
-             patch('os.kill'):
-            result = write_env_values({'ZURGARR_LOG_LEVEL': 'INFO'})
-        assert result['status'] == 'saved'
-        content = env_file.read_text()
-        assert 'ZURGARR_LOG_LEVEL=INFO' in content
-        assert 'PDZURG_LOG_LEVEL' not in content
+        assert values['ZURGARR_LOG_LEVEL'] == ''
 
 
 class TestWriteEnvValues:

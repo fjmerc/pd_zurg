@@ -145,19 +145,33 @@ class TestConfigValidation:
         assert any('ZURG_LOG_LEVEL' in w for w in result.warnings)
         assert not any('ZURG_LOG_LEVEL' in e for e in result.errors)
 
-    def test_bad_log_level_warns_legacy_pdzurg(self, clean_env, env_vars):
-        """Legacy PDZURG_LOG_LEVEL should still be validated during the 2.19.x window."""
-        env_vars(PDZURG_LOG_LEVEL='BOGUS')
-        result = _validate_with_reload()
-        assert any('PDZURG_LOG_LEVEL' in w for w in result.warnings)
-        assert not any('PDZURG_LOG_LEVEL' in e for e in result.errors)
-
-    def test_bad_log_level_warns_new_zurgarr(self, clean_env, env_vars):
-        """New ZURGARR_LOG_LEVEL should warn on invalid value just like the legacy name."""
+    def test_bad_log_level_warns_zurgarr(self, clean_env, env_vars):
+        """ZURGARR_LOG_LEVEL should warn on invalid value."""
         env_vars(ZURGARR_LOG_LEVEL='BOGUS')
         result = _validate_with_reload()
         assert any('ZURGARR_LOG_LEVEL' in w for w in result.warnings)
         assert not any('ZURGARR_LOG_LEVEL' in e for e in result.errors)
+
+    def test_legacy_pdzurg_env_var_warns(self, clean_env, env_vars):
+        """Plan 35 Phase 6: a user on 2.20.0 who still has PDZURG_LOG_LEVEL
+        set in their .env (or docker-compose environment) gets a one-shot
+        startup warning listing every ignored legacy name. Without this,
+        the user's DEBUG intent would silently regress to INFO at upgrade
+        — the warning is the only signal that the env var is no longer
+        honored.
+        """
+        env_vars(PDZURG_LOG_LEVEL='DEBUG', PDZURG_LOG_COUNT='3')
+        result = _validate_with_reload()
+        warn_text = ' '.join(result.warnings)
+        assert 'PDZURG_LOG_LEVEL' in warn_text
+        assert 'PDZURG_LOG_COUNT' in warn_text
+        assert 'ZURGARR_' in warn_text
+
+    def test_no_legacy_pdzurg_no_warning(self, clean_env, env_vars):
+        """Clean installs / migrated users must not see the legacy warning."""
+        env_vars(ZURGARR_LOG_LEVEL='INFO')
+        result = _validate_with_reload()
+        assert not any('PDZURG_' in w for w in result.warnings)
 
     def test_duplicate_cleanup_keep_valid_local(self, clean_env, env_vars):
         """DUPLICATE_CLEANUP_KEEP=local should pass."""

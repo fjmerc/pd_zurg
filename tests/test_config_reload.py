@@ -67,20 +67,11 @@ class TestSoftReload:
 
     def test_soft_reload_vars_defined(self):
         """SOFT_RELOAD should contain known soft-reload variables."""
-        assert 'PDZURG_LOG_LEVEL' in SOFT_RELOAD
-        assert 'NOTIFICATION_LEVEL' in SOFT_RELOAD
-        assert 'NOTIFICATION_EVENTS' in SOFT_RELOAD
-
-    def test_soft_reload_covers_new_zurgarr_log_names(self):
-        """New ZURGARR_LOG_* names trigger soft reload alongside the legacy PDZURG_LOG_* set.
-
-        Keeps parity during the 2.19.x dual-read deprecation window so users who
-        already migrated their .env don't lose soft-reload behaviour on log-level
-        changes.
-        """
         assert 'ZURGARR_LOG_LEVEL' in SOFT_RELOAD
         assert 'ZURGARR_LOG_COUNT' in SOFT_RELOAD
         assert 'ZURGARR_LOG_SIZE' in SOFT_RELOAD
+        assert 'NOTIFICATION_LEVEL' in SOFT_RELOAD
+        assert 'NOTIFICATION_EVENTS' in SOFT_RELOAD
 
     def test_soft_reload_no_process_vars(self):
         """SOFT_RELOAD should not contain vars that need process restart."""
@@ -97,12 +88,12 @@ class TestSoftReload:
 
     def test_soft_only_detection(self):
         """Changes only in SOFT_RELOAD should be detected as soft-only."""
-        changed = {'PDZURG_LOG_LEVEL', 'SKIP_VALIDATION'}
+        changed = {'ZURGARR_LOG_LEVEL', 'SKIP_VALIDATION'}
         assert changed <= SOFT_RELOAD
 
     def test_mixed_changes_not_soft(self):
         """Changes mixing soft and hard vars should not be soft-only."""
-        changed = {'PDZURG_LOG_LEVEL', 'RD_API_KEY'}
+        changed = {'ZURGARR_LOG_LEVEL', 'RD_API_KEY'}
         assert not (changed <= SOFT_RELOAD)
 
 

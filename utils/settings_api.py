@@ -209,9 +209,9 @@ ENV_SCHEMA = [
         'name': 'Logging',
         'description': 'Application logging configuration',
         'fields': [
-            ('ZURGARR_LOG_LEVEL', 'Zurgarr Log Level', 'select:DEBUG,INFO,WARNING,ERROR,CRITICAL', False, 'Main application log level. Legacy PDZURG_LOG_LEVEL is still read through 2.20.0; if only the legacy name is set in .env, this field surfaces its value, and saving the form will rewrite .env under the new name.'),
-            ('ZURGARR_LOG_COUNT', 'Log File Count', 'string', False, 'Number of rotated log files to keep. Legacy PDZURG_LOG_COUNT still accepted through 2.20.0.'),
-            ('ZURGARR_LOG_SIZE', 'Max Log Size', 'string', False, 'Max size per log file (e.g., 10M). Legacy PDZURG_LOG_SIZE still accepted through 2.20.0.'),
+            ('ZURGARR_LOG_LEVEL', 'Zurgarr Log Level', 'select:DEBUG,INFO,WARNING,ERROR,CRITICAL', False, 'Main application log level.'),
+            ('ZURGARR_LOG_COUNT', 'Log File Count', 'string', False, 'Number of rotated log files to keep.'),
+            ('ZURGARR_LOG_SIZE', 'Max Log Size', 'string', False, 'Max size per log file (e.g., 10M).'),
             ('COLOR_LOG_ENABLED', 'Color Logs', 'boolean', False, 'Enable colored console log output'),
             ('PD_LOGFILE', 'plex_debrid Log File', 'string', False, 'Path for plex_debrid log output'),
         ],
@@ -293,18 +293,6 @@ def get_env_schema():
 # Read / Write
 # ---------------------------------------------------------------------------
 
-# Schema keys that gained a new name in the 2.19.0 rename — legacy names
-# are still read and surfaced under the new name's UI slot so users who
-# pre-migrated their .env (or haven't migrated at all) see their current
-# runtime value instead of an empty field. Saving the form writes under
-# the new name, cleanly migrating the .env. Removed in 2.20.0.
-_LEGACY_ENV_ALIASES = {
-    'ZURGARR_LOG_LEVEL': 'PDZURG_LOG_LEVEL',
-    'ZURGARR_LOG_COUNT': 'PDZURG_LOG_COUNT',
-    'ZURGARR_LOG_SIZE':  'PDZURG_LOG_SIZE',
-}
-
-
 def read_env_values():
     """Read current .env file and return key-value dict.
 
@@ -316,33 +304,19 @@ def read_env_values():
     When a key IS present in the .env file, its value is honored as-is
     (including an explicit empty string) — the default only fills in
     when the user hasn't declared an intent for the key at all.
-
-    Keys listed in ``_LEGACY_ENV_ALIASES`` fall back to the legacy name's
-    value when the new name is absent, so pd_zurg users see their actual
-    runtime config instead of a blank UI field on first open.
     """
     file_values = {}
     if os.path.exists(ENV_FILE):
         file_values = dotenv_values(ENV_FILE)
 
-    def _read_with_alias(key):
+    def _read(key):
         if key in file_values:
             return file_values[key] or ''
-        legacy = _LEGACY_ENV_ALIASES.get(key)
-        if legacy and legacy in file_values:
-            return file_values[legacy] or ''
-        env_val = os.environ.get(key, '')
-        if env_val:
-            return env_val
-        if legacy:
-            legacy_env = os.environ.get(legacy, '')
-            if legacy_env:
-                return legacy_env
-        return _ENV_DEFAULTS.get(key, '')
+        return os.environ.get(key, '') or _ENV_DEFAULTS.get(key, '')
 
     result = {}
     for key in sorted(_ALL_KEYS):
-        result[key] = _read_with_alias(key)
+        result[key] = _read(key)
     return result
 
 
@@ -534,8 +508,7 @@ def validate_env_values(values):
     log_levels = ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
     log_level_vars = (
         'ZURG_LOG_LEVEL', 'RCLONE_LOG_LEVEL',
-        'ZURGARR_LOG_LEVEL', 'PDZURG_LOG_LEVEL',
-        'PD_LOG_LEVEL',
+        'ZURGARR_LOG_LEVEL', 'PD_LOG_LEVEL',
     )
     for var in log_level_vars:
         val = values.get(var, '').upper()

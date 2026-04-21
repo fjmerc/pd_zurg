@@ -113,17 +113,19 @@ __NAV_HTML__
 .legend-item{display:inline-flex;align-items:center;gap:6px}
 .legend-swatch{width:16px;height:5px;border-radius:1px;display:inline-block}
 
-/* Alphabetical jump bar */
-.jump-bar{position:fixed;right:10px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;align-items:center;gap:clamp(0px,0.3vh,2px);z-index:10;padding:clamp(4px,1vh,10px) 5px;border-radius:10px;background:var(--card);border:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,.2);max-height:90vh;overflow-y:auto}
-.jump-letter{font-size:clamp(.7em,1.5vh,1.15em);font-weight:600;line-height:1;padding:clamp(1px,0.4vh,4px) 10px;cursor:pointer;color:var(--blue);border-radius:4px;user-select:none;transition:background .1s,color .1s}
-.jump-letter:hover{background:var(--blue);color:var(--bg)}
+/* Alphabetical jump bar - slim, edge-flush strip (Sonarr-style) */
+.jump-bar{position:fixed;right:0;top:0;bottom:0;display:flex;flex-direction:column;justify-content:center;align-items:stretch;gap:0;z-index:10;padding:8px 4px;width:22px;max-height:100vh;overflow-y:auto;background:transparent}
+.jump-letter{font-size:.72em;font-weight:600;line-height:1.55;padding:0 2px;cursor:pointer;color:var(--blue);user-select:none;text-align:center;transition:background .1s,color .1s,border-radius .1s}
+.jump-letter:hover{background:var(--blue);color:var(--bg);border-radius:3px}
 .jump-letter.inactive{color:var(--text3);cursor:default;opacity:.4;pointer-events:none}
 .jump-letter[title]{position:relative}
-.jump-letter .jump-tip{display:none;position:absolute;right:100%;top:50%;transform:translateY(-50%);margin-right:6px;background:var(--card);border:1px solid var(--border);color:var(--text);font-size:.72em;font-weight:400;padding:3px 8px;border-radius:4px;white-space:nowrap;pointer-events:none;box-shadow:0 2px 6px rgba(0,0,0,.25);z-index:11}
+.jump-letter .jump-tip{display:none;position:absolute;right:100%;top:50%;transform:translateY(-50%);margin-right:8px;background:var(--card);border:1px solid var(--border);color:var(--text);font-size:.72em;font-weight:400;padding:3px 8px;border-radius:4px;white-space:nowrap;pointer-events:none;box-shadow:0 2px 6px rgba(0,0,0,.25);z-index:11}
 .jump-letter:hover .jump-tip{display:block}
 .poster-card.jump-highlight{outline:2px solid var(--blue);outline-offset:2px}
-@media(max-width:900px) and (min-width:641px){.jump-bar{padding:clamp(3px,0.8vh,6px) 3px}.jump-letter{font-size:clamp(.6em,1.2vh,.9em);padding:clamp(0px,0.2vh,2px) 6px}.grid{padding-right:32px}}
-@media(max-width:640px) and (min-width:481px){.jump-bar{position:sticky;top:0;right:auto;left:0;transform:none;flex-direction:row;max-height:none;overflow-x:auto;overflow-y:hidden;border-radius:0;border-left:none;border-right:none;padding:4px 8px;gap:0;z-index:15;width:100%;box-shadow:0 2px 6px rgba(0,0,0,.15)}.jump-letter{padding:3px 8px;font-size:.75em;flex-shrink:0}.jump-letter .jump-tip{display:none !important}.grid{padding-right:0}}
+/* Reserve right-side space so poster cards don't slide under the fixed jump bar */
+.grid{padding-right:24px}
+@media(max-width:900px) and (min-width:641px){.jump-bar{width:20px;padding:6px 3px}.jump-letter{font-size:.68em;line-height:1.5}.grid{padding-right:22px}}
+@media(max-width:640px) and (min-width:481px){.jump-bar{position:sticky;top:0;right:auto;left:0;transform:none;flex-direction:row;justify-content:flex-start;align-items:center;max-height:none;width:100%;height:auto;overflow-x:auto;overflow-y:hidden;border-radius:0;padding:4px 8px;gap:0;z-index:15;background:var(--card);border-top:1px solid var(--border);border-bottom:1px solid var(--border);box-shadow:0 2px 6px rgba(0,0,0,.15)}.jump-letter{padding:3px 8px;font-size:.75em;line-height:1;flex-shrink:0}.jump-letter .jump-tip{display:none !important}.grid{padding-right:0}}
 @media(max-width:480px){.jump-bar{display:none}.grid{padding-right:0}}
 
 /* Media card (detail view only) */

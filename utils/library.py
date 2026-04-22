@@ -30,6 +30,15 @@ except ImportError:
 
 MEDIA_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m4v', '.webm'}
 
+
+def gap_fill_enabled():
+    """Return ``True`` when the unconditional episode-completeness reconcile is
+    enabled.  Single source of truth for the ``GAP_FILL_ENABLED`` env var so
+    ``library.py`` and ``scheduled_tasks.py`` can't drift on parsing rules.
+    Default ``true`` — opt-out, not opt-in.
+    """
+    return os.environ.get('GAP_FILL_ENABLED', 'true').strip().lower() == 'true'
+
 # Folders to skip during library scans (non-media content)
 _SKIP_FOLDERS = {
     'plex versions', 'subs', 'subtitles', 'featurettes',
@@ -776,6 +785,53 @@ class LibraryScanner:
                     break
         return pref
 
+    def _route_for(self, norm, preferences):
+        """Map a stored preference to an ``ensure_and_search`` route selector.
+
+        Returns True for prefer-debrid (force-grab debrid copies),
+        False for prefer-local, and None when no preference is set
+        (gap-fill only — Sonarr's own routing tag decides the destination).
+        """
+        pref = self._get_pref(norm, preferences)
+        if pref == 'prefer-debrid':
+            return True
+        if pref == 'prefer-local':
+            return False
+        return None
+
+    def _compute_missing_episodes(self, show):
+        """Return ``[(season, episode), ...]`` of aired TMDB episodes that the
+        scan did not find under any source.
+
+        Defends the "Lucky Hank E04" user story: an aired episode the TMDB
+        cache expects but neither debrid nor local holds a file for.  Specials
+        (season 0) and unaired episodes are excluded at the TMDB helper.
+
+        Returns ``[]`` when TMDB has no cached episode list for the show —
+        an empty return must be treated as "don't know" so we never trigger
+        a spurious search for a title we lack ground truth on.
+        """
+        from utils.tmdb import get_cached_episode_list
+        norm = _normalize_title(show.get('title', ''))
+        expected = get_cached_episode_list(norm, show.get('year'))
+        if not expected:
+            return []
+        present = set()
+        for sd in show.get('season_data', []):
+            sn = sd.get('number')
+            if not sn:
+                continue
+            for ep in sd.get('episodes', []):
+                en = ep.get('number')
+                if en and ep.get('source') in ('debrid', 'local', 'both'):
+                    present.add((sn, en))
+        missing = []
+        for ep in expected:
+            key = (ep['season'], ep['number'])
+            if key not in present:
+                missing.append(key)
+        return missing
+
     @staticmethod
     def _dedup_by_tmdb(items, aliases):
         """Merge items that share a TMDB ID but have different normalized titles.
@@ -1134,7 +1190,7 @@ class LibraryScanner:
         self._cleanup_disc_rips(movies)
         changed = self._enforce_preferences(shows, movies, preferences, path_index,
                                               local_path_index, force=force_enforce)
-        self._search_for_debrid_copies(shows, movies, preferences)
+        self._search_for_missing_episodes(shows, movies, preferences)
         self._recover_local_fallback_routing(shows, movies)
         self._clear_resolved_pending(shows, movies)
         self._escalate_stuck_pending()
@@ -1673,18 +1729,34 @@ class LibraryScanner:
     _SEARCH_BUDGET_SECONDS = 30
     _SEARCH_RETRY_HOURS = 6
 
-    def _search_for_debrid_copies(self, shows, movies, preferences):
-        """Trigger Sonarr/Radarr searches for prefer-debrid titles missing debrid copies.
+    def _search_for_missing_episodes(self, shows, movies, preferences):
+        """Unconditional episode-completeness reconcile.
 
-        Finds episodes/movies that are local-only (no debrid copy) under a
-        prefer-debrid preference and triggers a search via the arr client.
-        Skips episodes on cooldown from a recent failed search.  Episodes with
-        existing pending entries are retried after _SEARCH_RETRY_HOURS to
-        handle transient indexer failures.
+        For every show and movie, issue arr searches for:
+          * Missing-anywhere: aired TMDB episodes present in neither debrid
+            nor local (the "Lucky Hank E04" case).  Runs regardless of
+            source preference so any viewer hole gets filled.  Gated by
+            ``GAP_FILL_ENABLED`` (default ``true``).
+          * Local-only (``prefer-debrid`` only): episodes that exist
+            locally but not on debrid — the original preference-enforcement
+            behavior this function was built for.
+
+        Route selection: ``prefer-debrid`` → True (force-grab debrid copies);
+        ``prefer-local`` → False (route via local); unset → None (Sonarr's
+        own tag decides).  Unset and prefer-local pass
+        ``respect_monitored=True`` so an explicitly-unmonitored episode is
+        never re-searched against the user's intent.
+
+        Pending direction is chosen per route: ``to-debrid`` / ``to-local``
+        / ``to-any``.  ``to-any`` resolves on any source and is never
+        escalated to ``debrid-unavailable``.
+
+        Skips episodes on cooldown from a recent failed search.  Episodes
+        with existing pending entries of the same direction are retried
+        after ``_SEARCH_RETRY_HOURS`` to handle transient indexer failures.
         Respects a time budget to avoid blocking the scan thread too long.
         """
-        if not preferences:
-            return
+        gap_fill_on = gap_fill_enabled()
 
         from utils.library_prefs import get_all_pending, set_pending, touch_pending_searched, update_pending_error
         from utils.tmdb import search_show as tmdb_search_show, search_movie as tmdb_search_movie
@@ -1716,10 +1788,11 @@ class LibraryScanner:
                     logger.info("[library] Search budget exhausted, deferring remaining to next scan")
                     break
                 norm = _normalize_title(show['title'])
-                if self._get_pref(norm, preferences) != 'prefer-debrid':
-                    continue
+                route = self._route_for(norm, preferences)
+                direction = {True: 'to-debrid', False: 'to-local', None: 'to-any'}[route]
 
-                # Check pending state — skip debrid-unavailable, allow retries for stale to-debrid
+                # Check pending state — skip debrid-unavailable, allow retries
+                # for stale entries whose direction matches the current route
                 pending_entry = pending.get(norm)
                 pending_norm = norm  # key under which the entry lives
                 if not pending_entry:
@@ -1734,7 +1807,17 @@ class LibraryScanner:
                     continue  # escalated — stop retrying
                 pending_keys = set()
                 is_retry = False
-                if pe_dir == 'to-debrid':
+                if pe_dir and pe_dir != direction:
+                    # Direction changed (e.g., user flipped from prefer-debrid
+                    # to unset).  Clear the stale-direction entry so
+                    # touch_pending_searched / update_pending_error below don't
+                    # mutate a wrong-direction entry that would then zombify
+                    # when the whole season loop errors out.
+                    from utils.library_prefs import clear_pending
+                    clear_pending(pending_norm)
+                    pending_entry = {}
+                    pe_dir = ''
+                if pe_dir == direction:
                     # Check if the last search attempt is recent enough to skip
                     last_ts = pending_entry.get('last_searched') or pending_entry.get('created')
                     stale = True
@@ -1765,34 +1848,45 @@ class LibraryScanner:
                             increment_retry=False,
                         )
 
-                # Find local-only episodes not already pending or on cooldown
+                # Build the candidate set:
+                #   - Missing-anywhere (aired TMDB episodes absent from all sources).
+                #     Gated by GAP_FILL_ENABLED so operators can opt out.
+                #   - Local-only (route=True only): legacy prefer-debrid behavior.
+                candidates = set()
+                if gap_fill_on:
+                    for sn, en in self._compute_missing_episodes(show):
+                        candidates.add((sn, en))
+                if route is True:
+                    for sd in show.get('season_data', []):
+                        for ep in sd.get('episodes', []):
+                            src = ep.get('source')
+                            if src in ('debrid', 'both'):
+                                continue  # already on debrid
+                            candidates.add((sd['number'], ep['number']))
+
                 by_season = {}
-                for sd in show.get('season_data', []):
-                    for ep in sd.get('episodes', []):
-                        src = ep.get('source')
-                        if src in ('debrid', 'both'):
-                            continue  # already on debrid
-                        sn, en = sd['number'], ep['number']
-                        if (sn, en) in pending_keys:
-                            continue  # already searching
-                        if (norm, sn) in self._search_cooldown:
-                            continue  # recently attempted
-                        if sn not in by_season:
-                            by_season[sn] = []
-                        by_season[sn].append(en)
+                for sn, en in candidates:
+                    if (sn, en) in pending_keys:
+                        continue  # already searching
+                    if (norm, sn) in self._search_cooldown:
+                        continue  # recently attempted
+                    by_season.setdefault(sn, []).append(en)
 
                 if not by_season:
                     continue
 
                 total = sum(len(eps) for eps in by_season.values())
                 retry_tag = ' (retry)' if is_retry else ''
+                route_tag = {True: 'debrid', False: 'local', None: 'any'}[route]
                 logger.info(
-                    f"[library] Prefer-debrid search{retry_tag} for {show['title']}: "
+                    f"[library] Gap-fill search{retry_tag} [{route_tag}] for {show['title']}: "
                     f"{total} episode(s) across {len(by_season)} season(s)"
                 )
 
                 # Touch last_searched immediately so overlapping scans
-                # don't re-process the same title concurrently
+                # don't re-process the same title concurrently.  Safe no-op
+                # when no entry exists; on direction change the final
+                # set_pending() below resets the entry cleanly.
                 touch_pending_searched(pending_norm)
 
                 # Resolve TMDB ID for accurate Sonarr matching (only when
@@ -1806,16 +1900,26 @@ class LibraryScanner:
                     except Exception as e:
                         logger.debug(f"[library] TMDB lookup failed for {show['title']!r}, falling back to title search: {e}")
 
+                respect_mon = route is not True  # True for None and False routes
                 new_pending = []
                 for sn, ep_nums in by_season.items():
                     try:
                         result = show_client.ensure_and_search(
-                            show['title'], show_tmdb_id, sn, ep_nums, prefer_debrid=True
+                            show['title'], show_tmdb_id, sn, ep_nums,
+                            prefer_debrid=route, respect_monitored=respect_mon,
                         )
                         status = result.get('status', '')
                         if status in ('sent', 'pending'):
                             for en in ep_nums:
                                 new_pending.append({'season': sn, 'episode': en})
+                        elif status == 'skipped':
+                            # User-unmonitored episodes — respect intent, don't
+                            # cooldown or error-log (would churn retry_count).
+                            logger.debug(
+                                f"[library] {show['title']} S{sn:02d}: "
+                                f"{result.get('message', 'skipped (unmonitored)')}"
+                            )
+                            self._search_cooldown[(norm, sn)] = now
                         elif status == 'error':
                             err_msg = f"Sonarr: {result.get('message', 'unknown error')}"
                             logger.warning(
@@ -1825,14 +1929,14 @@ class LibraryScanner:
                             self._search_cooldown[(norm, sn)] = now
                             update_pending_error(pending_norm, err_msg)
                         else:
-                            update_pending_error(pending_norm, "No debrid results found", increment_retry=False)
+                            update_pending_error(pending_norm, "No search results found", increment_retry=False)
                     except Exception as e:
                         logger.error(f"[library] Search error for {show['title']} S{sn:02d}: {e}")
                         self._search_cooldown[(norm, sn)] = now
                         update_pending_error(pending_norm, f"Sonarr: {e}")
 
                 if new_pending:
-                    set_pending(pending_norm, new_pending, 'to-debrid')
+                    set_pending(pending_norm, new_pending, direction)
 
         # --- Movies via Radarr ---
         try:
@@ -1846,10 +1950,22 @@ class LibraryScanner:
                     logger.info("[library] Search budget exhausted, deferring remaining to next scan")
                     break
                 norm = _normalize_title(movie['title'])
-                if self._get_pref(norm, preferences) != 'prefer-debrid':
-                    continue
-                if movie.get('source') in ('debrid', 'both'):
-                    continue  # already on debrid
+                route = self._route_for(norm, preferences)
+                direction = {True: 'to-debrid', False: 'to-local', None: 'to-any'}[route]
+
+                # Candidate check: route=True searches whenever debrid copy missing
+                # (legacy prefer-debrid); other routes search only when missing from
+                # every source.  Gap-fill gated by GAP_FILL_ENABLED.
+                src = movie.get('source')
+                if route is True:
+                    if src in ('debrid', 'both'):
+                        continue  # already on debrid
+                else:
+                    if not gap_fill_on:
+                        continue
+                    if src in ('debrid', 'local', 'both'):
+                        continue  # already available somewhere
+
                 pending_entry = pending.get(norm)
                 pending_norm = norm
                 if not pending_entry:
@@ -1863,7 +1979,14 @@ class LibraryScanner:
                 if pe_dir == 'debrid-unavailable':
                     continue  # escalated — stop retrying
                 movie_is_retry = False
-                if pe_dir == 'to-debrid':
+                if pe_dir and pe_dir != direction:
+                    # Direction changed (preference flipped) — clear stale-direction
+                    # entry so touch / update_pending_error below don't zombify it.
+                    from utils.library_prefs import clear_pending
+                    clear_pending(pending_norm)
+                    pending_entry = {}
+                    pe_dir = ''
+                if pe_dir == direction:
                     # Allow retry if last search is stale
                     last_ts = pending_entry.get('last_searched') or pending_entry.get('created')
                     stale = True
@@ -1893,9 +2016,12 @@ class LibraryScanner:
                     continue  # recently attempted
 
                 retry_tag = ' (retry)' if movie_is_retry else ''
-                logger.info(f"[library] Prefer-debrid search{retry_tag} for movie: {movie['title']}")
+                route_tag = {True: 'debrid', False: 'local', None: 'any'}[route]
+                logger.info(f"[library] Gap-fill search{retry_tag} [{route_tag}] for movie: {movie['title']}")
 
-                # Touch immediately to prevent overlapping scans
+                # Touch immediately to prevent overlapping scans.  Safe no-op
+                # when no entry exists; direction reset is handled by the
+                # final set_pending() below.
                 touch_pending_searched(pending_norm)
 
                 movie_tmdb_id = None
@@ -1906,13 +2032,23 @@ class LibraryScanner:
                             movie_tmdb_id = tmdb_hit['tmdb_id']
                     except Exception as e:
                         logger.debug(f"[library] TMDB lookup failed for {movie['title']!r}, falling back to title search: {e}")
+                respect_mon = route is not True
                 try:
                     result = movie_client.ensure_and_search(
-                        movie['title'], movie_tmdb_id, prefer_debrid=True
+                        movie['title'], movie_tmdb_id, prefer_debrid=route,
+                        respect_monitored=respect_mon,
                     )
                     status = result.get('status', '')
                     if status in ('sent', 'pending'):
-                        set_pending(pending_norm, [{'season': 0, 'episode': 0}], 'to-debrid')
+                        set_pending(pending_norm, [{'season': 0, 'episode': 0}], direction)
+                    elif status == 'skipped':
+                        # Respect_monitored short-circuit — user intentionally
+                        # unmonitored; don't touch pending or retry_count.
+                        logger.debug(
+                            f"[library] Movie {movie['title']}: "
+                            f"{result.get('message', 'skipped (unmonitored)')}"
+                        )
+                        self._search_cooldown[(norm, 0)] = now
                     elif status == 'error':
                         err_msg = f"Radarr: {result.get('message', 'unknown error')}"
                         logger.warning(
@@ -1922,7 +2058,7 @@ class LibraryScanner:
                         self._search_cooldown[(norm, 0)] = now
                         update_pending_error(pending_norm, err_msg)
                     else:
-                        update_pending_error(pending_norm, "No debrid results found", increment_retry=False)
+                        update_pending_error(pending_norm, "No search results found", increment_retry=False)
                 except Exception as e:
                     logger.error(f"[library] Search error for movie {movie['title']}: {e}")
                     self._search_cooldown[(norm, 0)] = now
@@ -1987,6 +2123,8 @@ class LibraryScanner:
                     resolved.append(ep)  # content appeared on debrid after all
                 elif direction in ('to-local', 'to-local-fallback') and src in ('local', 'both'):
                     resolved.append(ep)
+                elif direction == 'to-any' and src in ('debrid', 'local', 'both'):
+                    resolved.append(ep)  # gap-fill: any source satisfies the user story
                 elif not src and not title_exists:
                     # Title gone from library entirely — stale
                     resolved.append(ep)
@@ -2053,9 +2191,12 @@ class LibraryScanner:
         """Send notification for items pending > PENDING_WARNING_HOURS.
 
         Notifies once per item (tracks via 'warned_at' field on pending entry).
-        Only warns for 'to-debrid' direction — items actively searching.
-        Runs after _escalate_stuck_pending() so newly-escalated items are
-        already direction='debrid-unavailable' and won't be warned.
+        Warns for 'to-debrid' AND 'to-any' directions — both represent items
+        actively searching for content.  'to-any' entries are never escalated
+        (never become 'debrid-unavailable') but still need a visibility signal
+        for the user after the threshold so a long-standing gap doesn't go
+        unnoticed.  Runs after _escalate_stuck_pending() so newly-escalated
+        items are already direction='debrid-unavailable' and won't be warned.
         """
         from utils.library_prefs import get_all_pending, set_pending_warned
 
@@ -2071,7 +2212,7 @@ class LibraryScanner:
         warned = []
 
         for norm_title, entry in list(pending.items()):
-            if entry.get('direction') != 'to-debrid':
+            if entry.get('direction') not in ('to-debrid', 'to-any'):
                 continue
             if entry.get('warned_at'):
                 continue  # already warned

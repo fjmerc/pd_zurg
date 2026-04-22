@@ -1,6 +1,6 @@
 """Tests for the prefer-debrid search retry mechanism.
 
-Verifies that _search_for_debrid_copies retries stale pending entries
+Verifies that _search_for_missing_episodes retries stale pending entries
 instead of permanently skipping them after the first search attempt.
 """
 
@@ -30,7 +30,7 @@ def _isolate_pending(tmp_dir, monkeypatch):
 
 @pytest.fixture
 def scanner(monkeypatch):
-    """Create a minimal LibraryScanner for testing _search_for_debrid_copies."""
+    """Create a minimal LibraryScanner for testing _search_for_missing_episodes."""
     from utils.library import LibraryScanner
     monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', '/data/mount')
     monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
@@ -97,7 +97,7 @@ class TestShowSearchRetry:
         preferences = {'tulsa king': 'prefer-debrid'}
 
         with patch('utils.arr_client.get_download_service', return_value=(mock_sonarr, 'sonarr')):
-            scanner._search_for_debrid_copies(shows, [], preferences)
+            scanner._search_for_missing_episodes(shows, [], preferences)
 
         # Should NOT have called ensure_and_search — pending is fresh
         mock_sonarr.ensure_and_search.assert_not_called()
@@ -124,7 +124,7 @@ class TestShowSearchRetry:
 
         with patch('utils.arr_client.get_download_service', return_value=(mock_sonarr, 'sonarr')):
             with patch('utils.tmdb.search_show', return_value=None):
-                scanner._search_for_debrid_copies(shows, [], preferences)
+                scanner._search_for_missing_episodes(shows, [], preferences)
 
         # Should have retried the search
         mock_sonarr.ensure_and_search.assert_called_once()
@@ -147,7 +147,7 @@ class TestShowSearchRetry:
 
         with patch('utils.arr_client.get_download_service', return_value=(mock_sonarr, 'sonarr')):
             with patch('utils.tmdb.search_show', return_value=None):
-                scanner._search_for_debrid_copies(shows, [], preferences)
+                scanner._search_for_missing_episodes(shows, [], preferences)
 
         mock_sonarr.ensure_and_search.assert_called_once()
 
@@ -169,7 +169,7 @@ class TestShowSearchRetry:
 
         with patch('utils.arr_client.get_download_service', return_value=(mock_sonarr, 'sonarr')):
             with patch('utils.tmdb.search_show', return_value=None):
-                scanner._search_for_debrid_copies(shows, [], preferences)
+                scanner._search_for_missing_episodes(shows, [], preferences)
 
         # Verify last_searched was updated
         entry = lp.get_all_pending()['tulsa king']
@@ -195,7 +195,7 @@ class TestShowSearchRetry:
         preferences = {'tulsa king': 'prefer-debrid'}
 
         with patch('utils.arr_client.get_download_service', return_value=(mock_sonarr, 'sonarr')):
-            scanner._search_for_debrid_copies(shows, [], preferences)
+            scanner._search_for_missing_episodes(shows, [], preferences)
 
         mock_sonarr.ensure_and_search.assert_not_called()
 
@@ -216,7 +216,7 @@ class TestShowSearchRetry:
         preferences = {'tulsa king': 'prefer-debrid'}
 
         with patch('utils.arr_client.get_download_service', return_value=(mock_sonarr, 'sonarr')):
-            scanner._search_for_debrid_copies(shows, [], preferences)
+            scanner._search_for_missing_episodes(shows, [], preferences)
 
         # Episode is already on debrid — no search needed
         mock_sonarr.ensure_and_search.assert_not_called()
@@ -236,7 +236,7 @@ class TestMovieSearchRetry:
         preferences = {'children of men': 'prefer-debrid'}
 
         with patch('utils.arr_client.get_download_service', return_value=(mock_radarr, 'radarr')):
-            scanner._search_for_debrid_copies([], movies, preferences)
+            scanner._search_for_missing_episodes([], movies, preferences)
 
         mock_radarr.ensure_and_search.assert_not_called()
 
@@ -258,7 +258,7 @@ class TestMovieSearchRetry:
 
         with patch('utils.arr_client.get_download_service', return_value=(mock_radarr, 'radarr')):
             with patch('utils.tmdb.search_movie', return_value=None):
-                scanner._search_for_debrid_copies([], movies, preferences)
+                scanner._search_for_missing_episodes([], movies, preferences)
 
         mock_radarr.ensure_and_search.assert_called_once()
 
@@ -280,7 +280,7 @@ class TestMovieSearchRetry:
 
         with patch('utils.arr_client.get_download_service', return_value=(mock_radarr, 'radarr')):
             with patch('utils.tmdb.search_movie', return_value=None):
-                scanner._search_for_debrid_copies([], movies, preferences)
+                scanner._search_for_missing_episodes([], movies, preferences)
 
         entry = lp.get_all_pending()['children of men']
         assert entry['last_searched'] != old_ts
@@ -313,7 +313,7 @@ class TestSearchTouchBeforeSearch:
 
         with patch('utils.arr_client.get_download_service', return_value=(error_client, 'sonarr')):
             with patch('utils.tmdb.search_show', return_value=None):
-                scanner._search_for_debrid_copies(shows, [], preferences)
+                scanner._search_for_missing_episodes(shows, [], preferences)
 
         error_client.ensure_and_search.assert_called_once()
         # last_searched IS updated (touched before search to prevent overlaps)
@@ -341,7 +341,7 @@ class TestSearchTouchBeforeSearch:
 
         with patch('utils.arr_client.get_download_service', return_value=(error_client, 'radarr')):
             with patch('utils.tmdb.search_movie', return_value=None):
-                scanner._search_for_debrid_copies([], movies, preferences)
+                scanner._search_for_missing_episodes([], movies, preferences)
 
         error_client.ensure_and_search.assert_called_once()
         entry = lp.get_all_pending()['children of men']

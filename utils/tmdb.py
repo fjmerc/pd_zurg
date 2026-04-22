@@ -818,6 +818,44 @@ def find_show_tmdb_id_by_season(norm_key, max_season, year=None):
     return None
 
 
+def get_cached_episode_list(normalized_title, year=None):
+    """Return aired, non-specials episodes from the TMDB cache.
+
+    Used by the library reconcile to diff expected against present.  Season 0
+    is always excluded (``get_show_metadata`` already drops it on fetch, but
+    re-filter here for defense against stale pre-v2 cache entries).  Episodes
+    with empty or future ``air_date`` are excluded — unaired content isn't
+    "missing".  Returns ``[]`` when the title isn't cached or is stale; callers
+    must treat an empty return as "don't know, skip" rather than "nothing
+    aired" so we never trigger a spurious search for a title we have no data
+    on.
+    """
+    from utils.library import _normalize_title as _nt
+    norm = _nt(normalized_title or '')
+    if not norm:
+        return []
+    with _cache_lock:
+        cache = _load_cache()
+    entry = _cache_lookup(cache.get('shows', {}), norm, year)
+    if not entry or not _is_fresh(entry):
+        return []
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    out = []
+    for s in entry.get('seasons', []):
+        snum = s.get('number', 0)
+        if snum is None or snum <= 0:
+            continue
+        for ep in s.get('episodes', []):
+            ad = ep.get('air_date', '')
+            if not ad or ad > today:
+                continue
+            enum = ep.get('number', 0)
+            if not isinstance(enum, int) or enum <= 0:
+                continue
+            out.append({'season': snum, 'number': enum, 'air_date': ad})
+    return out
+
+
 def get_cached_tmdb_ids():
     """Return cached TMDB IDs grouped by section (no API calls).
 

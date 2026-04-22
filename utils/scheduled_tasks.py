@@ -390,8 +390,15 @@ def verify_symlinks():
                 if not os.path.exists(check_target):
                     to_delete.append((fpath, target, scan_dir))
 
-    # Phase 2: Attempt repair, then delete confirmed broken symlinks
-    auto_search = os.environ.get('SYMLINK_REPAIR_AUTO_SEARCH', 'false').lower() == 'true'
+    # Phase 2: Attempt repair, then delete confirmed broken symlinks.
+    # Auto-search on deletion is enabled by either the legacy opt-in flag
+    # or GAP_FILL_ENABLED (default true), since re-searching disappeared
+    # content is part of the "available anywhere" reconcile story.
+    from utils.library import gap_fill_enabled
+    auto_search = (
+        os.environ.get('SYMLINK_REPAIR_AUTO_SEARCH', 'false').lower() == 'true'
+        or gap_fill_enabled()
+    )
     repaired = 0
     searched = 0
     deleted = 0

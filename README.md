@@ -424,6 +424,7 @@ All settings are documented in [`.env.example`](.env.example) with inline commen
 | `LIBRARY_PREFERENCE_AUTO_ENFORCE` | Automatically switch sources when content arrives matching a stored preference (prefer-local/prefer-debrid) | `false` |
 | `DEBRID_UNAVAILABLE_THRESHOLD_DAYS` | Days of failed debrid searches before marking content as debrid-unavailable and stopping retries | `3` |
 | `PENDING_WARNING_HOURS` | Hours before sending a `pending_warning` notification for items stuck searching. Set to `0` to disable | `24` |
+| `GAP_FILL_ENABLED` | Reconcile every monitored show against TMDB and search Sonarr/Radarr for aired episodes missing from both debrid and local, regardless of source preference. Also auto-enables `verify_symlinks` re-search on broken symlinks. Set `false` to opt out (preserves legacy prefer-debrid-only behavior). | `true` |
 
 </details>
 

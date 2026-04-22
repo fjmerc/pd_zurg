@@ -100,7 +100,7 @@ def _save_pending(pending):
         json.dump(pending, f, indent=2)
 
 
-_VALID_DIRECTIONS = {'to-debrid', 'to-local', 'to-local-fallback'}
+_VALID_DIRECTIONS = {'to-debrid', 'to-local', 'to-local-fallback', 'to-any'}
 
 
 def set_pending(normalized_title, episodes, direction='to-debrid'):
@@ -109,7 +109,11 @@ def set_pending(normalized_title, episodes, direction='to-debrid'):
     Args:
         normalized_title: Normalized show/movie title
         episodes: list of {season, episode} dicts
-        direction: 'to-debrid', 'to-local', or 'to-local-fallback'
+        direction: 'to-debrid', 'to-local', 'to-local-fallback', or 'to-any'
+
+    'to-any' is used by the unconditional gap-fill reconcile when no source
+    preference is set — it resolves on any source (debrid OR local) and is
+    never escalated to debrid-unavailable.
 
     Note: 'debrid-unavailable' is set by mark_debrid_unavailable(), not here.
     """

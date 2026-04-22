@@ -805,6 +805,14 @@ class BlackholeWatcher:
         # Active monitor tracking (prevents duplicate monitors)
         self._active_monitors = set()
         self._monitors_lock = threading.RLock()
+
+        # Audit-driven re-search cooldown so a flaky indexer handing out
+        # broken releases for the same (show, season) doesn't produce an
+        # unbounded grab-blocklist-regrab loop on Sonarr.
+        self._audit_retrigger = {}  # {(title_lower, season): epoch}
+        self._audit_retrigger_lock = threading.Lock()
+        self._AUDIT_RETRIGGER_COOLDOWN = 7200  # 2 hours
+        self._AUDIT_RETRIGGER_MAX_PER_WINDOW = 3  # caps retries within window
         if symlink_enabled:
             self._pending_file = os.path.join(completed_dir, 'pending_monitors.json')
         else:
@@ -1247,6 +1255,154 @@ class BlackholeWatcher:
 
         return count
 
+    # ── Post-grab completeness audit ─────────────────────────────────
+
+    def _audit_retrigger_recent(self, title, season):
+        """Return True when an audit-driven re-search for ``(title, season)``
+        has fired more than ``_AUDIT_RETRIGGER_MAX_PER_WINDOW`` times within
+        ``_AUDIT_RETRIGGER_COOLDOWN`` seconds.  Bounds the grab-blocklist-regrab
+        loop a flaky indexer could otherwise sustain indefinitely.
+        """
+        key = (title.lower(), int(season))
+        now = time.time()
+        with self._audit_retrigger_lock:
+            entries = self._audit_retrigger.get(key, [])
+            entries = [t for t in entries if now - t < self._AUDIT_RETRIGGER_COOLDOWN]
+            self._audit_retrigger[key] = entries
+            if len(entries) >= self._AUDIT_RETRIGGER_MAX_PER_WINDOW:
+                logger.info(
+                    f"[blackhole] Audit retry limit reached for {title} S{season:02d} "
+                    f"({len(entries)} attempts in last "
+                    f"{self._AUDIT_RETRIGGER_COOLDOWN//60}m) — backing off"
+                )
+                return True
+            return False
+
+    def _audit_retrigger_mark(self, title, season):
+        """Record a successful audit-driven re-search trigger against
+        ``(title, season)`` so ``_audit_retrigger_recent`` can enforce the
+        per-window cap on subsequent attempts."""
+        key = (title.lower(), int(season))
+        with self._audit_retrigger_lock:
+            self._audit_retrigger.setdefault(key, []).append(time.time())
+
+    def _audit_release_completeness(self, filename, release_name, mount_path, info):
+        """Verify a TV release actually delivered every claimed episode.
+
+        Only audits episode-level releases — ``_parse_episodes`` returns an
+        empty set for season packs, and we have no TMDB ground truth at this
+        layer to diff against.  The library-scan reconcile catches pack gaps
+        on the next cycle.
+
+        On short delivery: blocklist the release hash so the same bad release
+        isn't re-grabbed, log a ``release_incomplete`` history event, and
+        trigger a force-grab re-search for the still-missing episodes.
+
+        Best-effort: any failure in the re-search path is swallowed (the
+        blocklist + history are what matters).  Partially-delivered episodes
+        are NOT un-symlinked — partial playback beats nothing.
+        """
+        claimed = _parse_episodes(filename)
+        if not claimed:
+            return  # pack or unparseable — rely on library reconcile
+
+        delivered = set()
+        try:
+            for root, _dirs, files in os.walk(mount_path):
+                for f in files:
+                    ext = os.path.splitext(f)[1].lower()
+                    if ext not in MEDIA_EXTENSIONS:
+                        continue
+                    if 'sample' in f.lower():
+                        continue
+                    delivered |= _parse_episodes(f)
+        except OSError as e:
+            logger.debug(f"[blackhole] Completeness audit: walk failed for {release_name}: {e}")
+            return
+
+        missing = sorted(claimed - delivered)
+        if not missing:
+            return
+
+        info_hash = ''
+        try:
+            info_hash = self._extract_hash_from_info(info) or ''
+        except Exception:
+            pass
+
+        logger.warning(
+            f"[blackhole] Incomplete release {release_name}: claimed "
+            f"{sorted(claimed)}, delivered {sorted(delivered)}, missing {missing}"
+        )
+
+        if _blocklist and info_hash and str(os.environ.get('BLOCKLIST_AUTO_ADD', 'true')).lower() == 'true':
+            try:
+                _blocklist.add(
+                    info_hash, filename,
+                    reason=f'incomplete release: missing episodes {missing}',
+                    source='auto',
+                )
+            except Exception as e:
+                logger.debug(f"[blackhole] Blocklist add failed: {e}")
+
+        if _history:
+            try:
+                mt, ep = _enrich_for_history(filename)
+                _history.log_event(
+                    'release_incomplete', filename, episode=ep, source='blackhole',
+                    detail=f'Missing episodes: {missing}',
+                    meta={
+                        'info_hash': info_hash,
+                        'claimed': sorted(claimed),
+                        'delivered': sorted(delivered),
+                        'missing': missing,
+                    },
+                    media_title=mt,
+                )
+            except Exception as e:
+                logger.debug(f"[blackhole] History log failed: {e}")
+
+        try:
+            title, season, is_tv = parse_release_name(filename)
+            if is_tv and season is not None and title:
+                # Audit-driven re-search uses a find-only path: if Sonarr
+                # doesn't already track the series, we do NOT add it here.
+                # The filename-parsed title drops the disambiguation year
+                # (parse_release_name strips it), so handing `tmdb_id=None`
+                # straight into ensure_and_search can miss a year-qualified
+                # series ("Lucky Hank (2023)") and fall through to add_series,
+                # creating a duplicate.  Resolve TMDB first, and only proceed
+                # when the series is already in the library.
+                if self._audit_retrigger_recent(title, season):
+                    return
+                from utils.arr_client import get_download_service
+                from utils.tmdb import search_show as tmdb_search_show
+                client, svc = get_download_service('show')
+                if not client or svc != 'sonarr':
+                    return
+                tmdb_id = None
+                try:
+                    hit = tmdb_search_show(title)
+                    if hit:
+                        tmdb_id = hit.get('tmdb_id')
+                except Exception:
+                    pass
+                if not client.find_series_in_library(tmdb_id=tmdb_id, title=title):
+                    logger.info(
+                        f"[blackhole] Audit: series {title!r} not in Sonarr — "
+                        f"skipping re-search to avoid adding a duplicate"
+                    )
+                    return
+                self._audit_retrigger_mark(title, season)
+                client.ensure_and_search(
+                    title, tmdb_id, season, missing,
+                    prefer_debrid=True, respect_monitored=True,
+                )
+        except Exception as e:
+            logger.warning(
+                f"[blackhole] Re-search failed for missing episodes of {release_name}: {e}"
+            )
+
     # ── Symlink cleanup ──────────────────────────────────────────────
 
     def _cleanup_symlinks(self):
@@ -1612,6 +1768,11 @@ class BlackholeWatcher:
                 if _notify:
                     _notify('download_complete', 'Blackhole: Symlinks Created',
                             f'{count} symlink(s) created for {release_name}')
+                # Post-grab audit: did every claimed episode actually land?
+                try:
+                    self._audit_release_completeness(filename, release_name, mount_path, info)
+                except Exception as e:
+                    logger.debug(f"[blackhole] Completeness audit error for {release_name}: {e}")
                 try:
                     from utils.library import get_scanner
                     scanner = get_scanner()

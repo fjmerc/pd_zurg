@@ -1072,7 +1072,8 @@ class SonarrClient(_ArrClientBase):
                                media_title=media_title)
         return result
 
-    def ensure_and_search(self, title, tmdb_id, season_number, episode_numbers, prefer_debrid=None):
+    def ensure_and_search(self, title, tmdb_id, season_number, episode_numbers,
+                          prefer_debrid=None, respect_monitored=False):
         """High-level: ensure series exists in Sonarr, then search for episodes.
 
         Args:
@@ -1081,6 +1082,9 @@ class SonarrClient(_ArrClientBase):
             season_number: Season number to search
             episode_numbers: List of episode numbers within the season
             prefer_debrid: True=route via blackhole, False=route locally, None=don't touch
+            respect_monitored: When True, drop episodes with ``monitored=False`` from
+                the target set before searching.  Used by the unconditional gap-fill
+                reconcile so an explicit user-unmonitored episode isn't re-searched.
 
         Returns dict with status info, or raises on failure.
         """
@@ -1136,9 +1140,13 @@ class SonarrClient(_ArrClientBase):
         target_ids = []
         has_file_ids = []
         no_file_ids = []
+        matched_any = False  # saw a requested (season, episode) regardless of monitor filter
         for ep in episodes:
             if (ep.get('seasonNumber') == season_number
                     and ep.get('episodeNumber') in episode_numbers):
+                matched_any = True
+                if respect_monitored and not ep.get('monitored'):
+                    continue
                 ep_id = ep.get('id')
                 if ep_id is not None:
                     target_ids.append(ep_id)
@@ -1153,6 +1161,15 @@ class SonarrClient(_ArrClientBase):
                     'status': 'pending',
                     'service': 'sonarr',
                     'message': f'Added {title} to Sonarr — episode data is loading. Try again in a moment.',
+                }
+            # Distinguish "all matched episodes were unmonitored" (respect user
+            # intent — caller must not treat as error) from "nothing matched at
+            # all" (probably wrong season/episode numbers — genuine error).
+            if respect_monitored and matched_any:
+                return {
+                    'status': 'skipped',
+                    'service': 'sonarr',
+                    'message': f'All requested episodes of {title} S{season_number:02d} are unmonitored',
                 }
             return {
                 'status': 'error',
@@ -2013,13 +2030,16 @@ class RadarrClient(_ArrClientBase):
                                media_title=media_title)
         return result
 
-    def ensure_and_search(self, title, tmdb_id, prefer_debrid=None):
+    def ensure_and_search(self, title, tmdb_id, prefer_debrid=None, respect_monitored=False):
         """High-level: ensure movie exists in Radarr, then trigger search.
 
         Args:
             title: Movie title for lookup
             tmdb_id: TMDB ID (preferred for matching)
             prefer_debrid: True=route via blackhole, False=route locally, None=don't touch
+            respect_monitored: When True and the movie is already in Radarr with
+                ``monitored=False``, return early without searching.  Used by the
+                gap-fill reconcile to skip explicitly-unmonitored movies.
 
         Returns dict with status info.
         """
@@ -2027,6 +2047,12 @@ class RadarrClient(_ArrClientBase):
         movie = self.find_movie_in_library(tmdb_id=tmdb_id, title=title)
 
         if movie:
+            if respect_monitored and not movie.get('monitored'):
+                return {
+                    'status': 'skipped',
+                    'service': 'radarr',
+                    'message': f'{title} is unmonitored — gap-fill respects user intent',
+                }
             # Route downloads through the correct client before any search
             if prefer_debrid is True:
                 movie = self._ensure_debrid_routing(movie)

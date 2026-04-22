@@ -205,7 +205,14 @@ BlackholeWatcher._create_symlinks(label=…)
   ├─ labeled: {COMPLETED_DIR}/<label>/release/file.mkv  → SYMLINK_TARGET_BASE/…
   │   NOTE: Target path resolves in arr/Plex containers, NOT in Zurgarr
   ├─ Record: history.log_event('symlink_created')
-  └─ Notify: notifications.notify('symlink_created')
+  ├─ Notify: notifications.notify('symlink_created')
+  └─ _audit_release_completeness(filename, release_name, mount_path, info)
+      ├─ Parse claimed episodes from filename (_parse_episodes)
+      ├─ Walk mount for delivered episodes
+      ├─ If short delivery: blocklist.add(info_hash), history event,
+      │   and ensure_and_search(missing_eps, prefer_debrid=True,
+      │   respect_monitored=True)
+      └─ Skipped for packs (claimed set empty) — library reconcile catches those
          │
          ▼
 Sonarr imports from /completed/sonarr/ (labeled) or /completed/ (flat)
@@ -240,12 +247,22 @@ LibraryScanner.scan() — two-phase design
   │
   └─ Phase 2: _scan_effects()  [side effects, ~30-60 seconds]
       ├─ Enforce preferences: execute pending prefer-local/prefer-debrid transitions
-      ├─ Search missing: trigger Sonarr/Radarr searches for missing episodes
+      ├─ Search missing (`_search_for_missing_episodes`): unconditional gap-fill
+      │   - Missing-anywhere: TMDB-expected aired episodes absent from both
+      │     debrid AND local, for every monitored show (gated by
+      │     `GAP_FILL_ENABLED`, default true). Uses `to-any` pending direction.
+      │   - Local-only (prefer-debrid shows only): legacy preference enforcement
+      │     — searches for debrid copies of episodes that exist locally.
+      │   Route passed to `ensure_and_search`: prefer-debrid→True,
+      │   prefer-local→False, unset→None. `respect_monitored=True` for routes
+      │   None/False so unmonitored episodes aren't re-searched.
       │   (records last_error, retry_count, next_retry_at on pending entries)
       ├─ Recover local fallback: re-route completed local-fallback downloads
       ├─ Clear resolved: remove pending entries whose target source arrived
       ├─ Escalate stuck: mark to-debrid → debrid-unavailable after threshold
-      │   (DEBRID_UNAVAILABLE_THRESHOLD_DAYS, default 3)
+      │   (DEBRID_UNAVAILABLE_THRESHOLD_DAYS, default 3).
+      │   `to-any` entries are NEVER escalated — gap-fill retries forever at
+      │   the 6h cadence since the episode may still land via either backend.
       ├─ Warn stalled: send pending_warning notification for items pending 24h+
       │   (PENDING_WARNING_HOURS, default 24; set 0 to disable)
       ├─ Create debrid symlinks: organized symlinks in local library dirs

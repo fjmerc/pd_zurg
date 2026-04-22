@@ -326,9 +326,24 @@ class TestSymlinkRepair:
         assert not os.path.exists(link)
         assert 'repaired' not in result['message']
 
-    def test_auto_search_disabled_by_default(self, symlink_env):
-        """With SYMLINK_REPAIR_AUTO_SEARCH unset, no arr searches are triggered."""
+    def test_auto_search_enabled_by_default_via_gap_fill(self, symlink_env):
+        """GAP_FILL_ENABLED (default true) turns auto-search on even when the
+        legacy SYMLINK_REPAIR_AUTO_SEARCH flag is unset — broken symlinks are
+        treated as a gap to fill, not just housekeeping."""
         from utils.scheduled_tasks import verify_symlinks
+
+        old_target = os.path.join(symlink_env['mount'], 'movies', 'Gone.Movie.2025', 'movie.mkv')
+        _make_symlink(symlink_env['completed'], 'movie.mkv', old_target)
+
+        with patch('utils.scheduled_tasks._attempt_arr_research', return_value=True) as mock_search:
+            verify_symlinks()
+            mock_search.assert_called_once_with('Gone.Movie.2025')
+
+    def test_auto_search_disabled_when_gap_fill_off_and_legacy_flag_off(self, symlink_env, monkeypatch):
+        """Both knobs off = no auto-search (preserves the legacy opt-out)."""
+        from utils.scheduled_tasks import verify_symlinks
+        monkeypatch.setenv('GAP_FILL_ENABLED', 'false')
+        monkeypatch.delenv('SYMLINK_REPAIR_AUTO_SEARCH', raising=False)
 
         old_target = os.path.join(symlink_env['mount'], 'movies', 'Gone.Movie.2025', 'movie.mkv')
         _make_symlink(symlink_env['completed'], 'movie.mkv', old_target)

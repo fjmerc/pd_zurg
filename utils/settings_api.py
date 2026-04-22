@@ -185,6 +185,7 @@ ENV_SCHEMA = [
             ('ROUTING_AUTO_TAG_UNTAGGED', 'Auto-Tag Untagged Media', 'boolean', False, 'During the 6h routing audit, auto-apply the debrid tag to monitored Sonarr series / Radarr movies that have no routing tag. Self-heals Overseerr requests that arrive with empty tags and silently fail with "0 active indexers" (default: true)'),
             ('DEBRID_UNAVAILABLE_THRESHOLD_DAYS', 'Debrid Unavailable After (days)', 'number:1-30', False, 'Days of failed searches before marking content as debrid-unavailable (default: 3)'),
             ('PENDING_WARNING_HOURS', 'Pending Warning After (hours)', 'number:0-168', False, 'Hours before sending a warning notification for stuck pending items (default: 24, 0 to disable)'),
+            ('GAP_FILL_ENABLED', 'Gap-Fill Missing Episodes', 'boolean', False, 'Reconcile every monitored show against TMDB and search Sonarr/Radarr for aired episodes missing from both debrid and local, regardless of source preference. Also auto-enables re-search for broken symlinks during verify_symlinks. Set OFF to opt out (default: true)'),
         ],
     },
     {
@@ -246,6 +247,10 @@ _ALL_KEYS = {field[0] for cat in ENV_SCHEMA for field in cat['fields']}
 _ENV_DEFAULTS = {
     'BLOCKLIST_AUTO_ADD': 'true',
     'ROUTING_AUTO_TAG_UNTAGGED': 'true',
+    # Gap-fill defaults ON — listed so the Settings UI boolean toggle renders
+    # as ON when the var isn't set in .env, matching runtime behavior in
+    # utils/library.py::gap_fill_enabled().
+    'GAP_FILL_ENABLED': 'true',
     # Quality compromise true-defaults — see Config.load() in base/__init__.py.
     # Listed so the Settings UI renders the matching toggles as ON out of
     # the box instead of misleading the user with an OFF toggle when the

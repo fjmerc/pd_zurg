@@ -74,6 +74,8 @@ __all__ = [
     'SYMLINK_REPAIR_AUTO_SEARCH',
     # Routing audit
     'ROUTING_AUTO_TAG_UNTAGGED',
+    # Gap-fill reconcile
+    'GAP_FILL_ENABLED',
     # Debrid search
     'TORRENTIO_URL',
     # Quality compromise (plan 33)
@@ -219,6 +221,9 @@ class Config:
         self.SYMLINK_REPAIR_AUTO_SEARCH = os.getenv('SYMLINK_REPAIR_AUTO_SEARCH', 'false')
         # Routing audit (auto-tag untagged monitored series/movies with debrid tag)
         self.ROUTING_AUTO_TAG_UNTAGGED = os.getenv('ROUTING_AUTO_TAG_UNTAGGED', 'true')
+        # Gap-fill reconcile — unconditional missing-episode search across
+        # debrid + local.  Also auto-enables verify_symlinks re-search.
+        self.GAP_FILL_ENABLED = os.getenv('GAP_FILL_ENABLED', 'true')
         # Debrid search
         self.TORRENTIO_URL = os.getenv('TORRENTIO_URL')
         # Quality compromise (plan 33) — opt-in, strict defaults.  Phase 7
@@ -310,6 +315,7 @@ BLOCKLIST_AUTO_ADD = config.BLOCKLIST_AUTO_ADD
 BLOCKLIST_EXPIRY_DAYS = config.BLOCKLIST_EXPIRY_DAYS
 SYMLINK_REPAIR_AUTO_SEARCH = config.SYMLINK_REPAIR_AUTO_SEARCH
 ROUTING_AUTO_TAG_UNTAGGED = config.ROUTING_AUTO_TAG_UNTAGGED
+GAP_FILL_ENABLED = config.GAP_FILL_ENABLED
 TORRENTIO_URL = config.TORRENTIO_URL
 QUALITY_COMPROMISE_ENABLED = config.QUALITY_COMPROMISE_ENABLED
 QUALITY_COMPROMISE_DWELL_DAYS = config.QUALITY_COMPROMISE_DWELL_DAYS

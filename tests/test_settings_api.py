@@ -115,6 +115,24 @@ class TestEnvSchema:
         roundtrip = json.loads(serialized)
         assert roundtrip == schema
 
+    def test_gap_fill_enabled_registered_as_default_on_boolean(self):
+        """GAP_FILL_ENABLED must be surfaced in the UI under Media Services as
+        a boolean toggle that renders ON out of the box — otherwise a user who
+        never set it in .env would see an OFF toggle despite runtime default=ON."""
+        schema = get_env_schema()
+        field = None
+        category = None
+        for cat in schema['categories']:
+            for f in cat['fields']:
+                if f['key'] == 'GAP_FILL_ENABLED':
+                    field = f
+                    category = cat['name']
+                    break
+        assert field is not None, "GAP_FILL_ENABLED missing from schema"
+        assert field['type'] == 'boolean'
+        assert category == 'Media Services'
+        assert _ENV_DEFAULTS.get('GAP_FILL_ENABLED') == 'true'
+
 
 # ---------------------------------------------------------------------------
 # Sanitization tests

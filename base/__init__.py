@@ -77,7 +77,11 @@ __all__ = [
     # Gap-fill reconcile
     'GAP_FILL_ENABLED',
     # Debrid search
-    'TORRENTIO_URL',
+    'TORRENTIO_URL', 'SEARCH_REQUIRE_CACHED', 'SEARCH_DEDUP_ENABLED',
+    # Blackhole cache / debrid-account dedup gates
+    'BLACKHOLE_REQUIRE_CACHED', 'BLACKHOLE_DEBRID_DEDUP_ENABLED',
+    # plex_debrid content-version cache-rule enforcer
+    'PD_ENFORCE_CACHED_VERSIONS',
     # Quality compromise (plan 33)
     'QUALITY_COMPROMISE_ENABLED', 'QUALITY_COMPROMISE_DWELL_DAYS',
     'QUALITY_COMPROMISE_MIN_SEEDERS', 'QUALITY_COMPROMISE_ONLY_CACHED',
@@ -226,6 +230,28 @@ class Config:
         self.GAP_FILL_ENABLED = os.getenv('GAP_FILL_ENABLED', 'true')
         # Debrid search
         self.TORRENTIO_URL = os.getenv('TORRENTIO_URL')
+        # Refuse the interactive "Add" button when the chosen hash is not
+        # confirmed cached on the debrid provider (default OFF — RD has no
+        # working cache probe, so ON effectively blocks all RD adds).
+        self.SEARCH_REQUIRE_CACHED = os.getenv('SEARCH_REQUIRE_CACHED', 'false')
+        # Skip the interactive "Add" call when the hash is already on the
+        # account — stops duplicate entries that the user has to clean up
+        # in DMM.  Default ON (cheap API list + 30s TTL cache).
+        self.SEARCH_DEDUP_ENABLED = os.getenv('SEARCH_DEDUP_ENABLED', 'true')
+        # Same two gates for the Sonarr/Radarr blackhole.  Dedup defaults ON;
+        # require-cached defaults OFF (see SEARCH_REQUIRE_CACHED for the RD
+        # caveat).
+        self.BLACKHOLE_REQUIRE_CACHED = os.getenv('BLACKHOLE_REQUIRE_CACHED', 'false')
+        # NOTE: ``BLACKHOLE_DEDUP_ENABLED`` (read directly in ``blackhole.py``)
+        # is the local-filesystem library-dedup gate — a different feature.
+        # This one skips hashes already on the debrid account.
+        self.BLACKHOLE_DEBRID_DEDUP_ENABLED = os.getenv('BLACKHOLE_DEBRID_DEDUP_ENABLED', 'true')
+        # When ON, plex_debrid setup injects the ``cache status / requirement
+        # / cached`` rule into every content version on startup so the
+        # vendored download path refuses uncached releases.  Default OFF
+        # to preserve existing behavior for users who deliberately want
+        # uncached fallback.  Idempotent — safe to leave ON.
+        self.PD_ENFORCE_CACHED_VERSIONS = os.getenv('PD_ENFORCE_CACHED_VERSIONS', 'false')
         # Quality compromise (plan 33) — opt-in, strict defaults.  Phase 7
         # exposes these in the settings UI and the soft-reload set; string
         # shapes are preserved so ``str(VAR).lower() == 'true'`` keeps
@@ -317,6 +343,11 @@ SYMLINK_REPAIR_AUTO_SEARCH = config.SYMLINK_REPAIR_AUTO_SEARCH
 ROUTING_AUTO_TAG_UNTAGGED = config.ROUTING_AUTO_TAG_UNTAGGED
 GAP_FILL_ENABLED = config.GAP_FILL_ENABLED
 TORRENTIO_URL = config.TORRENTIO_URL
+SEARCH_REQUIRE_CACHED = config.SEARCH_REQUIRE_CACHED
+SEARCH_DEDUP_ENABLED = config.SEARCH_DEDUP_ENABLED
+BLACKHOLE_REQUIRE_CACHED = config.BLACKHOLE_REQUIRE_CACHED
+BLACKHOLE_DEBRID_DEDUP_ENABLED = config.BLACKHOLE_DEBRID_DEDUP_ENABLED
+PD_ENFORCE_CACHED_VERSIONS = config.PD_ENFORCE_CACHED_VERSIONS
 QUALITY_COMPROMISE_ENABLED = config.QUALITY_COMPROMISE_ENABLED
 QUALITY_COMPROMISE_DWELL_DAYS = config.QUALITY_COMPROMISE_DWELL_DAYS
 QUALITY_COMPROMISE_MIN_SEEDERS = config.QUALITY_COMPROMISE_MIN_SEEDERS

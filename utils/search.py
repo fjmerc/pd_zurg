@@ -8,6 +8,8 @@ and one-click add them to their debrid provider.  Uses urllib only
 import json
 import os
 import re
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -453,6 +455,188 @@ def _check_cache_tb(hashes, api_key):
 
 
 # ---------------------------------------------------------------------------
+# Debrid account dedup — listing hashes already on the account
+# ---------------------------------------------------------------------------
+
+# Short TTL so repeated adds in the same UI session hit the API once, but
+# the cache goes stale fast enough that an external deletion (via DMM, etc.)
+# is picked up on the next attempt.
+_EXISTING_HASHES_TTL = 30
+
+# {service: (fetched_at, set_of_lowercase_hashes)}
+_existing_hashes_cache = {}
+_existing_hashes_lock = threading.Lock()
+
+# In-flight ``(service, hash)`` tuples — a second concurrent add of the
+# same hash has to see the first one in progress, otherwise two sibling
+# "Add" clicks racing the dedup check can both pass the cached-set probe
+# and both submit.  Kept under ``_existing_hashes_lock`` so the check and
+# insert are one atomic step.
+_inflight_adds = set()
+
+
+def _existing_hashes(service, api_key, force_refresh=False):
+    """Return the set of lowercase info-hashes currently on the debrid account.
+
+    Returns ``None`` when the account cannot be queried (missing service/key,
+    API error, unexpected response).  Callers distinguish ``None`` (unknown —
+    do not claim "no duplicate") from ``set()`` (confirmed empty account).
+
+    Cached for ``_EXISTING_HASHES_TTL`` seconds per service so a burst of
+    "add" clicks issues one list call, not N.  ``remember_added_hash`` keeps
+    the cache honest by injecting newly-added hashes without waiting for TTL
+    expiry.
+    """
+    if not service or not api_key:
+        return None
+
+    now = time.time()
+    with _existing_hashes_lock:
+        cached = _existing_hashes_cache.get(service)
+        if cached and not force_refresh and (now - cached[0]) < _EXISTING_HASHES_TTL:
+            # Return a snapshot so a concurrent ``remember_added_hash`` on
+            # the cached set can't mutate the view the caller is iterating.
+            return set(cached[1])
+
+    try:
+        if service == 'realdebrid':
+            hashes = _existing_hashes_rd(api_key)
+        elif service == 'alldebrid':
+            hashes = _existing_hashes_ad(api_key)
+        elif service == 'torbox':
+            hashes = _existing_hashes_tb(api_key)
+        else:
+            return None
+    except (urllib.error.URLError, urllib.error.HTTPError,
+            json.JSONDecodeError, OSError, ValueError,
+            AttributeError, TypeError, KeyError) as e:
+        # AttributeError / TypeError / KeyError cover the "API returned an
+        # unexpected shape" case (e.g. a list where we expected a dict, or
+        # a non-string hash field) without bubbling up into the hot path
+        # of add_to_debrid / _process_file and crashing the request.
+        logger.warning(f"[search] Dedup probe failed for {service}: {type(e).__name__}")
+        return None
+
+    if hashes is None:
+        return None
+    with _existing_hashes_lock:
+        _existing_hashes_cache[service] = (now, hashes)
+        snapshot = set(hashes)
+    return snapshot
+
+
+def remember_added_hash(service, info_hash):
+    """Update the dedup cache after a successful add so back-to-back duplicates
+    are caught without waiting for TTL refresh."""
+    if not service or not info_hash:
+        return
+    h = info_hash.strip().lower()
+    if not _HASH_RE.match(h):
+        return
+    with _existing_hashes_lock:
+        cached = _existing_hashes_cache.get(service)
+        if cached:
+            cached[1].add(h)
+
+
+def invalidate_existing_hashes_cache(service=None):
+    """Drop the dedup cache for one service (or all if None)."""
+    with _existing_hashes_lock:
+        if service is None:
+            _existing_hashes_cache.clear()
+        else:
+            _existing_hashes_cache.pop(service, None)
+
+
+def _coerce_hash(value):
+    """Return a valid lowercase 40-char hex hash or None.
+
+    Defensive against API responses that return non-string hash fields
+    (int, null, nested dict) — ``(x or '').strip().lower()`` would raise
+    AttributeError on those, so we type-check first.
+    """
+    if not isinstance(value, str):
+        return None
+    h = value.strip().lower()
+    return h if _HASH_RE.match(h) else None
+
+
+# RD list cap.  At 2501 torrents the API truncates silently and the dedup
+# gate starts missing older hashes.  We emit a one-time warning when the
+# response fills the window so users with heavy accounts at least see
+# "dedup may be incomplete" instead of a silent-degradation failure mode.
+_RD_LIST_LIMIT = 2500
+_rd_list_truncation_warned = False
+
+
+def _existing_hashes_rd(api_key):
+    """RD: GET /torrents?limit=2500 → list of {id, hash, status, ...}."""
+    global _rd_list_truncation_warned
+    headers = {'Authorization': f'Bearer {api_key}'}
+    data = _urllib_get(
+        f'https://api.real-debrid.com/rest/1.0/torrents?limit={_RD_LIST_LIMIT}',
+        headers=headers, timeout=_CACHE_PROBE_TIMEOUT,
+    )
+    if not isinstance(data, list):
+        return None
+    out = set()
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        h = _coerce_hash(entry.get('hash'))
+        if h:
+            out.add(h)
+    if len(data) >= _RD_LIST_LIMIT and not _rd_list_truncation_warned:
+        logger.warning(
+            f"[search] RD returned {len(data)} torrents (limit {_RD_LIST_LIMIT}) — "
+            "dedup may miss older entries.  See SEARCH_DEDUP_ENABLED docs."
+        )
+        _rd_list_truncation_warned = True
+    return out
+
+
+def _existing_hashes_ad(api_key):
+    """AD: GET /v4/magnet/status → {data: {magnets: [{hash, ...}]}}."""
+    qs = urllib.parse.urlencode({'agent': 'zurgarr', 'apikey': api_key})
+    data = _urllib_get(
+        f'https://api.alldebrid.com/v4/magnet/status?{qs}',
+        timeout=_CACHE_PROBE_TIMEOUT,
+    )
+    if not isinstance(data, dict) or data.get('status') != 'success':
+        return None
+    inner = data.get('data') if isinstance(data.get('data'), dict) else {}
+    magnets = inner.get('magnets') if isinstance(inner.get('magnets'), list) else []
+    out = set()
+    for entry in magnets:
+        if not isinstance(entry, dict):
+            continue
+        h = _coerce_hash(entry.get('hash'))
+        if h:
+            out.add(h)
+    return out
+
+
+def _existing_hashes_tb(api_key):
+    """TB: GET /v1/api/torrents/mylist → {data: [{hash, ...}]}."""
+    headers = {'Authorization': f'Bearer {api_key}'}
+    data = _urllib_get(
+        'https://api.torbox.app/v1/api/torrents/mylist',
+        headers=headers, timeout=_CACHE_PROBE_TIMEOUT,
+    )
+    if not isinstance(data, dict) or not data.get('success'):
+        return None
+    payload = data.get('data') if isinstance(data.get('data'), list) else []
+    out = set()
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        h = _coerce_hash(entry.get('hash'))
+        if h:
+            out.add(h)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # F9.3 — Search + filter
 # ---------------------------------------------------------------------------
 
@@ -541,7 +725,8 @@ def add_to_debrid(info_hash, title=''):
         title: Release title for logging/history
 
     Returns:
-        {'success': bool, 'torrent_id': str, 'service': str, 'error': str}
+        {'success': bool, 'torrent_id': str, 'service': str, 'error': str,
+         'duplicate': bool}
     """
     if not info_hash or not _HASH_RE.match(info_hash):
         return {'success': False, 'torrent_id': '', 'service': '', 'error': 'Invalid info hash'}
@@ -550,22 +735,65 @@ def add_to_debrid(info_hash, title=''):
     if not service:
         return {'success': False, 'torrent_id': '', 'service': '', 'error': 'No debrid service configured'}
 
-    magnet = _hash_to_magnet(info_hash.lower())
+    lowered = info_hash.lower()
+
+    # Dedup — skip hashes already on the account.  Default ON because adding
+    # the same magnet twice just creates a second torrent entry pointing at
+    # the same hash and leaves the user to clean it up in DMM.
+    if str(os.environ.get('SEARCH_DEDUP_ENABLED', 'true')).lower() == 'true':
+        existing = _existing_hashes(service, api_key)
+        if existing is not None and lowered in existing:
+            logger.info(f"[search] Skipping add: {title or lowered[:16]} already in {service} account")
+            return {'success': False, 'torrent_id': '', 'service': service,
+                    'error': 'Already in debrid account', 'duplicate': True}
+
+    # In-flight gate — another thread is mid-add for this same hash.  The
+    # account-list probe above can miss this case because the sibling add
+    # hasn't reached ``addMagnet`` yet (race between
+    # ``_existing_hashes`` → ``add_to_debrid`` on both threads).
+    inflight_key = (service, lowered)
+    with _existing_hashes_lock:
+        if inflight_key in _inflight_adds:
+            return {'success': False, 'torrent_id': '', 'service': service,
+                    'error': 'Add already in progress', 'duplicate': True}
+        _inflight_adds.add(inflight_key)
 
     try:
-        if service == 'realdebrid':
-            result = _add_to_rd(magnet, api_key)
-        elif service == 'alldebrid':
-            result = _add_to_ad(magnet, api_key)
-        elif service == 'torbox':
-            result = _add_to_tb(magnet, api_key)
-        else:
-            result = {'success': False, 'torrent_id': '', 'error': f'Unknown service: {service}'}
-    except Exception as e:
-        logger.error(f"[search] Add to {service} failed: {type(e).__name__}")
-        result = {'success': False, 'torrent_id': '', 'error': f'Service error: {type(e).__name__}'}
+        # Require-cached — opt-in gate that refuses uncached torrents before
+        # they land in the account as 0%/0-seed entries.  RD's cache probe
+        # is a no-op (deprecated Nov 2024) so on RD this effectively blocks
+        # all adds; users who still want the gate on AD/TB and not RD
+        # should leave it OFF.
+        if str(os.environ.get('SEARCH_REQUIRE_CACHED', 'false')).lower() == 'true':
+            cache_map = check_debrid_cache([lowered], service=service, api_key=api_key)
+            cached = cache_map.get(lowered)
+            if cached is not True:
+                cache_label = 'uncached' if cached is False else 'cache status unknown'
+                logger.info(f"[search] Skipping add: {title or lowered[:16]} {cache_label} on {service}")
+                return {'success': False, 'torrent_id': '', 'service': service,
+                        'error': f'Not cached on {service} ({cache_label})'}
 
-    result['service'] = service
+        magnet = _hash_to_magnet(lowered)
+
+        try:
+            if service == 'realdebrid':
+                result = _add_to_rd(magnet, api_key)
+            elif service == 'alldebrid':
+                result = _add_to_ad(magnet, api_key)
+            elif service == 'torbox':
+                result = _add_to_tb(magnet, api_key)
+            else:
+                result = {'success': False, 'torrent_id': '', 'error': f'Unknown service: {service}'}
+        except Exception as e:
+            logger.error(f"[search] Add to {service} failed: {type(e).__name__}")
+            result = {'success': False, 'torrent_id': '', 'error': f'Service error: {type(e).__name__}'}
+
+        result['service'] = service
+        if result.get('success'):
+            remember_added_hash(service, lowered)
+    finally:
+        with _existing_hashes_lock:
+            _inflight_adds.discard(inflight_key)
 
     # Emit history event
     try:

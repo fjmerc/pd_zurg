@@ -4,6 +4,54 @@ from plexapi.server import PlexServer
 
 logger = get_logger()
 
+
+_CACHE_REQUIRED_RULE = ['cache status', 'requirement', 'cached', '']
+
+
+def enforce_cached_versions(json_data):
+    """Inject the ``cache status / requirement / cached`` rule into every
+    plex_debrid content version missing it, in place.
+
+    plex_debrid's default version template already includes the rule
+    (``sort.versions`` in ``releases/__init__.py``), but a user who created
+    a custom version via the plex_debrid UI or removed the rule manually
+    can still see uncached grabs because the vendored
+    ``debrid/services/{realdebrid,alldebrid,torbox}.py`` download paths
+    only reject uncached releases when the active version *explicitly*
+    requires cached.  Extracted from ``pd_setup`` so the migration can be
+    unit-tested directly instead of re-implemented in the test suite.
+
+    Args:
+        json_data: Parsed plex_debrid ``settings.json`` dict.
+
+    Returns:
+        List of version names that were modified (empty if every version
+        already satisfied the invariant, or if ``Versions`` was missing /
+        malformed).  Callers typically emit a log line when the list is
+        non-empty so users see the migration fire on startup.
+    """
+    versions = json_data.get('Versions')
+    if not isinstance(versions, list):
+        return []
+    modified = []
+    for version in versions:
+        if not isinstance(version, list) or len(version) < 4:
+            continue
+        rules = version[3]
+        if not isinstance(rules, list):
+            continue
+        already = any(
+            isinstance(r, list) and len(r) >= 3
+            and r[0] == 'cache status'
+            and r[1] == 'requirement'
+            and r[2] == 'cached'
+            for r in rules
+        )
+        if not already:
+            rules.insert(0, list(_CACHE_REQUIRED_RULE))
+            modified.append(version[0] if version else '?')
+    return modified
+
 def pd_setup():
     logger.info("Configuring plex_debrid")
     settings_file = "./config/settings.json"
@@ -140,7 +188,20 @@ def pd_setup():
             if log_level == 'DEBUG':
                 json_data["Debug printing"] = "true"
             else:
-                json_data["Debug printing"] = "false"                
+                json_data["Debug printing"] = "false"
+
+            # Optionally enforce the 'cache status / requirement / cached' rule
+            # on every content version — see ``enforce_cached_versions`` above.
+            # Idempotent, so safe to leave ON on every startup.
+            if str(os.getenv('PD_ENFORCE_CACHED_VERSIONS', 'false')).lower() == 'true':
+                modified_versions = enforce_cached_versions(json_data)
+                if modified_versions:
+                    logger.info(
+                        "plex_debrid: added cache-required rule to "
+                        f"{len(modified_versions)} version(s): "
+                        f"{', '.join(str(n) for n in modified_versions)}"
+                    )
+
             f.seek(0)
             dump(json_data, f, indent=4)
             f.truncate()

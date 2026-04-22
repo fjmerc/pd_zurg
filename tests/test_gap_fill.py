@@ -167,8 +167,10 @@ class TestPreferDebridPreserved:
         mock_sonarr.ensure_and_search.assert_called_once()
         _, kwargs = mock_sonarr.ensure_and_search.call_args
         assert kwargs.get('prefer_debrid') is True
-        # Preserve existing behavior: prefer-debrid bypasses respect_monitored
-        assert kwargs.get('respect_monitored') is False
+        # prefer-debrid honors Sonarr's monitored flag (same as every other route):
+        # unmonitoring a season in Sonarr must suppress gap-fill for that season,
+        # even under prefer-debrid force-grab semantics.
+        assert kwargs.get('respect_monitored') is True
 
     def test_pending_direction_is_to_debrid(self, scanner, mock_sonarr):
         show = {

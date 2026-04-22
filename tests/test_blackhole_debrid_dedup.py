@@ -191,6 +191,197 @@ class TestBlackholeRequireCached:
             'file must NOT be deleted when API key is missing — leaves user a clear recovery path'
 
 
+class TestBlackholeTimeoutCleanup:
+    """Guards for ``BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT`` — when a
+    torrent doesn't cache within the mount-poll timeout, opt-in cleanup
+    removes it from the debrid account instead of letting it sit as a
+    0%/0-seed entry forever."""
+
+    @pytest.fixture
+    def watcher(self):
+        """Minimal BlackholeWatcher with the fields ``_monitor_and_symlink``
+        touches.  Bypasses __init__ so we don't have to construct the
+        entire blackhole stack."""
+        import threading
+        from utils.blackhole import BlackholeWatcher
+        w = BlackholeWatcher.__new__(BlackholeWatcher)
+        w.debrid_service = 'realdebrid'
+        w.debrid_api_key = 'test_key'
+        w.mount_poll_timeout = 0  # fire immediately on first loop iteration
+        w.mount_poll_interval = 1
+        w._stop_event = threading.Event()
+        w._remove_pending = MagicMock()
+        # Minimal status dispatch — these are referenced but not called
+        # before the timeout branch fires when mount_poll_timeout=0.
+        w._check_realdebrid_status = MagicMock()
+        w._check_alldebrid_status = MagicMock()
+        w._check_torbox_status = MagicMock()
+        return w
+
+    def test_delete_off_by_default_leaves_torrent_on_debrid(self, watcher,
+                                                              monkeypatch):
+        monkeypatch.delenv('BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', raising=False)
+        mock_client = MagicMock()
+        with patch('utils.debrid_client.get_debrid_client',
+                   return_value=(mock_client, 'realdebrid')):
+            watcher._monitor_and_symlink('T123', 'release.magnet')
+        mock_client.delete_torrent.assert_not_called()
+        watcher._remove_pending.assert_called_once_with('T123')
+
+    def test_delete_on_removes_timed_out_torrent(self, watcher, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'true')
+        mock_client = MagicMock()
+        with patch('utils.debrid_client.get_debrid_client',
+                   return_value=(mock_client, 'realdebrid')):
+            watcher._monitor_and_symlink('T123', 'release.magnet')
+        mock_client.delete_torrent.assert_called_once_with('T123')
+        watcher._remove_pending.assert_called_once_with('T123')
+
+    def test_delete_on_but_no_client_still_clears_pending(self, watcher,
+                                                            monkeypatch):
+        """If the debrid client can't be constructed (missing key, etc.)
+        the cleanup must not crash — we still remove pending tracking so
+        the watcher stays in a consistent state."""
+        monkeypatch.setenv('BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'true')
+        with patch('utils.debrid_client.get_debrid_client',
+                   return_value=(None, None)):
+            watcher._monitor_and_symlink('T123', 'release.magnet')
+        watcher._remove_pending.assert_called_once_with('T123')
+
+    def test_delete_raises_is_swallowed(self, watcher, monkeypatch):
+        """A failing delete_torrent call (network error, stale torrent id,
+        etc.) must not prevent pending cleanup."""
+        monkeypatch.setenv('BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'true')
+        mock_client = MagicMock()
+        mock_client.delete_torrent.side_effect = RuntimeError('boom')
+        with patch('utils.debrid_client.get_debrid_client',
+                   return_value=(mock_client, 'realdebrid')):
+            watcher._monitor_and_symlink('T123', 'release.magnet')
+        mock_client.delete_torrent.assert_called_once()
+        watcher._remove_pending.assert_called_once_with('T123')
+
+    def test_history_event_fires_when_client_absent(self, watcher, monkeypatch):
+        """A misconfigured debrid key should not erase the audit trail —
+        the timeout still happened and the torrent is still stuck on the
+        account.  History logs the event either way, with a detail string
+        that marks the delete-skipped outcome for post-hoc analysis."""
+        monkeypatch.setenv('BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'true')
+        mock_history = MagicMock()
+        with patch('utils.debrid_client.get_debrid_client',
+                   return_value=(None, None)), \
+             patch('utils.blackhole._history', mock_history):
+            watcher._monitor_and_symlink('T123', 'release.magnet')
+        mock_history.log_event.assert_called_once()
+        _type = mock_history.log_event.call_args.args[0]
+        _detail = mock_history.log_event.call_args.kwargs.get('detail', '')
+        _meta = mock_history.log_event.call_args.kwargs.get('meta', {})
+        assert _type == 'failed'
+        assert 'skipped' in _detail.lower()
+        assert _meta.get('deleted') is False
+
+    def test_history_event_marks_successful_delete(self, watcher, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'true')
+        mock_client = MagicMock()
+        mock_history = MagicMock()
+        with patch('utils.debrid_client.get_debrid_client',
+                   return_value=(mock_client, 'realdebrid')), \
+             patch('utils.blackhole._history', mock_history):
+            watcher._monitor_and_symlink('T123', 'release.magnet')
+        mock_history.log_event.assert_called_once()
+        _meta = mock_history.log_event.call_args.kwargs.get('meta', {})
+        _detail = mock_history.log_event.call_args.kwargs.get('detail', '')
+        assert _meta.get('deleted') is True
+        assert 'removed from debrid' in _detail
+
+    def test_delete_routes_to_bound_service_not_priority(self, watcher,
+                                                          monkeypatch):
+        """Regression for the wrong-account hazard: the watcher bound to
+        AllDebrid must call get_debrid_client with service='alldebrid',
+        NOT let the priority default pick RD when an RD key is also
+        configured globally."""
+        monkeypatch.setenv('BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'true')
+        watcher.debrid_service = 'alldebrid'
+        watcher.debrid_api_key = 'ad_key_xyz'
+        mock_client = MagicMock()
+        with patch('utils.debrid_client.get_debrid_client',
+                   return_value=(mock_client, 'alldebrid')) as mock_factory:
+            watcher._monitor_and_symlink('T123', 'release.magnet')
+        mock_factory.assert_called_once()
+        assert mock_factory.call_args.kwargs['service'] == 'alldebrid'
+        assert mock_factory.call_args.kwargs['api_key'] == 'ad_key_xyz'
+
+    def test_delete_sanitizes_api_key_in_debug_log(self, watcher,
+                                                     monkeypatch):
+        """A raising delete_torrent whose message contains the API key
+        must be redacted before DEBUG-level logging — RD/AD/TB URLs can
+        carry the key in query strings."""
+        monkeypatch.setenv('BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'true')
+        watcher.debrid_api_key = 'supersecret_KEY_123'
+        mock_client = MagicMock()
+        mock_client.delete_torrent.side_effect = RuntimeError(
+            'HTTPError at https://api.example.com/path?apikey=supersecret_KEY_123'
+        )
+        mock_logger = MagicMock()
+        with patch('utils.debrid_client.get_debrid_client',
+                   return_value=(mock_client, 'realdebrid')), \
+             patch('utils.blackhole.logger', mock_logger):
+            watcher._monitor_and_symlink('T123', 'release.magnet')
+        debug_calls = [c for c in mock_logger.debug.call_args_list
+                       if 'Failed to delete' in c.args[0]]
+        assert len(debug_calls) == 1
+        msg = debug_calls[0].args[0]
+        assert 'supersecret_KEY_123' not in msg
+        assert '***' in msg
+
+    def test_delete_after_real_status_polls(self, monkeypatch):
+        """Integration-shaped: exercise the realistic path where
+        check_status returns "not ready" several times before the
+        timeout fires, then the delete block runs.  Guards against a
+        regression where a successful status-check path accidentally
+        skips the new code."""
+        import threading
+        from utils.blackhole import BlackholeWatcher
+        w = BlackholeWatcher.__new__(BlackholeWatcher)
+        w.debrid_service = 'realdebrid'
+        w.debrid_api_key = 'test_key'
+        w.mount_poll_timeout = 0.3
+        w.mount_poll_interval = 0.05
+        w._stop_event = threading.Event()
+        w._remove_pending = MagicMock()
+        # Return "downloading" status repeatedly until the timeout fires
+        w._check_realdebrid_status = MagicMock(
+            return_value=('downloading', {'status': 'downloading'})
+        )
+        w._check_alldebrid_status = MagicMock()
+        w._check_torbox_status = MagicMock()
+        w._is_torrent_ready = MagicMock(return_value=False)
+        monkeypatch.setenv('BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'true')
+        mock_client = MagicMock()
+        with patch('utils.debrid_client.get_debrid_client',
+                   return_value=(mock_client, 'realdebrid')):
+            w._monitor_and_symlink('T123', 'release.magnet')
+        # Status was polled at least twice before timeout
+        assert w._check_realdebrid_status.call_count >= 2
+        mock_client.delete_torrent.assert_called_once_with('T123')
+        w._remove_pending.assert_called_once_with('T123')
+
+    def test_delete_import_error_is_swallowed(self, watcher, monkeypatch):
+        """A broken utils.debrid_client import cannot crash the timeout
+        handler — _remove_pending must still run."""
+        monkeypatch.setenv('BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'true')
+        # Force ImportError by nuking the module from sys.modules and
+        # blocking re-import — the handler's bare except must swallow it.
+        import sys
+        saved = sys.modules.pop('utils.debrid_client', None)
+        try:
+            with patch.dict(sys.modules, {'utils.debrid_client': None}):
+                watcher._monitor_and_symlink('T123', 'release.magnet')
+        finally:
+            if saved is not None:
+                sys.modules['utils.debrid_client'] = saved
+        watcher._remove_pending.assert_called_once_with('T123')
+
+
 class TestPlexDebridCacheRuleEnforcer:
     """Startup migration that injects the cache-required rule into every
     plex_debrid content version when ``PD_ENFORCE_CACHED_VERSIONS`` is on.

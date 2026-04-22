@@ -80,6 +80,7 @@ __all__ = [
     'TORRENTIO_URL', 'SEARCH_REQUIRE_CACHED', 'SEARCH_DEDUP_ENABLED',
     # Blackhole cache / debrid-account dedup gates
     'BLACKHOLE_REQUIRE_CACHED', 'BLACKHOLE_DEBRID_DEDUP_ENABLED',
+    'BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT',
     # plex_debrid content-version cache-rule enforcer
     'PD_ENFORCE_CACHED_VERSIONS',
     # Quality compromise (plan 33)
@@ -246,6 +247,16 @@ class Config:
         # is the local-filesystem library-dedup gate — a different feature.
         # This one skips hashes already on the debrid account.
         self.BLACKHOLE_DEBRID_DEDUP_ENABLED = os.getenv('BLACKHOLE_DEBRID_DEDUP_ENABLED', 'true')
+        # When ON, a blackhole torrent that's still uncached when
+        # BLACKHOLE_MOUNT_POLL_TIMEOUT expires is actively deleted from the
+        # debrid account, not just dropped from pending tracking.  Prevents
+        # 0%/0-seed junk from accumulating on RD.  Default OFF because it
+        # changes data state (deletes torrents from the debrid account)
+        # and a user who tolerates long cache waits may want the torrent
+        # to survive past Zurgarr's patience.
+        self.BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT = os.getenv(
+            'BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'false'
+        )
         # When ON, plex_debrid setup injects the ``cache status / requirement
         # / cached`` rule into every content version on startup so the
         # vendored download path refuses uncached releases.  Default OFF
@@ -347,6 +358,7 @@ SEARCH_REQUIRE_CACHED = config.SEARCH_REQUIRE_CACHED
 SEARCH_DEDUP_ENABLED = config.SEARCH_DEDUP_ENABLED
 BLACKHOLE_REQUIRE_CACHED = config.BLACKHOLE_REQUIRE_CACHED
 BLACKHOLE_DEBRID_DEDUP_ENABLED = config.BLACKHOLE_DEBRID_DEDUP_ENABLED
+BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT = config.BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT
 PD_ENFORCE_CACHED_VERSIONS = config.PD_ENFORCE_CACHED_VERSIONS
 QUALITY_COMPROMISE_ENABLED = config.QUALITY_COMPROMISE_ENABLED
 QUALITY_COMPROMISE_DWELL_DAYS = config.QUALITY_COMPROMISE_DWELL_DAYS

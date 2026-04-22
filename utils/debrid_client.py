@@ -294,13 +294,39 @@ class TorBoxClient(DebridClientBase):
             return False
 
 
-def get_debrid_client():
-    """Factory — returns the appropriate debrid client based on configured API key.
+_SERVICE_CLASSES = {
+    'realdebrid': RealDebridClient,
+    'alldebrid': AllDebridClient,
+    'torbox': TorBoxClient,
+}
 
-    Priority: Real-Debrid > AllDebrid > TorBox (matches blackhole.py detection).
 
-    Returns (client, service_name) or (None, None) if nothing configured.
+def get_debrid_client(service=None, api_key=None):
+    """Factory — returns the appropriate debrid client.
+
+    When ``service`` is given, builds a client for that specific provider
+    (optionally with an explicit ``api_key`` override).  This is the
+    **correct path** for callers that already know which provider they
+    want to talk to — e.g. the blackhole watcher, which is bound to
+    ``self.debrid_service`` / ``self.debrid_api_key`` for the lifetime
+    of the process and must NOT route a torrent-ID through the priority
+    fallback below (an AD magnet ID sent to RD can silently hit an
+    unrelated RD torrent that happens to share the ID shape).
+
+    When ``service`` is ``None``, falls back to priority-based detection
+    (Real-Debrid > AllDebrid > TorBox) — matches the historical behavior
+    for callers that don't care which account answers.
+
+    Returns (client, service_name) or (None, None) when nothing is
+    configured / the requested service isn't available.
     """
+    if service:
+        cls = _SERVICE_CLASSES.get(service)
+        if not cls:
+            return None, None
+        client = cls(api_key) if api_key else cls()
+        return (client, service) if client.configured else (None, None)
+
     rd = RealDebridClient()
     if rd.configured:
         return rd, 'realdebrid'

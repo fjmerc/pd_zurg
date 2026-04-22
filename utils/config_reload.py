@@ -73,6 +73,7 @@ SOFT_RELOAD = {
     # without bouncing the blackhole watcher or status server.
     'SEARCH_DEDUP_ENABLED', 'SEARCH_REQUIRE_CACHED',
     'BLACKHOLE_DEBRID_DEDUP_ENABLED', 'BLACKHOLE_REQUIRE_CACHED',
+    'BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT',
 }
 
 

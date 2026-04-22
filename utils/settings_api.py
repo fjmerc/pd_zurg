@@ -141,6 +141,7 @@ ENV_SCHEMA = [
             ('BLACKHOLE_LOCAL_LIBRARY_MOVIES', 'Local Movie Library Path', 'string', False, 'Path to local movie library (for dedup and auto debrid symlinks)'),
             ('BLACKHOLE_DEBRID_DEDUP_ENABLED', 'Skip If Already in Debrid Account', 'boolean', False, 'Before adding, query the debrid account and skip hashes already present. Prevents duplicate torrent entries when Sonarr/Radarr re-grabs the same release after a failed import (default: ON).'),
             ('BLACKHOLE_REQUIRE_CACHED', 'Require Cached on Debrid', 'boolean', False, 'Refuse .torrent / .magnet drops whose hash is not confirmed cached on the debrid provider. Real-Debrid deprecated its cache probe in Nov 2024, so on RD this will block all adds — leave OFF for RD or switch to AllDebrid/TorBox to use this gate (default: OFF).'),
+            ('BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'Delete Uncached Torrents on Timeout', 'boolean', False, 'When the blackhole gives up waiting for debrid to cache a torrent (BLACKHOLE_MOUNT_POLL_TIMEOUT — default 5 min), actively delete it from the debrid account instead of leaving it as a 0%/0-seed entry. Recommended ON for Real-Debrid users where no pre-add cache probe is available — see TROUBLESHOOTING.md "Uncached torrents pile up on my debrid account from the blackhole" (default: OFF).'),
         ],
     },
     {

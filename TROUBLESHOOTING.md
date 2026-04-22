@@ -6,6 +6,7 @@ isn't here, open a [GitHub issue](https://github.com/fjmerc/zurgarr/issues).
 ## Contents
 
 - [DMM shows torrents at 0% with no seeds](#dmm-shows-torrents-at-0--with-no-seeds)
+- [Uncached torrents pile up on my debrid account from the blackhole](#uncached-torrents-pile-up-on-my-debrid-account-from-the-blackhole)
 - [Duplicate torrents in my debrid account](#duplicate-torrents-in-my-debrid-account)
 - [Sonarr/Radarr keeps re-grabbing the same failed torrent](#sonarrradarr-keeps-re-grabbing-the-same-failed-torrent)
 - [Mount not available / empty `/data` directory](#mount-not-available--empty-data-directory)
@@ -38,6 +39,35 @@ will prompt you.
 
 Already-added uncached torrents have to be deleted manually from DMM /
 the RD web UI — the gates only prevent new ones.
+
+## Uncached torrents pile up on my debrid account from the blackhole
+
+Related to the previous entry but more specific: when Sonarr/Radarr drop
+a `.magnet` / `.torrent` into the blackhole and the hash never caches
+on your debrid provider, Zurgarr times out waiting (5 min by default,
+`BLACKHOLE_MOUNT_POLL_TIMEOUT`) and stops tracking it — but the
+torrent **stays on your debrid account as a 0%/0-seed entry**. Over
+time these accumulate.
+
+Most visible on **Real-Debrid** because RD has no pre-add cache probe
+(`BLACKHOLE_REQUIRE_CACHED` can't help you), and most visible on shows
+with a `prefer-debrid` preference + `GAP_FILL_ENABLED=true` — gap-fill
+finds missing episodes, Sonarr searches Torrentio, drops magnets,
+~75% don't cache.
+
+**Fix:** flip `BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT` to ON in the
+Settings UI (Blackhole section). After the timeout, Zurgarr will
+actively delete the still-uncached torrent from the debrid account
+instead of abandoning it. Logs the deletion and emits a `failed`
+history event with `reason=uncached_timeout` so you can audit what was
+removed.
+
+Default is OFF because it changes data state (deletes torrents) and
+some users tolerate long cache waits. Turn it on explicitly once
+you're sure you don't want the behaviour.
+
+For the backlog already on your account, clean it out once from DMM or
+the RD web UI — the gate only affects new drops from the blackhole.
 
 ## Duplicate torrents in my debrid account
 

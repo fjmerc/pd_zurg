@@ -1601,6 +1601,56 @@ class BlackholeWatcher:
                     metrics.inc('blackhole_torrent_timeout')
                 except Exception:
                     pass
+                # Opt-in cleanup: on timeout, actively delete the still-uncached
+                # torrent from the debrid account so it doesn't sit there as
+                # a 0%/0-seed entry accumulating over time.  Mirrors the disc
+                # rip cleanup pattern below — same per-service client lookup,
+                # same guards.
+                deleted_from_debrid = False
+                if str(os.environ.get('BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT',
+                                       'false')).lower() == 'true':
+                    try:
+                        from utils.debrid_client import get_debrid_client
+                        # Route through the watcher's bound service — NOT the
+                        # priority default — so an AD/TB torrent ID never
+                        # leaks into an RD client (shared-hex ID collision
+                        # would silently delete an unrelated torrent).
+                        client, _svc = get_debrid_client(
+                            service=self.debrid_service,
+                            api_key=self.debrid_api_key,
+                        )
+                        if client:
+                            client.delete_torrent(str(torrent_id))
+                            deleted_from_debrid = True
+                            logger.info(
+                                f"[blackhole] Deleted uncached torrent {torrent_id} "
+                                f"from debrid on timeout ({filename})"
+                            )
+                    except Exception as e:
+                        msg = str(e)
+                        if self.debrid_api_key and self.debrid_api_key in msg:
+                            msg = msg.replace(self.debrid_api_key, '***')
+                        logger.debug(
+                            f"[blackhole] Failed to delete timed-out torrent "
+                            f"{torrent_id} from debrid: {msg}"
+                        )
+                    # History event fires regardless of whether the delete
+                    # landed — the timeout happened either way and the audit
+                    # trail should reflect it.  Detail string distinguishes
+                    # the two outcomes for post-hoc analysis.
+                    if _history:
+                        _mt, _ep = _enrich_for_history(filename)
+                        _detail = ('Timed out uncached — removed from debrid'
+                                   if deleted_from_debrid
+                                   else 'Timed out uncached — debrid cleanup skipped')
+                        _history.log_event(
+                            'failed', filename, episode=_ep, source='blackhole',
+                            detail=_detail,
+                            meta={'torrent_id': str(torrent_id),
+                                  'reason': 'uncached_timeout',
+                                  'deleted': deleted_from_debrid},
+                            media_title=_mt,
+                        )
                 if _notify:
                     _notify('download_error', 'Blackhole: Torrent Timeout',
                             f'{filename} timed out waiting for debrid processing',
@@ -1634,11 +1684,20 @@ class BlackholeWatcher:
                                                    media_title=_mt)
                     try:
                         from utils.debrid_client import get_debrid_client
-                        client, _svc = get_debrid_client()
+                        # Route through the watcher's bound service — see the
+                        # timeout-delete block above for the cross-provider
+                        # hazard this avoids.
+                        client, _svc = get_debrid_client(
+                            service=self.debrid_service,
+                            api_key=self.debrid_api_key,
+                        )
                         if client:
                             client.delete_torrent(str(torrent_id))
                     except Exception as e:
-                        logger.debug(f"[blackhole] Failed to delete disc rip from debrid: {e}")
+                        msg = str(e)
+                        if self.debrid_api_key and self.debrid_api_key in msg:
+                            msg = msg.replace(self.debrid_api_key, '***')
+                        logger.debug(f"[blackhole] Failed to delete disc rip from debrid: {msg}")
                     if _history:
                         _history.log_event('failed', filename, episode=_ep, source='blackhole',
                                            detail='Rejected: no usable media files',

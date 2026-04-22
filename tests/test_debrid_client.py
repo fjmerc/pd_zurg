@@ -91,6 +91,39 @@ class TestConfiguration:
             assert client is None
             assert name is None
 
+    def test_explicit_service_overrides_priority(self):
+        """With service='alldebrid' specified, MUST return an AD client
+        even when RD is also configured — otherwise callers that route
+        a service-specific torrent ID through the default priority can
+        hit the wrong account."""
+        with patch('utils.debrid_client.load_secret_or_env', side_effect=lambda k: {
+            'rd_api_key': 'rd-key', 'ad_api_key': 'ad-key', 'torbox_api_key': ''
+        }.get(k, '')):
+            client, name = get_debrid_client(service='alldebrid')
+        assert name == 'alldebrid'
+        assert client.configured
+
+    def test_explicit_service_with_api_key_override(self):
+        """Explicit api_key must take precedence over the env-configured key."""
+        with patch('utils.debrid_client.load_secret_or_env', return_value=''):
+            client, name = get_debrid_client(service='realdebrid', api_key='explicit-key')
+        assert name == 'realdebrid'
+        assert client.configured
+        assert client._api_key == 'explicit-key'
+
+    def test_explicit_service_unknown_returns_none(self):
+        client, name = get_debrid_client(service='premiumize')
+        assert client is None
+        assert name is None
+
+    def test_explicit_service_but_unconfigured_returns_none(self):
+        """service='realdebrid' with no RD key available must return (None,None)
+        rather than falling through to another provider."""
+        with patch('utils.debrid_client.load_secret_or_env', return_value=''):
+            client, name = get_debrid_client(service='realdebrid')
+        assert client is None
+        assert name is None
+
 
 # ---------------------------------------------------------------------------
 # Torrent ID validation

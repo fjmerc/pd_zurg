@@ -136,6 +136,7 @@ for recommended settings per provider.
 |---|---|---|
 | `BLACKHOLE_DEBRID_DEDUP_ENABLED` | Skip if the hash is already on the debrid account. Stops Sonarr/Radarr re-grabs from producing duplicate entries in DMM | `true` |
 | `BLACKHOLE_REQUIRE_CACHED` | Refuse `.torrent`/`.magnet` drops that aren't confirmed cached. **RD users leave OFF** (RD deprecated its cache probe Nov 2024); AD/TB users can turn this ON | `false` |
+| `BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT` | When the blackhole gives up waiting for debrid to cache a torrent (`BLACKHOLE_MOUNT_POLL_TIMEOUT`), actively delete it from the debrid account instead of leaving it as a 0%/0-seed entry. **Recommended ON for RD users** — see [TROUBLESHOOTING](TROUBLESHOOTING.md#uncached-torrents-pile-up-on-my-debrid-account-from-the-blackhole) | `false` |
 
 ### Quality compromise + season-pack fallback (opt-in)
 

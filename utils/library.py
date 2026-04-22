@@ -1743,9 +1743,10 @@ class LibraryScanner:
 
         Route selection: ``prefer-debrid`` → True (force-grab debrid copies);
         ``prefer-local`` → False (route via local); unset → None (Sonarr's
-        own tag decides).  Unset and prefer-local pass
-        ``respect_monitored=True`` so an explicitly-unmonitored episode is
-        never re-searched against the user's intent.
+        own tag decides).  All routes pass ``respect_monitored=True`` so an
+        explicitly-unmonitored episode is never re-searched against the
+        user's intent — prefer-debrid still force-grabs debrid copies, but
+        only for episodes the user is actively monitoring.
 
         Pending direction is chosen per route: ``to-debrid`` / ``to-local``
         / ``to-any``.  ``to-any`` resolves on any source and is never
@@ -1900,7 +1901,7 @@ class LibraryScanner:
                     except Exception as e:
                         logger.debug(f"[library] TMDB lookup failed for {show['title']!r}, falling back to title search: {e}")
 
-                respect_mon = route is not True  # True for None and False routes
+                respect_mon = True  # all routes honor Sonarr's monitored flag
                 new_pending = []
                 for sn, ep_nums in by_season.items():
                     try:
@@ -2032,7 +2033,7 @@ class LibraryScanner:
                             movie_tmdb_id = tmdb_hit['tmdb_id']
                     except Exception as e:
                         logger.debug(f"[library] TMDB lookup failed for {movie['title']!r}, falling back to title search: {e}")
-                respect_mon = route is not True
+                respect_mon = True  # all routes honor Radarr's monitored flag
                 try:
                     result = movie_client.ensure_and_search(
                         movie['title'], movie_tmdb_id, prefer_debrid=route,

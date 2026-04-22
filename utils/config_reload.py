@@ -58,7 +58,7 @@ SOFT_RELOAD = {
     'PD_LOG_LEVEL', 'NOTIFICATION_LEVEL',
     'NOTIFICATION_EVENTS', 'DUPLICATE_CLEANUP', 'CLEANUP_INTERVAL', 'DUPLICATE_CLEANUP_KEEP',
     'PLEX_REFRESH', 'SKIP_VALIDATION', 'LIBRARY_PREFERENCE_AUTO_ENFORCE',
-    'BLOCKLIST_AUTO_ADD',
+    'BLOCKLIST_AUTO_ADD', 'GAP_FILL_ENABLED',
     # Quality compromise (plan 33): all nine toggles are read fresh
     # from os.environ on each blackhole retry cycle via `_compromise_enabled`,
     # `_int_env`, `_float_env`, etc. — no module globals to restart,

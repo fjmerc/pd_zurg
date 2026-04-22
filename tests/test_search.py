@@ -22,7 +22,22 @@ from utils.search import (
     check_debrid_cache,
     _coerce_instant,
     _TORBOX_MAX_PROBES,
+    _existing_hashes,
+    remember_added_hash,
+    invalidate_existing_hashes_cache,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_search_env_and_cache(monkeypatch):
+    """Each test starts with gates at their default values and the dedup
+    cache empty so cross-test pollution (e.g. a previous test priming the
+    cache with ``remember_added_hash``) cannot leak into the next."""
+    monkeypatch.delenv('SEARCH_DEDUP_ENABLED', raising=False)
+    monkeypatch.delenv('SEARCH_REQUIRE_CACHED', raising=False)
+    invalidate_existing_hashes_cache()
+    yield
+    invalidate_existing_hashes_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +271,14 @@ class TestSearchSortAndFilter:
 
 
 class TestAddToDebrid:
+
+    @pytest.fixture(autouse=True)
+    def _stub_dedup_probe(self, monkeypatch):
+        """Stub the debrid-account list call so the dedup gate never makes a
+        real HTTP request.  Each test that needs to exercise dedup can still
+        patch ``_existing_hashes`` directly."""
+        monkeypatch.setattr('utils.search._existing_hashes',
+                            lambda *a, **kw: set())
 
     @patch('utils.search._urllib_post')
     @patch('utils.search._get_debrid_service')
@@ -807,3 +830,337 @@ class TestSearchTorrentsCacheAnnotation:
             results = search_torrents('tt1234567')  # defaults
             mock_check.assert_not_called()
         assert results[0]['info_hash'] == 'b' * 40
+
+
+# ---------------------------------------------------------------------------
+# Dedup and require-cached gates on add_to_debrid
+# ---------------------------------------------------------------------------
+
+class TestAddToDebridDedup:
+    """Guards for the pre-add dedup probe — hashes already on the account
+    must not be re-submitted."""
+
+    @patch('utils.search._urllib_post')
+    @patch('utils.search._existing_hashes')
+    @patch('utils.search._get_debrid_service')
+    def test_duplicate_hash_blocks_add(self, mock_service, mock_existing, mock_post):
+        mock_service.return_value = ('realdebrid', 'test_key')
+        mock_existing.return_value = {'a' * 40}
+        result = add_to_debrid('a' * 40, title='Dup')
+        assert result['success'] is False
+        assert result.get('duplicate') is True
+        mock_post.assert_not_called()
+
+    @patch('utils.search._urllib_post')
+    @patch('utils.search._existing_hashes')
+    @patch('utils.search._get_debrid_service')
+    def test_new_hash_not_blocked(self, mock_service, mock_existing, mock_post):
+        mock_service.return_value = ('realdebrid', 'test_key')
+        mock_existing.return_value = {'b' * 40}  # different hash
+        mock_post.side_effect = [{'id': 'ABC'}, {}]
+        result = add_to_debrid('a' * 40)
+        assert result['success'] is True
+
+    @patch('utils.search._urllib_post')
+    @patch('utils.search._existing_hashes')
+    @patch('utils.search._get_debrid_service')
+    def test_unknown_existing_does_not_block(self, mock_service, mock_existing, mock_post):
+        """When we cannot query the account (``None``), dedup must defer
+        to the add — refusing would lock users out on transient API errors."""
+        mock_service.return_value = ('realdebrid', 'test_key')
+        mock_existing.return_value = None  # unknown
+        mock_post.side_effect = [{'id': 'ABC'}, {}]
+        result = add_to_debrid('a' * 40)
+        assert result['success'] is True
+
+    @patch('utils.search._urllib_post')
+    @patch('utils.search._existing_hashes')
+    @patch('utils.search._get_debrid_service')
+    def test_dedup_disabled_bypasses_probe(self, mock_service, mock_existing,
+                                            mock_post, monkeypatch):
+        monkeypatch.setenv('SEARCH_DEDUP_ENABLED', 'false')
+        mock_service.return_value = ('realdebrid', 'test_key')
+        mock_post.side_effect = [{'id': 'ABC'}, {}]
+        result = add_to_debrid('a' * 40)
+        assert result['success'] is True
+        mock_existing.assert_not_called()
+
+    @patch('utils.search._urllib_post')
+    @patch('utils.search._existing_hashes')
+    @patch('utils.search._get_debrid_service')
+    def test_successful_add_primes_cache(self, mock_service, mock_existing,
+                                           mock_post):
+        """After a successful add, ``remember_added_hash`` should have
+        injected the hash so a duplicate-click within TTL is caught."""
+        mock_service.return_value = ('realdebrid', 'test_key')
+        # Prime the real cache with an empty set so ``remember_added_hash``
+        # has somewhere to write.
+        invalidate_existing_hashes_cache()
+        import utils.search as s
+        s._existing_hashes_cache['realdebrid'] = (
+            s.time.time(), set()
+        )
+        mock_existing.return_value = s._existing_hashes_cache['realdebrid'][1]
+        mock_post.side_effect = [{'id': 'ABC'}, {}]
+        add_to_debrid('a' * 40)
+        assert 'a' * 40 in s._existing_hashes_cache['realdebrid'][1]
+
+
+class TestAddToDebridRequireCached:
+    """Guards for the pre-add cache check — uncached / unknown hashes must
+    be refused when the strict gate is on."""
+
+    @patch('utils.search._urllib_post')
+    @patch('utils.search.check_debrid_cache')
+    @patch('utils.search._existing_hashes')
+    @patch('utils.search._get_debrid_service')
+    def test_uncached_blocked(self, mock_service, mock_existing, mock_cache,
+                                mock_post, monkeypatch):
+        monkeypatch.setenv('SEARCH_REQUIRE_CACHED', 'true')
+        mock_service.return_value = ('alldebrid', 'test_key')
+        mock_existing.return_value = set()
+        mock_cache.return_value = {'a' * 40: False}
+        result = add_to_debrid('a' * 40)
+        assert result['success'] is False
+        assert 'cached' in result['error'].lower()
+        mock_post.assert_not_called()
+
+    @patch('utils.search._urllib_post')
+    @patch('utils.search.check_debrid_cache')
+    @patch('utils.search._existing_hashes')
+    @patch('utils.search._get_debrid_service')
+    def test_unknown_blocked(self, mock_service, mock_existing, mock_cache,
+                               mock_post, monkeypatch):
+        """RD's cache probe always returns None — strict mode must treat
+        that as 'not cached' so uncached RD grabs are not snuck in."""
+        monkeypatch.setenv('SEARCH_REQUIRE_CACHED', 'true')
+        mock_service.return_value = ('realdebrid', 'test_key')
+        mock_existing.return_value = set()
+        mock_cache.return_value = {'a' * 40: None}
+        result = add_to_debrid('a' * 40)
+        assert result['success'] is False
+        mock_post.assert_not_called()
+
+    @patch('utils.search._urllib_post')
+    @patch('utils.search.check_debrid_cache')
+    @patch('utils.search._existing_hashes')
+    @patch('utils.search._get_debrid_service')
+    def test_cached_allowed(self, mock_service, mock_existing, mock_cache,
+                              mock_post, monkeypatch):
+        monkeypatch.setenv('SEARCH_REQUIRE_CACHED', 'true')
+        mock_service.return_value = ('alldebrid', 'test_key')
+        mock_existing.return_value = set()
+        mock_cache.return_value = {'a' * 40: True}
+        mock_post.return_value = {
+            'status': 'success', 'data': {'magnets': [{'id': 1}]}
+        }
+        result = add_to_debrid('a' * 40)
+        assert result['success'] is True
+
+    @patch('utils.search._urllib_post')
+    @patch('utils.search.check_debrid_cache')
+    @patch('utils.search._existing_hashes')
+    @patch('utils.search._get_debrid_service')
+    def test_gate_off_allows_uncached(self, mock_service, mock_existing,
+                                        mock_cache, mock_post):
+        """Default behaviour (gate OFF) must be unchanged — uncached
+        releases still land on the account."""
+        mock_service.return_value = ('alldebrid', 'test_key')
+        mock_existing.return_value = set()
+        mock_post.return_value = {
+            'status': 'success', 'data': {'magnets': [{'id': 1}]}
+        }
+        result = add_to_debrid('a' * 40)
+        assert result['success'] is True
+        mock_cache.assert_not_called()
+
+
+class TestExistingHashesHelpers:
+    """Parsing and caching guards for the account-listing helpers."""
+
+    def test_rd_parses_list_response(self):
+        with patch('utils.search._urllib_get') as mock_get:
+            mock_get.return_value = [
+                {'id': '1', 'hash': 'A' * 40, 'status': 'downloaded'},
+                {'id': '2', 'hash': 'B' * 40, 'status': 'queued'},
+                {'id': '3', 'hash': 'not-a-hash', 'status': 'x'},  # dropped
+                'garbage',  # dropped
+            ]
+            from utils.search import _existing_hashes_rd
+            result = _existing_hashes_rd('key')
+        assert result == {'a' * 40, 'b' * 40}
+
+    def test_ad_parses_success_response(self):
+        with patch('utils.search._urllib_get') as mock_get:
+            mock_get.return_value = {
+                'status': 'success',
+                'data': {'magnets': [
+                    {'hash': 'A' * 40}, {'hash': 'C' * 40},
+                    {'hash': ''}, 'garbage',
+                ]},
+            }
+            from utils.search import _existing_hashes_ad
+            result = _existing_hashes_ad('key')
+        assert result == {'a' * 40, 'c' * 40}
+
+    def test_ad_failure_returns_none(self):
+        with patch('utils.search._urllib_get') as mock_get:
+            mock_get.return_value = {'status': 'error'}
+            from utils.search import _existing_hashes_ad
+            assert _existing_hashes_ad('key') is None
+
+    def test_tb_parses_success_response(self):
+        with patch('utils.search._urllib_get') as mock_get:
+            mock_get.return_value = {
+                'success': True,
+                'data': [{'hash': 'D' * 40}, {'hash': 'e' * 40}],
+            }
+            from utils.search import _existing_hashes_tb
+            result = _existing_hashes_tb('key')
+        assert result == {'d' * 40, 'e' * 40}
+
+    def test_cache_hit_within_ttl_skips_api(self):
+        invalidate_existing_hashes_cache()
+        with patch('utils.search._urllib_get') as mock_get:
+            mock_get.return_value = [{'id': '1', 'hash': 'a' * 40}]
+            _existing_hashes('realdebrid', 'key')
+            _existing_hashes('realdebrid', 'key')
+            _existing_hashes('realdebrid', 'key')
+            assert mock_get.call_count == 1
+
+    def test_force_refresh_bypasses_ttl(self):
+        invalidate_existing_hashes_cache()
+        with patch('utils.search._urllib_get') as mock_get:
+            mock_get.return_value = [{'id': '1', 'hash': 'a' * 40}]
+            _existing_hashes('realdebrid', 'key')
+            _existing_hashes('realdebrid', 'key', force_refresh=True)
+            assert mock_get.call_count == 2
+
+    def test_missing_service_returns_none(self):
+        assert _existing_hashes(None, 'key') is None
+        assert _existing_hashes('realdebrid', '') is None
+
+    def test_remember_added_hash_updates_cache(self):
+        invalidate_existing_hashes_cache()
+        with patch('utils.search._urllib_get') as mock_get:
+            mock_get.return_value = []
+            cached = _existing_hashes('realdebrid', 'key')
+        assert cached == set()
+        remember_added_hash('realdebrid', 'A' * 40)
+        # Re-read: same cache object, now contains the new hash
+        cached = _existing_hashes('realdebrid', 'key')
+        assert 'a' * 40 in cached
+
+    def test_remember_ignores_invalid_hash(self):
+        invalidate_existing_hashes_cache()
+        with patch('utils.search._urllib_get') as mock_get:
+            mock_get.return_value = []
+            _existing_hashes('realdebrid', 'key')
+        remember_added_hash('realdebrid', 'not-a-hash')
+        cached = _existing_hashes('realdebrid', 'key')
+        assert cached == set()
+
+    def test_rd_non_list_response_returns_none(self):
+        """RD error responses are dicts (``{'error': 'not_authenticated'}``);
+        the dedup helper must return None, not crash on ``.strip()`` of the
+        dict's 'hash' field."""
+        from utils.search import _existing_hashes_rd
+        with patch('utils.search._urllib_get') as mock_get:
+            mock_get.return_value = {'error': 'not_authenticated'}
+            assert _existing_hashes_rd('key') is None
+
+    def test_ad_non_dict_response_returns_none(self):
+        """AD is supposed to return a dict; a list / string / None slipping
+        through (gateway HTML error page that parsed as JSON, etc.) must
+        not raise AttributeError from the new helper."""
+        from utils.search import _existing_hashes_ad
+        with patch('utils.search._urllib_get') as mock_get:
+            mock_get.return_value = ['garbage']
+            assert _existing_hashes_ad('key') is None
+            mock_get.return_value = None
+            assert _existing_hashes_ad('key') is None
+
+    def test_tb_non_dict_response_returns_none(self):
+        from utils.search import _existing_hashes_tb
+        with patch('utils.search._urllib_get') as mock_get:
+            mock_get.return_value = ['garbage']
+            assert _existing_hashes_tb('key') is None
+
+    def test_hash_field_not_a_string_skipped(self):
+        """Entries with non-string ``hash`` fields (e.g. ``{'hash': 123}``)
+        must be skipped, not crash on ``.strip()``."""
+        from utils.search import _existing_hashes_rd
+        with patch('utils.search._urllib_get') as mock_get:
+            mock_get.return_value = [
+                {'id': '1', 'hash': 123},  # int — skip
+                {'id': '2', 'hash': None},  # null — skip
+                {'id': '3', 'hash': 'A' * 40},  # valid
+            ]
+            result = _existing_hashes_rd('key')
+        assert result == {'a' * 40}
+
+    def test_rd_truncation_warning(self, caplog):
+        """When RD returns the full 2500-entry page, log a one-time warning
+        so heavy users know dedup is degraded."""
+        from utils.search import _existing_hashes_rd, _RD_LIST_LIMIT
+        import utils.search as s
+        s._rd_list_truncation_warned = False  # reset for this test
+        with patch('utils.search._urllib_get') as mock_get:
+            mock_get.return_value = [
+                {'id': str(i), 'hash': f'{i:040x}'[:40]}
+                for i in range(_RD_LIST_LIMIT)
+            ]
+            with caplog.at_level('WARNING'):
+                _existing_hashes_rd('key')
+        assert any('dedup may miss older entries' in r.message
+                   for r in caplog.records)
+
+    def test_unexpected_exception_returns_none(self):
+        """If a dedup helper raises an unexpected exception (schema drift,
+        etc.) the outer ``_existing_hashes`` must swallow it and return
+        None — a crash here would propagate into the ``/api/search/add``
+        handler and the blackhole watcher."""
+        with patch('utils.search._existing_hashes_rd',
+                    side_effect=AttributeError('unexpected')):
+            assert _existing_hashes('realdebrid', 'key') is None
+
+
+class TestAddToDebridInFlightRace:
+    """Guard against two simultaneous Add clicks (or two browser tabs)
+    both passing the dedup probe before either hits ``addMagnet``."""
+
+    def test_inflight_blocks_concurrent_add(self, monkeypatch):
+        """While one thread is mid-add, a sibling call for the same hash
+        must be rejected — the account-list probe cannot see the in-flight
+        submission yet."""
+        import utils.search as s
+        monkeypatch.setattr(s, '_existing_hashes', lambda *a, **kw: set())
+        monkeypatch.setattr(s, '_get_debrid_service',
+                             lambda: ('realdebrid', 'key'))
+        h = 'a' * 40
+
+        # Pre-mark the hash as in-flight so add_to_debrid sees it.
+        with s._existing_hashes_lock:
+            s._inflight_adds.add(('realdebrid', h))
+        try:
+            result = add_to_debrid(h)
+        finally:
+            with s._existing_hashes_lock:
+                s._inflight_adds.discard(('realdebrid', h))
+        assert result['success'] is False
+        assert result.get('duplicate') is True
+        assert 'in progress' in result['error'].lower()
+
+    def test_inflight_released_after_add(self, monkeypatch):
+        import utils.search as s
+        monkeypatch.setattr(s, '_existing_hashes', lambda *a, **kw: set())
+        monkeypatch.setattr(s, '_get_debrid_service',
+                             lambda: ('realdebrid', 'key'))
+        monkeypatch.setattr(s, '_urllib_post',
+                             lambda *a, **kw: {'id': 'ABC'})
+        h = 'a' * 40
+        add_to_debrid(h)
+        # After the add completes the in-flight tuple must be cleared so
+        # the user can retry without a spurious "already in progress".
+        with s._existing_hashes_lock:
+            assert ('realdebrid', h) not in s._inflight_adds

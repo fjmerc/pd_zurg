@@ -80,6 +80,7 @@ ENV_SCHEMA = [
             ('TRAKT_CLIENT_ID', 'Trakt Client ID', 'string', False, 'Trakt API application client ID'),
             ('TRAKT_CLIENT_SECRET', 'Trakt Client Secret', 'secret', False, 'Trakt API application client secret'),
             ('FLARESOLVERR_URL', 'FlareSolverr URL', 'url', False, 'FlareSolverr proxy URL for Cloudflare bypass'),
+            ('PD_ENFORCE_CACHED_VERSIONS', 'Enforce Cached-Only Versions', 'boolean', False, 'On startup, inject a "cache status / requirement / cached" rule into every plex_debrid content version missing it. Stops the vendored download path from falling back to uncached grabs. Idempotent — a no-op once the rule is present. Requires a plex_debrid restart to take effect (default: OFF).'),
         ],
     },
     {
@@ -138,6 +139,8 @@ ENV_SCHEMA = [
             ('BLACKHOLE_DEDUP_ENABLED', 'Enable Local Library Dedup', 'boolean', False, 'Skip torrents that match content already in your local library'),
             ('BLACKHOLE_LOCAL_LIBRARY_TV', 'Local TV Library Path', 'string', False, 'Path to local TV library (for dedup and auto debrid symlinks)'),
             ('BLACKHOLE_LOCAL_LIBRARY_MOVIES', 'Local Movie Library Path', 'string', False, 'Path to local movie library (for dedup and auto debrid symlinks)'),
+            ('BLACKHOLE_DEBRID_DEDUP_ENABLED', 'Skip If Already in Debrid Account', 'boolean', False, 'Before adding, query the debrid account and skip hashes already present. Prevents duplicate torrent entries when Sonarr/Radarr re-grabs the same release after a failed import (default: ON).'),
+            ('BLACKHOLE_REQUIRE_CACHED', 'Require Cached on Debrid', 'boolean', False, 'Refuse .torrent / .magnet drops whose hash is not confirmed cached on the debrid provider. Real-Debrid deprecated its cache probe in Nov 2024, so on RD this will block all adds — leave OFF for RD or switch to AllDebrid/TorBox to use this gate (default: OFF).'),
         ],
     },
     {
@@ -194,6 +197,10 @@ ENV_SCHEMA = [
         'fields': [
             ('TORRENTIO_URL', 'Torrentio URL', 'url', False,
              'Torrentio API base URL (e.g. https://torrentio.strem.fun). Enables interactive torrent search in the Library detail view'),
+            ('SEARCH_DEDUP_ENABLED', 'Skip If Already in Debrid Account', 'boolean', False,
+             'Before the one-click Add, query the debrid account and refuse hashes already present. Prevents a double-click from creating two entries for the same torrent (default: ON).'),
+            ('SEARCH_REQUIRE_CACHED', 'Require Cached on Debrid', 'boolean', False,
+             'Refuse the Add button when the hash is not confirmed cached on the debrid provider. Real-Debrid deprecated its cache probe in Nov 2024, so on RD this will block all adds — leave OFF for RD or switch to AllDebrid/TorBox to use this gate (default: OFF).'),
         ],
     },
     {
@@ -257,6 +264,11 @@ _ENV_DEFAULTS = {
     # master switch is also off.
     'QUALITY_COMPROMISE_ONLY_CACHED': 'true',
     'QUALITY_COMPROMISE_NOTIFY': 'true',
+    # Debrid-account dedup gates default ON in base/__init__.py — the UI
+    # toggle would read as OFF without these entries, misleading users who
+    # rely on the protection without ever setting the var.
+    'SEARCH_DEDUP_ENABLED': 'true',
+    'BLACKHOLE_DEBRID_DEDUP_ENABLED': 'true',
 }
 
 # Sensitive key patterns — values should be masked in certain contexts

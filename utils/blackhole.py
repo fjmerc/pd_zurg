@@ -2586,22 +2586,148 @@ class BlackholeWatcher:
                 pass
             return
 
+        # Extract hash once — used by blocklist, dedup, and cache-require
+        # gates below.  Falls back to None for files we cannot parse
+        # (malformed .magnet, unreadable .torrent); downstream gates then
+        # treat "unknown hash" as "can't dedup / can't cache-check" and let
+        # the file through to the handler.
+        info_hash = self._extract_info_hash_from_file(file_path)
+
         # Check blocklist before submitting to debrid
-        if _blocklist:
-            info_hash = self._extract_info_hash_from_file(file_path)
-            if info_hash and _blocklist.is_blocked(info_hash):
-                logger.info(f"[blackhole] Skipping blocklisted torrent: {filename} ({info_hash[:16]}...)")
-                if _history:
-                    _mt, _ep = _enrich_for_history(filename)
-                    _history.log_event('blocklisted', filename, episode=_ep, source='blackhole',
-                                       detail=f'Skipped — info hash is blocklisted',
-                                       meta={'info_hash': info_hash},
-                                       media_title=_mt)
-                try:
-                    os.remove(file_path)
-                except OSError as e:
-                    logger.warning(f"[blackhole] Could not remove blocklisted file {filename}: {e}")
-                return
+        if _blocklist and info_hash and _blocklist.is_blocked(info_hash):
+            logger.info(f"[blackhole] Skipping blocklisted torrent: {filename} ({info_hash[:16]}...)")
+            if _history:
+                _mt, _ep = _enrich_for_history(filename)
+                _history.log_event('blocklisted', filename, episode=_ep, source='blackhole',
+                                   detail=f'Skipped — info hash is blocklisted',
+                                   meta={'info_hash': info_hash},
+                                   media_title=_mt)
+            try:
+                os.remove(file_path)
+            except OSError as e:
+                logger.warning(f"[blackhole] Could not remove blocklisted file {filename}: {e}")
+            return
+
+        # Debrid-account dedup — skip hashes already on the debrid account.
+        # Without this, Sonarr/Radarr re-grabs of the same release after a
+        # failed import produce duplicate torrent entries the user has to
+        # clean up manually.  Distinct from ``BLACKHOLE_DEDUP_ENABLED``
+        # (local-filesystem library dedup) — they can be toggled independently.
+        debrid_dedup_enabled = str(os.environ.get('BLACKHOLE_DEBRID_DEDUP_ENABLED', 'true')).lower() == 'true'
+        require_cached = str(os.environ.get('BLACKHOLE_REQUIRE_CACHED', 'false')).lower() == 'true'
+
+        # Strict-mode bypass: with require_cached ON and no API key, every
+        # hash probe returns None → every drop gets deleted.  That's a
+        # misconfiguration, not "provider says uncached" — leave the file
+        # alone so the user sees the problem and the drop survives once
+        # they fix the key.
+        if require_cached and not self.debrid_api_key:
+            logger.error(
+                f"[blackhole] BLACKHOLE_REQUIRE_CACHED is on but {self.debrid_service} "
+                f"API key is missing — leaving {filename} in watch dir"
+            )
+            return
+
+        # Strict-mode bypass: a file whose info hash could not be extracted
+        # (bencode corruption, missing ``btih:``) must NOT slip past a gate
+        # that is explicitly supposed to reject uncached content.  Dedup can
+        # safely fall through — "can't dedup" is a best-effort degradation —
+        # but cache-required is a safety gate and "can't verify" must mean
+        # "refuse".
+        if require_cached and info_hash is None:
+            logger.warning(
+                f"[blackhole] Refusing {filename}: info hash unavailable, "
+                f"require-cached is ON"
+            )
+            if _history:
+                _mt, _ep = _enrich_for_history(filename)
+                _history.log_event('uncached_rejected', filename, episode=_ep, source='blackhole',
+                                   detail='Refused — info hash unavailable under strict mode',
+                                   meta={'provider': self.debrid_service},
+                                   media_title=_mt)
+            try:
+                os.remove(file_path)
+            except OSError as e:
+                logger.warning(f"[blackhole] Could not remove refused file {filename}: {e}")
+            try:
+                from utils.metrics import metrics
+                metrics.inc('blackhole_processed', {'status': 'skipped_uncached'})
+            except Exception:
+                pass
+            return
+
+        if info_hash and (debrid_dedup_enabled or require_cached):
+            # utils.search is a first-party, always-shipped module — an
+            # ImportError here would be a hard bug, not a missing optional
+            # dependency, so let it propagate.
+            from utils.search import _existing_hashes, check_debrid_cache
+
+            lowered = info_hash.lower()
+
+            if debrid_dedup_enabled:
+                existing = _existing_hashes(self.debrid_service, self.debrid_api_key)
+                if existing is not None and lowered in existing:
+                    logger.info(f"[blackhole] Skipping duplicate: {filename} already in {self.debrid_service} account")
+                    if _history:
+                        _mt, _ep = _enrich_for_history(filename)
+                        _history.log_event('duplicate', filename, episode=_ep, source='blackhole',
+                                           detail=f'Skipped — already in {self.debrid_service}',
+                                           meta={'info_hash': info_hash,
+                                                 'provider': self.debrid_service},
+                                           media_title=_mt)
+                    try:
+                        os.remove(file_path)
+                    except OSError as e:
+                        logger.warning(f"[blackhole] Could not remove duplicate file {filename}: {e}")
+                    try:
+                        from utils.metrics import metrics
+                        metrics.inc('blackhole_processed', {'status': 'skipped_duplicate'})
+                    except Exception:
+                        pass
+                    return
+
+            if require_cached:
+                cache_map = check_debrid_cache([lowered], service=self.debrid_service,
+                                               api_key=self.debrid_api_key)
+                cached = cache_map.get(lowered)
+                if cached is False:
+                    # Provider confirmed uncached — safe to delete; nothing
+                    # to wait for.
+                    cache_label = 'uncached'
+                    logger.info(f"[blackhole] Skipping {cache_label}: {filename} on {self.debrid_service}")
+                    if _history:
+                        _mt, _ep = _enrich_for_history(filename)
+                        _history.log_event('uncached_rejected', filename, episode=_ep, source='blackhole',
+                                           detail=f'Skipped — {cache_label} on {self.debrid_service}',
+                                           meta={'info_hash': info_hash,
+                                                 'provider': self.debrid_service},
+                                           media_title=_mt)
+                    try:
+                        os.remove(file_path)
+                    except OSError as e:
+                        logger.warning(f"[blackhole] Could not remove uncached file {filename}: {e}")
+                    try:
+                        from utils.metrics import metrics
+                        metrics.inc('blackhole_processed', {'status': 'skipped_uncached'})
+                    except Exception:
+                        pass
+                    return
+                if cached is None:
+                    # Unknown — API outage, rate-limit, key rotation, or
+                    # RD's deprecated endpoint.  Do NOT delete: leave the
+                    # drop in the watch dir so the next poll retries.  An
+                    # AD/TB blip during a Sonarr grab burst must not
+                    # silently eat every in-flight drop.
+                    logger.warning(
+                        f"[blackhole] Deferring {filename}: cache status unknown on "
+                        f"{self.debrid_service} (API unavailable?) — leaving in watch dir"
+                    )
+                    try:
+                        from utils.metrics import metrics
+                        metrics.inc('blackhole_processed', {'status': 'deferred_cache_unknown'})
+                    except Exception:
+                        pass
+                    return
 
         dispatch = {
             'realdebrid': self._add_to_realdebrid,
@@ -2618,6 +2744,16 @@ class BlackholeWatcher:
             success, result = handler(file_path)
             if success:
                 logger.info(f"[blackhole] Added to {self.debrid_service}: {filename}")
+
+                # Prime the dedup cache so a re-drop of the same .magnet before
+                # TTL expiry is caught even if the debrid account list hasn't
+                # been re-fetched yet.
+                if info_hash:
+                    try:
+                        from utils.search import remember_added_hash
+                        remember_added_hash(self.debrid_service, info_hash)
+                    except ImportError:
+                        pass
 
                 # Record pending FIRST — prevents orphaned debrid torrents if
                 # we crash before reaching file cleanup or notifications.

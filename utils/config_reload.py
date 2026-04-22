@@ -68,6 +68,11 @@ SOFT_RELOAD = {
     'QUALITY_COMPROMISE_MAX_TIER_DROP', 'QUALITY_COMPROMISE_NOTIFY',
     'SEASON_PACK_FALLBACK_ENABLED', 'SEASON_PACK_FALLBACK_MIN_MISSING',
     'SEASON_PACK_FALLBACK_MIN_RATIO',
+    # Debrid-account dedup + require-cached gates — both paths read these
+    # fresh from os.environ at each add attempt, so SIGHUP applies them
+    # without bouncing the blackhole watcher or status server.
+    'SEARCH_DEDUP_ENABLED', 'SEARCH_REQUIRE_CACHED',
+    'BLACKHOLE_DEBRID_DEDUP_ENABLED', 'BLACKHOLE_REQUIRE_CACHED',
 }
 
 

@@ -1076,18 +1076,28 @@ function computeProgress(item) {
     return {width:'100%', color: isPending ? '#7a43b6' : '#27c24c',
             tooltip: isPending ? 'Switching source' : 'Available'};
   }
-  // Show — no TMDB data: invisible bar
-  if (!item.total_episodes || item.total_episodes <= 0) {
+  // Prefer Sonarr's monitored-aware total so the bar agrees with the
+  // "X missing" pill.  Without this, a show with a large unmonitored
+  // back catalogue (Grey's Anatomy S1–S15) stays red at ~30% even
+  // when the user has every monitored episode on disk.
+  var total, have;
+  if (typeof item.monitored_episodes === 'number' && item.monitored_episodes > 0) {
+    total = item.monitored_episodes;
+    have = Math.max(0, total - (item.missing_episodes || 0));
+  } else if (item.total_episodes && item.total_episodes > 0) {
+    total = item.total_episodes;
+    have = item.episodes || 0;
+  } else {
     return {width:'100%', color:'transparent', tooltip: (item.episodes || 0) + ' episodes'};
   }
-  var pct = Math.min(100, Math.round((item.episodes || 0) / item.total_episodes * 100));
+  var pct = Math.min(100, Math.round(have / total * 100));
   var color;
   if (isPending) color = '#7a43b6';
   else if (pct >= 100 && (item.tmdb_status === 'Ended' || item.tmdb_status === 'Canceled')) color = '#27c24c';
   else if (pct >= 100) color = '#5d9cec';
   else color = '#f05050';
   return {width: pct + '%', color: color,
-          tooltip: (item.episodes || 0) + ' / ' + item.total_episodes + ' episodes'};
+          tooltip: have + ' / ' + total + ' episodes'};
 }
 
 function _titleHue(title) {
@@ -1518,12 +1528,27 @@ function _applyMeta(card, meta) {
       var items = type === 'show' ? _allShows : _allMovies;
       var haveEps = 0;
       var missingServer = null;  // Sonarr-monitored-aware count, when available
+      var monitoredTotal = null; // Sonarr-monitored-aware denominator
       for (var i = 0; i < items.length; i++) {
         if (normTitle(items[i].title) === nk) {
           haveEps = items[i].episodes || 0;
           if (typeof items[i].missing_episodes === 'number') missingServer = items[i].missing_episodes;
+          if (typeof items[i].monitored_episodes === 'number' && items[i].monitored_episodes > 0) {
+            monitoredTotal = items[i].monitored_episodes;
+          }
           break;
         }
+      }
+      // When Sonarr gave us a monitored total, prefer it over the TMDB
+      // total so the bar and the "X missing" pill tell the same story.
+      // Gate only on `monitoredTotal` (not on `missingServer`) to match
+      // `computeProgress`'s `(item.missing_episodes || 0)` coercion —
+      // otherwise the two paths diverge when `missing_episodes` is null
+      // on the item, producing a green→red flicker between the sync
+      // grid render and the async enrichment pass.
+      if (monitoredTotal !== null) {
+        totalEps = monitoredTotal;
+        haveEps = Math.max(0, monitoredTotal - (missingServer !== null ? missingServer : 0));
       }
       var pct = Math.min(100, Math.round(haveEps / totalEps * 100));
       var isPending = !!_pending[nk];
@@ -2317,6 +2342,14 @@ function _mergeShowMeta(show, meta) {
     var remaining = Object.keys(fileEps);
     for (var ri = 0; ri < remaining.length; ri++) {
       episodes.push(fileEps[remaining[ri]]);
+    }
+    // Hide fully-empty unmonitored seasons: the user opted out and
+    // has no files to show, so rendering a ghost "Season N" section
+    // with nothing in it just clutters the detail view.  Unmonitored
+    // seasons that do have on-disk files are kept so the user can
+    // still play what they have.
+    if (isUnmonitored && episodes.length === 0) {
+      return;
     }
     episodes.sort(function(a, b) { return b.number - a.number; });
     var haveCount = episodes.filter(function(e) { return e.source !== 'missing'; }).length;

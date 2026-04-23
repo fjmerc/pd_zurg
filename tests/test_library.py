@@ -2283,6 +2283,8 @@ class TestApplySonarrMonitoredFilter:
 
         Sonarr's ``episodeCount`` already filters by per-episode monitored
         flags, so the math only needs to drop wholly unmonitored seasons.
+        Also sets ``monitored_episodes`` so the UI progress bar agrees
+        with the "X missing" pill.
         """
         from utils.library import _apply_sonarr_monitored_filter
         shows = [{'title': 'Show', 'year': None}]
@@ -2300,6 +2302,26 @@ class TestApplySonarrMonitoredFilter:
             _apply_sonarr_monitored_filter(shows)
         assert shows[0]['missing_episodes'] == 4
         assert shows[0]['unmonitored_seasons'] == []
+        assert shows[0]['monitored_episodes'] == 18
+
+    def test_monitored_episodes_omitted_when_all_seasons_unmonitored(self):
+        """With zero monitored seasons the denominator would be zero — omit
+        the field so the frontend falls back to the TMDB total rather
+        than drawing a divide-by-zero bar."""
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{'title': 'Show', 'year': None}]
+        series = [{
+            'title': 'Show',
+            'tmdbId': 42,
+            'seasons': [
+                {'seasonNumber': 1, 'monitored': False,
+                 'statistics': {'episodeCount': 10, 'episodeFileCount': 10}},
+            ],
+        }]
+        with _fake_sonarr(series):
+            _apply_sonarr_monitored_filter(shows)
+        assert shows[0]['missing_episodes'] == 0
+        assert 'monitored_episodes' not in shows[0]
 
     def test_file_count_exceeding_episode_count_clamps_to_zero(self):
         """A season with more files than monitored episodes (e.g. stale

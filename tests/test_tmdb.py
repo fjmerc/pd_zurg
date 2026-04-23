@@ -1011,6 +1011,35 @@ class TestCachedPosters:
         result = tmdb.get_cached_posters(items)
         assert result == {}
 
+    def test_excludes_episodes_airing_today_from_total(self, monkeypatch):
+        """Today's episode hasn't broadcast yet — it must not be counted in
+        total_episodes, otherwise it surfaces on the library card as a
+        spurious "1 missing" the user can't do anything about."""
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        eps = [
+            {'number': 1, 'title': 'Aired', 'air_date': '2020-01-01'},
+            {'number': 2, 'title': 'Today', 'air_date': today},
+            {'number': 3, 'title': 'Future', 'air_date': '2099-12-31'},
+        ]
+        cache = {
+            'shows': {
+                'airing today show': {
+                    'tmdb_id': 9999,
+                    'title': 'Airing Today Show',
+                    'poster_path': '/a.jpg',
+                    'status': 'Returning Series',
+                    'cast': [],
+                    'seasons': [{'number': 1, 'episodes': eps}],
+                    'cached_at': datetime.now(timezone.utc).isoformat(),
+                }
+            }
+        }
+        tmdb._save_cache(cache)
+        items = [{'title': 'Airing Today Show', 'year': None, 'type': 'show'}]
+        result = tmdb.get_cached_posters(items)
+        assert result['airing today show']['total_episodes'] == 1
+
 
 # ---------------------------------------------------------------------------
 # Background cache population

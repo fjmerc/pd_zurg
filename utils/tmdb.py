@@ -631,13 +631,15 @@ def get_cached_posters(items):
         if item_type == 'show':
             entry = _cache_lookup(shows_cache, key, year)
             if entry and _is_fresh(entry):
-                # Only count aired episodes (air_date non-empty and <= today)
-                # to match Sonarr behavior — unaired episodes are not "missing"
+                # Count only episodes that have already aired (air_date strictly
+                # in the past).  Today's episode is excluded — until it actually
+                # broadcasts it surfaces as "Airing Today" in the detail view,
+                # not "Missing" on the card.
                 aired_eps = 0
                 for s in entry.get('seasons', []):
                     for ep in s.get('episodes', []):
                         ad = ep.get('air_date', '')
-                        if ad and ad <= today:
+                        if ad and ad < today:
                             aired_eps += 1
                 season_nums = [s['number'] for s in entry.get('seasons', [])]
                 info = {
@@ -756,7 +758,7 @@ def find_show_by_season(norm_key, max_season, year=None):
         for s in entry.get('seasons', []):
             for ep in s.get('episodes', []):
                 ad = ep.get('air_date', '')
-                if ad and ad <= today:
+                if ad and ad < today:
                     aired_eps += 1
         season_nums = [s['number'] for s in entry.get('seasons', [])]
         return {
@@ -824,11 +826,11 @@ def get_cached_episode_list(normalized_title, year=None):
     Used by the library reconcile to diff expected against present.  Season 0
     is always excluded (``get_show_metadata`` already drops it on fetch, but
     re-filter here for defense against stale pre-v2 cache entries).  Episodes
-    with empty or future ``air_date`` are excluded — unaired content isn't
-    "missing".  Returns ``[]`` when the title isn't cached or is stale; callers
-    must treat an empty return as "don't know, skip" rather than "nothing
-    aired" so we never trigger a spurious search for a title we have no data
-    on.
+    with empty or today/future ``air_date`` are excluded — unaired content
+    (including episodes scheduled to broadcast today) isn't "missing".
+    Returns ``[]`` when the title isn't cached or is stale; callers must treat
+    an empty return as "don't know, skip" rather than "nothing aired" so we
+    never trigger a spurious search for a title we have no data on.
     """
     from utils.library import _normalize_title as _nt
     norm = _nt(normalized_title or '')
@@ -847,7 +849,7 @@ def get_cached_episode_list(normalized_title, year=None):
             continue
         for ep in s.get('episodes', []):
             ad = ep.get('air_date', '')
-            if not ad or ad > today:
+            if not ad or ad >= today:
                 continue
             enum = ep.get('number', 0)
             if not isinstance(enum, int) or enum <= 0:

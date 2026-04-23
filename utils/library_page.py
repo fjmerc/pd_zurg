@@ -1494,15 +1494,21 @@ function _applyMeta(card, meta) {
     container.appendChild(badge);
   }
 
-  // Update progress bar — only count AIRED episodes (air_date <= today)
+  // Update progress bar — only count episodes that have ALREADY aired
+  // (air_date strictly before today).  Today's episode hasn't broadcast yet
+  // and is surfaced as "Airing Today" in the detail view, not "Missing".
   if (type === 'show' && meta.seasons) {
     var totalEps = 0;
-    var today = new Date().toISOString().slice(0, 10);
+    // Use local-date "today" so the grid card matches the detail view's
+    // "Airing Today" badge (which also uses local date at line 2353).
+    // Mixing UTC here with local there would split-brain a user's timezone.
+    var _todayNow = new Date();
+    var today = _todayNow.getFullYear() + '-' + String(_todayNow.getMonth()+1).padStart(2,'0') + '-' + String(_todayNow.getDate()).padStart(2,'0');
     for (var si = 0; si < meta.seasons.length; si++) {
       var eps = meta.seasons[si].episodes || [];
       for (var ei = 0; ei < eps.length; ei++) {
         var ad = eps[ei].air_date;
-        if (ad && ad <= today) totalEps++;
+        if (ad && ad < today) totalEps++;
       }
     }
     if (totalEps > 0) {
@@ -1707,7 +1713,11 @@ function _resolveMissingTasks(items, callback) {
 
   var resolved = 0;
   var showTasks = [];
-  var today = new Date().toISOString().slice(0, 10);
+  // Local-date "today" — matches _renderSeasonEpisodes' badge logic so the
+  // bulk-search selection never includes an episode the detail view is
+  // labelling "Airing Today".
+  var _todayNow = new Date();
+  var today = _todayNow.getFullYear() + '-' + String(_todayNow.getMonth()+1).padStart(2,'0') + '-' + String(_todayNow.getDate()).padStart(2,'0');
   for (var si = 0; si < showsToResolve.length; si++) {
     (function(show) {
       var params = 'title=' + encodeURIComponent(show.title) + '&type=show';
@@ -1722,7 +1732,7 @@ function _resolveMissingTasks(items, callback) {
               var missingEps = [];
               for (var ei = 0; ei < (season.episodes || []).length; ei++) {
                 var ep = season.episodes[ei];
-                if (ep.source === 'missing' && ep.air_date && ep.air_date <= today) {
+                if (ep.source === 'missing' && ep.air_date && ep.air_date < today) {
                   missingEps.push(ep.number);
                 }
               }

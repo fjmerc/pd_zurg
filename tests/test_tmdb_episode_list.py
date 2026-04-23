@@ -67,3 +67,15 @@ class TestCachedEpisodeList:
     def test_empty_title_returns_empty(self):
         assert tmdb.get_cached_episode_list('') == []
         assert tmdb.get_cached_episode_list(None) == []
+
+    def test_excludes_episodes_airing_today(self):
+        """Today's episode hasn't broadcast yet — reconcile/search must skip it
+        so we don't hunt for a release that isn't available."""
+        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        _seed_show('show', {1: [
+            (1, '2020-01-01'),  # past — aired
+            (2, today),         # today — not yet aired
+            (3, '2099-01-01'),  # future — not aired
+        ]})
+        result = tmdb.get_cached_episode_list('show')
+        assert [(e['season'], e['number']) for e in result] == [(1, 1)]

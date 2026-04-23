@@ -2326,6 +2326,14 @@ function _mergeShowMeta(show, meta) {
 
   var merged = [];
   meta.seasons.forEach(function(tmdbS) {
+    // Skip seasons TMDB knows about but hasn't populated with episodes
+    // (e.g. a renewed-but-unscheduled next season).  Cached entries
+    // from older pd_zurg versions can still carry these ghost seasons;
+    // `get_show_metadata` no longer emits them going forward, so this
+    // filter is a compatibility shim for pre-fix caches.
+    if (!tmdbS.episodes || tmdbS.episodes.length === 0) {
+      if (!fileLookup[tmdbS.number]) return;
+    }
     var fileEps = fileLookup[tmdbS.number] || {};
     var episodes = [];
     var isUnmonitored = unmonitored[tmdbS.number];

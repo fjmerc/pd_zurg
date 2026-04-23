@@ -387,6 +387,40 @@ class TestShowMetadata:
         _mock_api(monkeypatch, {})
         assert tmdb.get_show_metadata(9999) is None
 
+    def test_get_show_metadata_skips_empty_seasons(self, monkeypatch):
+        """TMDB reports renewed-but-unscheduled seasons (e.g. Grey's
+        Anatomy S23 after a renewal announcement, before episode stubs
+        are filled in) with an empty episodes list.  Storing them
+        produces ghost 'Season N' sections in the detail view with
+        zero episodes — drop them at fetch time so the cache never
+        carries the noise."""
+        _mock_api(monkeypatch, {
+            '/tv/1416': {
+                'name': "Grey's Anatomy",
+                'seasons': [
+                    {'season_number': 0, 'episode_count': 0},
+                    {'season_number': 22, 'episode_count': 5},
+                    {'season_number': 23, 'episode_count': 0},
+                ],
+            },
+            '/tv/1416/season/22': {
+                'episodes': [
+                    {'episode_number': 1, 'name': 'Premiere', 'air_date': '2025-09-01'},
+                    {'episode_number': 2, 'name': 'Second', 'air_date': '2025-09-08'},
+                ]
+            },
+            '/tv/1416/season/23': {
+                # Renewed, but TMDB hasn't published any episode stubs yet.
+                'episodes': []
+            },
+        })
+        result = tmdb.get_show_metadata(1416)
+        assert result is not None
+        # Only season 22 survives; season 23 is dropped because it has
+        # no episodes to display.
+        season_numbers = [s['number'] for s in result['seasons']]
+        assert season_numbers == [22]
+
 
 class TestMovieMetadata:
 

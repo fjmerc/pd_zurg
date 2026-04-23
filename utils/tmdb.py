@@ -334,6 +334,16 @@ def get_show_metadata(tmdb_id):
                 'air_date': ep.get('air_date') or '',
             })
 
+        # Skip seasons TMDB knows about but hasn't populated yet — e.g.
+        # an announced-but-unscheduled next season (Grey's Anatomy S23
+        # after a renewal, before the episode list is filled in).
+        # Storing them produces ghost "Season N" sections with zero
+        # episodes in the detail view and inflates the seasons count
+        # on the card.  Once TMDB publishes episode stubs the next cache
+        # refresh will pick the season up again.
+        if not episodes:
+            continue
+
         result['seasons'].append({
             'number': snum,
             'total_episodes': len(episodes),

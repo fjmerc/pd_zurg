@@ -832,6 +832,7 @@ def _apply_sonarr_monitored_filter(shows):
 
         seasons = series.get('seasons') or []
         missing = 0
+        monitored_total = 0
         unmonitored_nums = []
         for sd in seasons:
             snum = sd.get('seasonNumber')
@@ -843,10 +844,30 @@ def _apply_sonarr_monitored_filter(shows):
             stats = sd.get('statistics') or {}
             ep_count = stats.get('episodeCount', 0) or 0
             ep_file = stats.get('episodeFileCount', 0) or 0
+            monitored_total += ep_count
+            # Sonarr's `episodeFileCount` counts files across ALL episodes
+            # in the season regardless of per-episode monitored flag.  In
+            # a mixed season (monitored as a whole, with a few unmonitored
+            # individual episodes that still have files — common after
+            # unmonitoring a pilot you already watched) `ep_file` can
+            # exceed `ep_count`, so the clamp hides genuine monitored
+            # gaps.  Teasing that apart would require a per-series
+            # /episode call (one HTTP round-trip per show), which we
+            # decline for the cost.  Accept that the bar and pill agree
+            # with each other and with Sonarr's own series-stats widget.
             missing += max(0, ep_count - ep_file)
 
         show['missing_episodes'] = missing
         show['unmonitored_seasons'] = sorted(unmonitored_nums)
+        # ``monitored_episodes`` is the denominator the UI needs for a
+        # progress bar that agrees with the "X missing" pill — otherwise
+        # the bar stays red at a low TMDB-based ratio while the pill
+        # reads "1 missing" for a show with large unmonitored back
+        # catalogue.  Left off-payload when the show had no monitored
+        # seasons (user paused all seasons) so the frontend falls back
+        # to the TMDB total and doesn't draw a divide-by-zero bar.
+        if monitored_total > 0:
+            show['monitored_episodes'] = monitored_total
 
 
 def _normalize_title(title):

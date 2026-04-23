@@ -2535,38 +2535,6 @@ function _renderSeasonEpisodes(season, si) {
   return html;
 }
 
-function _shouldAutoExpand(season, showTitle) {
-  // Expand seasons with missing episodes being searched (not upgrade-only)
-  if (showTitle) {
-    var pnk = normTitle(showTitle);
-    var pe = _pending[pnk];
-    if (pe && pe.episodes) {
-      var missingInSeason = {};
-      (season.episodes || []).forEach(function(e) {
-        if (e.source === 'missing') missingInSeason[e.number] = true;
-      });
-      for (var i = 0; i < pe.episodes.length; i++) {
-        if (pe.episodes[i].season === season.number && missingInSeason[pe.episodes[i].episode]) return true;
-      }
-    }
-  }
-  // Expand seasons with recent or upcoming episodes (within 30 days)
-  var now = Date.now();
-  var thirtyDays = 30 * 24 * 60 * 60 * 1000;
-  var eps = season.episodes || [];
-  for (var i = 0; i < eps.length; i++) {
-    if (eps[i].air_date) {
-      var airMs = new Date(eps[i].air_date + 'T00:00:00').getTime();
-      if (!isNaN(airMs) && Math.abs(now - airMs) <= thirtyDays) return true;
-    }
-  }
-  // Expand incomplete seasons (have some but not all episodes)
-  var count = season.episode_count || 0;
-  var total = season.total_episodes || 0;
-  if (count > 0 && count < total) return true;
-  return false;
-}
-
 function _syncExpandAllBtn() {
   var btn = document.querySelector('.expand-all-row .btn');
   if (!btn) return;
@@ -2699,7 +2667,7 @@ function _renderShowDetail(show, meta) {
 
   for (var si = 0; si < seasons.length; si++) {
     var season = seasons[si];
-    var expanded = hasPrev ? !!expandedNums[String(season.number)] : _shouldAutoExpand(season, show.title);
+    var expanded = !!(hasPrev && expandedNums[String(season.number)]);
     var hasDebrid = false, hasLocal = false, hasMissing = false, debridCount = 0, missingCount = 0;
     for (var ci = 0; ci < (season.episodes || []).length; ci++) {
       if (season.episodes[ci].source === 'debrid') { hasDebrid = true; debridCount++; }

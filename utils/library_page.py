@@ -236,7 +236,7 @@ __NAV_HTML__
 .episode-table td{padding:7px 14px;font-size:.82em;color:var(--text);vertical-align:middle}
 .ep-num{font-weight:600;color:var(--text2);white-space:nowrap;width:50px}
 .ep-file{color:var(--text)}
-.ep-source{white-space:nowrap;text-align:right}
+.ep-source{white-space:nowrap;text-align:center}
 .ep-quality{white-space:nowrap}
 .ep-actions{white-space:nowrap;text-align:right}
 

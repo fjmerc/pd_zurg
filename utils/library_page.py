@@ -1517,8 +1517,13 @@ function _applyMeta(card, meta) {
       // Use data-type to pick the correct list (safe in async callbacks)
       var items = type === 'show' ? _allShows : _allMovies;
       var haveEps = 0;
+      var missingServer = null;  // Sonarr-monitored-aware count, when available
       for (var i = 0; i < items.length; i++) {
-        if (normTitle(items[i].title) === nk) { haveEps = items[i].episodes || 0; break; }
+        if (normTitle(items[i].title) === nk) {
+          haveEps = items[i].episodes || 0;
+          if (typeof items[i].missing_episodes === 'number') missingServer = items[i].missing_episodes;
+          break;
+        }
       }
       var pct = Math.min(100, Math.round(haveEps / totalEps * 100));
       var isPending = !!_pending[nk];
@@ -1533,8 +1538,11 @@ function _applyMeta(card, meta) {
         fill.style.background = color;
         fill.title = haveEps + ' / ' + totalEps + ' episodes';
       }
-      // Update meta line with missing count
-      var missing = totalEps - haveEps;
+      // Prefer the server-side missing count — it already honors Sonarr's
+      // monitored flag so unmonitored seasons aren't treated as gaps.
+      // Fall back to TMDB total-have math when the server didn't populate
+      // the field (e.g. show not in Sonarr).
+      var missing = (missingServer !== null) ? missingServer : (totalEps - haveEps);
       if (missing > 0) {
         var metaEl = card.querySelector('.card-meta');
         if (!metaEl) {
@@ -2285,16 +2293,23 @@ function _mergeShowMeta(show, meta) {
     s.episodes.forEach(function(ep) { fileLookup[s.number][ep.number] = ep; });
   });
 
+  // Seasons the user has explicitly unmonitored in Sonarr — don't
+  // render TMDB-known episodes there as "missing" (they aren't wanted)
+  // and don't count them toward the seasonal missing total.
+  var unmonitored = {};
+  (show.unmonitored_seasons || []).forEach(function(n) { unmonitored[n] = true; });
+
   var merged = [];
   meta.seasons.forEach(function(tmdbS) {
     var fileEps = fileLookup[tmdbS.number] || {};
     var episodes = [];
+    var isUnmonitored = unmonitored[tmdbS.number];
     tmdbS.episodes.forEach(function(te) {
       var fe = fileEps[te.number];
       if (fe) {
         episodes.push({number: te.number, title: te.title, air_date: te.air_date, file: fe.file, source: fe.source, quality: fe.quality, size_bytes: fe.size_bytes});
         delete fileEps[te.number];
-      } else {
+      } else if (!isUnmonitored) {
         episodes.push({number: te.number, title: te.title, air_date: te.air_date, file: null, source: 'missing'});
       }
     });
@@ -2305,7 +2320,11 @@ function _mergeShowMeta(show, meta) {
     }
     episodes.sort(function(a, b) { return b.number - a.number; });
     var haveCount = episodes.filter(function(e) { return e.source !== 'missing'; }).length;
-    merged.push({number: tmdbS.number, total_episodes: tmdbS.total_episodes, episode_count: haveCount, episodes: episodes});
+    // For unmonitored seasons the "total" shown on the progress pill is
+    // the ratio the user actually wants — i.e. have/have — so pills
+    // don't scream red on seasons they've explicitly opted out of.
+    var totalEps = isUnmonitored ? haveCount : tmdbS.total_episodes;
+    merged.push({number: tmdbS.number, total_episodes: totalEps, episode_count: haveCount, episodes: episodes, unmonitored: !!isUnmonitored});
   });
   // Append file seasons not in TMDB
   (show.season_data || []).forEach(function(s) {

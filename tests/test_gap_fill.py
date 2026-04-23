@@ -113,6 +113,28 @@ class TestComputeMissingEpisodes:
         with _stub_tmdb_episodes([(1, 1), (1, 2)]):
             assert scanner._compute_missing_episodes(show) == []
 
+    def test_unmonitored_seasons_excluded(self, scanner):
+        """Seasons in ``unmonitored_seasons`` must not feed gap-fill — otherwise
+        each scan round-trips Sonarr once per unmonitored season only for
+        ensure_and_search to short-circuit. Repro: Grey's Anatomy S1–S15
+        unmonitored, S22 has one real gap."""
+        show = {
+            'title': 'Grey\'s Anatomy',
+            'year': None,
+            'season_data': [{'number': 22, 'episodes': [
+                {'number': 1, 'source': 'debrid'},
+                {'number': 2, 'source': 'debrid'},
+            ]}],
+            'unmonitored_seasons': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        }
+        expected = (
+            [(sn, en) for sn in range(1, 16) for en in range(1, 25)]  # S1–S15 full
+            + [(22, 1), (22, 2), (22, 3)]  # S22: have 2, missing 1
+        )
+        with _stub_tmdb_episodes(expected):
+            missing = scanner._compute_missing_episodes(show)
+        assert missing == [(22, 3)]
+
 
 class TestGapFillWithoutPreference:
     """Route=None: search runs for shows with no preference set."""

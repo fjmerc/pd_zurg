@@ -660,6 +660,195 @@ def _enrich_with_tmdb_cache(movies, shows):
     return renames
 
 
+# Scan-scoped cache for Sonarr's series list.  ``_scan_read`` fetches
+# once and the same read-phase pass is also reused by ``_scan_effects``
+# (via ``_create_debrid_symlinks``) so the scanner doesn't round-trip
+# Sonarr twice per cycle.  TTL is deliberately short — long enough to
+# span one scan (read → effects takes seconds) but short enough that
+# back-to-back manual refreshes get fresh data.
+_SONARR_SERIES_TTL = 120
+_sonarr_series_cache = {'data': None, 'ts': 0.0}
+_sonarr_series_lock = threading.Lock()
+
+
+def _get_sonarr_series_list(client, force_refresh=False):
+    """Fetch Sonarr's full series list with a short TTL cache.
+
+    Returns the raw series list on success, ``None`` on fetch failure, or
+    ``[]`` when Sonarr returns an empty library.  Caches the result under
+    a process-wide lock so concurrent callers share one HTTP round-trip.
+    """
+    now = time.monotonic()
+    with _sonarr_series_lock:
+        if not force_refresh:
+            cached = _sonarr_series_cache.get('data')
+            ts = _sonarr_series_cache.get('ts', 0.0)
+            if cached is not None and (now - ts) < _SONARR_SERIES_TTL:
+                return cached
+    try:
+        series_list = client.get_all_series() or []
+    except Exception as e:
+        logger.warning(f"[library] Could not fetch Sonarr series: {e}")
+        return None
+    with _sonarr_series_lock:
+        _sonarr_series_cache['data'] = series_list
+        _sonarr_series_cache['ts'] = now
+    return series_list
+
+
+def _apply_sonarr_monitored_filter(shows):
+    """Rebase show missing-episode counts against Sonarr's monitored view.
+
+    The TMDB-only math in ``_enrich_with_tmdb_cache`` counts every aired
+    TMDB episode that isn't on disk as "missing" — which inflates badly
+    for long-running shows where the user has explicitly unmonitored
+    older seasons in Sonarr (e.g. Grey's Anatomy S1–S15).  Sonarr already
+    exposes the monitored-aware counts per season in one bulk endpoint:
+    ``season.statistics.episodeCount`` is aired monitored episodes and
+    ``episodeFileCount`` is those that have a file.  Summing
+    ``max(0, episodeCount - episodeFileCount)`` across monitored seasons
+    gives the "truly wanted, still missing" count.
+
+    Matching cascade (TMDB ID first since it's the only unambiguous
+    identifier): cached-TMDB-ID under either the parsed folder title or
+    the enrichment-upgraded title → exact lowercase title (year-qualified
+    then plain) → ``_norm_for_matching`` fuzzy.  Collision-safe: if two
+    Sonarr series share a lowercase or normalized title (common for
+    reboots like "Magnum P.I." 1980 vs 2018, or international retitles),
+    those title-level keys are marked ambiguous and skipped — TMDB ID
+    remains the only reliable path for colliding titles.
+
+    Side effects per matched show:
+      * ``missing_episodes`` replaced with Sonarr's monitored-aware count.
+      * ``unmonitored_seasons`` list attached so the UI can skip those
+        seasons when rendering the TMDB-expected missing-episode table,
+        and so gap-fill can short-circuit rather than round-tripping
+        Sonarr once per unmonitored season.
+
+    Shows without a Sonarr match (or when Sonarr is unreachable) keep
+    the TMDB-only calculation — it's conservative but preserves the
+    existing behavior for hand-imported libraries.
+    """
+    if not shows:
+        return
+    try:
+        from utils.arr_client import get_download_service
+        client, svc = get_download_service('show')
+    except Exception as e:
+        logger.debug(f"[library] Sonarr unavailable for monitored filter: {e}")
+        return
+    if not client or svc != 'sonarr':
+        return
+    series_list = _get_sonarr_series_list(client)
+    if not series_list:
+        return
+
+    by_tmdb = {}
+    by_norm = {}
+    by_title = {}
+    norm_collisions = set()
+    title_collisions = set()
+    for s in series_list:
+        tid = s.get('tmdbId')
+        if tid:
+            # TMDB IDs are globally unique so a duplicate is a Sonarr
+            # data bug, not a reboot collision — first-writer-wins is
+            # the safest stance.
+            by_tmdb.setdefault(tid, s)
+        title = s.get('title', '')
+        if not title:
+            continue
+        tk = title.lower()
+        if tk in by_title and by_title[tk] is not s:
+            title_collisions.add(tk)
+        else:
+            by_title[tk] = s
+        nk = _norm_for_matching(title)
+        if nk:
+            if nk in by_norm and by_norm[nk] is not s:
+                norm_collisions.add(nk)
+            else:
+                by_norm[nk] = s
+
+    # Resolve TMDB IDs for library shows via the cached TMDB→ID map so
+    # reboots/differently-titled entries match the same as the rest of
+    # the scanner.
+    try:
+        from utils.tmdb import get_cached_tmdb_ids
+        cached_show_ids = get_cached_tmdb_ids().get('shows', {})
+    except Exception as e:
+        logger.debug(f"[library] TMDB ID cache unavailable for monitored filter, skipping: {e}")
+        cached_show_ids = {}
+
+    def _lookup_tmdb_id(candidate, year):
+        if not candidate:
+            return None
+        nt = _normalize_title(candidate)
+        if not nt:
+            return None
+        return (cached_show_ids.get(f"{nt} ({year})") if year else None) or cached_show_ids.get(nt)
+
+    def _title_match(candidate, year):
+        if not candidate:
+            return None
+        if year:
+            key = f"{candidate} ({year})".lower()
+            if key in by_title and key not in title_collisions:
+                return by_title[key]
+        key = candidate.lower()
+        if key in by_title and key not in title_collisions:
+            return by_title[key]
+        nk = _norm_for_matching(candidate)
+        if nk and nk in by_norm and nk not in norm_collisions:
+            return by_norm[nk]
+        return None
+
+    for show in shows:
+        series = None
+        title = show.get('title', '')
+        parsed_title = show.get('_parsed_title') or ''
+        year = show.get('year')
+
+        # 1) TMDB ID match — try both the parsed-folder title and the
+        # enrichment-upgraded display title, since the TMDB cache can be
+        # keyed under either depending on what got scanned first.
+        for candidate in (parsed_title, title):
+            tmdb_id = _lookup_tmdb_id(candidate, year)
+            if tmdb_id:
+                series = by_tmdb.get(tmdb_id)
+                if series:
+                    break
+
+        # 2/3) Title match (exact year-qualified → exact plain → fuzzy
+        # norm), skipping any key shared by multiple Sonarr series.
+        if not series:
+            for candidate in (title, parsed_title):
+                series = _title_match(candidate, year)
+                if series:
+                    break
+
+        if not series:
+            continue
+
+        seasons = series.get('seasons') or []
+        missing = 0
+        unmonitored_nums = []
+        for sd in seasons:
+            snum = sd.get('seasonNumber')
+            if snum is None or snum <= 0:
+                continue  # skip specials
+            if not sd.get('monitored'):
+                unmonitored_nums.append(snum)
+                continue
+            stats = sd.get('statistics') or {}
+            ep_count = stats.get('episodeCount', 0) or 0
+            ep_file = stats.get('episodeFileCount', 0) or 0
+            missing += max(0, ep_count - ep_file)
+
+        show['missing_episodes'] = missing
+        show['unmonitored_seasons'] = sorted(unmonitored_nums)
+
+
 def _normalize_title(title):
     t = title.lower()
     t = re.sub(r'\s*\(\d{4}\)\s*$', '', t)
@@ -806,6 +995,10 @@ class LibraryScanner:
         Defends the "Lucky Hank E04" user story: an aired episode the TMDB
         cache expects but neither debrid nor local holds a file for.  Specials
         (season 0) and unaired episodes are excluded at the TMDB helper.
+        Seasons listed in ``show['unmonitored_seasons']`` are also excluded
+        — otherwise gap-fill would fan out a search per season only for
+        ``ensure_and_search`` to short-circuit with "all unmonitored",
+        which costs one Sonarr round-trip per skipped season.
 
         Returns ``[]`` when TMDB has no cached episode list for the show —
         an empty return must be treated as "don't know" so we never trigger
@@ -816,6 +1009,7 @@ class LibraryScanner:
         expected = get_cached_episode_list(norm, show.get('year'))
         if not expected:
             return []
+        unmonitored = set(show.get('unmonitored_seasons') or ())
         present = set()
         for sd in show.get('season_data', []):
             sn = sd.get('number')
@@ -827,6 +1021,8 @@ class LibraryScanner:
                     present.add((sn, en))
         missing = []
         for ep in expected:
+            if ep['season'] in unmonitored:
+                continue
             key = (ep['season'], ep['number'])
             if key not in present:
                 missing.append(key)
@@ -1110,6 +1306,13 @@ class LibraryScanner:
                 continue
             alias_norms_local.setdefault(new_norm, set()).add(old_norm)
             alias_norms_local.setdefault(old_norm, set()).add(new_norm)
+
+        # Re-base ``missing_episodes`` against Sonarr's monitored view so
+        # long-running shows like Grey's Anatomy (22 seasons, older ones
+        # unmonitored) don't report 100s of "missing" episodes the user
+        # never asked to track.  Also surfaces unmonitored season numbers
+        # to the UI and to gap-fill so neither invents phantom work.
+        _apply_sonarr_monitored_filter(shows)
 
         # Build path indexes keyed by post-rename normalized titles.  When
         # two items collide on the same (norm, season, episode) — possible
@@ -2552,22 +2755,29 @@ class LibraryScanner:
         try:
             client, svc = get_download_service('show')
             if client and svc == 'sonarr':
-                for s in (client.get_all_series() or []):
-                    t = s.get('title', '')
-                    if not t:
-                        continue
-                    p = s.get('path', '')
-                    info = {
-                        'folder': os.path.basename(p) if p else '',
-                        'id': s.get('id'),
-                        'tvdb_id': s.get('tvdbId'),
-                        'tmdb_id': s.get('tmdbId'),
-                        'client': client,
-                    }
-                    sonarr_map[t.lower()] = info
-                    nk = _norm_for_matching(t)
-                    if nk and nk not in sonarr_map_norm:
-                        sonarr_map_norm[nk] = info
+                # Share the series list with ``_apply_sonarr_monitored_filter``
+                # via the scan-scoped TTL cache — one HTTP round-trip per
+                # scan cycle instead of one per consumer.
+                series_list = _get_sonarr_series_list(client)
+                if series_list is None:
+                    sonarr_fetch_failed = True
+                else:
+                    for s in series_list:
+                        t = s.get('title', '')
+                        if not t:
+                            continue
+                        p = s.get('path', '')
+                        info = {
+                            'folder': os.path.basename(p) if p else '',
+                            'id': s.get('id'),
+                            'tvdb_id': s.get('tvdbId'),
+                            'tmdb_id': s.get('tmdbId'),
+                            'client': client,
+                        }
+                        sonarr_map[t.lower()] = info
+                        nk = _norm_for_matching(t)
+                        if nk and nk not in sonarr_map_norm:
+                            sonarr_map_norm[nk] = info
         except Exception as e:
             sonarr_fetch_failed = True
             logger.warning(f"[library] Could not fetch Sonarr library: {e}")

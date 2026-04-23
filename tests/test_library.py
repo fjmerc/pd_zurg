@@ -2223,3 +2223,248 @@ class TestRemoveTitleSymlinksLabeled:
         removed = remove_title_symlinks('Fargo', 'show')
         assert sonarr_release in removed
         assert radarr_release in removed
+
+
+# ---------------------------------------------------------------------------
+# _apply_sonarr_monitored_filter
+# ---------------------------------------------------------------------------
+
+from unittest.mock import MagicMock, patch
+
+
+@pytest.fixture(autouse=True)
+def _reset_sonarr_series_cache():
+    """TTL cache in ``_get_sonarr_series_list`` persists across tests in the
+    same process; reset it before every test so prior fixtures can't leak
+    their mocked series lists into unrelated assertions."""
+    import utils.library as _lib
+    _lib._sonarr_series_cache['data'] = None
+    _lib._sonarr_series_cache['ts'] = 0.0
+
+
+def _fake_sonarr(series_list):
+    """Context manager patching ``get_download_service`` to return a
+    MagicMock Sonarr client whose ``get_all_series`` yields *series_list*."""
+    client = MagicMock()
+    client.get_all_series.return_value = series_list
+    return patch('utils.arr_client.get_download_service',
+                 return_value=(client, 'sonarr'))
+
+
+class TestApplySonarrMonitoredFilter:
+    """Rebase missing_episodes against Sonarr's monitored view.
+
+    Repro for the user-reported inflation: a show like Grey's Anatomy with
+    22 seasons, older ones unmonitored, previously reported ~300+ missing
+    episodes because the count was pure TMDB total minus on-disk count.
+    """
+
+    def test_unmonitored_seasons_excluded_from_count(self):
+        """Unmonitored seasons must not contribute to missing_episodes."""
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{'title': "Grey's Anatomy", 'year': None, 'missing_episodes': 300}]
+        series = [{
+            'title': "Grey's Anatomy",
+            'tmdbId': 1416,
+            'seasons': [
+                {'seasonNumber': 1, 'monitored': False,
+                 'statistics': {'episodeCount': 9, 'episodeFileCount': 9}},
+                {'seasonNumber': 22, 'monitored': True,
+                 'statistics': {'episodeCount': 5, 'episodeFileCount': 4}},
+            ],
+        }]
+        with _fake_sonarr(series):
+            _apply_sonarr_monitored_filter(shows)
+        assert shows[0]['missing_episodes'] == 1
+        assert shows[0]['unmonitored_seasons'] == [1]
+
+    def test_missing_is_monitored_minus_file_count(self):
+        """Sum ``episodeCount - episodeFileCount`` across monitored seasons.
+
+        Sonarr's ``episodeCount`` already filters by per-episode monitored
+        flags, so the math only needs to drop wholly unmonitored seasons.
+        """
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{'title': 'Show', 'year': None}]
+        series = [{
+            'title': 'Show',
+            'tmdbId': 42,
+            'seasons': [
+                {'seasonNumber': 1, 'monitored': True,
+                 'statistics': {'episodeCount': 10, 'episodeFileCount': 6}},
+                {'seasonNumber': 2, 'monitored': True,
+                 'statistics': {'episodeCount': 8, 'episodeFileCount': 8}},
+            ],
+        }]
+        with _fake_sonarr(series):
+            _apply_sonarr_monitored_filter(shows)
+        assert shows[0]['missing_episodes'] == 4
+        assert shows[0]['unmonitored_seasons'] == []
+
+    def test_file_count_exceeding_episode_count_clamps_to_zero(self):
+        """A season with more files than monitored episodes (e.g. stale
+        episodes still on disk) must clamp at zero — never negative."""
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{'title': 'Show', 'year': None}]
+        series = [{
+            'title': 'Show',
+            'seasons': [
+                {'seasonNumber': 1, 'monitored': True,
+                 'statistics': {'episodeCount': 3, 'episodeFileCount': 5}},
+            ],
+        }]
+        with _fake_sonarr(series):
+            _apply_sonarr_monitored_filter(shows)
+        assert shows[0]['missing_episodes'] == 0
+
+    def test_specials_season_zero_ignored(self):
+        """Season 0 (specials) is neither counted nor listed as unmonitored."""
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{'title': 'Show', 'year': None}]
+        series = [{
+            'title': 'Show',
+            'seasons': [
+                {'seasonNumber': 0, 'monitored': False,
+                 'statistics': {'episodeCount': 4, 'episodeFileCount': 0}},
+                {'seasonNumber': 1, 'monitored': True,
+                 'statistics': {'episodeCount': 2, 'episodeFileCount': 2}},
+            ],
+        }]
+        with _fake_sonarr(series):
+            _apply_sonarr_monitored_filter(shows)
+        assert shows[0]['missing_episodes'] == 0
+        assert shows[0]['unmonitored_seasons'] == []
+
+    def test_unmatched_show_keeps_existing_count(self):
+        """Shows not in Sonarr keep the TMDB-based count — conservative
+        fallback for hand-imported libraries where no arr is tracking them."""
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{'title': 'Orphan', 'year': None, 'missing_episodes': 7}]
+        with _fake_sonarr([]):
+            _apply_sonarr_monitored_filter(shows)
+        assert shows[0]['missing_episodes'] == 7
+        assert 'unmonitored_seasons' not in shows[0]
+
+    def test_sonarr_unreachable_leaves_shows_untouched(self):
+        """Network failure on Sonarr must be a no-op, not wipe counts."""
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{'title': 'Show', 'missing_episodes': 5}]
+        client = MagicMock()
+        client.get_all_series.side_effect = RuntimeError('boom')
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(client, 'sonarr')):
+            _apply_sonarr_monitored_filter(shows)
+        assert shows[0]['missing_episodes'] == 5
+        assert 'unmonitored_seasons' not in shows[0]
+
+    def test_sonarr_not_configured_no_op(self):
+        """Without Sonarr configured, monitored filtering is skipped entirely."""
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{'title': 'Show', 'missing_episodes': 5}]
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(None, None)):
+            _apply_sonarr_monitored_filter(shows)
+        assert shows[0]['missing_episodes'] == 5
+        assert 'unmonitored_seasons' not in shows[0]
+
+    def test_title_collision_skipped_without_tmdb_id(self):
+        """Two Sonarr series sharing a lowercase title (classic reboot shape,
+        e.g. 'Magnum P.I.' 1980 + 2018 lacking year suffixes) must not
+        silent-match. Without a TMDB-ID hit in the cache the library show
+        is left untouched rather than matched to an arbitrary series."""
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{'title': 'Magnum P.I.', 'year': None, 'missing_episodes': 12}]
+        series = [
+            {'title': 'Magnum P.I.', 'tmdbId': 100,
+             'seasons': [{'seasonNumber': 1, 'monitored': True,
+                          'statistics': {'episodeCount': 8, 'episodeFileCount': 0}}]},
+            {'title': 'Magnum P.I.', 'tmdbId': 200,
+             'seasons': [{'seasonNumber': 1, 'monitored': True,
+                          'statistics': {'episodeCount': 10, 'episodeFileCount': 1}}]},
+        ]
+        with _fake_sonarr(series):
+            _apply_sonarr_monitored_filter(shows)
+        # No match — colliding title can't resolve to a specific series.
+        assert shows[0]['missing_episodes'] == 12
+        assert 'unmonitored_seasons' not in shows[0]
+
+    def test_title_collision_resolved_via_tmdb_id(self):
+        """Same collision as above but with a TMDB-ID hit in the cache —
+        the ambiguous title-level keys are skipped, but the TMDB ID step
+        resolves to the correct series."""
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{'title': 'Magnum P.I.', 'year': None}]
+        series = [
+            {'title': 'Magnum P.I.', 'tmdbId': 100,
+             'seasons': [{'seasonNumber': 1, 'monitored': True,
+                          'statistics': {'episodeCount': 8, 'episodeFileCount': 0}}]},
+            {'title': 'Magnum P.I.', 'tmdbId': 200,
+             'seasons': [{'seasonNumber': 1, 'monitored': True,
+                          'statistics': {'episodeCount': 10, 'episodeFileCount': 1}}]},
+        ]
+        with _fake_sonarr(series):
+            with patch('utils.tmdb.get_cached_tmdb_ids',
+                       return_value={'shows': {'magnum p.i.': 200}}):
+                _apply_sonarr_monitored_filter(shows)
+        assert shows[0]['missing_episodes'] == 9  # from tmdbId=200
+
+    def test_parsed_title_matches_even_when_display_renamed(self):
+        """Enrichment may upgrade ``title`` to the canonical TMDB spelling
+        while the Sonarr library still carries the parsed-folder form
+        (or vice versa). Both candidates must be tried through every
+        match step — not just step 1 — so renamed shows aren't silently
+        skipped."""
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{
+            'title': 'Star Wars: Andor',
+            '_parsed_title': 'Andor',
+            'year': None,
+        }]
+        series = [{
+            'title': 'Andor',
+            'tmdbId': 999,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 12, 'episodeFileCount': 10}}],
+        }]
+        with _fake_sonarr(series):
+            _apply_sonarr_monitored_filter(shows)
+        assert shows[0]['missing_episodes'] == 2
+
+
+class TestGetSonarrSeriesList:
+    """TTL cache shared by the monitored-filter and symlink paths."""
+
+    def test_cached_within_ttl(self):
+        from utils.library import _get_sonarr_series_list
+        client = MagicMock()
+        client.get_all_series.side_effect = [
+            [{'id': 1, 'title': 'A'}],
+            [{'id': 2, 'title': 'B'}],  # should not be reached
+        ]
+        first = _get_sonarr_series_list(client)
+        second = _get_sonarr_series_list(client)
+        assert first == [{'id': 1, 'title': 'A'}]
+        assert second == first
+        assert client.get_all_series.call_count == 1
+
+    def test_force_refresh_bypasses_cache(self):
+        from utils.library import _get_sonarr_series_list
+        client = MagicMock()
+        client.get_all_series.side_effect = [
+            [{'id': 1, 'title': 'A'}],
+            [{'id': 2, 'title': 'B'}],
+        ]
+        _get_sonarr_series_list(client)
+        refreshed = _get_sonarr_series_list(client, force_refresh=True)
+        assert refreshed == [{'id': 2, 'title': 'B'}]
+        assert client.get_all_series.call_count == 2
+
+    def test_fetch_failure_returns_none_and_does_not_cache(self):
+        """A transient fetch failure must return None and leave the cache
+        empty so the next scan retries rather than returning stale data."""
+        import utils.library as _lib
+        client = MagicMock()
+        client.get_all_series.side_effect = RuntimeError('boom')
+        result = _lib._get_sonarr_series_list(client)
+        assert result is None
+        assert _lib._sonarr_series_cache['data'] is None

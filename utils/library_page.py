@@ -2284,7 +2284,7 @@ function _renderMovieDetail(movie, meta) {
   }
   var movieActionBtns = [];
   if (movie.source === 'debrid' || movie.source === 'both') {
-    movieActionBtns.push('<button class="btn btn-ghost btn-icon" title="Block this torrent file" onclick="event.stopPropagation();_blockItem()">&#128683;</button>');
+    movieActionBtns.push('<button class="btn btn-ghost btn-icon" title="Block this release" onclick="event.stopPropagation();_blockItem()">&#128683;</button>');
   }
   if (_downloadServices.movie === 'radarr') {
     movieActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" title="Delete from Radarr" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'movie\')})">&#128465; Delete</button>');
@@ -2518,7 +2518,9 @@ function _renderSeasonEpisodes(season, si) {
       }
     }
     if (ep.source === 'debrid' || ep.source === 'both') {
-      html += '<button class="btn btn-ghost btn-icon" title="Block this torrent file" aria-label="Block ' + epLabel + '" onclick="event.stopPropagation();_blockItem()">&#128683;</button>';
+      var epFolder = ep.folder || '';
+      var blTitle = epFolder ? 'Block this release (' + epFolder + ')' : 'Block this release';
+      html += '<button class="btn btn-ghost btn-icon" title="' + escAttr(blTitle) + '" aria-label="Block ' + epLabel + '" data-folder="' + escAttr(epFolder) + '" onclick="event.stopPropagation();_blockFromBtn(this)">&#128683;</button>';
     }
     if (_searchEnabled && _detailItem && _detailItem.imdb_id) {
       html += ' <button class="btn btn-ghost btn-sm" title="Search torrents for ' + escAttr(epLabel) + '" data-imdb="' + escAttr(_detailItem.imdb_id) + '" data-mtype="series" data-season="' + season.number + '" data-episode="' + ep.number + '" data-label="' + escAttr(_detailItem.title + ' ' + epLabel) + '" onclick="event.stopPropagation();openSearchFromBtn(this)">&#128269;</button>';
@@ -2677,9 +2679,6 @@ function _renderShowDetail(show, meta) {
   html += '</div>';
   html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px;line-height:1.5"><strong style="color:var(--text2)">Prefer Local</strong> &mdash; switches debrid-only episodes to local copies.<br><strong style="color:var(--text2)">Prefer Debrid</strong> &mdash; removes local copies and streams from debrid.</div>';
   var showActionBtns = [];
-  if (show.source === 'debrid' || show.source === 'both') {
-    showActionBtns.push('<button class="btn btn-ghost btn-icon" title="Block this torrent file" onclick="event.stopPropagation();_blockItem()">&#128683;</button>');
-  }
   if (_downloadServices.show === 'sonarr') {
     showActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" title="Delete from Sonarr" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'show\')})">&#128465; Delete</button>');
   }
@@ -3317,15 +3316,22 @@ function removeEp(season, episode) {
   });
 }
 
-function _blockItem() {
+function _blockFromBtn(btn) {
+  var folder = btn && btn.getAttribute ? (btn.getAttribute('data-folder') || '') : '';
+  _blockItem(folder);
+}
+
+function _blockItem(folder) {
   if (!_detailItem) return;
   if (document.getElementById('bl-overlay')) return;
+  var blockTarget = (folder && String(folder).trim()) ? String(folder).trim() : _detailItem.title;
   var reasons = ['Wrong content', 'Corrupt file', 'Wrong language', 'Low quality', 'Other'];
   var overlay = document.createElement('div');
   overlay.className = 'search-overlay';
   overlay.id = 'bl-overlay';
+  overlay.dataset.blTarget = blockTarget;
   var html = '<div class="bl-dialog">';
-  html += '<div class="bl-dialog-hdr"><h3>Block: ' + esc(_detailItem.title) + '</h3>';
+  html += '<div class="bl-dialog-hdr"><h3>Block: ' + esc(blockTarget) + '</h3>';
   html += '<button class="search-dialog-close" onclick="_closeBlockModal()" title="Close">&times;</button></div>';
   html += '<div class="bl-dialog-body">';
   html += '<div class="bl-reasons">';
@@ -3384,7 +3390,8 @@ function _confirmBlock() {
   } else {
     reason = 'Blocked from library';
   }
-  var title = _detailItem.title;
+  var overlay = document.getElementById('bl-overlay');
+  var title = (overlay && overlay.dataset && overlay.dataset.blTarget) || _detailItem.title;
   _closeBlockModal();
   fetch('/api/blocklist', {
     method: 'POST',

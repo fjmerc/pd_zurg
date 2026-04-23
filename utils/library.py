@@ -306,11 +306,12 @@ def _get_folder_mtime(path):
 def _collect_episodes(folder_path):
     """Collect episode details from a torrent folder.
 
-    Returns dict: {(season_num, ep_num): {'file': str, 'path': str}}
+    Returns dict: {(season_num, ep_num): {'file': str, 'path': str, 'folder': str}}
     Handles both structured (Season X subdirs) and flat layouts (S01E01.mkv
     directly in folder).
     """
     episodes = {}
+    folder_name = os.path.basename(folder_path)
     try:
         with os.scandir(folder_path) as it:
             for entry in it:
@@ -337,7 +338,7 @@ def _collect_episodes(folder_path):
                                     sz = f.stat(follow_symlinks=False).st_size
                                 except OSError:
                                     sz = 0
-                                episodes[key] = {'file': f.name, 'path': f.path, 'size_bytes': sz}
+                                episodes[key] = {'file': f.name, 'path': f.path, 'size_bytes': sz, 'folder': folder_name}
                     except (PermissionError, OSError):
                         pass
                 elif entry.is_file(follow_symlinks=False):
@@ -350,7 +351,7 @@ def _collect_episodes(folder_path):
                                 sz = entry.stat(follow_symlinks=False).st_size
                             except OSError:
                                 sz = 0
-                            episodes[key] = {'file': entry.name, 'path': entry.path, 'size_bytes': sz}
+                            episodes[key] = {'file': entry.name, 'path': entry.path, 'size_bytes': sz, 'folder': folder_name}
     except (PermissionError, OSError, FileNotFoundError):
         pass
     return episodes
@@ -376,6 +377,11 @@ def _build_season_data(episodes_dict, default_source='debrid'):
         }
         ep['quality'] = parse_quality(info['file'])
         ep['size_bytes'] = info.get('size_bytes', 0)
+        # 'both'-sourced episodes keep debrid's folder (see merge at ~L1278),
+        # so blocking targets the debrid release the user saw — not the local dir.
+        folder = info.get('folder')
+        if folder:
+            ep['folder'] = folder
         by_season[season_num].append(ep)
 
     result = []
@@ -3494,7 +3500,7 @@ class LibraryScanner:
                 if not title:
                     continue
 
-                episodes = self._collect_episodes_from_webdav(contents)
+                episodes = self._collect_episodes_from_webdav(contents, folder_name)
                 is_show = len(episodes) > 0
                 if not is_show and cat_is_shows:
                     has_media = any(
@@ -3601,11 +3607,13 @@ class LibraryScanner:
         return result
 
     @staticmethod
-    def _collect_episodes_from_webdav(contents):
+    def _collect_episodes_from_webdav(contents, folder_name=''):
         """Extract episodes from WebDAV folder contents.
 
         Mirrors _collect_episodes() logic but works on pre-parsed WebDAV data
-        instead of os.scandir.
+        instead of os.scandir. `folder_name` is the release folder basename
+        so each episode can be traced back to the torrent it came from (used
+        by the per-episode block action to blocklist the source release).
         """
         episodes = {}
 
@@ -3624,7 +3632,7 @@ class LibraryScanner:
                     key = (int(ep_match.group(1)), int(ep_match.group(2)))
                 else:
                     key = (season_num, len(episodes) + 1000)
-                episodes[key] = {'file': fname, 'path': fpath, 'size_bytes': fsize}
+                episodes[key] = {'file': fname, 'path': fpath, 'size_bytes': fsize, 'folder': folder_name}
 
         # Check flat files in folder root
         for fname, fsize, fpath in contents.get('files', []):
@@ -3633,7 +3641,7 @@ class LibraryScanner:
                 ep_match = _EPISODE_ID_PATTERN.search(fname)
                 if ep_match:
                     key = (int(ep_match.group(1)), int(ep_match.group(2)))
-                    episodes[key] = {'file': fname, 'path': fpath, 'size_bytes': fsize}
+                    episodes[key] = {'file': fname, 'path': fpath, 'size_bytes': fsize, 'folder': folder_name}
 
         return episodes
 

@@ -108,8 +108,9 @@ textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;l
 .check-item.checked{border-color:var(--green);background:#3fb9500d}
 
 /* Password field with toggle */
-.secret-wrap{display:flex;gap:6px}
-.secret-wrap input{flex:1}
+.secret-wrap{display:flex;gap:6px;flex-wrap:wrap}
+.secret-wrap input{flex:1;min-width:200px}
+.secret-wrap .btn.copied{color:var(--green);border-color:var(--green)}
 
 /* List inputs */
 .list-container{display:flex;flex-direction:column;gap:6px}
@@ -145,6 +146,10 @@ textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;l
 
 /* Settings spinner has margin-right for inline use */
 .spinner{margin-right:6px}
+
+/* Init-time "Loading settings…" placeholder shown while the
+   /api/settings/{env,plex-debrid} fetches resolve. */
+.loading-state{display:flex;align-items:center;justify-content:center;padding:40px 16px;color:var(--text3);font-size:.95em}
 
 /* OAuth panel */
 .oauth-panel{background:var(--bg);border:1px solid var(--blue);border-radius:8px;padding:16px;margin-top:8px}
@@ -353,10 +358,64 @@ function toggleCategory(header) {
   header.setAttribute('aria-expanded', header.classList.contains('open'));
 }
 
+// Pick the secret input out of a .secret-wrap. The data-type filter keeps
+// us from grabbing an unrelated sibling input if the renderer ever adds
+// one (e.g. a "confirm" or OAuth name field) — the old
+// querySelector('input') would have returned the first element in
+// document order, which is not guaranteed to be the secret.
+function _secretInputFor(btn) {
+  return btn.parentElement.querySelector(
+    'input[data-type="secret"], input[data-pdtype="secret"]'
+  );
+}
+
+// Track the visibility state via data-secret-revealed on the input instead
+// of parsing the button's textContent — the button label was fragile to
+// re-render and to any future localization.
 function toggleSecret(btn) {
-  const input = btn.previousElementSibling;
-  if (input.type === 'password') { input.type = 'text'; btn.textContent = 'Hide'; }
-  else { input.type = 'password'; btn.textContent = 'Show'; }
+  const input = _secretInputFor(btn);
+  if (!input) return;
+  const revealed = input.type === 'text';
+  input.type = revealed ? 'password' : 'text';
+  input.dataset.secretRevealed = revealed ? 'false' : 'true';
+  btn.textContent = revealed ? 'Show' : 'Hide';
+}
+
+// Copy the current value of a secret field to the clipboard. Flashes the
+// button to "Copied" for 1.2s as visual confirmation. Safe to call on a
+// masked input since we read .value (browsers don't gate clipboard access
+// on the input's type).
+async function copySecret(btn) {
+  const input = _secretInputFor(btn);
+  if (!input || !input.value) return;
+  try {
+    await navigator.clipboard.writeText(input.value);
+    const prev = btn.textContent;
+    btn.textContent = 'Copied';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = prev;
+      btn.classList.remove('copied');
+    }, 1200);
+  } catch (_) {
+    // Clipboard API unavailable (older browser, insecure context) —
+    // fall back to selecting the input so the user can Ctrl+C. The
+    // type-flip is guarded by try/finally so the input can't be left
+    // revealed if `select()` or `execCommand` throws (iOS Safari has
+    // been known to throw on select() for password-typed inputs).
+    const wasPassword = input.type === 'password';
+    let copied = false;
+    if (wasPassword) input.type = 'text';
+    try {
+      input.select();
+      try { copied = document.execCommand('copy'); } catch (__) { copied = false; }
+    } finally {
+      if (wasPassword) input.type = 'password';
+    }
+    if (!copied && typeof showToast === 'function') {
+      showToast('Copy failed — select the value and press Ctrl+C', 'warning');
+    }
+  }
 }
 
 function toggleAdvanced(el) {
@@ -384,7 +443,7 @@ function renderEnvField(field, value) {
     const checked = isTrue ? ' checked' : '';
     inputHtml = `<div class="toggle-wrap"><label class="toggle"><input type="checkbox" id="${id}" data-key="${esc(field.key)}" data-type="boolean"${checked} aria-label="${esc(field.label)}"><span class="slider"></span></label></div>`;
   } else if (field.type === 'secret') {
-    inputHtml = `<div class="secret-wrap"><input type="password" id="${id}" data-key="${esc(field.key)}" data-type="secret" value="${esc(value || '')}"><button type="button" class="btn btn-ghost btn-sm" onclick="toggleSecret(this)">Show</button></div>`;
+    inputHtml = `<div class="secret-wrap"><input type="password" id="${id}" data-key="${esc(field.key)}" data-type="secret" data-secret-revealed="false" value="${esc(value || '')}"><button type="button" class="btn btn-ghost btn-sm" onclick="toggleSecret(this)">Show</button><button type="button" class="btn btn-ghost btn-sm" onclick="copySecret(this)" title="Copy to clipboard">Copy</button></div>`;
   } else if (field.type.startsWith('select:')) {
     const options = field.type.slice(7).split(',');
     let opts = '<option value="">— select —</option>';
@@ -585,7 +644,7 @@ function renderPdField(field, value) {
       break;
     }
     case 'secret': {
-      inputHtml = `<div class="secret-wrap"><input type="password" id="${id}" data-pdkey="${esc(field.key)}" data-pdtype="secret" value="${esc(value || '')}"><button type="button" class="btn btn-ghost btn-sm" onclick="toggleSecret(this)">Show</button></div>`;
+      inputHtml = `<div class="secret-wrap"><input type="password" id="${id}" data-pdkey="${esc(field.key)}" data-pdtype="secret" data-secret-revealed="false" value="${esc(value || '')}"><button type="button" class="btn btn-ghost btn-sm" onclick="toggleSecret(this)">Show</button><button type="button" class="btn btn-ghost btn-sm" onclick="copySecret(this)" title="Copy to clipboard">Copy</button></div>`;
       if (field.oauth) {
         inputHtml += `<button type="button" class="btn btn-ghost btn-oauth" onclick="oauthConnect('${esc(field.oauth)}','${id}')" id="oauth-btn-${id}">Connect ${esc(field.label.replace(' API Key','').replace(' Key',''))}</button><div id="oauth-panel-${id}"></div>`;
       }
@@ -1217,11 +1276,22 @@ async function oauthConnect(service, fieldId) {
 
         if (poll.status === 'complete' && poll.token) {
           oauthCancel(service, fieldId);
-          // Fill the input field
+          // Fill the input field and sync the Show/Hide button label so
+          // the two don't drift — previously OAuth revealed the input
+          // (type=text) but the button still read "Show", leaving the
+          // user unsure whether it was revealed.
           const input = document.getElementById(fieldId);
           if (input) {
             input.value = poll.token;
-            if (input.type === 'password') input.type = 'text';
+            if (input.type === 'password') {
+              input.type = 'text';
+              input.dataset.secretRevealed = 'true';
+              const showBtn = input.parentElement && input.parentElement.querySelector('button[onclick*="toggleSecret"]');
+              if (showBtn) showBtn.textContent = 'Hide';
+            }
+            // Fire input event so the dirty-state tracker picks up the
+            // token assignment — setting .value programmatically doesn't.
+            input.dispatchEvent(new Event('input', { bubbles: true }));
           }
           panelEl.innerHTML = `<div class="oauth-panel" style="border-color:var(--green)"><div style="color:var(--green)">Connected! Token received.</div></div>`;
           setTimeout(() => { panelEl.innerHTML = ''; }, 5000);
@@ -1236,10 +1306,41 @@ async function oauthConnect(service, fieldId) {
   }
 }
 
-async function oauthConnectPair(service, containerId) {
-  // For list_pairs (e.g., Trakt users): prompt for name, then OAuth for token
-  const name = prompt('Enter a name for this user:');
-  if (!name) return;
+function oauthConnectPair(service, containerId) {
+  // For list_pairs (e.g., Trakt users): render an inline name-entry form
+  // instead of the blocking browser prompt() dialog. The user can type
+  // the name, press Enter or click "Start OAuth" to begin, or Cancel.
+  const btn = document.getElementById('oauth-btn-' + containerId);
+  const panelEl = document.getElementById('oauth-panel-' + containerId);
+  if (!btn || !panelEl) return;
+  const nameInputId = 'oauth-name-' + containerId;
+  // containerId comes from pdFieldId() which restricts to [a-zA-Z0-9_],
+  // so an injection-breaking character can't land here through the
+  // current schema — but we still route it through esc() to keep the
+  // escaping invariant consistent with `service` and bulletproof against
+  // any future caller that hands in a raw string.
+  const cidEsc = esc(containerId);
+  panelEl.innerHTML = `<div class="oauth-panel">
+    <label for="${esc(nameInputId)}" style="font-size:.9em;color:var(--text2);display:block;margin-bottom:6px">Enter a name for this user:</label>
+    <div style="display:flex;gap:6px">
+      <input type="text" id="${esc(nameInputId)}" placeholder="username" style="flex:1" autofocus>
+      <button type="button" class="btn btn-primary btn-sm" onclick="_oauthPairStart('${esc(service)}','${cidEsc}')">Start OAuth</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('oauth-panel-${cidEsc}').innerHTML=''">Cancel</button>
+    </div>
+  </div>`;
+  const nameEl = document.getElementById(nameInputId);
+  if (nameEl) {
+    nameEl.focus();
+    nameEl.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); _oauthPairStart(service, containerId); }
+    });
+  }
+}
+
+async function _oauthPairStart(service, containerId) {
+  const nameEl = document.getElementById('oauth-name-' + containerId);
+  const name = nameEl ? nameEl.value.trim() : '';
+  if (!name) { if (nameEl) nameEl.focus(); return; }
 
   const btn = document.getElementById('oauth-btn-' + containerId);
   const panelEl = document.getElementById('oauth-panel-' + containerId);
@@ -1359,6 +1460,9 @@ function envImport(input) {
     lines.forEach(line => {
       line = line.trim();
       if (!line || line.startsWith('#')) return;
+      // Accept `export KEY=value` shell-style exports (common in .env files
+      // pasted from shell sessions) — strip the prefix if present.
+      if (/^export\s+/i.test(line)) line = line.replace(/^export\s+/i, '');
       const eq = line.indexOf('=');
       if (eq < 1) return;
       let key = line.substring(0, eq).trim();
@@ -1373,11 +1477,32 @@ function envImport(input) {
       showBanner('error', 'No valid settings found in file');
       return;
     }
-    // Merge imported values into current form
-    const merged = Object.assign({}, envValues, imported);
+    // Split imported keys into known (will be applied) vs unknown (ignored
+    // on save because write_env_values filters to _ALL_KEYS) so the banner
+    // tells the user exactly what's going to land in the form.
+    const matched = [];
+    const unknown = [];
+    Object.keys(imported).forEach(k => {
+      _ENV_KEY_SET.has(k) ? matched.push(k) : unknown.push(k);
+    });
+    if (!matched.length) {
+      const sample = unknown.slice(0, 5).join(', ') + (unknown.length > 5 ? ', …' : '');
+      showBanner('error', 'No recognized settings found in file. Unknown keys ignored: ' + esc(sample));
+      return;
+    }
+    // Merge only known keys into the form — unknown ones would get
+    // filtered on save anyway, and rendering them would imply they work.
+    const merged = Object.assign({}, envValues);
+    matched.forEach(k => { merged[k] = imported[k]; });
     renderEnvCategories(merged);
     updateDirtyUI();
-    showBanner('info', 'Imported ' + Object.keys(imported).length + ' settings into form. Review and click <strong>Save &amp; Apply</strong> to write changes.');
+    let msg = 'Imported ' + matched.length + ' setting' + (matched.length === 1 ? '' : 's') + ' into form.';
+    if (unknown.length) {
+      const sample = unknown.slice(0, 5).join(', ') + (unknown.length > 5 ? ', …' : '');
+      msg += ' ' + unknown.length + ' unknown key' + (unknown.length === 1 ? '' : 's') + ' skipped: ' + esc(sample);
+    }
+    msg += ' Review and click <strong>Save &amp; Apply</strong> to write changes.';
+    showBanner('info', msg);
   };
   reader.readAsText(file);
   input.value = '';
@@ -1538,11 +1663,15 @@ function filterSettings(tab, query) {
     const catName = cat.querySelector('.cat-name');
     let catVisible = 0;
 
-    // Check both regular and advanced fields
+    // Check both regular and advanced fields. Match against label *and*
+    // help text so a search for "timeout" also surfaces fields whose
+    // label doesn't contain the word but whose help text explains it.
     cat.querySelectorAll('.field').forEach(field => {
       total++;
       const label = (field.querySelector('.field-label') || {}).textContent || '';
-      if (!q || label.toLowerCase().includes(q)) {
+      const help = (field.querySelector('.field-help') || {}).textContent || '';
+      const haystack = (label + ' ' + help).toLowerCase();
+      if (!q || haystack.includes(q)) {
         field.style.display = '';
         shown++;
         catVisible++;
@@ -1564,10 +1693,17 @@ function filterSettings(tab, query) {
       // Auto-expand categories with matches
       header.classList.add('open');
       body.classList.add('open');
-      // Also expand advanced section if it has matches
+      // Also expand advanced section if it has matches. Count visible
+      // fields by walking them — the old `[style*="display"]` selector
+      // was fragile: when a field is shown back via `style.display = ''`
+      // the attribute may still carry a stale `display` token in some
+      // browsers, and the `display: none` serialization varies.
       const adv = body.querySelector('.advanced-fields');
       if (adv) {
-        const advVisible = adv.querySelectorAll('.field').length - adv.querySelectorAll('.field[style*="display"]').length;
+        let advVisible = 0;
+        adv.querySelectorAll('.field').forEach(f => {
+          if (f.style.display !== 'none') advVisible++;
+        });
         if (advVisible > 0) { adv.classList.add('open'); }
       }
     }
@@ -1729,6 +1865,12 @@ function resetField(tab, key) {
     } else {
       el.value = saved;
     }
+    // Clear the "invalid" outline and any inline error that was pinned to
+    // this field — otherwise a user-triggered reset leaves the red state
+    // in place even though the value now matches the validated saved value.
+    el.classList.remove('invalid');
+    const errEl = document.getElementById('err-' + key);
+    if (errEl) { errEl.textContent = ''; errEl.className = 'field-error'; }
   } else {
     // Fast path for simple pd field types — set value directly
     const saved = pdValues[key];
@@ -1753,6 +1895,15 @@ function resetField(tab, key) {
       const searchInput = document.getElementById('search-pd');
       if (searchInput && searchInput.value.trim()) filterSettings('pd', searchInput.value);
     }
+    // Parity with the env branch: clear .invalid outline and inline error
+    // on the reset field so a prior validation failure doesn't leave the
+    // field painted red after the user reverted to the saved value.
+    const rowEl = document.getElementById('pdrow-' + pdFieldId(key));
+    if (rowEl) {
+      rowEl.querySelectorAll('.invalid').forEach(el => el.classList.remove('invalid'));
+      const errEl = rowEl.querySelector('.field-error');
+      if (errEl) { errEl.textContent = ''; errEl.className = 'field-error'; }
+    }
   }
   updateDirtyUI();
 }
@@ -1761,20 +1912,32 @@ function resetField(tab, key) {
 // Init
 // -----------------------------------------------------------------------
 async function init() {
-  // Load env values
-  try {
-    const resp = await fetch('/api/settings/env');
-    if (resp.ok) { envValues = await resp.json(); }
-    else { showBanner('error', 'Failed to load Zurgarr settings (HTTP ' + resp.status + '). Check authentication.'); }
-  } catch (e) { showBanner('error', 'Failed to load Zurgarr settings: ' + esc(e.message)); }
-  renderEnvCategories(envValues);
+  // Placeholder "Loading…" state so the page doesn't look frozen while
+  // the two fetches resolve. Wiped by the render calls below.
+  const envCats = document.getElementById('env-categories');
+  const pdCats = document.getElementById('pd-categories');
+  const loadingHtml = '<div class="loading-state"><span class="spinner"></span>Loading settings…</div>';
+  if (envCats) envCats.innerHTML = loadingHtml;
+  if (pdCats) pdCats.innerHTML = loadingHtml;
 
-  // Load plex_debrid values
-  try {
-    const resp = await fetch('/api/settings/plex-debrid');
-    if (resp.ok) { pdValues = await resp.json(); }
-    else if (resp.status !== 404) { showBanner('error', 'Failed to load plex_debrid settings (HTTP ' + resp.status + ')'); }
-  } catch (e) { showBanner('error', 'Failed to load plex_debrid settings: ' + esc(e.message)); }
+  // Load env and plex_debrid values in parallel — they're independent,
+  // so we don't need to wait for env before kicking off pd.
+  const envFetch = fetch('/api/settings/env')
+    .then(async resp => {
+      if (resp.ok) envValues = await resp.json();
+      else showBanner('error', 'Failed to load Zurgarr settings (HTTP ' + resp.status + '). Check authentication.');
+    })
+    .catch(e => showBanner('error', 'Failed to load Zurgarr settings: ' + esc(e.message)));
+
+  const pdFetch = fetch('/api/settings/plex-debrid')
+    .then(async resp => {
+      if (resp.ok) pdValues = await resp.json();
+      else if (resp.status !== 404) showBanner('error', 'Failed to load plex_debrid settings (HTTP ' + resp.status + ')');
+    })
+    .catch(e => showBanner('error', 'Failed to load plex_debrid settings: ' + esc(e.message)));
+
+  await Promise.all([envFetch, pdFetch]);
+  renderEnvCategories(envValues);
   renderPdCategories(pdValues);
 }
 

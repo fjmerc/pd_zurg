@@ -74,7 +74,7 @@ ENV_SCHEMA = [
             ('PLEX_ADDRESS', 'Plex Address', 'url', False, 'Plex server URL (e.g., http://192.168.1.100:32400)'),
             ('SEERR_ADDRESS', 'Overseerr/Jellyseerr Address', 'url', False, 'Request management server URL'),
             ('SEERR_API_KEY', 'Overseerr/Jellyseerr API Key', 'secret', False, 'API key for Overseerr/Jellyseerr'),
-            ('PD_LOG_LEVEL', 'Log Level', 'select:DEBUG,INFO,WARNING,ERROR', False, 'plex_debrid log level'),
+            ('PD_LOG_LEVEL', 'Log Level', 'select:DEBUG,INFO,WARNING,ERROR,CRITICAL', False, 'plex_debrid log level'),
             ('PD_UPDATE', 'Auto-Update plex_debrid', 'boolean', False, 'Check for updates on startup'),
             ('PD_REPO', 'plex_debrid Repository', 'string', False, 'GitHub repo (owner/repo format)'),
             ('TRAKT_CLIENT_ID', 'Trakt Client ID', 'string', False, 'Trakt API application client ID'),
@@ -523,11 +523,14 @@ def validate_env_values(values):
                 'At least one debrid API key is required.'
             )
 
-    # URL format validation
+    # URL format validation. Strip whitespace before the regex check so a
+    # sloppy copy-paste (`http://sonarr:8989 `) isn't rejected for the
+    # space alone — write_env_values' _sanitize_value also strips, so the
+    # stored value ends up clean regardless of what the user typed.
     url_fields = ['PLEX_ADDRESS', 'JF_ADDRESS', 'SEERR_ADDRESS', 'FLARESOLVERR_URL',
                   'SONARR_URL', 'RADARR_URL', 'TORRENTIO_URL']
     for key in url_fields:
-        val = values.get(key, '')
+        val = values.get(key, '').strip()
         if val and not _is_valid_url(val):
             errors.append(f"{key}='{val}' is not a valid URL. Must start with http:// or https://")
 
@@ -540,16 +543,24 @@ def validate_env_values(values):
             f"Must be one of: {', '.join(valid_debrid)}"
         )
 
-    log_levels = ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
-    log_level_vars = (
-        'ZURG_LOG_LEVEL', 'RCLONE_LOG_LEVEL',
-        'ZURGARR_LOG_LEVEL', 'PD_LOG_LEVEL',
-    )
-    for var in log_level_vars:
+    # rclone's level set is distinct: it uses NOTICE instead of WARNING,
+    # so allowing WARNING there (as the old validator did) let users pick
+    # a level rclone doesn't actually implement.
+    _RCLONE_LEVELS = ('DEBUG', 'INFO', 'NOTICE', 'ERROR')
+    _PY_LEVELS = ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
+    _log_level_allowed = {
+        'ZURG_LOG_LEVEL': _PY_LEVELS,
+        'RCLONE_LOG_LEVEL': _RCLONE_LEVELS,
+        'ZURGARR_LOG_LEVEL': _PY_LEVELS,
+        'PD_LOG_LEVEL': _PY_LEVELS,
+    }
+    for var, allowed in _log_level_allowed.items():
         val = values.get(var, '').upper()
-        allowed = log_levels + (('NOTICE',) if var == 'RCLONE_LOG_LEVEL' else ())
         if val and val not in allowed:
-            warnings.append(f"{var}='{val}' is not a standard log level.")
+            warnings.append(
+                f"{var}='{val}' is not a standard log level. "
+                f"Expected one of: {', '.join(allowed)}"
+            )
 
     notification_level = values.get('NOTIFICATION_LEVEL', '').lower()
     if notification_level and notification_level not in ('info', 'warning', 'error'):

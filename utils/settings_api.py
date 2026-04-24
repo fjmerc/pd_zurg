@@ -283,6 +283,10 @@ _ENV_DEFAULTS = {
     # applies when the env var is empty; surfacing a non-empty UI default
     # would pin the value into .env on first save.
     'CONFIG_BACKUP_RETENTION': '7',
+    # Notification digest default matches Config.load() in base/__init__.py
+    # (os.getenv('NOTIFICATION_DIGEST_TIME', '08:00')). Listed so the UI
+    # doesn't render an empty field while help text claims "default: 08:00".
+    'NOTIFICATION_DIGEST_TIME': '08:00',
 }
 
 # Sensitive key patterns — values should be masked in certain contexts
@@ -609,6 +613,17 @@ def validate_env_values(values):
                 f"SEASON_PACK_FALLBACK_MIN_RATIO='{ratio_val}' is not a valid number"
             )
 
+    # NOTIFICATION_DIGEST_TIME must be 24-hour HH:MM — runtime parses it
+    # via strptime('%H:%M') and a malformed value disables the digest
+    # scheduler with no user-facing signal.
+    digest_time = values.get('NOTIFICATION_DIGEST_TIME', '')
+    # re.fullmatch (not re.match) so a trailing newline or whitespace is rejected
+    if digest_time and not re.fullmatch(r'([01]\d|2[0-3]):[0-5]\d', digest_time):
+        errors.append(
+            f"NOTIFICATION_DIGEST_TIME='{digest_time}' is not valid. "
+            "Must be 24-hour HH:MM (e.g. 08:00, 23:30)."
+        )
+
     # Logical consistency
     if _truthy('PD_ENABLED') and not _truthy('ZURG_ENABLED'):
         warnings.append(
@@ -913,8 +928,8 @@ PLEX_DEBRID_SCHEMA = [
              'Plex usernames and their authentication tokens.'),
             ('Plex auto remove', 'Plex Auto Remove', 'select', _AUTO_REMOVE_OPTIONS, True,
              'Which media types to remove from watchlist after download.'),
-            ('Trakt users', 'Trakt Users', 'list_pairs', ['Name', 'Token/Code'], True,
-             'Trakt usernames and auth codes. Use OAuth in Phase 3 for proper auth.'),
+            ('Trakt users', 'Trakt Users', 'list_pairs', ['Name', 'Token/Code'], False,
+             'Trakt usernames and auth codes. Click "Connect via OAuth" below to add a user — OAuth is the primary setup path for Trakt.'),
             ('Trakt lists', 'Trakt Lists', 'list_strings', None, True,
              'Trakt list URLs or IDs to monitor.'),
             ('Trakt auto remove', 'Trakt Auto Remove', 'select', _AUTO_REMOVE_OPTIONS, True,
@@ -1445,6 +1460,38 @@ def validate_plex_debrid_values(values):
             if ftype == 'json' and json_key == 'Versions':
                 if not isinstance(val, list):
                     errors.append('"Versions" must be a list')
+                else:
+                    # Each profile is [name:str, conditions:list, language:str, rules:list].
+                    # profile[2] is a language code ("en", "jp", ...) — plex_debrid
+                    # migrates the legacy "true"/"both" markers to the configured
+                    # default language on first load (see releases/__init__.py
+                    # version.setup at line 159 and default_language = "en" at line
+                    # 1371). Validate shape; accept any string for language.
+                    # Malformed profiles otherwise silently land in settings.json
+                    # and crash the scraper path on the next restart.
+                    for i, profile in enumerate(val):
+                        label = f'Versions entry {i + 1}'
+                        if not isinstance(profile, list):
+                            errors.append(f'{label} must be a list, got {type(profile).__name__}')
+                            continue
+                        if len(profile) < 4:
+                            errors.append(
+                                f'{label} must have 4 elements '
+                                f'[name, conditions, language, rules], got {len(profile)}'
+                            )
+                            continue
+                        name, conditions, language, rules = profile[0], profile[1], profile[2], profile[3]
+                        if not isinstance(name, str) or not name.strip():
+                            errors.append(f'{label}: profile name must be a non-empty string')
+                        if not isinstance(conditions, list):
+                            errors.append(f'{label}: conditions must be a list')
+                        if not isinstance(language, str):
+                            errors.append(
+                                f'{label}: language must be a string '
+                                f'(e.g. "en"), got {type(language).__name__}'
+                            )
+                        if not isinstance(rules, list):
+                            errors.append(f'{label}: rules must be a list')
 
             if ftype == 'boolean_str' and isinstance(val, str):
                 if val.lower() not in ('true', 'false', ''):

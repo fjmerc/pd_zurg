@@ -441,6 +441,23 @@ class TestValidateEnvValues:
         result = validate_env_values({'BLACKHOLE_ENABLED': 'true'})
         assert any('debrid API key' in e for e in result['errors'])
 
+    def test_notification_digest_time_valid(self):
+        for v in ('00:00', '08:00', '09:30', '23:59'):
+            result = validate_env_values({'NOTIFICATION_DIGEST_TIME': v})
+            assert not any('NOTIFICATION_DIGEST_TIME' in e for e in result['errors']), \
+                f'{v} should be accepted'
+
+    def test_notification_digest_time_empty_ok(self):
+        result = validate_env_values({'NOTIFICATION_DIGEST_TIME': ''})
+        assert not any('NOTIFICATION_DIGEST_TIME' in e for e in result['errors'])
+
+    def test_notification_digest_time_bad_formats(self):
+        for v in ('8:00', '24:00', '12:60', '12:5', 'noon', '08-00', '08:00:00',
+                  '08:00\n', '08:00 ', ' 08:00'):
+            result = validate_env_values({'NOTIFICATION_DIGEST_TIME': v})
+            assert any('NOTIFICATION_DIGEST_TIME' in e for e in result['errors']), \
+                f'{v!r} should be rejected'
+
 
 # ===========================================================================
 # plex_debrid schema tests
@@ -650,6 +667,50 @@ class TestValidatePlexDebridValues:
             'Versions': 'not a list',
         })
         assert any('Versions' in e for e in result['errors'])
+
+    def test_versions_profile_not_a_list(self):
+        result = validate_plex_debrid_values({'Versions': ['not a list']})
+        assert any('Versions entry 1' in e and 'must be a list' in e for e in result['errors'])
+
+    def test_versions_profile_wrong_arity(self):
+        result = validate_plex_debrid_values({'Versions': [['name only']]})
+        assert any('Versions entry 1' in e and '4 elements' in e for e in result['errors'])
+
+    def test_versions_profile_empty_name(self):
+        result = validate_plex_debrid_values({
+            'Versions': [['', [], 'true', []]],
+        })
+        assert any('profile name must be a non-empty string' in e for e in result['errors'])
+
+    def test_versions_profile_language_must_be_string(self):
+        # profile[2] is a language code string ("en", "jp", ...). plex_debrid
+        # migrates legacy "true" to the default language on load, but a non-
+        # string (e.g. list, int) crashes the scraper path on restart.
+        result = validate_plex_debrid_values({
+            'Versions': [['1080p SDR', [], 123, []]],
+        })
+        assert any('language must be a string' in e for e in result['errors'])
+
+    def test_versions_profile_accepts_language_code(self):
+        # Real presets ship with "en"; the legacy settings-default.json ships
+        # with "true" which plex_debrid rewrites on load. Both must validate.
+        for lang in ('en', 'jp', 'true', 'all', ''):
+            result = validate_plex_debrid_values({
+                'Versions': [['1080p SDR', [], lang, []]],
+            })
+            assert result['errors'] == [], f'language={lang!r} should pass: {result["errors"]}'
+
+    def test_versions_profile_conditions_not_list(self):
+        result = validate_plex_debrid_values({
+            'Versions': [['1080p SDR', 'not-a-list', 'en', []]],
+        })
+        assert any('conditions must be a list' in e for e in result['errors'])
+
+    def test_versions_profile_valid_shape_passes(self):
+        result = validate_plex_debrid_values({
+            'Versions': [['1080p SDR', [], 'en', []]],
+        })
+        assert result['errors'] == []
 
     def test_non_dict_input(self):
         result = validate_plex_debrid_values([1, 2, 3])

@@ -395,7 +395,11 @@ function renderEnvField(field, value) {
     inputHtml = `<select id="${id}" data-key="${esc(field.key)}" data-type="select">${opts}</select>`;
   } else if (field.type.startsWith('number:')) {
     const range = field.type.slice(7).split('-');
-    inputHtml = `<input type="number" id="${id}" data-key="${esc(field.key)}" data-type="number" value="${esc(value || '')}" min="${range[0]}" max="${range[1]}" placeholder="${range[0]}-${range[1]}">`;
+    // No HTML min/max — out-of-range numerics are server-side *warnings*,
+    // not hard errors, and letting the browser's constraint-validation
+    // outline paint the field red before the user even hits Save makes
+    // that distinction invisible. Range hint is surfaced via placeholder.
+    inputHtml = `<input type="number" id="${id}" data-key="${esc(field.key)}" data-type="number" value="${esc(value || '')}" placeholder="${range[0]}-${range[1]}">`;
   } else if (field.type === 'url') {
     inputHtml = `<input type="url" id="${id}" data-key="${esc(field.key)}" data-type="url" value="${esc(value || '')}" placeholder="http://...">`;
   } else {
@@ -433,10 +437,25 @@ function clearFieldErrors(container) {
   (container || document).querySelectorAll('.invalid').forEach(el => { el.classList.remove('invalid'); });
 }
 
+// Set of every env key the schema knows about, used by highlightErrors to
+// reject false-positive regex captures on messages that happen to lead with
+// an uppercase word (e.g. "HTTP 500 …").
+const _ENV_KEY_SET = (() => {
+  const s = new Set();
+  ENV_SCHEMA.categories.forEach(c => c.fields.forEach(f => s.add(f.key)));
+  return s;
+})();
+
 function highlightErrors(errors) {
   errors.forEach(msg => {
-    const match = msg.match(/^["']?([A-Z_]+)[=:'"]/);
-    if (match) {
+    // Match the first ALL_CAPS token at the start, not just the key=value /
+    // key:value shape the old regex required. Validator messages like
+    // "STATUS_UI_AUTH format is invalid" were previously dropped on the
+    // floor because the key was followed by a space. The captured token is
+    // cross-checked against the schema's known key set so stray English
+    // words ("Invalid", "HTTP") never light up a wrong field.
+    const match = msg.match(/^["']?([A-Z][A-Z0-9_]*)\b/);
+    if (match && _ENV_KEY_SET.has(match[1])) {
       const errEl = document.getElementById('err-' + match[1]);
       if (errEl) { errEl.textContent = msg; errEl.className = 'field-error show'; }
       const input = document.getElementById('env-' + match[1]);
@@ -483,7 +502,37 @@ async function envSave() {
       if (result.warnings && result.warnings.length) html += '<br><br><strong>Warnings:</strong><br>' + result.warnings.map(w => '&bull; ' + esc(w)).join('<br>');
       showBanner('success', html);
       showToast('Settings saved and applied!', 'success');
-      envValues = collectEnvData();
+      // Re-fetch canonical values so the form reflects server-side
+      // sanitization (trailing-whitespace strip, etc). Three guards:
+      //   (1) skip the re-render if the user is already typing into a
+      //       tab-env input — clobbering DOM with innerHTML would drop
+      //       the focused element and the keystrokes queued behind it.
+      //   (2) verify the GET body is a plain object — a reverse-proxy
+      //       misconfig returning HTML or an array would otherwise get
+      //       assigned to envValues and desync dirty detection.
+      //   (3) fall back to collectEnvData on any failure so the envValues
+      //       snapshot at least matches what's in the DOM.
+      try {
+        const fresh = await fetch('/api/settings/env');
+        if (fresh.ok) {
+          const body = await fresh.json();
+          const isPlainObject = body && typeof body === 'object' && !Array.isArray(body);
+          const activeEl = document.activeElement;
+          const userEditing = activeEl && activeEl !== document.body
+            && activeEl.closest && activeEl.closest('#tab-env')
+            && !activeEl.matches('button');
+          if (isPlainObject) {
+            envValues = body;
+            if (!userEditing) renderEnvCategories(envValues);
+          } else {
+            envValues = collectEnvData();
+          }
+        } else {
+          envValues = collectEnvData();
+        }
+      } catch (_) {
+        envValues = collectEnvData();
+      }
       envDirty = false;
       updateDirtyUI();
     } else {

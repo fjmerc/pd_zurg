@@ -891,7 +891,7 @@ _LIBRARY_COLLECTION = ['Plex Library', 'Trakt Collection', 'Overseerr Requests',
 _LIBRARY_UPDATE = ['Plex Libraries', 'Plex Labels', 'Trakt Collection',
                    'Overseerr Requests', 'Jellyfin Libraries']
 _LIBRARY_IGNORE = ['Plex Discover Watch Status', 'Trakt Watch Status', 'Local Ignore List']
-_SCRAPER_SOURCES = ['torrentio', 'rarbg', '1337x', 'jackett', 'prowlarr',
+_SCRAPER_SOURCES = ['torrentio', '1337x', 'jackett', 'prowlarr',
                     'orionoid', 'nyaa', 'zilean', 'torbox', 'mediafusion', 'comet']
 _DEBRID_SERVICES = ['Real Debrid', 'All Debrid', 'Premiumize', 'Debrid Link', 'PUT.io', 'Torbox']
 _AUTO_REMOVE_OPTIONS = ['movie', 'show', 'both', 'none']
@@ -970,13 +970,16 @@ PLEX_DEBRID_SCHEMA = [
         'description': 'Torrent/debrid scraper configuration',
         'fields': [
             ('Sources', 'Scraper Sources', 'multiselect', _SCRAPER_SOURCES, False,
-             'Torrent indexers and scrapers to search.'),
+             'Torrent indexers and scrapers to search. torrentio/mediafusion/comet '
+             'are public Stremio addons (recommended). jackett/prowlarr/zilean '
+             'require a self-hosted instance. orionoid/torbox require a paid '
+             'account. 1337x scrapes HTML directly — works when the site is '
+             'reachable but is brittle. nyaa is anime-focused.'),
             ('Versions', 'Release Versions / Quality Profiles', 'json', None, False,
              'Complex release matching rules. Edit the JSON directly.'),
             ('Special character renaming', 'Character Renaming Rules', 'list_pairs',
              ['Find', 'Replace'], False,
              'Character or regex replacements applied to release titles.'),
-            ('Rarbg API Key', 'Rarbg API Key', 'string', None, True, ''),
             ('Jackett Base URL', 'Jackett Base URL', 'string', None, True, ''),
             ('Jackett API Key', 'Jackett API Key', 'secret', None, True, ''),
             ('Jackett resolver timeout', 'Jackett Timeout (sec)', 'string', None, True, ''),

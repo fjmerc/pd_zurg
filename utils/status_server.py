@@ -1158,6 +1158,76 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(content)))
             self.end_headers()
             self.wfile.write(content)
+        elif self.path == '/api/settings/backup':
+            # Build a fresh config backup archive in memory and stream it.
+            if not self.auth_credentials:
+                self._send_json_response(403, json.dumps({
+                    'error': 'Settings API requires STATUS_UI_AUTH to be configured'
+                }))
+                return
+            try:
+                from utils import backup as _backup
+                filename, content = _backup.create_backup_blob()
+            except Exception as e:
+                logger.exception("[backup] create_backup_blob failed")
+                self._send_json_response(500, json.dumps({'error': str(e)}))
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/gzip')
+            self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+            self.send_header('Content-Length', str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+        elif self.path == '/api/settings/backups':
+            if not self.auth_credentials:
+                self._send_json_response(403, json.dumps({
+                    'error': 'Settings API requires STATUS_UI_AUTH to be configured'
+                }))
+                return
+            try:
+                from utils import backup as _backup
+                backup_dir = os.environ.get('CONFIG_BACKUP_DIR', _backup.DEFAULT_BACKUP_DIR)
+                self._send_json_response(200, json.dumps({
+                    'backups': _backup.list_backups(backup_dir),
+                    'backup_dir': backup_dir,
+                }))
+            except Exception as e:
+                logger.exception("[backup] list_backups failed")
+                self._send_json_response(500, json.dumps({'error': str(e)}))
+        elif self.path.startswith('/api/settings/backup/'):
+            # Download a specific saved backup by filename.
+            if not self.auth_credentials:
+                self._send_json_response(403, json.dumps({
+                    'error': 'Settings API requires STATUS_UI_AUTH to be configured'
+                }))
+                return
+            # Strip query string defensively — a future regex loosening
+            # must not let ``?foo=bar`` slip into the filename.
+            bare_path = urlparse(self.path).path
+            filename = url_unquote(bare_path[len('/api/settings/backup/'):])
+            try:
+                from utils import backup as _backup
+                backup_dir = os.environ.get('CONFIG_BACKUP_DIR', _backup.DEFAULT_BACKUP_DIR)
+                try:
+                    candidate = _backup.resolve_backup_path(filename, backup_dir=backup_dir)
+                except _backup.RestoreError as e:
+                    # Regex failure vs. missing file both map to 404/400
+                    # appropriately — missing-file message is explicit.
+                    status = 404 if 'not found' in str(e).lower() else 400
+                    self._send_json_response(status, json.dumps({'error': str(e)}))
+                    return
+                with open(candidate, 'rb') as f:
+                    content = f.read()
+            except Exception as e:
+                logger.exception("[backup] download saved backup failed")
+                self._send_json_response(500, json.dumps({'error': str(e)}))
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/gzip')
+            self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+            self.send_header('Content-Length', str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
         elif self.path == '/library' or self.path.startswith('/library?'):
             from utils.library_page import get_library_html
             nav_page = 'wanted' if 'filter=missing' in self.path else 'library'
@@ -2177,6 +2247,61 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
             except Exception as e:
+                self._send_json_response(500, json.dumps({'error': str(e)}))
+            return
+
+        if self.path == '/api/settings/restore':
+            # Restore from an uploaded backup archive (raw application/gzip body).
+            try:
+                from utils import backup as _backup
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length <= 0:
+                    self._send_json_response(400, json.dumps({'error': 'Empty request body'}))
+                    return
+                if content_length > _backup.MAX_ARCHIVE_BYTES:
+                    self._send_json_response(413, json.dumps({
+                        'error': f'Archive exceeds size cap ({content_length} > {_backup.MAX_ARCHIVE_BYTES})'
+                    }))
+                    return
+                body = self.rfile.read(content_length)
+                try:
+                    result = _backup.restore_from_blob(body)
+                except _backup.RestoreError as e:
+                    self._send_json_response(400, json.dumps({
+                        'status': 'error', 'error': str(e)
+                    }))
+                    return
+                self._send_json_response(200, json.dumps(result))
+                self.status_data_ref.add_event(
+                    'settings',
+                    f'Config restored from uploaded backup ({len(result.get("restored", []))} files)'
+                )
+            except Exception as e:
+                logger.exception("[backup] restore_from_blob failed")
+                self._send_json_response(500, json.dumps({'error': str(e)}))
+            return
+
+        if self.path.startswith('/api/settings/restore/'):
+            # Restore from a saved backup under /config/backups/.
+            try:
+                bare_path = urlparse(self.path).path
+                filename = url_unquote(bare_path[len('/api/settings/restore/'):])
+                from utils import backup as _backup
+                backup_dir = os.environ.get('CONFIG_BACKUP_DIR', _backup.DEFAULT_BACKUP_DIR)
+                try:
+                    result = _backup.restore_from_saved(filename, backup_dir=backup_dir)
+                except _backup.RestoreError as e:
+                    self._send_json_response(400, json.dumps({
+                        'status': 'error', 'error': str(e)
+                    }))
+                    return
+                self._send_json_response(200, json.dumps(result))
+                self.status_data_ref.add_event(
+                    'settings',
+                    f'Config restored from saved backup {filename}'
+                )
+            except Exception as e:
+                logger.exception("[backup] restore_from_saved failed")
                 self._send_json_response(500, json.dumps({'error': str(e)}))
             return
 

@@ -14,6 +14,7 @@ isn't here, open a [GitHub issue](https://github.com/fjmerc/zurgarr/issues).
 - [Plex not seeing debrid content](#plex-not-seeing-debrid-content)
 - [Blackhole: symlinks created but broken](#blackhole-symlinks-created-but-broken)
 - [Stuck ffprobe processes](#stuck-ffprobe-processes)
+- [I lost my config after a rebuild / restore from an old backup](#i-lost-my-config-after-a-rebuild--restore-from-an-old-backup)
 - [Migrating from pd_zurg](#migrating-from-pd_zurg)
 
 ---
@@ -155,6 +156,27 @@ for detailed diagnostics.
 Normal when Plex scans expired debrid links — the monitor handles it
 automatically. If you see false positives during large library scans,
 increase `FFPROBE_STUCK_TIMEOUT` (default 300s).
+
+## I lost my config after a rebuild / restore from an old backup
+
+Scheduled tar.gz archives land in `/config/backups/` (one every 24h by
+default, keeping the last 7). Open the Settings page → **Backup &
+Restore** → expand **Recent backups** to see them, then click
+**Restore** on any entry. The current `.env`, `settings.json`,
+`library_prefs.json`, and `blocklist.json` are snapshotted to
+`/config/backups/pre-restore-<timestamp>/` before being overwritten, so
+the restore itself is reversible — copy the snapshot files back if you
+restored the wrong archive.
+
+If the container isn't running, the archives are plain tar.gz files:
+`tar -tzf /config/backups/zurgarr-backup-*.tar.gz` to inspect, `tar
+-xzf ... -C /config/` to extract. The archive layout is flat (`env`,
+`settings.json`, `library_prefs.json`, `blocklist.json`, `manifest.json`
+— note `env` with no dot) so extract into `/config/` and rename `env` →
+`.env` if restoring manually.
+
+Disable scheduled backups by setting `CONFIG_BACKUP_INTERVAL=0`. Manual
+download/restore in the Settings UI still works.
 
 ## Migrating from pd_zurg
 

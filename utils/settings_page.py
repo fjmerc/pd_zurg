@@ -211,7 +211,33 @@ mark{background:var(--yellow);color:#0d1117;border-radius:2px;padding:0 1px}
 .field-reset:hover{color:var(--yellow);border-color:var(--yellow)}
 .field.changed .field-reset{display:inline-flex}
 .field.changed{background:rgba(210,153,34,.04);border-radius:4px;margin:0 -6px;padding:10px 6px}
+
+/* Backup & Restore bar (spans both tabs) */
+.backup-bar{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;flex-wrap:wrap;gap:10px}
+.backup-bar .backup-label{font-size:.85em;font-weight:600;color:var(--text);margin-right:6px}
+.backup-bar .backup-hint{font-size:.75em;color:var(--text3);flex-basis:100%;margin-top:2px}
+.backup-bar-toggle{margin-left:auto;font-size:.78em;color:var(--text2);cursor:pointer;user-select:none;padding:4px 8px;border-radius:4px;transition:color .15s}
+.backup-bar-toggle:hover{color:var(--blue)}
+.backup-bar-toggle .arrow{display:inline-block;transition:transform .2s;margin-right:4px}
+.backup-bar-toggle.open .arrow{transform:rotate(180deg)}
+.backup-list{flex-basis:100%;display:none;margin-top:6px;border-top:1px solid var(--border2);padding-top:10px}
+.backup-list.open{display:block}
+.backup-list .empty{font-size:.8em;color:var(--text2);text-align:center;padding:8px 0}
+.backup-row{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border2);font-size:.82em}
+.backup-row:last-child{border-bottom:none}
+.backup-row .b-name{flex:1;font-family:monospace;font-size:.8em;color:var(--text2);word-break:break-all}
+.backup-row .b-meta{font-size:.72em;color:var(--text3);white-space:nowrap}
+.backup-row .b-actions{display:flex;gap:6px;flex-shrink:0}
 </style>
+
+<div class="backup-bar">
+  <span class="backup-label">Backup &amp; Restore</span>
+  <a class="btn btn-ghost btn-sm" href="/api/settings/backup" download>Download backup</a>
+  <label class="btn btn-ghost btn-sm" style="cursor:pointer">Restore from file<input type="file" accept=".tar.gz,.tgz,application/gzip" style="display:none" onchange="configRestoreUpload(this)"></label>
+  <span class="backup-bar-toggle" id="backup-toggle" onclick="toggleRecentBackups()"><span class="arrow">▾</span>Recent backups</span>
+  <div class="backup-hint">Archive contains .env, settings.json, library_prefs.json, blocklist.json. A pre-restore snapshot is saved to /config/backups/ before replacement.</div>
+  <div class="backup-list" id="backup-list"><div class="empty">Loading…</div></div>
+</div>
 
 <div class="tabs" role="tablist">
   <div class="tab active" role="tab" tabindex="0" aria-selected="true" aria-controls="tab-env" data-kb="tab-1" onclick="switchTab('env')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('env')}">Zurgarr</div>
@@ -1328,6 +1354,94 @@ function pdImport(input) {
   };
   reader.readAsText(file);
   input.value = ''; // Allow re-importing same file
+}
+
+// -----------------------------------------------------------------------
+// Backup & Restore
+// -----------------------------------------------------------------------
+function toggleRecentBackups() {
+  const list = document.getElementById('backup-list');
+  const toggle = document.getElementById('backup-toggle');
+  const opening = !list.classList.contains('open');
+  list.classList.toggle('open');
+  toggle.classList.toggle('open');
+  if (opening) loadRecentBackups();
+}
+
+function loadRecentBackups() {
+  const list = document.getElementById('backup-list');
+  list.innerHTML = '<div class="empty">Loading…</div>';
+  fetch('/api/settings/backups')
+    .then(r => r.json())
+    .then(data => {
+      const backups = (data && data.backups) || [];
+      if (!backups.length) {
+        list.innerHTML = '<div class="empty">No saved backups yet. Scheduled backups land here (default every 24h) — or click <strong>Download backup</strong> above to create one now.</div>';
+        return;
+      }
+      list.innerHTML = backups.map(b => {
+        const kb = (b.size / 1024).toFixed(1) + ' KB';
+        const when = esc(b.created_at.replace('T', ' ').replace('Z', ' UTC'));
+        const name = esc(b.name);
+        const jsName = escJs(b.name);
+        return `<div class="backup-row">
+          <span class="b-name">${name}</span>
+          <span class="b-meta">${when} · ${kb}</span>
+          <span class="b-actions">
+            <a class="btn btn-ghost btn-sm" href="/api/settings/backup/${encodeURIComponent(b.name)}" download>Download</a>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="configRestoreFromSaved('${jsName}')">Restore</button>
+          </span>
+        </div>`;
+      }).join('');
+    })
+    .catch(err => {
+      list.innerHTML = '<div class="empty">Failed to load backups: ' + esc(err.message) + '</div>';
+    });
+}
+
+function _restoreConfirmText(source) {
+  return `Restore config from ${source}?\n\nCurrent .env, settings.json, library_prefs.json, and blocklist.json will be snapshotted to /config/backups/ before being replaced. The page will reload with the restored values.`;
+}
+
+function _applyRestoreResponse(resp) {
+  return resp.json().then(data => ({ok: resp.ok, data}));
+}
+
+function _handleRestoreResult({ok, data}) {
+  if (!ok || data.status !== 'success') {
+    const msg = (data && (data.error || (data.errors && data.errors.join('; ')))) || 'unknown error';
+    showBanner('error', 'Restore failed: ' + esc(msg));
+    return;
+  }
+  const restored = (data.restored || []).join(', ');
+  const snap = esc(data.snapshot_dir || '');
+  const warn = (data.warnings && data.warnings.length)
+    ? ' <em>(' + esc(data.warnings.join('; ')) + ')</em>' : '';
+  showBanner('info', `Restored ${esc(restored)}. Snapshot: ${snap}.${warn} Reloading…`);
+  setTimeout(() => location.reload(), 1500);
+}
+
+function configRestoreUpload(input) {
+  const file = input.files[0];
+  if (!file) return;
+  if (!confirm(_restoreConfirmText(file.name))) { input.value = ''; return; }
+  fetch('/api/settings/restore', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/gzip'},
+    body: file,
+  })
+    .then(_applyRestoreResponse)
+    .then(_handleRestoreResult)
+    .catch(err => showBanner('error', 'Restore failed: ' + esc(err.message)));
+  input.value = '';
+}
+
+function configRestoreFromSaved(filename) {
+  if (!confirm(_restoreConfirmText(filename))) return;
+  fetch('/api/settings/restore/' + encodeURIComponent(filename), {method: 'POST'})
+    .then(_applyRestoreResponse)
+    .then(_handleRestoreResult)
+    .catch(err => showBanner('error', 'Restore failed: ' + esc(err.message)));
 }
 
 // -----------------------------------------------------------------------

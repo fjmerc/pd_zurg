@@ -233,7 +233,9 @@ homelab-scale installs — most users don't need to touch these.
 | `SYMLINK_VERIFY_INTERVAL` | Minutes between symlink verification sweeps | `360` (6h) |
 | `PREFERENCE_ENFORCE_INTERVAL` | Minutes between preference-enforcement passes | `60` |
 | `HOUSEKEEPING_INTERVAL` | Minutes between housekeeping (history prune, cache rotation) | `1440` (24h) |
-| `CONFIG_BACKUP_INTERVAL` | Minutes between atomic `.env` / `settings.json` backups | `1440` (24h) |
+| `CONFIG_BACKUP_INTERVAL` | Seconds between scheduled config backups (archive of `.env`, `settings.json`, `library_prefs.json`, `blocklist.json`). `0` disables scheduled backups — manual backup/restore in the Settings UI still work | `86400` (24h) |
+| `CONFIG_BACKUP_RETENTION` | Number of scheduled backup archives to retain. Older ones are pruned after each run | `7` |
+| `CONFIG_BACKUP_DIR` | Directory that receives scheduled backup archives. Pre-restore snapshots also land here (under `pre-restore-<timestamp>/` subdirs) | `/config/backups` |
 | `MOUNT_LIVENESS_INTERVAL` | Minutes between rclone mount liveness probes | `5` |
 
 ---

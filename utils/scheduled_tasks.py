@@ -745,47 +745,41 @@ def detect_stale_grabs():
 # ---------------------------------------------------------------------------
 
 def config_backup():
-    """Backup .env and settings files to a timestamped directory."""
-    backup_root = os.environ.get('CONFIG_BACKUP_DIR', '/config/backups')
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    backup_dir = os.path.join(backup_root, timestamp)
+    """Write a tar.gz backup archive to /config/backups/ and prune old ones.
 
-    files_to_backup = [
-        ('/config/.env', '.env'),
-        ('/config/settings.json', 'settings.json'),
-        ('/config/preferences.json', 'preferences.json'),
-        ('/config/blocklist.json', 'blocklist.json'),
-        ('/config/history.jsonl', 'history.jsonl'),
-    ]
+    Archive bundles .env, settings.json, library_prefs.json, blocklist.json
+    with a manifest for restore.  Retention is controlled by
+    ``CONFIG_BACKUP_RETENTION`` (default 7).  Pruning only touches files
+    matching the archive filename pattern — pre-restore snapshot dirs
+    under the same /config/backups/ are left alone.
+    """
+    from utils import backup as _backup
 
-    backed_up = 0
+    backup_dir = os.environ.get('CONFIG_BACKUP_DIR', _backup.DEFAULT_BACKUP_DIR)
     try:
-        os.makedirs(backup_dir, exist_ok=True)
-        for src, dst_name in files_to_backup:
-            if os.path.isfile(src):
-                shutil.copy2(src, os.path.join(backup_dir, dst_name))
-                backed_up += 1
+        keep = max(1, int(os.environ.get('CONFIG_BACKUP_RETENTION', '7')))
+    except ValueError:
+        keep = 7
+
+    try:
+        archive = _backup.create_backup_file(
+            config_dir=_backup.DEFAULT_CONFIG_DIR, backup_dir=backup_dir
+        )
     except Exception as e:
         logger.error(f"[scheduler] Config backup failed: {e}")
         return {'status': 'error', 'message': str(e)}
 
-    # Prune old backups (keep last 7)
+    pruned = 0
     try:
-        if os.path.isdir(backup_root):
-            backups = sorted(
-                e for e in os.listdir(backup_root)
-                if os.path.isdir(os.path.join(backup_root, e))
-            )
-            while len(backups) > 7:
-                old = backups.pop(0)
-                old_path = os.path.join(backup_root, old)
-                if os.path.isdir(old_path):
-                    shutil.rmtree(old_path, ignore_errors=True)
-                    logger.debug(f"[scheduler] Pruned old backup: {old}")
+        pruned = _backup.prune_old_backups(backup_dir, keep=keep)
     except Exception as e:
         logger.warning(f"[scheduler] Error pruning old backups: {e}")
 
-    return {'status': 'success', 'message': f'Backed up {backed_up} files', 'items': backed_up}
+    size = archive.stat().st_size if archive.exists() else 0
+    msg = f'Wrote {archive.name} ({size} bytes)'
+    if pruned:
+        msg += f', pruned {pruned}'
+    return {'status': 'success', 'message': msg, 'items': 1}
 
 
 # ---------------------------------------------------------------------------
@@ -1076,13 +1070,20 @@ def register_all():
 
     # Priority 3 — Nice to Have
 
-    scheduler.register(
-        'config_backup',
-        config_backup,
-        interval_seconds=_get_interval('CONFIG_BACKUP_INTERVAL'),
-        description='Backup .env and settings files',
-        initial_delay=300,  # 5 min after startup
-    )
+    # CONFIG_BACKUP_INTERVAL=0 disables scheduled backups (manual
+    # backup/restore via the Settings UI still work).  Any other value is
+    # seconds; empty falls back to the _DEFAULTS entry (24h).
+    backup_interval = _get_interval('CONFIG_BACKUP_INTERVAL')
+    if backup_interval > 0:
+        scheduler.register(
+            'config_backup',
+            config_backup,
+            interval_seconds=backup_interval,
+            description='Archive .env, settings.json, library_prefs.json, blocklist.json to /config/backups/',
+            initial_delay=300,  # 5 min after startup
+        )
+    else:
+        logger.info('[scheduler] Scheduled config backups disabled (CONFIG_BACKUP_INTERVAL=0)')
 
     # Mount liveness — register if rclone is configured (mount may not exist yet at startup)
     rclone_configured = os.environ.get('RCLONE_MOUNT_NAME', '') or os.environ.get('BLACKHOLE_RCLONE_MOUNT', '')

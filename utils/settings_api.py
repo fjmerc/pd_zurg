@@ -241,6 +241,14 @@ ENV_SCHEMA = [
             ('SKIP_VALIDATION', 'Skip Validation', 'boolean', False, 'Skip startup config validation checks'),
         ],
     },
+    {
+        'name': 'Backups',
+        'description': 'Scheduled config backups (archive: .env, settings.json, library_prefs.json, blocklist.json)',
+        'fields': [
+            ('CONFIG_BACKUP_INTERVAL', 'Backup Interval (seconds)', 'number:0-604800', False, 'Seconds between scheduled config backups. 0 disables scheduled backups (manual backup/restore still work). Default 86400 (24h).'),
+            ('CONFIG_BACKUP_RETENTION', 'Retention Count', 'number:1-1000', False, 'Number of scheduled backups to keep. Older archives are pruned after each run. Default 7.'),
+        ],
+    },
 ]
 
 # All known env var keys from the schema
@@ -270,6 +278,11 @@ _ENV_DEFAULTS = {
     # rely on the protection without ever setting the var.
     'SEARCH_DEDUP_ENABLED': 'true',
     'BLACKHOLE_DEBRID_DEDUP_ENABLED': 'true',
+    # Config backup retention default matches base/__init__.py Config.load().
+    # Interval is omitted here because the scheduler's own default (86400s)
+    # applies when the env var is empty; surfacing a non-empty UI default
+    # would pin the value into .env on first save.
+    'CONFIG_BACKUP_RETENTION': '7',
 }
 
 # Sensitive key patterns — values should be masked in certain contexts

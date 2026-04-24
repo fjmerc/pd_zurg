@@ -124,8 +124,14 @@ def library_scan():
     duration_ms = data.get('scan_duration_ms', 0)
 
     if _history:
+        # Symlinks-created count isn't returned by scan() today; the scanner
+        # logs per-title symlink_created events separately, so leave it 0
+        # here rather than fabricate.
         _history.log_event('task_completed', 'Library Scan', source='scheduler',
-                           detail=f'{movies} movies, {shows} shows ({duration_ms}ms)')
+                           detail=f'{movies} movies, {shows} shows ({duration_ms}ms)',
+                           meta={'cause': 'task_library_scan',
+                                 'movies': movies, 'shows': shows,
+                                 'duration_ms': duration_ms})
 
     return {
         'status': 'success',
@@ -277,7 +283,8 @@ def _attempt_arr_research(release_name):
                         _retrigger_history[item_key] = now_epoch
 
         if target_eps:
-            client.search_episodes(target_eps, media_title=name)
+            client.search_episodes(target_eps, media_title=name,
+                                   cause='symlink_repair_research')
             s_label = f'S{season:02d}' if season is not None else 'all'
             logger.info(
                 f"[scheduler] Repair: triggered Sonarr search for '{name}' "
@@ -299,7 +306,8 @@ def _attempt_arr_research(release_name):
             return False
 
         _retrigger_history[item_key] = now_epoch
-        client.search_movie(movie['id'], media_title=name)
+        client.search_movie(movie['id'], media_title=name,
+                            cause='symlink_repair_research')
         logger.info(f"[scheduler] Repair: triggered Radarr search for '{name}'")
         return True
 
@@ -463,7 +471,12 @@ def verify_symlinks():
     if repaired or searched or deleted:
         if _history:
             _history.log_event('repair' if repaired or searched else 'cleanup',
-                               'Symlink Verify', source='scheduler', detail=msg)
+                               'Symlink Verify', source='scheduler', detail=msg,
+                               meta={'cause': 'task_verify_symlinks',
+                                     'repaired': repaired,
+                                     'searched': searched,
+                                     'deleted': deleted,
+                                     'checked': checked})
         if repaired or searched:
             try:
                 from utils.notifications import notify
@@ -626,7 +639,9 @@ def housekeeping():
 
     if cleaned and _history:
         _history.log_event('task_completed', 'Housekeeping', source='scheduler',
-                           detail=f'Cleaned {cleaned} item(s)')
+                           detail=f'Cleaned {cleaned} item(s)',
+                           meta={'cause': 'task_housekeeping',
+                                 'cleaned': cleaned})
 
     return {'status': 'success', 'message': f'Cleaned {cleaned} items', 'items': cleaned}
 
@@ -720,13 +735,15 @@ def detect_stale_grabs():
                     f"[scheduler] Stale grab detected: {source_title} "
                     f"(S{sn:02d}E{en:02d}, grabbed {int(age_minutes)}m ago) — re-triggering search"
                 )
-                client.search_episodes([ep_id], media_title=source_title)
+                client.search_episodes([ep_id], media_title=source_title,
+                                       cause='stale_grab_retry')
             else:
                 logger.info(
                     f"[scheduler] Stale grab detected: {source_title} "
                     f"(grabbed {int(age_minutes)}m ago) — re-triggering search"
                 )
-                client.search_movie(movie_id, media_title=source_title)
+                client.search_movie(movie_id, media_title=source_title,
+                                    cause='stale_grab_retry')
 
             _retrigger_history[item_key] = now_epoch
             searches_triggered += 1
@@ -736,7 +753,10 @@ def detect_stale_grabs():
         msg += f', re-triggered {searches_triggered} searches'
         if _history:
             _history.log_event('task_completed', 'Stale Grab Detection', source='scheduler',
-                               detail=msg)
+                               detail=msg,
+                               meta={'cause': 'task_stale_grab_detection',
+                                     'stale_found': stale_found,
+                                     'searches_triggered': searches_triggered})
     return {'status': 'success', 'message': msg, 'items': stale_found}
 
 

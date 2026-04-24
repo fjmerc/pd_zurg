@@ -8,6 +8,7 @@ the Sonarr/Radarr-style page-per-concern layout.
 
 def get_activity_html():
     """Return the complete activity page HTML with shared CSS and nav."""
+    from utils.activity_format import FORMATTER_JS
     from utils.ui_common import (get_base_head, get_nav_html, THEME_TOGGLE_JS,
                                  WANTED_BADGE_JS, KEYBOARD_JS, TOAST_JS)
     html = _ACTIVITY_HTML
@@ -15,7 +16,7 @@ def get_activity_html():
                                                        _ACTIVITY_EXTRA_CSS))
     html = html.replace('__NAV_HTML__', get_nav_html('activity'))
     html = html.replace('__THEME_TOGGLE_JS__',
-                        THEME_TOGGLE_JS + KEYBOARD_JS + TOAST_JS)
+                        THEME_TOGGLE_JS + KEYBOARD_JS + TOAST_JS + FORMATTER_JS)
     html = html.replace('__WANTED_BADGE_JS__', WANTED_BADGE_JS)
     return html
 
@@ -68,6 +69,10 @@ __NAV_HTML__
       <option value="blocklist_added">Auto-Blocked</option>
     </select>
     <input type="text" id="activity-search" data-kb="search" placeholder="Search titles... (/)" oninput="loadActivity(1)" style="flex:1;background:var(--input-bg);border:1px solid var(--input-border);border-radius:4px;padding:4px 8px;font-size:.8em;color:var(--text);outline:none;min-width:120px">
+    <label style="font-size:.78em;color:var(--text2);display:inline-flex;align-items:center;gap:4px;user-select:none">
+      <input type="checkbox" id="activity-collapse" checked onchange="loadActivity()" style="margin:0">
+      Collapse repeats
+    </label>
     <button class="btn btn-ghost btn-sm" onclick="clearHistory()" id="activity-clear-btn" style="display:none">Clear</button>
     <button class="btn btn-ghost btn-sm" data-kb="refresh" onclick="loadActivity()">Refresh</button>
   </div>
@@ -113,11 +118,45 @@ function loadActivity(page){
   fetch(url).then(function(r){return r.json()}).then(function(d){
     var el=document.getElementById('activity-body');
     if(!d.events||!d.events.length){el.innerHTML='<tr><td colspan="5" style="color:var(--text3);text-align:center;padding:16px">No activity recorded yet</td></tr>';document.getElementById('activity-pager').innerHTML='';return}
-    var h='';
-    d.events.forEach(function(e){
+    /* Collapse adjacent (type, source, cause, media) runs into one summary
+       row when "Collapse repeats" is on.  Threshold 3 keeps distinct
+       events visible while taming the 6-hour retry spam on long-unmet
+       items.  Events arrive newest-first. */
+    var collapse = (document.getElementById('activity-collapse')||{}).checked !== false;
+    var GROUP_MIN = 3;
+    function spanHuman(firstTs, lastTs){
+      var first = Date.parse(firstTs), last = Date.parse(lastTs);
+      if (isNaN(first) || isNaN(last) || first <= last) return '';
+      var sec = Math.floor((first - last) / 1000);
+      if (sec < 3600) return Math.max(1, Math.floor(sec/60)) + 'm';
+      if (sec < 86400) return Math.floor(sec/3600) + 'h';
+      return Math.floor(sec/86400) + 'd';
+    }
+    var runs = [];
+    if (collapse && window._formatActivityEvent) {
+      for (var i=0;i<d.events.length;i++){
+        var _ev = d.events[i];
+        var gk = window._formatActivityEvent(_ev).groupKey;
+        var _last = runs[runs.length-1];
+        if (_last && _last.groupKey === gk){ _last.events.push(_ev); continue; }
+        runs.push({groupKey: gk, events: [_ev]});
+      }
+    } else {
+      for (var j=0;j<d.events.length;j++) runs.push({groupKey:'', events:[d.events[j]]});
+    }
+    function rowFor(e, runInfo){
       var icon=_actIcons[e.type]||'\u2022';
-      h+='<tr><td style="font-size:.8em;color:var(--text3);white-space:nowrap">'+timeAgo(e.ts)+'</td>';
-      h+='<td><span class="type-badge type-'+esc(e.type)+'">'+icon+' '+esc(e.type.replace(/_/g,' '))+'</span></td>';
+      var fmt = window._formatActivityEvent ? window._formatActivityEvent(e) : {short: e.detail||''};
+      var timeCell;
+      if (runInfo){
+        var sp = spanHuman(runInfo.events[0].ts, runInfo.events[runInfo.events.length-1].ts);
+        timeCell = sp ? ('over ' + esc(sp)) : timeAgo(e.ts);
+      } else {
+        timeCell = timeAgo(e.ts);
+      }
+      var countBadge = runInfo ? (' <span class="act-run-count">' + runInfo.events.length + '×</span>') : '';
+      var row='<tr><td style="font-size:.8em;color:var(--text3);white-space:nowrap">'+timeCell+'</td>';
+      row+='<td><span class="type-badge type-'+esc(e.type)+'">'+icon+' '+esc(e.type.replace(/_/g,' '))+countBadge+'</span></td>';
       /* Link titles to the library detail page when we have a canonical
          name: either the event was enriched with media_title (blackhole/arr),
          or it came from the library scanner where title is already canonical.
@@ -127,9 +166,18 @@ function loadActivity(page){
       var _canLink=!!e.media_title||e.source==='library';
       var _mediaType=(e.title&&/^Sonarr /.test(e.title))||e.episode?'show':(e.title&&/^Radarr /.test(e.title))?'movie':'movie';
       var _titleCell=_canLink&&_name?'<a class="act-link" href="/library?detail='+encodeURIComponent(_name)+'&type='+_mediaType+'&from=activity">'+esc(_name)+'</a>':esc(_name);
-      h+='<td style="font-size:.85em">'+_titleCell+(e.episode?' <span style="color:var(--text2)">'+esc(e.episode)+'</span>':'')+'</td>';
-      h+='<td style="font-size:.8em;color:var(--text2)">'+esc(e.detail||'')+'</td>';
-      h+='<td style="font-size:.75em;color:var(--text3)">'+esc(e.source||'')+'</td></tr>';
+      row+='<td style="font-size:.85em">'+_titleCell+(e.episode?' <span style="color:var(--text2)">'+esc(e.episode)+'</span>':'')+'</td>';
+      row+='<td style="font-size:.8em;color:var(--text2)">'+esc(fmt.short||e.detail||'')+'</td>';
+      row+='<td style="font-size:.75em;color:var(--text3)">'+esc(e.source||'')+'</td></tr>';
+      return row;
+    }
+    var h='';
+    runs.forEach(function(r){
+      if (r.events.length >= GROUP_MIN){
+        h += rowFor(r.events[0], r);
+      } else {
+        for (var q=0;q<r.events.length;q++) h += rowFor(r.events[q], null);
+      }
     });
     el.innerHTML=h;
     /* Pager — windowed: first, ±2 around current, last, with ellipsis gaps */
@@ -242,6 +290,7 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .act-link{color:inherit;text-decoration:none;border-bottom:1px dotted var(--text3);transition:color var(--motion-fast),border-color var(--motion-fast)}
 .act-link:hover{color:var(--blue);border-bottom-color:var(--blue);text-decoration:none}
 .type-badge{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-size:.75em;font-weight:500;white-space:nowrap}
+.act-run-count{display:inline-block;padding:0 5px;margin-left:4px;border-radius:3px;font-size:.78em;font-weight:600;background:var(--border);color:var(--text);font-family:monospace}
 .type-grabbed{background:#58a6ff1a;color:var(--blue)}.type-cached{background:#3fb9501a;color:var(--green)}.type-symlink_created{background:#bc8cff1a;color:#bc8cff}.type-failed{background:#f851491a;color:var(--red)}.type-cleanup{background:#d299221a;color:var(--yellow)}.type-switched_source{background:#db6d281a;color:var(--orange)}.type-search_triggered{background:#58a6ff1a;color:var(--blue)}.type-rescan_triggered{background:#3fb9501a;color:var(--green)}.type-task_completed{background:var(--border);color:var(--text2)}.type-blocklisted{background:#f851491a;color:var(--red)}.type-blocklist_added{background:#db6d281a;color:var(--orange)}
 #activity-search:focus{border-color:var(--input-focus)}
 .footer{display:flex;justify-content:flex-end;align-items:center;gap:8px;color:var(--text3);font-size:.78em}

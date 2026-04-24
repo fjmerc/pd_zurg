@@ -1648,7 +1648,9 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                         episode_str = f'S{season:02d}' if service_name == 'sonarr' else None
                         _hist.log_event('local_fallback_triggered', title,
                                         episode=episode_str, source='library',
-                                        detail=f'Local fallback download via {service_name}')
+                                        detail=f'Local fallback download via {service_name}',
+                                        meta={'cause': 'local_fallback_grab',
+                                              'arr_service': service_name})
                     except Exception:
                         pass
 
@@ -2162,7 +2164,10 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     try:
                         from utils import history as _hist
                         _hist.log_event('arr_deleted', title, source='library',
-                                        detail=f'Deleted from {service_name}')
+                                        detail=f'Deleted from {service_name}',
+                                        meta={'cause': 'arr_deleted_user',
+                                              'arr_service': service_name,
+                                              'reason': 'user_request'})
                     except Exception:
                         pass
                     if cleanup:

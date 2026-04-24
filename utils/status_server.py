@@ -2263,6 +2263,18 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                         'error': f'Archive exceeds size cap ({content_length} > {_backup.MAX_ARCHIVE_BYTES})'
                     }))
                     return
+                # Content-Type check: reject obviously-wrong uploads up front
+                # rather than relying on the tar/gz parser to fail mid-stream.
+                # Accept application/gzip (what the UI sends) and the common
+                # generic octet-stream; tolerate absent header for curl users.
+                ctype = (self.headers.get('Content-Type') or '').lower().split(';')[0].strip()
+                if ctype and ctype not in ('application/gzip', 'application/x-gzip',
+                                            'application/octet-stream'):
+                    self._send_json_response(415, json.dumps({
+                        'error': f'Unsupported Content-Type: {ctype!r}. '
+                                 'Expected application/gzip.'
+                    }))
+                    return
                 body = self.rfile.read(content_length)
                 try:
                     result = _backup.restore_from_blob(body)
@@ -2308,6 +2320,9 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
         if self.path == '/api/settings/oauth/start':
             try:
                 content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 100_000:
+                    self._send_json_response(413, json.dumps({'error': 'Request body too large'}))
+                    return
                 body = self.rfile.read(content_length)
                 data = json.loads(body.decode('utf-8'))
                 service = data.get('service', '')
@@ -2324,6 +2339,9 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
         if self.path == '/api/settings/oauth/poll':
             try:
                 content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 100_000:
+                    self._send_json_response(413, json.dumps({'error': 'Request body too large'}))
+                    return
                 body = self.rfile.read(content_length)
                 data = json.loads(body.decode('utf-8'))
                 service = data.get('service', '')

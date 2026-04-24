@@ -429,6 +429,17 @@ class TestValidateEnvValues:
         result = validate_env_values({'RCLONE_LOG_LEVEL': 'NOTICE'})
         assert result['warnings'] == []
 
+    def test_rclone_log_level_warning_rejected(self):
+        # rclone uses NOTICE, not WARNING — its allowed set is distinct
+        # from Python's logging module.
+        result = validate_env_values({'RCLONE_LOG_LEVEL': 'WARNING'})
+        assert any('RCLONE_LOG_LEVEL' in w for w in result['warnings'])
+
+    def test_pd_log_level_critical_ok(self):
+        # CRITICAL is a valid Python log level and is now in the PD select.
+        result = validate_env_values({'PD_LOG_LEVEL': 'CRITICAL'})
+        assert result['warnings'] == []
+
     def test_zurg_log_level_notice_warns(self):
         result = validate_env_values({'ZURG_LOG_LEVEL': 'NOTICE'})
         assert any('ZURG_LOG_LEVEL' in w for w in result['warnings'])

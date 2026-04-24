@@ -1026,14 +1026,18 @@ function collectPdData() {
     if (!listKeys.has(key)) { listKeys.add(key); data[key] = []; }
     if (inp.value.trim()) data[key].push(inp.value.trim());
   });
-  // List of pairs
+  // List of pairs — skip wholly-blank rows (mirrors list_strings behavior)
+  // so a freshly-added unfilled row doesn't flag the tab as dirty or land
+  // a ["", ""] entry in the saved settings.
   document.querySelectorAll('#tab-pd [data-pdtype="list_pairs"]').forEach(container => {
     const key = container.dataset.pdkey;
     data[key] = [];
     container.querySelectorAll('.list-row').forEach(row => {
       const inputs = row.querySelectorAll('input');
       if (inputs.length >= 2) {
-        data[key].push([inputs[0].value, inputs[1].value]);
+        const a = inputs[0].value;
+        const b = inputs[1].value;
+        if (a.trim() || b.trim()) data[key].push([a, b]);
       }
     });
   });
@@ -1547,18 +1551,46 @@ function getEnvChangedFields() {
   return changes;
 }
 
+// Empty value for a given plex_debrid schema field. Matches what
+// collectPdData() emits when the DOM has no user-supplied value, so
+// fields missing from the saved settings.json (or saved as []) don't
+// appear falsely dirty on first render. Versions is keyed explicitly
+// because collectPdData emits _versionsData ([] by default) for it.
+function pdEmptyForField(field) {
+  switch (field.type) {
+    case 'multiselect':
+    case 'radio':
+    case 'list_strings':
+    case 'list_pairs':
+      return [];
+    case 'boolean_str':
+      return 'false';
+    case 'string':
+    case 'secret':
+    case 'select':
+      return '';
+    case 'json':
+      return field.key === 'Versions' ? [] : null;
+    default:
+      return null;
+  }
+}
+
 function getPdChangedFields() {
   const changes = new Set();
   try {
     const current = collectPdData();
-    const allKeys = new Set([...Object.keys(current), ...Object.keys(pdValues)]);
-    allKeys.forEach(key => {
-      const a = key in current ? current[key] : null;
-      const b = key in pdValues ? pdValues[key] : null;
+    PD_SCHEMA.categories.forEach(cat => cat.fields.forEach(f => {
+      if (f.type === 'hidden') return;
+      const empty = pdEmptyForField(f);
+      const rawA = f.key in current ? current[f.key] : undefined;
+      const rawB = f.key in pdValues ? pdValues[f.key] : undefined;
+      const a = (rawA === undefined || rawA === null) ? empty : rawA;
+      const b = (rawB === undefined || rawB === null) ? empty : rawB;
       if (JSON.stringify(a) !== JSON.stringify(b)) {
-        changes.add(key);
+        changes.add(f.key);
       }
-    });
+    }));
   } catch(e) { /* form not ready yet */ }
   return changes;
 }

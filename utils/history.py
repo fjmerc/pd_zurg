@@ -2,6 +2,11 @@
 
 Logs pipeline events (grabs, symlinks, failures, etc.) to a JSONL file
 for querying via API and display in the dashboard Activity tab.
+
+Callers pass a stable ``meta['cause']`` slug from the CAUSE_* constants
+below; the UI builds the human-readable detail from meta. The free-form
+``detail`` string is only kept for backward-compat with events written
+before the cause vocabulary existed.
 """
 
 import json
@@ -18,6 +23,61 @@ logger = get_logger()
 _file_path = None
 _lock = threading.Lock()
 _retention_days = 30
+
+
+# ---------------------------------------------------------------------------
+# Cause vocabulary — stable slugs attached to events via ``meta['cause']``.
+# The UI translates these to human strings; never rename an existing slug
+# without also updating utils/activity_format.py and the JS mirror.
+# ---------------------------------------------------------------------------
+
+# Acquisition
+CAUSE_BLACKHOLE_NEW_IMPORT = 'blackhole_new_import'
+CAUSE_BLACKHOLE_CACHE_HIT = 'blackhole_cache_hit'
+CAUSE_BLACKHOLE_GRAB_SUBMITTED = 'blackhole_grab_submitted'
+CAUSE_LIBRARY_NEW_IMPORT = 'library_new_import'
+CAUSE_LIBRARY_UPGRADE_REPLACED = 'library_upgrade_replaced'
+CAUSE_LIBRARY_STATE_INIT = 'library_state_init'
+CAUSE_COMPROMISE_GRAB = 'compromise_grab'
+
+# Failure
+CAUSE_DEBRID_ADD_FAILED = 'debrid_add_failed'
+CAUSE_SYMLINK_CREATE_FAILED = 'symlink_create_failed'
+CAUSE_DISC_RIP_REJECTED = 'disc_rip_rejected'
+CAUSE_TERMINAL_ERROR = 'terminal_error'
+CAUSE_UNCACHED_TIMEOUT = 'uncached_timeout'
+CAUSE_UNCACHED_REJECTED = 'uncached_rejected'
+CAUSE_INCOMPLETE_RELEASE = 'incomplete_release'
+CAUSE_ALTS_EXHAUSTED = 'alts_exhausted'
+CAUSE_DUPLICATE_SKIPPED = 'duplicate_skipped'
+CAUSE_BLOCKLISTED_HASH = 'blocklisted_hash'
+CAUSE_DEBRID_UNAVAILABLE_MARKED = 'debrid_unavailable_marked'
+CAUSE_DEBRID_ADD_VIA_SEARCH = 'debrid_add_via_search'
+
+# Action
+CAUSE_POST_SYMLINK_RESCAN = 'post_symlink_rescan'
+CAUSE_POST_GRAB_RESCAN = 'post_grab_rescan'
+CAUSE_USER_TRIGGERED_RESCAN = 'user_triggered_rescan'
+CAUSE_USER_TRIGGERED_SEARCH = 'user_triggered_search'
+CAUSE_ROUTING_AUDIT_RETRY = 'routing_audit_retry'
+CAUSE_STALE_GRAB_RETRY = 'stale_grab_retry'
+CAUSE_SYMLINK_REPAIR_RESEARCH = 'symlink_repair_research'
+CAUSE_PREFERENCE_ENFORCE_SEARCH = 'preference_enforce_search'
+CAUSE_LOCAL_FALLBACK_GRAB = 'local_fallback_grab'
+
+# Management
+CAUSE_PREFERENCE_SOURCE_SWITCH = 'preference_source_switch'
+CAUSE_ROUTING_REPAIRED = 'routing_repaired'
+CAUSE_ARR_DELETED_USER = 'arr_deleted_user'
+CAUSE_ARR_DELETED_CLEANUP = 'arr_deleted_cleanup'
+CAUSE_AUTO_BLOCKLIST_ADDED = 'auto_blocklist_added'
+
+# Scheduler / tasks
+CAUSE_TASK_LIBRARY_SCAN = 'task_library_scan'
+CAUSE_TASK_HOUSEKEEPING = 'task_housekeeping'
+CAUSE_TASK_STALE_GRAB_DETECTION = 'task_stale_grab_detection'
+CAUSE_TASK_ROUTING_AUDIT = 'task_routing_audit'
+CAUSE_TASK_VERIFY_SYMLINKS = 'task_verify_symlinks'
 
 
 def init(config_dir='/config'):
@@ -39,13 +99,22 @@ def log_event(type, title, episode=None, detail='', source='', meta=None, media_
         type: Event type (grabbed, cached, failed, symlink_created, cleanup, etc.)
         title: Media title or technical identifier (e.g. torrent filename)
         episode: Episode identifier (e.g. "S01E05") or None for movies
-        detail: Human-readable detail string
+        detail: Human-readable detail string (backward-compat fallback;
+            prefer ``meta['cause']`` from the CAUSE_* vocab above — the UI
+            builds the rendered detail from meta when present)
         source: Origin of the event (blackhole, library, arr, scheduler)
-        meta: Optional dict of extra structured data
+        meta: Optional dict of extra structured data. Canonical keys:
+            cause, file, quality, size_bytes, cycle_n, cycle_first_ts,
+            linked_to, replaces, command_id, arr_service, prior_event_id,
+            provider, info_hash, age_days, search_attempts.
         media_title: Canonical show/movie name for matching on detail pages
+
+    Returns:
+        The event id (uuid string) on success, or None if history is
+        uninitialised or the write failed.
     """
     if _file_path is None:
-        return
+        return None
 
     event = {
         'id': str(uuid.uuid4()),
@@ -72,6 +141,8 @@ def log_event(type, title, episode=None, detail='', source='', meta=None, media_
                 f.write(line)
         except OSError as e:
             logger.error(f"[history] Failed to write event: {e}")
+            return None
+    return event['id']
 
 
 def query(type=None, title=None, start=None, end=None, page=1, limit=50):

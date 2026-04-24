@@ -54,6 +54,40 @@ class TestLogEvent:
         history._file_path = None
         history.log_event('grabbed', 'Test')  # should not raise
 
+    def test_log_event_returns_event_id(self, tmp_dir):
+        """Callers chain events via the returned id (symlink → rescan)."""
+        history.init(tmp_dir)
+        ev_id = history.log_event(
+            'symlink_created', 'Guardians of the Galaxy', source='library',
+            meta={'cause': 'library_new_import', 'file': 'x.mkv'})
+        assert ev_id
+        assert isinstance(ev_id, str)
+
+    def test_log_event_none_when_uninitialised(self):
+        """Returning None (not raising) keeps callers simple before init."""
+        history._file_path = None
+        assert history.log_event('grabbed', 'Test') is None
+
+    def test_legacy_event_without_meta_still_renders(self, tmp_dir):
+        """Events written before the cause vocab must still format cleanly."""
+        fpath = os.path.join(tmp_dir, 'history.jsonl')
+        legacy = {'id': 'old', 'ts': '2026-04-17T10:22:49+00:00',
+                  'type': 'symlink_created',
+                  'title': 'Guardians of the Galaxy',
+                  'detail': 'Debrid symlink(s) created in local library',
+                  'source': 'library'}
+        with open(fpath, 'w') as f:
+            f.write(json.dumps(legacy) + '\n')
+
+        history.init(tmp_dir)
+        r = history.query()
+        assert r['total'] == 1
+        assert r['events'][0]['detail'] == 'Debrid symlink(s) created in local library'
+
+        from utils.activity_format import format_event
+        assert format_event(r['events'][0])['short'] == (
+            'Debrid symlink(s) created in local library')
+
 
 class TestQueryAll:
     """F5.4 — test_query_all: log 5 events, query all, verify order (newest first)."""

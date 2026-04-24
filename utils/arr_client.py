@@ -741,6 +741,10 @@ class SonarrClient(_ArrClientBase):
                 f'Sonarr auto-tagged {len(tagged_ids)} series',
                 source='scheduler',
                 detail=f'Applied debrid tag + triggered {search_count} search(es)',
+                meta={'cause': 'routing_repaired',
+                      'arr_service': 'sonarr',
+                      'tagged_count': len(tagged_ids),
+                      'search_count': search_count},
             )
 
     def _clear_stale_queue_items(self, client_names):
@@ -1043,8 +1047,15 @@ class SonarrClient(_ArrClientBase):
                     if isinstance(r, dict) and r.get('eventType') == 'grabbed']
         return []
 
-    def search_episodes(self, episode_ids, media_title=None):
+    def search_episodes(self, episode_ids, media_title=None, cause=None):
         """Trigger a search for specific episodes by their Sonarr episode IDs.
+
+        Args:
+            episode_ids: list of Sonarr episode ids.
+            media_title: canonical show name for the activity feed.
+            cause: cause slug from utils.history (CAUSE_*). Callers should
+                pass the reason they are firing the search so the UI can
+                explain why it ran (scheduled retry, user click, etc.).
 
         Returns the command dict or None.
         """
@@ -1055,20 +1066,49 @@ class SonarrClient(_ArrClientBase):
             'episodeIds': episode_ids,
         })
         if result and _history:
+            from utils import retry_counter
+            meta = {'arr_service': 'sonarr',
+                    'command_id': result.get('id'),
+                    'episode_count': len(episode_ids)}
+            if cause:
+                meta['cause'] = cause
+            # Track retries per (series, season) when possible; fall back to
+            # the episode-id tuple.  Only meaningful for repeat-retry causes.
+            if cause in ('routing_audit_retry', 'stale_grab_retry',
+                         'symlink_repair_research', 'preference_enforce_search'):
+                key_id = ('episodes', tuple(sorted(episode_ids)))
+                count, first_ts = retry_counter.bump('sonarr', key_id)
+                meta['cycle_n'] = count
+                meta['cycle_first_ts'] = first_ts
             _history.log_event('search_triggered', f'Sonarr episodes {episode_ids}',
-                               source='arr', detail=f'EpisodeSearch for {len(episode_ids)} episode(s)',
+                               source='arr',
+                               detail=f'EpisodeSearch for {len(episode_ids)} episode(s)',
+                               meta=meta,
                                media_title=media_title)
         return result
 
-    def rescan_series(self, series_id, media_title=None):
-        """Trigger a disk rescan for a series so Sonarr picks up new files."""
+    def rescan_series(self, series_id, media_title=None, cause=None,
+                      prior_event_id=None):
+        """Trigger a disk rescan for a series so Sonarr picks up new files.
+
+        Args:
+            cause: cause slug (CAUSE_POST_SYMLINK_RESCAN etc.).
+            prior_event_id: id of the event that motivated this rescan
+                (e.g. the symlink_created event) so the UI can chain them.
+        """
         result = self._post('/api/v3/command', {
             'name': 'RescanSeries',
             'seriesId': series_id,
         })
         if result and _history:
+            meta = {'arr_service': 'sonarr', 'command_id': result.get('id')}
+            if cause:
+                meta['cause'] = cause
+            if prior_event_id:
+                meta['prior_event_id'] = prior_event_id
             _history.log_event('rescan_triggered', f'Sonarr series {series_id}',
                                source='arr', detail='RescanSeries',
+                               meta=meta,
                                media_title=media_title)
         return result
 
@@ -1712,6 +1752,10 @@ class RadarrClient(_ArrClientBase):
                 f'Radarr auto-tagged {len(tagged_ids)} movie(s)',
                 source='scheduler',
                 detail=f'Applied debrid tag + triggered {search_count} search(es)',
+                meta={'cause': 'routing_repaired',
+                      'arr_service': 'radarr',
+                      'tagged_count': len(tagged_ids),
+                      'search_count': search_count},
             )
 
     def _clear_stale_queue_items(self, client_names):
@@ -2003,8 +2047,12 @@ class RadarrClient(_ArrClientBase):
                     if isinstance(r, dict) and r.get('eventType') == 'grabbed']
         return []
 
-    def search_movie(self, movie_id, media_title=None):
+    def search_movie(self, movie_id, media_title=None, cause=None):
         """Trigger a search for a specific movie.
+
+        Args:
+            cause: cause slug (CAUSE_ROUTING_AUDIT_RETRY etc.) — drives the
+                retry cycle counter and the UI explanation string.
 
         Returns the command dict or None.
         """
@@ -2013,20 +2061,37 @@ class RadarrClient(_ArrClientBase):
             'movieIds': [movie_id],
         })
         if result and _history:
+            from utils import retry_counter
+            meta = {'arr_service': 'radarr', 'command_id': result.get('id')}
+            if cause:
+                meta['cause'] = cause
+            if cause in ('routing_audit_retry', 'stale_grab_retry',
+                         'symlink_repair_research', 'preference_enforce_search'):
+                count, first_ts = retry_counter.bump('radarr', movie_id)
+                meta['cycle_n'] = count
+                meta['cycle_first_ts'] = first_ts
             _history.log_event('search_triggered', f'Radarr movie {movie_id}',
                                source='arr', detail='MoviesSearch',
+                               meta=meta,
                                media_title=media_title)
         return result
 
-    def rescan_movie(self, movie_id, media_title=None):
+    def rescan_movie(self, movie_id, media_title=None, cause=None,
+                     prior_event_id=None):
         """Trigger a disk rescan for a movie so Radarr picks up new files."""
         result = self._post('/api/v3/command', {
             'name': 'RescanMovie',
             'movieId': movie_id,
         })
         if result and _history:
+            meta = {'arr_service': 'radarr', 'command_id': result.get('id')}
+            if cause:
+                meta['cause'] = cause
+            if prior_event_id:
+                meta['prior_event_id'] = prior_event_id
             _history.log_event('rescan_triggered', f'Radarr movie {movie_id}',
                                source='arr', detail='RescanMovie',
+                               meta=meta,
                                media_title=media_title)
         return result
 

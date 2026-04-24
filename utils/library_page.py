@@ -14,10 +14,12 @@ def get_library_html(current_page='library'):
     """
     from utils.ui_common import (get_base_head, get_nav_html, THEME_TOGGLE_JS,
                                  KEYBOARD_JS, TOAST_JS)
+    from utils.activity_format import FORMATTER_JS
     html = _LIBRARY_HTML
     html = html.replace('__BASE_HEAD__', get_base_head('Zurgarr Library'))
     html = html.replace('__NAV_HTML__', get_nav_html(current_page))
-    html = html.replace('__THEME_TOGGLE_JS__', THEME_TOGGLE_JS + KEYBOARD_JS + TOAST_JS)
+    html = html.replace('__THEME_TOGGLE_JS__',
+                        THEME_TOGGLE_JS + KEYBOARD_JS + TOAST_JS + FORMATTER_JS)
     return html
 
 
@@ -222,6 +224,8 @@ __NAV_HTML__
 .hs-event-episode{display:inline-block;padding:1px 5px;border-radius:3px;font-size:.78em;font-weight:600;background:var(--border);color:var(--text2);margin-left:4px}
 .hs-event-detail{color:var(--text2);font-size:.92em;margin-top:1px;word-break:break-word}
 .hs-event-time{color:var(--text3);font-size:.82em;font-family:monospace}
+.hs-event-count{display:inline-block;padding:0 5px;border-radius:3px;font-size:.78em;font-weight:600;background:var(--border2);color:var(--text);margin-left:4px;font-family:monospace}
+.hs-event.hs-run{opacity:.95}
 
 /* Season accordion */
 .season-section{border:1px solid var(--border);border-radius:8px;margin-bottom:8px;overflow:hidden}
@@ -2786,6 +2790,10 @@ function hideDetail() {
   window.scrollTo(0, _librarySavedScrollY);
 }
 
+// Shared activity event formatter is installed on window by
+// utils/activity_format.FORMATTER_JS (interpolated into __THEME_TOGGLE_JS__).
+// window._formatActivityEvent(ev) -> {short, long, groupKey}.
+
 // Excluded from detail sidebar: system-level events, startup-skip events
 var _HS_EXCLUDE = {task_completed:1, cleanup:1, repair:1, blocklisted:1};
 var _HS_CATEGORIES = {
@@ -2878,31 +2886,92 @@ function _renderHistorySidebar(container, events) {
     container.innerHTML = '<h3>Activity</h3><div class="hs-empty">No activity recorded yet</div>';
     return;
   }
+  // Events arrive newest-first.  Collapse runs of adjacent events that share
+  // the same group_key (type+source+cause+media) into a single summary row.
+  // Collapse threshold: 3+ consecutive.  Each run keeps pointers to first
+  // and last ts so we can display "14\u00d7 over 3d".
+  var GROUP_MIN = 3;
+  function _dayKey(ts){ return (ts||'').slice(0, 10); }
+  function _spanHuman(firstTs, lastTs){
+    var first = Date.parse(firstTs), last = Date.parse(lastTs);
+    if (isNaN(first) || isNaN(last) || last <= first) return '';
+    var sec = Math.floor((last - first) / 1000);
+    if (sec < 3600) return Math.max(1, Math.floor(sec/60)) + 'm';
+    if (sec < 86400) return Math.floor(sec/3600) + 'h';
+    return Math.floor(sec/86400) + 'd';
+  }
+  var collapsed = [];
+  for (var i = 0; i < filtered.length; i++) {
+    var ev = filtered[i];
+    var fmt = (window._formatActivityEvent ? window._formatActivityEvent(ev) : {short: ev.detail||'', groupKey: ev.type});
+    var last = collapsed[collapsed.length - 1];
+    if (last && last.kind === 'run' && last.groupKey === fmt.groupKey) {
+      last.events.push(ev);
+      last.firstTs = ev.ts;
+      continue;
+    }
+    // Start a new run if the prior event chains.  (Using a lookahead keeps
+    // the run contiguous even when a single other event briefly interrupts
+    // \u2014 we don't support gapped merges on purpose; simpler is better.)
+    collapsed.push({kind: 'run', groupKey: fmt.groupKey, events: [ev],
+                    firstTs: ev.ts, lastTs: ev.ts, short: fmt.short});
+  }
+  // Post-process: runs shorter than threshold render as individual rows.
+  var items = [];
+  for (var r = 0; r < collapsed.length; r++) {
+    var run = collapsed[r];
+    if (run.events.length >= GROUP_MIN) {
+      items.push({kind: 'run', run: run});
+    } else {
+      for (var q = 0; q < run.events.length; q++) items.push({kind: 'single', ev: run.events[q]});
+    }
+  }
+  // Split into day buckets for the existing visual grouping.
   var groups = [];
   var currentDay = null;
-  for (var i = 0; i < filtered.length; i++) {
-    var day = _historyDayLabel(filtered[i].ts);
+  for (var k = 0; k < items.length; k++) {
+    var ts = items[k].kind === 'single' ? items[k].ev.ts : items[k].run.lastTs;
+    var day = _historyDayLabel(ts);
     if (day !== currentDay) {
-      groups.push({label: day, events: []});
+      groups.push({label: day, items: []});
       currentDay = day;
     }
-    groups[groups.length - 1].events.push(filtered[i]);
+    groups[groups.length - 1].items.push(items[k]);
   }
   var h = '<h3>Activity</h3><div class="hs-timeline">';
   for (var g = 0; g < groups.length; g++) {
     h += '<div class="hs-day-group"><div class="hs-day-label">' + esc(groups[g].label) + '</div>';
-    for (var j = 0; j < groups[g].events.length; j++) {
-      var ev = groups[g].events[j];
-      var cat = _HS_CATEGORIES[ev.type] || 'management';
-      var icon = _HS_ICONS[ev.type] || '\u2022';
-      var label = _HS_LABELS[ev.type] || ev.type.replace(/_/g, ' ');
-      h += '<div class="hs-event hs-cat-' + escAttr(cat) + '">';
-      h += '<span class="hs-event-icon">' + esc(icon) + '</span>';
-      h += '<span class="hs-event-type">' + esc(label) + '</span>';
-      if (ev.episode) h += '<span class="hs-event-episode">' + esc(ev.episode) + '</span>';
-      h += ' <span class="hs-event-time">' + esc(_timeAgoHistory(ev.ts)) + '</span>';
-      if (ev.detail) h += '<div class="hs-event-detail">' + esc(ev.detail) + '</div>';
-      h += '</div>';
+    for (var j = 0; j < groups[g].items.length; j++) {
+      var it = groups[g].items[j];
+      if (it.kind === 'single') {
+        var sev = it.ev;
+        var cat = _HS_CATEGORIES[sev.type] || 'management';
+        var icon = _HS_ICONS[sev.type] || '\u2022';
+        var label = _HS_LABELS[sev.type] || sev.type.replace(/_/g, ' ');
+        var fmtOne = window._formatActivityEvent ? window._formatActivityEvent(sev) : {short: sev.detail||''};
+        h += '<div class="hs-event hs-cat-' + escAttr(cat) + '">';
+        h += '<span class="hs-event-icon">' + esc(icon) + '</span>';
+        h += '<span class="hs-event-type">' + esc(label) + '</span>';
+        if (sev.episode) h += '<span class="hs-event-episode">' + esc(sev.episode) + '</span>';
+        h += ' <span class="hs-event-time">' + esc(_timeAgoHistory(sev.ts)) + '</span>';
+        if (fmtOne.short) h += '<div class="hs-event-detail">' + esc(fmtOne.short) + '</div>';
+        h += '</div>';
+      } else {
+        var run = it.run;
+        var rev = run.events[0];
+        var rcat = _HS_CATEGORIES[rev.type] || 'management';
+        var ricon = _HS_ICONS[rev.type] || '\u2022';
+        var rlabel = _HS_LABELS[rev.type] || rev.type.replace(/_/g, ' ');
+        var span = _spanHuman(run.firstTs, run.lastTs);
+        h += '<div class="hs-event hs-cat-' + escAttr(rcat) + ' hs-run">';
+        h += '<span class="hs-event-icon">' + esc(ricon) + '</span>';
+        h += '<span class="hs-event-type">' + esc(rlabel) + '</span>';
+        h += ' <span class="hs-event-count">' + run.events.length + '\u00d7</span>';
+        if (span) h += ' <span class="hs-event-time">over ' + esc(span) + '</span>';
+        else      h += ' <span class="hs-event-time">' + esc(_timeAgoHistory(run.lastTs)) + '</span>';
+        if (run.short) h += '<div class="hs-event-detail">' + esc(run.short) + '</div>';
+        h += '</div>';
+      }
     }
     h += '</div>';
   }

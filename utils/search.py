@@ -795,7 +795,22 @@ def add_to_debrid(info_hash, title=''):
         with _existing_hashes_lock:
             _inflight_adds.discard(inflight_key)
 
-    # Emit history event
+    # Emit history event.  Scrub well-known credential patterns from the
+    # provider error string before it lands in history.jsonl — debrid
+    # clients have been seen to echo the request URL (with apikey
+    # querystring) in failure messages, and history is a plain file that
+    # is often shared verbatim when troubleshooting.
+    import re as _re
+
+    def _redact(s):
+        if not s:
+            return s
+        s = _re.sub(r'(apikey|api_key|token|key|bearer)=[^&\s]+',
+                    r'\1=***', str(s), flags=_re.IGNORECASE)
+        s = _re.sub(r'(Authorization:\s*Bearer\s+)\S+', r'\1***', s,
+                    flags=_re.IGNORECASE)
+        return s
+
     try:
         from utils import history as _hist
         if result['success']:
@@ -804,16 +819,22 @@ def add_to_debrid(info_hash, title=''):
                 title or info_hash[:16],
                 detail=f'Added to {service} via search',
                 source='search',
-                meta={'info_hash': info_hash, 'service': service,
+                meta={'cause': 'debrid_add_via_search',
+                      'info_hash': info_hash,
+                      'service': service,
                       'torrent_id': result.get('torrent_id', '')},
             )
         else:
+            err = _redact(result.get('error', ''))
             _hist.log_event(
                 'debrid_add_failed',
                 title or info_hash[:16],
-                detail=f'Failed to add to {service}: {result.get("error", "")}',
+                detail=f'Failed to add to {service}: {err}',
                 source='search',
-                meta={'info_hash': info_hash, 'service': service},
+                meta={'cause': 'debrid_add_failed',
+                      'info_hash': info_hash,
+                      'service': service,
+                      'error': err},
             )
     except Exception:
         pass

@@ -977,6 +977,46 @@ class LibraryScanner:
         self._last_had_local = None    # None=unknown, True=had local content
         self._local_drop_alerted = False
 
+        # Per-title basename sets of previously-created debrid symlinks.
+        # Used to classify new symlink_created events as "new import" vs
+        # "upgrade (replaced prior file)" vs "state_init" (first scan after
+        # restart, can't tell).  Persisted across restarts so a container
+        # restart doesn't mis-label every existing symlink as an upgrade.
+        self._scan_state_path = os.path.join(
+            os.environ.get('CONFIG_DIR', '/config'),
+            'library_scan_state.json',
+        )
+        self._last_symlinked_files = {}   # title -> set(basename)
+        self._state_was_bootstrapped = not os.path.isfile(self._scan_state_path)
+        if not self._state_was_bootstrapped:
+            # Guard against a tampered/corrupt state file — the loader must
+            # never take the scanner offline.  A 10 MB cap prevents a
+            # malicious file from swallowing RAM; on any validation miss we
+            # wipe state and treat the next scan as a fresh bootstrap.
+            try:
+                import json as _json
+                try:
+                    if os.path.getsize(self._scan_state_path) > 10 * 1024 * 1024:
+                        raise ValueError('scan state file too large')
+                except OSError:
+                    pass
+                with open(self._scan_state_path, 'r', encoding='utf-8') as fh:
+                    raw = _json.load(fh)
+                if not isinstance(raw, dict):
+                    raise ValueError('scan state root is not an object')
+                titles = raw.get('titles', {})
+                if not isinstance(titles, dict):
+                    raise ValueError('scan state "titles" is not an object')
+                self._last_symlinked_files = {
+                    t: {b for b in v if isinstance(b, str)}
+                    for t, v in titles.items()
+                    if isinstance(t, str) and isinstance(v, list)
+                }
+            except (OSError, ValueError, TypeError, AttributeError) as e:
+                logger.warning(f"[library] Could not load scan state: {e}")
+                self._last_symlinked_files = {}
+                self._state_was_bootstrapped = True
+
         if self._mount_path:
             logger.info(f"[library] Mount path: {self._mount_path}")
         else:
@@ -1661,7 +1701,9 @@ class LibraryScanner:
                 if _history:
                     _history.log_event('blocklist_added', title, source='library',
                                        detail='Auto-blocklisted: disc rip',
-                                       meta={'info_hash': bl_hash})
+                                       meta={'cause': 'auto_blocklist_added',
+                                             'blocklist_reason': 'disc rip',
+                                             'info_hash': bl_hash})
 
             if deleted or bl_hash:
                 logger.info(f"[library] Disc rip cleaned: {title} — "
@@ -1669,7 +1711,9 @@ class LibraryScanner:
                 if _history:
                     _history.log_event('failed', title, source='library',
                                        detail=f'Disc rip removed ({deleted} torrent(s) deleted)',
-                                       meta={'info_hash': bl_hash})
+                                       meta={'cause': 'disc_rip_rejected',
+                                             'info_hash': bl_hash,
+                                             'deleted_torrents': deleted})
                 try:
                     from utils.notifications import notify
                     notify('download_error', 'Library: Disc Rip Removed',
@@ -1770,7 +1814,12 @@ class LibraryScanner:
                         enforced_this_scan.add(norm)
                         if _history:
                             _history.log_event('switched_source', show['title'], source='library',
-                                               detail=f"Switched {result['switched']} episode(s) to debrid")
+                                               detail=f"Switched {result['switched']} episode(s) to debrid",
+                                               meta={'cause': 'preference_source_switch',
+                                                     'from': 'local',
+                                                     'to': 'debrid',
+                                                     'count': result['switched'],
+                                                     'media_type': 'show'})
                         # Only clear pending for episodes that were actually switched
                         # (those whose local_path is now a symlink)
                         cleared = [
@@ -1875,7 +1924,11 @@ class LibraryScanner:
                     )
                     if _history:
                         _history.log_event('switched_source', movie['title'], source='library',
-                                           detail="Switched movie to debrid")
+                                           detail="Switched movie to debrid",
+                                           meta={'cause': 'preference_source_switch',
+                                                 'from': 'local',
+                                                 'to': 'debrid',
+                                                 'media_type': 'movie'})
                     # Movie is atomic — one file switched means the whole title is done
                     clear_pending(norm)
                     enforced_this_scan.add(norm)
@@ -1941,7 +1994,11 @@ class LibraryScanner:
                                 )
                                 if _history:
                                     _history.log_event('switched_source', item['title'], source='library',
-                                                       detail=f"Removed {deleted} debrid torrent(s) — prefer-local")
+                                                       detail=f"Removed {deleted} debrid torrent(s) — prefer-local",
+                                                       meta={'cause': 'preference_source_switch',
+                                                             'from': 'debrid',
+                                                             'to': 'local',
+                                                             'count': deleted})
                                 clear_pending(norm)
                                 enforced_this_scan.add(norm)
                                 try:
@@ -2403,9 +2460,17 @@ class LibraryScanner:
 
         if escalated:
             if _history:
+                from utils import retry_counter as _rc
                 for t in escalated:
+                    # Pick up the retry-cycle count from whichever arr has
+                    # been searching for this title.  We don't know the id
+                    # here, but the counter is keyed by (service, id);
+                    # record the threshold itself as the meaningful datum.
+                    meta = {'cause': 'debrid_unavailable_marked',
+                            'age_days': threshold_days}
                     _history.log_event('debrid_unavailable', t, source='library',
-                                       detail=f'Marked debrid-unavailable after {threshold_days}+ days')
+                                       detail=f'Marked debrid-unavailable after {threshold_days}+ days',
+                                       meta=meta)
             try:
                 from utils.notifications import notify
                 summary = ', '.join(escalated[:5])
@@ -2413,7 +2478,8 @@ class LibraryScanner:
                     summary += f', +{len(escalated) - 5} more'
                 notify('debrid_unavailable',
                        f'Debrid Unavailable ({len(escalated)})',
-                       f'Content not found on debrid after {threshold_days} days: {summary}',
+                       f'Content not found on debrid after {threshold_days} days — retries '
+                       f'continue in arr: {summary}',
                        level='warning')
             except Exception as e:
                 logger.warning(f"[library] Could not send debrid_unavailable notification: {e}")
@@ -2761,6 +2827,21 @@ class LibraryScanner:
         created = 0
         symlinked_shows = set()   # titles that got new symlinks
         symlinked_movies = set()  # titles that got new symlinks
+        # Per-title details for the activity event: set of new basenames
+        # linked this scan, their total size, and the best-guess "replaces"
+        # filename pulled from the prior state.
+        _symlink_new_files = {}   # title -> list[{'file', 'size'}]
+        _symlink_replaces = {}    # title -> prior-basename (best guess)
+        _symlink_is_upgrade = {}  # title -> bool (True iff prior state was non-empty)
+        # Defensive getattr — tests bypass __init__ via LibraryScanner.__new__().
+        _prior_symlinks = getattr(self, '_last_symlinked_files', None)
+        if _prior_symlinks is None:
+            _prior_symlinks = {}
+            self._last_symlinked_files = _prior_symlinks
+        # Reset the rescan-chain stash unconditionally so a previous scan's
+        # event ids can never leak into this cycle's rescan calls — even
+        # when this scan creates zero symlinks.
+        self._pending_rescan_prior_ids = {}
         _symlink_years = {}       # title -> parsed year (for year-aware rescan matching)
         # canonical title -> parsed-folder title (when display was upgraded
         # via TMDB rename).  Lets the rescan-trigger TMDB cache fallback use
@@ -2945,6 +3026,18 @@ class LibraryScanner:
                     os.symlink(symlink_target, local_path)
                     created += 1
                     symlinked_movies.add(title)
+                    # Record the new basename + size for activity event meta.
+                    prior = _prior_symlinks.get(title) or set()
+                    if prior and media_file not in prior and title not in _symlink_replaces:
+                        # Best guess for "replaced" filename: the one prior
+                        # entry we saw last time (movies have a single file).
+                        _symlink_replaces[title] = sorted(prior)[0]
+                    if prior:
+                        _symlink_is_upgrade[title] = True
+                    entry = {'file': media_file}
+                    if media_size and media_size > 0:
+                        entry['size'] = media_size
+                    _symlink_new_files.setdefault(title, []).append(entry)
                     if year:
                         _symlink_years[title] = year
                     parsed_t = movie.get('_parsed_title')
@@ -3055,6 +3148,24 @@ class LibraryScanner:
                             os.symlink(symlink_target, local_path)
                             created += 1
                             symlinked_shows.add(title)
+                            prior = _prior_symlinks.get(title) or set()
+                            if prior and filename not in prior:
+                                _symlink_is_upgrade[title] = True
+                                if title not in _symlink_replaces:
+                                    # First prior file we saw — used by the
+                                    # "Upgraded: old.mkv → new.mkv" UI string.
+                                    # Arbitrary but deterministic choice for
+                                    # shows, where the prior set may contain
+                                    # many episodes.
+                                    _symlink_replaces[title] = sorted(prior)[0]
+                            try:
+                                ep_size = os.path.getsize(debrid_path)
+                            except OSError:
+                                ep_size = 0
+                            entry = {'file': filename}
+                            if ep_size > 0:
+                                entry['size'] = ep_size
+                            _symlink_new_files.setdefault(title, []).append(entry)
                             if year:
                                 _symlink_years[title] = year
                             parsed_t = show.get('_parsed_title')
@@ -3071,13 +3182,78 @@ class LibraryScanner:
 
         if created:
             logger.info(f"[library] Created {created} debrid symlink(s) in local library")
+            # Cause picker: first-scan-after-restart bypasses upgrade heuristic
+            # because we have no prior state to diff against — labeling those
+            # symlinks as "upgrades" would mis-attribute every existing file
+            # after a container restart.
+            state_init = getattr(self, '_state_was_bootstrapped', False)
+            symlink_event_ids = {}  # title -> event id (for rescan chaining)
             if _history:
-                for t in symlinked_shows:
-                    _history.log_event('symlink_created', t, source='library',
-                                       detail=f'Debrid symlink(s) created in local library')
-                for t in symlinked_movies:
-                    _history.log_event('symlink_created', t, source='library',
-                                       detail=f'Debrid symlink(s) created in local library')
+                for t in sorted(symlinked_shows | symlinked_movies):
+                    entries = _symlink_new_files.get(t, [])
+                    is_show = t in symlinked_shows
+                    total_size = sum(e.get('size', 0) for e in entries) or None
+                    primary = entries[0] if entries else {}
+                    if state_init:
+                        cause = 'library_state_init'
+                    elif _symlink_is_upgrade.get(t):
+                        cause = 'library_upgrade_replaced'
+                    else:
+                        cause = 'library_new_import'
+                    meta = {'cause': cause,
+                            'count': len(entries),
+                            'files': [e['file'] for e in entries[:10]]}
+                    if primary.get('file'):
+                        meta['file'] = primary['file']
+                    if total_size:
+                        meta['size_bytes'] = total_size
+                    if _symlink_replaces.get(t):
+                        meta['replaces'] = _symlink_replaces[t]
+                    if is_show:
+                        meta['media_type'] = 'show'
+                    else:
+                        meta['media_type'] = 'movie'
+                    ev_id = _history.log_event('symlink_created', t, source='library',
+                                               detail='Debrid symlink(s) created in local library',
+                                               meta=meta)
+                    if ev_id:
+                        symlink_event_ids[t] = ev_id
+            # Persist updated state so subsequent scans can diff.  Also
+            # prune titles that no longer exist in the current debrid
+            # library so the file doesn't grow unbounded over months of
+            # additions and removals.  `current_titles` is the union of
+            # every show/movie title the scanner just inspected.
+            # Guard: a test scanner built via __new__() may not have a
+            # state path configured — skip persistence in that case.
+            state_path = getattr(self, '_scan_state_path', None)
+            if state_path:
+                try:
+                    import json as _json
+                    from utils import file_utils as _fu
+                    for t, entries in _symlink_new_files.items():
+                        _prior_symlinks.setdefault(t, set()).update(
+                            e['file'] for e in entries if e.get('file')
+                        )
+                    current_titles = {s['title'] for s in shows} | {
+                        m['title'] for m in movies
+                    }
+                    # Drop titles absent from the current scan — if the
+                    # user removed the movie or it was never re-seen on
+                    # the mount, the stored basenames can't help classify
+                    # future upgrades for it.
+                    for stale in [t for t in _prior_symlinks if t not in current_titles]:
+                        _prior_symlinks.pop(stale, None)
+                    payload = {
+                        'titles': {t: sorted(s) for t, s in _prior_symlinks.items()},
+                    }
+                    with _fu.atomic_write(state_path) as fh:
+                        fh.write(_json.dumps(payload, separators=(',', ':')))
+                    self._state_was_bootstrapped = False
+                except Exception as e:
+                    logger.warning(f"[library] Failed to persist scan state: {e}")
+            # Stash the event ids for rescan-trigger chaining (read by the
+            # caller inside scan() — see _trigger_rescans).
+            self._pending_rescan_prior_ids = symlink_event_ids
             # Batch notification for symlink_created
             try:
                 from utils.notifications import notify
@@ -3095,7 +3271,9 @@ class LibraryScanner:
             if _history:
                 for t, err in failed_titles.items():
                     _history.log_event('symlink_failed', t, source='library',
-                                       detail=f'Symlink creation failed: {err}')
+                                       detail=f'Symlink creation failed: {err}',
+                                       meta={'cause': 'symlink_create_failed',
+                                             'error': err})
             try:
                 from utils.notifications import notify
                 titles = sorted(failed_titles)[:5]
@@ -3110,7 +3288,10 @@ class LibraryScanner:
                 pass
 
         if created:
-            # Trigger arr rescans so Sonarr/Radarr discover the new files
+            # Trigger arr rescans so Sonarr/Radarr discover the new files.
+            # Exception safety: the stash was reset to {} at the top of this
+            # method, so even if the rescan loop raises the next scan won't
+            # pick up stale ids.  No finally clause needed.
             if symlinked_shows and not sonarr_map:
                 if sonarr_fetch_failed:
                     logger.warning(
@@ -3151,7 +3332,18 @@ class LibraryScanner:
                                 info = sonarr_by_tmdb.get(alt_id)
                 if info and info.get('id') and info.get('client'):
                     try:
-                        info['client'].rescan_series(info['id'], media_title=title)
+                        prior = (getattr(self, '_pending_rescan_prior_ids', {}) or {}).get(title)
+                        info['client'].rescan_series(info['id'], media_title=title,
+                                                     cause='post_symlink_rescan',
+                                                     prior_event_id=prior)
+                        # Successful symlink + rescan — drop any lingering
+                        # retry-cycle counter so future searches don't show
+                        # stale "retry #47" annotations for a satisfied item.
+                        try:
+                            from utils import retry_counter as _rc
+                            _rc.reset('sonarr', info['id'])
+                        except Exception:
+                            pass
                         logger.info(f"[library] Triggered Sonarr rescan for {title}")
                     except Exception as e:
                         logger.warning(f"[library] Sonarr rescan failed for {title}: {e}")
@@ -3191,7 +3383,15 @@ class LibraryScanner:
                         info = radarr_by_tmdb.get(tmdb_id)
                 if info and info.get('id') and info.get('client'):
                     try:
-                        info['client'].rescan_movie(info['id'], media_title=title)
+                        prior = (getattr(self, '_pending_rescan_prior_ids', {}) or {}).get(title)
+                        info['client'].rescan_movie(info['id'], media_title=title,
+                                                    cause='post_symlink_rescan',
+                                                    prior_event_id=prior)
+                        try:
+                            from utils import retry_counter as _rc
+                            _rc.reset('radarr', info['id'])
+                        except Exception:
+                            pass
                         logger.info(f"[library] Triggered Radarr rescan for {title}")
                     except Exception as e:
                         logger.warning(f"[library] Radarr rescan failed for {title}: {e}")

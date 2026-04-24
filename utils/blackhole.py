@@ -1352,6 +1352,7 @@ class BlackholeWatcher:
                     'release_incomplete', filename, episode=ep, source='blackhole',
                     detail=f'Missing episodes: {missing}',
                     meta={
+                        'cause': 'incomplete_release',
                         'info_hash': info_hash,
                         'claimed': sorted(claimed),
                         'delivered': sorted(delivered),
@@ -1646,9 +1647,10 @@ class BlackholeWatcher:
                         _history.log_event(
                             'failed', filename, episode=_ep, source='blackhole',
                             detail=_detail,
-                            meta={'torrent_id': str(torrent_id),
-                                  'reason': 'uncached_timeout',
-                                  'deleted': deleted_from_debrid},
+                            meta={'cause': 'uncached_timeout',
+                                  'torrent_id': str(torrent_id),
+                                  'deleted': deleted_from_debrid,
+                                  'provider': self.debrid_service},
                             media_title=_mt,
                         )
                 if _notify:
@@ -1680,7 +1682,9 @@ class BlackholeWatcher:
                             if _history:
                                 _history.log_event('blocklist_added', filename, episode=_ep, source='blackhole',
                                                    detail='Auto-blocklisted: disc rip',
-                                                   meta={'info_hash': bl_hash},
+                                                   meta={'cause': 'auto_blocklist_added',
+                                                         'blocklist_reason': 'disc rip',
+                                                         'info_hash': bl_hash},
                                                    media_title=_mt)
                     try:
                         from utils.debrid_client import get_debrid_client
@@ -1701,7 +1705,9 @@ class BlackholeWatcher:
                     if _history:
                         _history.log_event('failed', filename, episode=_ep, source='blackhole',
                                            detail='Rejected: no usable media files',
-                                           meta={'provider': self.debrid_service, 'torrent_id': torrent_id},
+                                           meta={'cause': 'disc_rip_rejected',
+                                                 'provider': self.debrid_service,
+                                                 'torrent_id': torrent_id},
                                            media_title=_mt)
                     try:
                         from utils.metrics import metrics
@@ -1719,7 +1725,9 @@ class BlackholeWatcher:
                     _mt, _ep = _enrich_for_history(filename)
                     _history.log_event('cached', filename, episode=_ep, source='blackhole',
                                        detail=f'Ready on {self.debrid_service}',
-                                       meta={'provider': self.debrid_service, 'torrent_id': torrent_id},
+                                       meta={'cause': 'blackhole_cache_hit',
+                                             'provider': self.debrid_service,
+                                             'torrent_id': torrent_id},
                                        media_title=_mt)
                 break
 
@@ -1727,9 +1735,18 @@ class BlackholeWatcher:
                 logger.error(f"[blackhole] Torrent {torrent_id} hit terminal error: {status}")
                 _mt, _ep = _enrich_for_history(filename) if _history else (None, None)
                 if _history:
+                    # Scrub potential credential echoes from the provider
+                    # status string before persisting it to history.jsonl.
+                    import re as _re_bh
+                    _status_safe = _re_bh.sub(
+                        r'(apikey|api_key|token|key|bearer)=[^&\s]+',
+                        r'\1=***', str(status), flags=_re_bh.IGNORECASE)
                     _history.log_event('failed', filename, episode=_ep, source='blackhole',
-                                       detail=f'Terminal error: {status}',
-                                       meta={'provider': self.debrid_service, 'torrent_id': torrent_id},
+                                       detail=f'Terminal error: {_status_safe}',
+                                       meta={'cause': 'terminal_error',
+                                             'status': _status_safe,
+                                             'provider': self.debrid_service,
+                                             'torrent_id': torrent_id},
                                        media_title=_mt)
                 # Auto-blocklist on terminal failure
                 if _blocklist and str(os.environ.get('BLOCKLIST_AUTO_ADD', 'true')).lower() == 'true':
@@ -1739,7 +1756,9 @@ class BlackholeWatcher:
                         if _history:
                             _history.log_event('blocklist_added', filename, episode=_ep, source='blackhole',
                                                detail=f'Auto-blocklisted: {status}',
-                                               meta={'info_hash': bl_hash},
+                                               meta={'cause': 'auto_blocklist_added',
+                                                     'blocklist_reason': f'terminal error: {status}',
+                                                     'info_hash': bl_hash},
                                                media_title=_mt)
                 try:
                     from utils.metrics import metrics
@@ -1817,7 +1836,10 @@ class BlackholeWatcher:
                     _mt, _ep = _enrich_for_history(filename)
                     _history.log_event('symlink_created', filename, episode=_ep, source='blackhole',
                                        detail=f'{count} symlink(s) for {release_name}',
-                                       meta={'provider': self.debrid_service, 'count': count},
+                                       meta={'cause': 'blackhole_new_import',
+                                             'provider': self.debrid_service,
+                                             'count': count,
+                                             'release': release_name},
                                        media_title=_mt)
                 try:
                     from utils.metrics import metrics
@@ -2074,6 +2096,7 @@ class BlackholeWatcher:
                 _mt, _ep = _enrich_for_history(filename)
                 _history.log_event('failed', filename, episode=_ep, source='blackhole',
                                    detail='All alternative releases exhausted',
+                                   meta={'cause': 'alts_exhausted'},
                                    media_title=_mt)
 
     def _try_alt_episode(self, series_name, season, episodes, debrid_handler, orig_filename, orig_path, label=None):
@@ -2484,11 +2507,13 @@ class BlackholeWatcher:
                     level='info')
         if _history:
             _mt, _ep = _enrich_for_history(orig_filename)
+            merged_meta = dict(compromise_meta)
+            merged_meta.setdefault('cause', 'compromise_grab')
             _history.log_event(
                 'compromise_grabbed', orig_filename,
                 episode=_ep, source='blackhole',
                 detail=body, media_title=_mt,
-                meta=compromise_meta,
+                meta=merged_meta,
             )
         return True
 
@@ -2659,7 +2684,8 @@ class BlackholeWatcher:
                 _mt, _ep = _enrich_for_history(filename)
                 _history.log_event('blocklisted', filename, episode=_ep, source='blackhole',
                                    detail=f'Skipped — info hash is blocklisted',
-                                   meta={'info_hash': info_hash},
+                                   meta={'cause': 'blocklisted_hash',
+                                         'info_hash': info_hash},
                                    media_title=_mt)
             try:
                 os.remove(file_path)
@@ -2702,7 +2728,9 @@ class BlackholeWatcher:
                 _mt, _ep = _enrich_for_history(filename)
                 _history.log_event('uncached_rejected', filename, episode=_ep, source='blackhole',
                                    detail='Refused — info hash unavailable under strict mode',
-                                   meta={'provider': self.debrid_service},
+                                   meta={'cause': 'uncached_rejected',
+                                         'provider': self.debrid_service,
+                                         'reason': 'info_hash_unavailable'},
                                    media_title=_mt)
             try:
                 os.remove(file_path)
@@ -2731,7 +2759,8 @@ class BlackholeWatcher:
                         _mt, _ep = _enrich_for_history(filename)
                         _history.log_event('duplicate', filename, episode=_ep, source='blackhole',
                                            detail=f'Skipped — already in {self.debrid_service}',
-                                           meta={'info_hash': info_hash,
+                                           meta={'cause': 'duplicate_skipped',
+                                                 'info_hash': info_hash,
                                                  'provider': self.debrid_service},
                                            media_title=_mt)
                     try:
@@ -2758,7 +2787,8 @@ class BlackholeWatcher:
                         _mt, _ep = _enrich_for_history(filename)
                         _history.log_event('uncached_rejected', filename, episode=_ep, source='blackhole',
                                            detail=f'Skipped — {cache_label} on {self.debrid_service}',
-                                           meta={'info_hash': info_hash,
+                                           meta={'cause': 'uncached_rejected',
+                                                 'info_hash': info_hash,
                                                  'provider': self.debrid_service},
                                            media_title=_mt)
                     try:
@@ -2831,7 +2861,8 @@ class BlackholeWatcher:
                     _mt, _ep = _enrich_for_history(filename)
                     _history.log_event('grabbed', filename, episode=_ep, source='blackhole',
                                        detail=f'Submitted to {self.debrid_service}',
-                                       meta={'provider': self.debrid_service},
+                                       meta={'cause': 'blackhole_grab_submitted',
+                                             'provider': self.debrid_service},
                                        media_title=_mt)
                 try:
                     os.remove(file_path)

@@ -413,11 +413,9 @@ function renderEnvCategories(values) {
   const container = document.getElementById('env-categories');
   let html = '';
   ENV_SCHEMA.categories.forEach((cat, i) => {
-    const openClass = i === 0 ? ' open' : '';
     let fieldsHtml = '';
     cat.fields.forEach(f => { fieldsHtml += renderEnvField(f, values[f.key] || ''); });
-    const expanded = i === 0 ? 'true' : 'false';
-    html += `<div class="category" data-cat-idx="${i}" data-tab="env"><div class="cat-header${openClass}" role="button" tabindex="0" aria-expanded="${expanded}" onclick="toggleCategory(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleCategory(this)}"><h2><span class="cat-name">${esc(cat.name)}</span> <span class="desc">\u2014 ${esc(cat.description)}</span></h2><span class="cat-dirty"><span class="cat-dirty-dot"></span><span class="cat-dirty-count"></span></span><span class="arrow" aria-hidden="true">&#9660;</span></div><div class="cat-body${openClass}">${fieldsHtml}</div></div>`;
+    html += `<div class="category" data-cat-idx="${i}" data-tab="env"><div class="cat-header" role="button" tabindex="0" aria-expanded="false" onclick="toggleCategory(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleCategory(this)}"><h2><span class="cat-name">${esc(cat.name)}</span> <span class="desc">\u2014 ${esc(cat.description)}</span></h2><span class="cat-dirty"><span class="cat-dirty-dot"></span><span class="cat-dirty-count"></span></span><span class="arrow" aria-hidden="true">&#9660;</span></div><div class="cat-body">${fieldsHtml}</div></div>`;
   });
   container.innerHTML = html;
 }
@@ -605,7 +603,6 @@ function renderPdCategories(values) {
   const container = document.getElementById('pd-categories');
   let html = '';
   PD_SCHEMA.categories.forEach((cat, i) => {
-    const openClass = i === 0 ? ' open' : '';
     let mainFields = '';
     let advFields = '';
     let hasAdvanced = false;
@@ -626,8 +623,7 @@ function renderPdCategories(values) {
       advHtml = `<div class="advanced-toggle" onclick="toggleAdvanced(this)">Show advanced settings</div><div class="advanced-fields">${advFields}</div>`;
     }
 
-    const expanded = i === 0 ? 'true' : 'false';
-    html += `<div class="category" data-cat-idx="${i}" data-tab="pd"><div class="cat-header${openClass}" role="button" tabindex="0" aria-expanded="${expanded}" onclick="toggleCategory(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleCategory(this)}"><h2><span class="cat-name">${esc(cat.name)}</span> <span class="desc">\u2014 ${esc(cat.description)}</span></h2><span class="cat-dirty"><span class="cat-dirty-dot"></span><span class="cat-dirty-count"></span></span><span class="arrow" aria-hidden="true">&#9660;</span></div><div class="cat-body${openClass}">${mainFields}${advHtml}</div></div>`;
+    html += `<div class="category" data-cat-idx="${i}" data-tab="pd"><div class="cat-header" role="button" tabindex="0" aria-expanded="false" onclick="toggleCategory(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleCategory(this)}"><h2><span class="cat-name">${esc(cat.name)}</span> <span class="desc">\u2014 ${esc(cat.description)}</span></h2><span class="cat-dirty"><span class="cat-dirty-dot"></span><span class="cat-dirty-count"></span></span><span class="arrow" aria-hidden="true">&#9660;</span></div><div class="cat-body">${mainFields}${advHtml}</div></div>`;
   });
   container.innerHTML = html;
 

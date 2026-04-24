@@ -2791,7 +2791,7 @@ function hideDetail() {
 }
 
 // Shared activity event formatter is installed on window by
-// utils/activity_format.FORMATTER_JS (interpolated into __THEME_TOGGLE_JS__).
+// utils/activity_format.FORMATTER_JS (interpolated into the shared-JS block above).
 // window._formatActivityEvent(ev) -> {short, long, groupKey}.
 
 // Excluded from detail sidebar: system-level events, startup-skip events

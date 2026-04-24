@@ -151,6 +151,17 @@ textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;l
    /api/settings/{env,plex-debrid} fetches resolve. */
 .loading-state{display:flex;align-items:center;justify-content:center;padding:40px 16px;color:var(--text3);font-size:.95em}
 
+/* inlineConfirm modal — replaces blocking browser confirm() dialogs with
+   an in-page overlay that can render rich content and match the app's
+   style. Promise-returning; no state kept outside the overlay DOM. */
+.confirm-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10000;display:flex;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(2px)}
+.confirm-dialog{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px 22px;max-width:520px;width:100%;box-shadow:0 20px 50px rgba(0,0,0,.4);animation:confirm-fade-in .12s ease-out}
+.confirm-title{margin:0 0 10px;font-size:1.1em}
+.confirm-message{color:var(--text2);margin-bottom:18px;line-height:1.45;font-size:.95em}
+.confirm-message strong{color:var(--text)}
+.confirm-actions{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
+@keyframes confirm-fade-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+
 /* OAuth panel */
 .oauth-panel{background:var(--bg);border:1px solid var(--blue);border-radius:8px;padding:16px;margin-top:8px}
 .oauth-panel .oauth-code{font-size:1.8em;font-weight:700;color:var(--blue);letter-spacing:.15em;font-family:monospace;margin:10px 0}
@@ -334,9 +345,116 @@ function hideBanner() {
   document.getElementById('banner').className = 'banner';
 }
 
-function switchTab(name) {
-  const curDirty = (activeTabName() === 'env' ? getEnvChangedFields() : getPdChangedFields()).size > 0;
-  if (curDirty && !confirm('You have unsaved changes. Switch tabs anyway?')) return;
+// Promise-returning inline confirmation dialog, replacement for window.confirm().
+// Resolves to true on Confirm, false on Cancel / Escape / click-outside. The
+// `message` is injected as HTML so callers can include <strong>, lists, etc —
+// pass trusted content (escape untrusted pieces with esc()).
+//
+//   const ok = await inlineConfirm({title:'Delete?', message:'This cannot be undone.',
+//     confirmText:'Delete', danger:true});
+function inlineConfirm(opts) {
+  const {
+    title = 'Confirm',
+    message = '',
+    confirmText = 'Confirm',
+    cancelText = 'Cancel',
+    danger = false,
+  } = opts || {};
+  return new Promise(resolve => {
+    // If a previous overlay is still open (rapid double-click), resolve
+    // its Promise as "cancelled" before removing the DOM. Otherwise the
+    // old Promise orphans forever, its keydown listener leaks at
+    // capture:true, and Enter/Escape start swallowing keys site-wide.
+    document.querySelectorAll('.confirm-overlay').forEach(o => {
+      if (typeof o._confirmResolve === 'function') {
+        try { o._confirmResolve(false); } catch (_) {}
+      } else {
+        o.remove();
+      }
+    });
+
+    const overlay = document.createElement('div');
+    overlay.className = 'confirm-overlay';
+    const confirmClass = danger ? 'btn btn-danger filled' : 'btn btn-primary';
+    overlay.innerHTML = `
+      <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+        <h3 id="confirm-title" class="confirm-title">${esc(title)}</h3>
+        <div class="confirm-message">${message}</div>
+        <div class="confirm-actions">
+          <button type="button" class="btn btn-ghost" data-confirm-action="cancel">${esc(cancelText)}</button>
+          <button type="button" class="${confirmClass}" data-confirm-action="confirm">${esc(confirmText)}</button>
+        </div>
+      </div>`;
+
+    const prevFocused = document.activeElement;
+    let settled = false;
+    const cleanup = (result) => {
+      if (settled) return;
+      settled = true;
+      document.removeEventListener('keydown', onKeyDown, true);
+      overlay.remove();
+      if (prevFocused && typeof prevFocused.focus === 'function') {
+        try { prevFocused.focus(); } catch (_) { /* element may be detached */ }
+      }
+      resolve(result);
+    };
+    // Expose the resolver so a subsequent inlineConfirm() call can
+    // cancel us instead of orphaning our Promise.
+    overlay._confirmResolve = cleanup;
+
+    const confirmBtn = () => overlay.querySelector('[data-confirm-action="confirm"]');
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cleanup(false); }
+      else if (e.key === 'Enter') {
+        // Only confirm on Enter when focus is explicitly on the Confirm
+        // button — any other target (backdrop, dialog body, tabbed-away
+        // document.body) is a no-op so a destructive action can't fire
+        // unintentionally from stray keystrokes.
+        if (document.activeElement === confirmBtn()) {
+          e.preventDefault(); cleanup(true);
+        }
+      }
+    };
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) return cleanup(false);
+      const action = e.target.closest('[data-confirm-action]');
+      if (action) cleanup(action.dataset.confirmAction === 'confirm');
+    });
+    document.addEventListener('keydown', onKeyDown, true);
+    document.body.appendChild(overlay);
+    const btn = confirmBtn();
+    if (btn) btn.focus();
+  });
+}
+
+let _switchInFlight = false;
+async function switchTab(name) {
+  // Reentrancy guard: switchTab is called from inline onclick / onkeydown
+  // which discards the returned Promise. Rapid clicks would otherwise
+  // stack confirm dialogs and race on the final class-toggle step; the
+  // guard ignores the second call while the first is awaiting its
+  // confirm modal. inlineConfirm still resolves a superseded overlay
+  // cleanly, so this is belt-and-suspenders against double-run races.
+  if (_switchInFlight) return;
+  _switchInFlight = true;
+  try {
+    const curDirty = (activeTabName() === 'env' ? getEnvChangedFields() : getPdChangedFields()).size > 0;
+    if (curDirty) {
+      const ok = await inlineConfirm({
+        title: 'Discard unsaved changes?',
+        message: 'The current tab has unsaved edits. Switching tabs will not lose them, but the save bar tracks per-tab state, so you may lose sight of what changed.',
+        confirmText: 'Switch anyway',
+        cancelText: 'Stay here',
+      });
+      if (!ok) return;
+    }
+    _switchTabUi(name);
+  } finally {
+    _switchInFlight = false;
+  }
+}
+
+function _switchTabUi(name) {
   document.querySelectorAll('.tab').forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
   document.querySelectorAll('.tab-content').forEach(t => { t.classList.remove('active'); });
   if (name === 'env') {
@@ -983,8 +1101,15 @@ function addEmptyProfile() {
   refreshVersionsUI();
 }
 
-function deleteProfile(idx) {
-  if (!confirm('Delete profile "' + (_versionsData[idx]?.[0] || '') + '"?')) return;
+async function deleteProfile(idx) {
+  const name = _versionsData[idx]?.[0] || 'this profile';
+  const ok = await inlineConfirm({
+    title: 'Delete profile?',
+    message: `Delete <strong>${esc(name)}</strong>? Any of its rules will be removed from the editor. You'll still need to click <strong>Save & Restart</strong> to persist the change to <code>settings.json</code>.`,
+    confirmText: 'Delete profile',
+    danger: true,
+  });
+  if (!ok) return;
   _versionsData.splice(idx, 1);
   refreshVersionsUI();
 }
@@ -1191,7 +1316,13 @@ async function pdValidate() {
 }
 
 async function pdSave() {
-  if (!confirm('This will save settings and restart plex_debrid. Active downloads may be interrupted. Continue?')) return;
+  const ok = await inlineConfirm({
+    title: 'Save and restart plex_debrid?',
+    message: 'This writes <code>settings.json</code> and restarts the plex_debrid service so the new config takes effect. <strong>Any active downloads or watchlist scans will be interrupted.</strong>',
+    confirmText: 'Save & Restart',
+    cancelText: 'Cancel',
+  });
+  if (!ok) return;
   clearFieldErrors(document.getElementById('tab-pd'));
   hideBanner();
   setButtonLoading('btn-pd-save', true, 'Saving...');
@@ -1429,7 +1560,13 @@ function oauthCancel(service, fieldId) {
 // Import / Export / Reset
 // -----------------------------------------------------------------------
 async function envResetDefaults() {
-  if (!confirm('Reset all Zurgarr settings to empty defaults? You will still need to click Save to apply.')) return;
+  const ok = await inlineConfirm({
+    title: 'Reset Zurgarr form to defaults?',
+    message: 'This clears every field back to its schema default — nothing is written to disk yet. You still need to click <strong>Save &amp; Apply</strong> afterwards to persist. Click Cancel to keep the current form values.',
+    confirmText: 'Reset form',
+    danger: true,
+  });
+  if (!ok) return;
   try {
     const resp = await fetch('/api/settings/reset/env', {method: 'POST'});
     const defaults = await resp.json();
@@ -1440,7 +1577,13 @@ async function envResetDefaults() {
 }
 
 async function pdResetDefaults() {
-  if (!confirm('Reset plex_debrid settings to defaults? You will still need to click Save to apply.')) return;
+  const ok = await inlineConfirm({
+    title: 'Reset plex_debrid form to defaults?',
+    message: 'This clears every plex_debrid field back to its schema default — nothing is written to <code>settings.json</code> yet. You still need to click <strong>Save &amp; Restart plex_debrid</strong> afterwards to persist. Click Cancel to keep the current form values.',
+    confirmText: 'Reset form',
+    danger: true,
+  });
+  if (!ok) return;
   try {
     const resp = await fetch('/api/settings/reset/plex-debrid', {method: 'POST'});
     const defaults = await resp.json();
@@ -1574,7 +1717,16 @@ function loadRecentBackups() {
 }
 
 function _restoreConfirmText(source) {
-  return `Restore config from ${source}?\n\nCurrent .env, settings.json, library_prefs.json, and blocklist.json will be snapshotted to /config/backups/ before being replaced. The page will reload with the restored values.`;
+  return `Restore config from <strong>${esc(source)}</strong>? Current <code>.env</code>, <code>settings.json</code>, <code>library_prefs.json</code>, and <code>blocklist.json</code> will be snapshotted to <code>/config/backups/</code> before being replaced. The page will reload with the restored values.`;
+}
+
+function _confirmRestore(source) {
+  return inlineConfirm({
+    title: 'Restore configuration?',
+    message: _restoreConfirmText(source),
+    confirmText: 'Restore',
+    danger: true,
+  });
 }
 
 function _applyRestoreResponse(resp) {
@@ -1595,27 +1747,34 @@ function _handleRestoreResult({ok, data}) {
   setTimeout(() => location.reload(), 1500);
 }
 
-function configRestoreUpload(input) {
+async function configRestoreUpload(input) {
   const file = input.files[0];
   if (!file) return;
-  if (!confirm(_restoreConfirmText(file.name))) { input.value = ''; return; }
-  fetch('/api/settings/restore', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/gzip'},
-    body: file,
-  })
-    .then(_applyRestoreResponse)
-    .then(_handleRestoreResult)
-    .catch(err => showBanner('error', 'Restore failed: ' + esc(err.message)));
+  // Reset the input now — if the user cancels we don't want the same file
+  // to re-trigger a change event, and if they confirm we've already
+  // captured the File reference locally.
   input.value = '';
+  if (!(await _confirmRestore(file.name))) return;
+  try {
+    const resp = await fetch('/api/settings/restore', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/gzip'},
+      body: file,
+    });
+    _handleRestoreResult(await _applyRestoreResponse(resp));
+  } catch (err) {
+    showBanner('error', 'Restore failed: ' + esc(err.message));
+  }
 }
 
-function configRestoreFromSaved(filename) {
-  if (!confirm(_restoreConfirmText(filename))) return;
-  fetch('/api/settings/restore/' + encodeURIComponent(filename), {method: 'POST'})
-    .then(_applyRestoreResponse)
-    .then(_handleRestoreResult)
-    .catch(err => showBanner('error', 'Restore failed: ' + esc(err.message)));
+async function configRestoreFromSaved(filename) {
+  if (!(await _confirmRestore(filename))) return;
+  try {
+    const resp = await fetch('/api/settings/restore/' + encodeURIComponent(filename), {method: 'POST'});
+    _handleRestoreResult(await _applyRestoreResponse(resp));
+  } catch (err) {
+    showBanner('error', 'Restore failed: ' + esc(err.message));
+  }
 }
 
 // -----------------------------------------------------------------------

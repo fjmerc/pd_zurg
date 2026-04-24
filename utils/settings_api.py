@@ -68,7 +68,7 @@ ENV_SCHEMA = [
         'description': 'Plex/Debrid integration service',
         'fields': [
             ('PD_ENABLED', 'Enable plex_debrid', 'boolean', False, 'Run the plex_debrid service'),
-            ('SHOW_MENU', 'Show Menu', 'boolean', False, 'Show plex_debrid interactive menu on startup'),
+            ('SHOW_MENU', 'Show Menu', 'boolean', False, 'Show plex_debrid interactive menu on startup. Mirrors the "Show Menu on Startup" toggle on the plex_debrid tab — changes to either propagate through the sync layer.'),
             ('PLEX_USER', 'Plex Username', 'string', False, 'Plex account username'),
             ('PLEX_TOKEN', 'Plex Token', 'secret', False, 'Plex authentication token'),
             ('PLEX_ADDRESS', 'Plex Address', 'url', False, 'Plex server URL (e.g., http://192.168.1.100:32400)'),
@@ -1055,7 +1055,7 @@ PLEX_DEBRID_SCHEMA = [
         'description': 'plex_debrid runtime behavior',
         'fields': [
             ('Show Menu on Startup', 'Show Menu on Startup', 'boolean_str', None, False,
-             'Show the interactive plex_debrid menu on container start.'),
+             'Show the interactive plex_debrid menu on container start. Mirrors the "Show Menu" toggle on the Zurgarr tab (SHOW_MENU env var) — changes to either propagate through the sync layer.'),
             ('Debug printing', 'Debug Printing', 'boolean_str', None, False,
              'Enable verbose debug output.'),
             ('Log to file', 'Log to File', 'boolean_str', None, False,

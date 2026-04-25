@@ -676,19 +676,31 @@ __NAV_HTML__
 <div class="grid full" id="lib-card-wrap" style="display:none">
   <div class="card">
     <h2>Library Composition</h2>
-    <div class="lib-totals" id="lib-totals"></div>
+    <div class="lib-headline">
+      <div class="lib-headline-main">
+        <div class="lib-headline-value" id="lib-total-size">—</div>
+        <div class="lib-headline-label">Total Size</div>
+      </div>
+      <div class="lib-headline-meta" id="lib-headline-meta"></div>
+    </div>
     <div class="lib-cats">
       <div class="lib-cat">
-        <div class="lib-cat-head"><span class="lib-cat-title">Movies</span><span class="lib-cat-sub" id="lib-mov-sub"></span></div>
+        <div class="lib-cat-head"><span class="lib-cat-title">Movies</span><span class="lib-cat-meta" id="lib-mov-meta"></span></div>
         <div class="lib-bar" id="lib-mov-bar"></div>
-        <div class="lib-rows" id="lib-mov-rows"></div>
       </div>
       <div class="lib-cat">
-        <div class="lib-cat-head"><span class="lib-cat-title">Shows</span><span class="lib-cat-sub" id="lib-show-sub"></span></div>
+        <div class="lib-cat-head"><span class="lib-cat-title">Shows</span><span class="lib-cat-meta" id="lib-show-meta"></span></div>
         <div class="lib-bar" id="lib-show-bar"></div>
-        <div class="lib-rows" id="lib-show-rows"></div>
-        <div class="lib-eps" id="lib-eps"></div>
       </div>
+      <div class="lib-cat" id="lib-eps-wrap">
+        <div class="lib-cat-head"><span class="lib-cat-title lib-eps-title">Episodes</span><span class="lib-cat-meta" id="lib-eps-meta"></span></div>
+        <div class="lib-bar lib-bar-eps" id="lib-eps-bar"></div>
+      </div>
+    </div>
+    <div class="lib-legend">
+      <span><span class="lib-swatch local"></span>Local</span>
+      <span><span class="lib-swatch both"></span>Both</span>
+      <span><span class="lib-swatch debrid"></span>Debrid</span>
     </div>
     <div class="lib-foot" id="lib-foot"></div>
   </div>
@@ -761,57 +773,63 @@ function renderLibrary(lib){
   if(!lib||!lib.totals||!lib.totals.items){wrap.style.display='none';return;}
   wrap.style.display='';
   var totals=lib.totals||{};
-  var movies=lib.movies||{by_source:{},size_by_source:{}};
-  var shows=lib.shows||{by_source:{},size_by_source:{},episodes:{by_source:{},size_by_source:{}}};
-  var totHtml=''+
-    '<div class="lib-tot-item"><div class="lib-tot-value">'+esc((totals.items||0).toLocaleString())+'</div><div class="lib-tot-label">Total Items</div></div>'+
-    '<div class="lib-tot-item"><div class="lib-tot-value">'+esc((movies.total||0).toLocaleString())+'</div><div class="lib-tot-label">Movies</div></div>'+
-    '<div class="lib-tot-item"><div class="lib-tot-value">'+esc((shows.total||0).toLocaleString())+'</div><div class="lib-tot-label">Shows</div></div>'+
-    '<div class="lib-tot-item"><div class="lib-tot-value">'+esc((shows.episodes&&shows.episodes.total||0).toLocaleString())+'</div><div class="lib-tot-label">Episodes</div></div>'+
-    '<div class="lib-tot-item"><div class="lib-tot-value">'+esc(fmtBytes(totals.size_bytes||0))+'</div><div class="lib-tot-label">Total Size</div></div>';
-  document.getElementById('lib-totals').innerHTML=totHtml;
-  function buildBar(by){
-    var tot=(by.local||0)+(by.debrid||0)+(by.both||0);
-    if(!tot)return '<div class="lib-bar-seg" style="width:100%;background:var(--border)"></div>';
-    var pct=function(n){return (n/tot*100).toFixed(2);};
-    var h='';
-    if(by.local)h+='<div class="lib-bar-seg local" style="width:'+pct(by.local)+'%" title="Local: '+esc(by.local)+'"></div>';
-    if(by.both)h+='<div class="lib-bar-seg both" style="width:'+pct(by.both)+'%" title="Both: '+esc(by.both)+'"></div>';
-    if(by.debrid)h+='<div class="lib-bar-seg debrid" style="width:'+pct(by.debrid)+'%" title="Debrid: '+esc(by.debrid)+'"></div>';
-    return h;
-  }
-  function buildRows(by,sizeBy){
+  var movies=lib.movies||{total:0,by_source:{},size_by_source:{}};
+  var shows=lib.shows||{total:0,by_source:{},size_by_source:{},episodes:{total:0,by_source:{},size_by_source:{}}};
+  var eps=shows.episodes||{total:0,by_source:{},size_by_source:{}};
+
+  // Headline
+  document.getElementById('lib-total-size').textContent=fmtBytes(totals.size_bytes||0);
+  var metaParts=[];
+  metaParts.push((movies.total||0).toLocaleString()+' movies');
+  metaParts.push((shows.total||0).toLocaleString()+' shows');
+  if(eps.total)metaParts.push((eps.total||0).toLocaleString()+' episodes');
+  document.getElementById('lib-headline-meta').textContent=metaParts.join(' · ');
+
+  // Source labels for tooltips
+  var SRC_LABELS={local:'Local',debrid:'Debrid',both:'Both'};
+
+  // Build a stacked bar: order local → both → debrid for visual consistency.
+  // Labels render inline when the segment is wide enough; tooltip carries
+  // the full breakdown for slivers.
+  function buildBar(by,sizeBy){
+    var tot=(by.local||0)+(by.both||0)+(by.debrid||0);
+    if(!tot)return '<div class="lib-bar-empty"></div>';
     var order=['local','both','debrid'];
-    var labels={local:'Local',debrid:'Debrid',both:'Both'};
     var h='';
     order.forEach(function(k){
-      var c=by[k]||0;var s=(sizeBy&&sizeBy[k])||0;
-      h+='<div class="lib-row"><span class="lib-swatch '+k+'"></span><span class="lib-src">'+esc(labels[k])+'</span><span class="lib-count">'+esc(c.toLocaleString())+'</span><span class="lib-size">'+esc(s?fmtBytes(s):'—')+'</span></div>';
+      var c=by[k]||0;if(!c)return;
+      var s=(sizeBy&&sizeBy[k])||0;
+      var pct=c/tot*100;
+      var label='';
+      if(pct>=22&&s)label=c.toLocaleString()+' · '+fmtBytes(s);
+      else if(pct>=10)label=c.toLocaleString();
+      var tip=SRC_LABELS[k]+': '+c.toLocaleString()+(s?' · '+fmtBytes(s):'')+' ('+pct.toFixed(1)+'%)';
+      h+='<div class="lib-bar-seg '+k+'" style="width:'+pct.toFixed(2)+'%" title="'+esc(tip)+'">';
+      if(label)h+='<span class="lib-bar-label">'+esc(label)+'</span>';
+      h+='</div>';
     });
     return h;
   }
-  document.getElementById('lib-mov-bar').innerHTML=buildBar(movies.by_source||{});
-  document.getElementById('lib-mov-rows').innerHTML=buildRows(movies.by_source||{},movies.size_by_source||{});
-  document.getElementById('lib-mov-sub').textContent=fmtBytes(movies.size_bytes||0);
-  document.getElementById('lib-show-bar').innerHTML=buildBar(shows.by_source||{});
-  document.getElementById('lib-show-rows').innerHTML=buildRows(shows.by_source||{},shows.size_by_source||{});
-  document.getElementById('lib-show-sub').textContent=fmtBytes(shows.size_bytes||0);
-  var eps=shows.episodes||{by_source:{},size_by_source:{}};
-  var ebs=eps.by_source||{};var ess=eps.size_by_source||{};
-  var epsHtml='<div class="lib-eps-line">';
-  ['local','both','debrid'].forEach(function(k){
-    var labels={local:'Local',debrid:'Debrid',both:'Both'};
-    var c=ebs[k]||0;var s=ess[k]||0;
-    if(!c&&!s)return;
-    epsHtml+='<span class="lib-eps-bucket"><span class="sw '+k+'"></span>'+esc(labels[k])+': '+esc(c.toLocaleString())+(s?' · '+esc(fmtBytes(s)):'')+'</span>';
-  });
-  epsHtml+='</div>';
-  document.getElementById('lib-eps').innerHTML=eps.total?epsHtml:'';
-  var foot='';
-  if(lib.last_scan){
-    foot='Last scan: '+esc(timeAgo(lib.last_scan));
+
+  function setBar(prefix,total,sizeBytes,by,sizeBy){
+    var meta=total?(total.toLocaleString()+' · '+fmtBytes(sizeBytes||0)):'—';
+    document.getElementById(prefix+'-meta').textContent=meta;
+    document.getElementById(prefix+'-bar').innerHTML=buildBar(by||{},sizeBy||{});
   }
-  document.getElementById('lib-foot').innerHTML=foot;
+
+  setBar('lib-mov',movies.total||0,movies.size_bytes||0,movies.by_source,movies.size_by_source);
+  setBar('lib-show',shows.total||0,shows.size_bytes||0,shows.by_source,shows.size_by_source);
+
+  // Episodes: hide the row when a movie-only library has no shows.
+  var epsWrap=document.getElementById('lib-eps-wrap');
+  if(eps.total){
+    epsWrap.style.display='';
+    setBar('lib-eps',eps.total||0,eps.size_bytes||0,eps.by_source,eps.size_by_source);
+  }else{
+    epsWrap.style.display='none';
+  }
+
+  document.getElementById('lib-foot').textContent=lib.last_scan?('Last scan: '+timeAgo(lib.last_scan)):'';
 }
 function setCardHealth(h2Text,cls){var heads=document.querySelectorAll('.card h2');for(var i=0;i<heads.length;i++){if(heads[i].textContent.trim().startsWith(h2Text)){var c=heads[i].parentElement;c.classList.remove('card-ok','card-warn','card-crit');if(cls)c.classList.add(cls);break;}}}
 function updateCardStates(d){
@@ -1122,37 +1140,38 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .info-value{display:block;font-size:1em;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .info-label{display:block;font-size:.7em;color:var(--text3);margin-top:2px;letter-spacing:.05em}
 @media(max-width:600px){.stats-row{flex-wrap:nowrap;gap:12px}.stats-row>div{flex:1 1 0;min-width:0;width:auto}.stat-ring{width:100%;height:auto;max-width:140px}.stat-value{font-size:1.3em}.info-row{flex-wrap:wrap;gap:12px}.info-item{flex:none;width:calc(50% - 6px)}}
-.lib-totals{display:flex;gap:32px;justify-content:space-around;flex-wrap:wrap;padding:6px 0 14px 0;border-bottom:1px solid var(--border2);margin-bottom:14px}
-.lib-tot-item{text-align:center;flex:1;min-width:90px}
-.lib-tot-value{font-size:1.6em;font-weight:600;color:var(--blue)}
-.lib-tot-label{font-size:.7em;color:var(--text3);margin-top:2px;text-transform:uppercase;letter-spacing:.06em}
-.lib-cats{display:grid;grid-template-columns:1fr 1fr;gap:24px}
-@media(max-width:768px){.lib-cats{grid-template-columns:1fr;gap:18px}}
-.lib-cat-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px}
-.lib-cat-title{font-size:.95em;font-weight:600;color:var(--text)}
-.lib-cat-sub{font-size:.75em;color:var(--text2)}
-.lib-bar{display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--border);margin-bottom:10px}
-.lib-bar-seg{height:100%;transition:width .4s ease}
-.lib-bar-seg.local{background:var(--green)}
-.lib-bar-seg.debrid{background:var(--blue)}
-.lib-bar-seg.both{background:var(--yellow)}
-.lib-rows{display:flex;flex-direction:column;gap:4px}
-.lib-row{display:grid;grid-template-columns:14px 1fr auto auto;gap:8px;align-items:center;font-size:.82em}
-.lib-row .lib-swatch{width:10px;height:10px;border-radius:2px;display:inline-block}
-.lib-row .lib-swatch.local{background:var(--green)}
-.lib-row .lib-swatch.debrid{background:var(--blue)}
-.lib-row .lib-swatch.both{background:var(--yellow)}
-.lib-row .lib-src{color:var(--text2);text-transform:capitalize}
-.lib-row .lib-count{color:var(--text);font-variant-numeric:tabular-nums;font-weight:500}
-.lib-row .lib-size{color:var(--text2);font-variant-numeric:tabular-nums;min-width:64px;text-align:right}
-.lib-eps{margin-top:10px;padding-top:8px;border-top:1px solid var(--border2);font-size:.78em;color:var(--text2)}
-.lib-eps-line{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
-.lib-eps-line .lib-eps-bucket{white-space:nowrap}
-.lib-eps-line .lib-eps-bucket .sw{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px;vertical-align:middle}
-.lib-eps-line .lib-eps-bucket .sw.local{background:var(--green)}
-.lib-eps-line .lib-eps-bucket .sw.debrid{background:var(--blue)}
-.lib-eps-line .lib-eps-bucket .sw.both{background:var(--yellow)}
-.lib-foot{margin-top:14px;font-size:.72em;color:var(--text3);text-align:right}
+.lib-headline{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;padding:0 0 18px 0;border-bottom:1px solid var(--border2);margin-bottom:18px;flex-wrap:wrap}
+.lib-headline-main{display:flex;flex-direction:column;min-width:0}
+.lib-headline-value{font-size:2.4em;font-weight:700;color:var(--text);line-height:1.05;font-variant-numeric:tabular-nums}
+.lib-headline-label{font-size:.7em;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;margin-top:4px}
+.lib-headline-meta{font-size:.85em;color:var(--text2);text-align:right;line-height:1.7;font-variant-numeric:tabular-nums}
+@media(max-width:600px){.lib-headline-meta{text-align:left;width:100%}}
+.lib-cats{display:flex;flex-direction:column;gap:14px}
+.lib-cat-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;gap:12px;flex-wrap:wrap}
+.lib-cat-title{font-size:.92em;font-weight:600;color:var(--text)}
+.lib-cat-title.lib-eps-title{font-weight:500;color:var(--text2);font-size:.82em}
+.lib-cat-meta{font-size:.78em;color:var(--text2);font-variant-numeric:tabular-nums}
+.lib-bar{display:flex;height:26px;border-radius:5px;overflow:hidden;background:var(--border);position:relative}
+.lib-bar.lib-bar-eps{height:18px}
+.lib-bar-empty{flex:1;background:repeating-linear-gradient(45deg,var(--border) 0 6px,transparent 6px 12px)}
+.lib-bar-seg{height:100%;display:flex;align-items:center;justify-content:center;overflow:hidden;transition:width .4s ease;min-width:0;cursor:default}
+.lib-bar-label{font-size:.72em;font-weight:600;color:#fff;white-space:nowrap;text-shadow:0 1px 2px rgba(0,0,0,.45);padding:0 6px;font-variant-numeric:tabular-nums;letter-spacing:.01em}
+.lib-bar-seg.local{background:#a855f7}
+.lib-bar-seg.debrid{background:#0891b2}
+.lib-bar-seg.both{background:repeating-linear-gradient(45deg,#a855f7 0 8px,#0891b2 8px 16px)}
+[data-theme="light"] .lib-bar-seg.local{background:#9333ea}
+[data-theme="light"] .lib-bar-seg.debrid{background:#0e7490}
+[data-theme="light"] .lib-bar-seg.both{background:repeating-linear-gradient(45deg,#9333ea 0 8px,#0e7490 8px 16px)}
+.lib-legend{display:flex;gap:18px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border2);font-size:.75em;color:var(--text2);justify-content:center;flex-wrap:wrap}
+.lib-legend>span{display:inline-flex;align-items:center;gap:6px}
+.lib-swatch{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:middle}
+.lib-swatch.local{background:#a855f7}
+.lib-swatch.debrid{background:#0891b2}
+.lib-swatch.both{background:repeating-linear-gradient(45deg,#a855f7 0 4px,#0891b2 4px 8px)}
+[data-theme="light"] .lib-swatch.local{background:#9333ea}
+[data-theme="light"] .lib-swatch.debrid{background:#0e7490}
+[data-theme="light"] .lib-swatch.both{background:repeating-linear-gradient(45deg,#9333ea 0 4px,#0e7490 4px 8px)}
+.lib-foot{margin-top:10px;font-size:.7em;color:var(--text3);text-align:right}
 """
 
 

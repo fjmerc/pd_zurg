@@ -675,6 +675,8 @@ class TestLibraryScannerScanDebrid:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
         return scanner
 
     def test_scan_debrid_movies_returns_correct_items(self, tmp_dir, monkeypatch):
@@ -751,6 +753,8 @@ class TestLibraryScannerScanDebrid:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
 
         result = scanner.scan()
         assert result["movies"] == []
@@ -975,6 +979,8 @@ class TestLibraryScannerScanLocal:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
         return scanner
 
     def test_scan_local_movies_source_is_local(self, tmp_dir):
@@ -1068,6 +1074,8 @@ class TestLibraryScannerScanCrossRef:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
 
         result = scanner.scan()
 
@@ -1105,6 +1113,8 @@ class TestLibraryScannerScanCrossRef:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
 
         result = scanner.scan()
         local_only = next(m for m in result["movies"] if m["title"] == "Local Only")
@@ -1136,6 +1146,8 @@ class TestLibraryScannerScanCrossRef:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
 
         result = scanner.scan()
         show = next(s for s in result["shows"] if s["title"] == "Succession")
@@ -1172,6 +1184,8 @@ class TestLibraryScannerScanCrossRef:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
 
         result = scanner.scan()
         arrival = next(m for m in result["movies"] if m["title"] == "Arrival")
@@ -1355,6 +1369,8 @@ class TestSeasonDataInScanResults:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
         return scanner
 
     def test_shows_have_season_data(self, tmp_dir, monkeypatch):
@@ -1461,6 +1477,8 @@ class TestEpisodeLevelCrossRef:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
         return scanner
 
     def test_same_episode_both_sources_gets_both(self, tmp_dir):
@@ -1679,6 +1697,8 @@ class TestLibraryScannerGetData:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
         return scanner
 
     def test_get_data_returns_scan_result(self):
@@ -1763,6 +1783,8 @@ class TestLibraryScannerRefresh:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
         return scanner
 
     def test_refresh_triggers_background_scan(self, mocker):
@@ -2490,3 +2512,196 @@ class TestGetSonarrSeriesList:
         result = _lib._get_sonarr_series_list(client)
         assert result is None
         assert _lib._sonarr_series_cache['data'] is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: memoize "Zurg lacks recursive PROPFIND" detection so the scanner
+# stops re-attempting Depth: infinity on every cache miss.
+# ---------------------------------------------------------------------------
+
+class TestWebDAVUnsupportedMemoization:
+
+    def _make_scanner(self):
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._mount_path = '/mnt/debrid'
+        scanner._local_movies_path = None
+        scanner._local_tv_path = None
+        scanner._cache = None
+        scanner._cache_time = 0
+        scanner._ttl = 600
+        scanner._lock = threading.Lock()
+        scanner._scanning = False
+        scanner._effects_running = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
+        return scanner
+
+    def test_flag_set_on_first_detection(self, monkeypatch):
+        """folders-but-no-files response flips the memoization flag."""
+        scanner = self._make_scanner()
+        monkeypatch.setattr(library, '_discover_zurg_url',
+                            lambda mp: 'http://zurg:9999')
+        monkeypatch.setattr(library, '_get_zurg_auth', lambda: None)
+
+        def fake_propfind(url, depth, auth, timeout):
+            if depth == 1:
+                # Root listing — return one scannable category.
+                return [
+                    {'href': '/dav/', 'name': '', 'is_collection': True, 'size': 0},
+                    {'href': '/dav/movies/', 'name': 'movies',
+                     'is_collection': True, 'size': 0},
+                ]
+            # Depth=infinity: Zurg returns folder names but no files.
+            return [
+                {'href': '/dav/movies/', 'name': 'movies',
+                 'is_collection': True, 'size': 0},
+                {'href': '/dav/movies/Inception/', 'name': 'Inception',
+                 'is_collection': True, 'size': 0},
+                {'href': '/dav/movies/Dune/', 'name': 'Dune',
+                 'is_collection': True, 'size': 0},
+            ]
+        monkeypatch.setattr('utils.webdav.propfind', fake_propfind)
+
+        with pytest.raises(library._WebDAVUnsupportedError):
+            scanner._webdav_scan_mount()
+        assert scanner._webdav_unsupported is True
+
+    def test_memoized_short_circuits_propfind(self, monkeypatch):
+        """Once memoized, _webdav_scan_mount must not issue any HTTP."""
+        scanner = self._make_scanner()
+        scanner._webdav_unsupported = True
+
+        called = []
+
+        def fake_propfind(*a, **kw):
+            called.append(1)
+            return []
+
+        monkeypatch.setattr('utils.webdav.propfind', fake_propfind)
+        # Sentinel: _discover_zurg_url must not be called either, since the
+        # short-circuit happens before the URL is resolved.
+        monkeypatch.setattr(library, '_discover_zurg_url',
+                            lambda mp: pytest.fail('should not be called'))
+
+        with pytest.raises(library._WebDAVUnsupportedError, match='memoized'):
+            scanner._webdav_scan_mount()
+        assert called == []
+
+    def test_log_demoted_to_debug_after_first_detection(self, monkeypatch):
+        """First "using FUSE" log fires at INFO; subsequent fires at DEBUG.
+
+        We spy on the logger directly rather than caplog because the custom
+        ZURGARR logger has its own handler config that doesn't always play
+        well with caplog's root-handler propagation.
+        """
+        scanner = self._make_scanner()
+
+        # Stub everything _scan_read touches after the WebDAV failure.
+        monkeypatch.setattr(scanner, '_scan_mount', lambda *a, **kw: ([], []))
+        monkeypatch.setattr(scanner, '_scan_local_movies', lambda: [])
+        monkeypatch.setattr(scanner, '_scan_local_shows', lambda: [])
+        monkeypatch.setattr(scanner, '_dedup_by_tmdb',
+                            lambda items, _aliases: items)
+        monkeypatch.setattr(library, '_build_tmdb_aliases', lambda: ({}, {}))
+        monkeypatch.setattr(library, '_enrich_with_tmdb_cache',
+                            lambda movies, shows: [])
+        monkeypatch.setattr(library, '_apply_sonarr_monitored_filter',
+                            lambda shows: None)
+        from utils import library_prefs
+        monkeypatch.setattr(library_prefs, 'get_all_preferences', lambda: {})
+
+        info_calls = []
+        debug_calls = []
+        monkeypatch.setattr(
+            library.logger, 'info',
+            lambda msg, *a, **kw: info_calls.append(msg % a if a else msg),
+        )
+        monkeypatch.setattr(
+            library.logger, 'debug',
+            lambda msg, *a, **kw: debug_calls.append(msg % a if a else msg),
+        )
+
+        # First scan — webdav raises the detection-style error.
+        def first_call(*a, **kw):
+            scanner._webdav_unsupported = True
+            raise library._WebDAVUnsupportedError(
+                "WebDAV depth-infinity returned 5 folders but 0 files for movies"
+            )
+        monkeypatch.setattr(scanner, '_webdav_scan_mount', first_call)
+
+        scanner._scan_read()
+        info_msgs = [m for m in info_calls if 'WebDAV scan unavailable' in m]
+        debug_msgs = [m for m in debug_calls if 'WebDAV scan unavailable' in m]
+        assert len(info_msgs) == 1
+        assert debug_msgs == []
+        assert scanner._webdav_unsupported_logged is True
+
+        # Second scan — memoized branch raises immediately.  Log demoted.
+        info_calls.clear()
+        debug_calls.clear()
+
+        def second_call(*a, **kw):
+            raise library._WebDAVUnsupportedError(
+                "Zurg lacks recursive PROPFIND (memoized)"
+            )
+        monkeypatch.setattr(scanner, '_webdav_scan_mount', second_call)
+
+        scanner._scan_read()
+        info_msgs = [m for m in info_calls if 'WebDAV scan unavailable' in m]
+        debug_msgs = [m for m in debug_calls if 'WebDAV scan unavailable' in m]
+        assert info_msgs == []
+        assert len(debug_msgs) == 1
+
+    def test_transient_failure_does_not_set_logged_flag(self, monkeypatch):
+        """A non-unsupported exception (e.g. transient DNS) keeps logging
+        at INFO and must NOT flip the memoization flags — flag-flipping is
+        reserved for the typed unsupported error so transient outages
+        don't permanently silence the FUSE-fallback log or wedge the
+        scanner into FUSE-only mode."""
+        scanner = self._make_scanner()
+
+        monkeypatch.setattr(scanner, '_scan_mount', lambda *a, **kw: ([], []))
+        monkeypatch.setattr(scanner, '_scan_local_movies', lambda: [])
+        monkeypatch.setattr(scanner, '_scan_local_shows', lambda: [])
+        monkeypatch.setattr(scanner, '_dedup_by_tmdb',
+                            lambda items, _aliases: items)
+        monkeypatch.setattr(library, '_build_tmdb_aliases', lambda: ({}, {}))
+        monkeypatch.setattr(library, '_enrich_with_tmdb_cache',
+                            lambda movies, shows: [])
+        monkeypatch.setattr(library, '_apply_sonarr_monitored_filter',
+                            lambda shows: None)
+        from utils import library_prefs
+        monkeypatch.setattr(library_prefs, 'get_all_preferences', lambda: {})
+
+        info_calls = []
+        debug_calls = []
+        monkeypatch.setattr(
+            library.logger, 'info',
+            lambda msg, *a, **kw: info_calls.append(msg % a if a else msg),
+        )
+        monkeypatch.setattr(
+            library.logger, 'debug',
+            lambda msg, *a, **kw: debug_calls.append(msg % a if a else msg),
+        )
+
+        def raise_transient(*a, **kw):
+            raise OSError('connection refused')
+        monkeypatch.setattr(scanner, '_webdav_scan_mount', raise_transient)
+
+        scanner._scan_read()
+
+        info_msgs = [m for m in info_calls if 'WebDAV scan unavailable' in m]
+        debug_msgs = [m for m in debug_calls if 'WebDAV scan unavailable' in m]
+        assert len(info_msgs) == 1
+        assert debug_msgs == []
+        assert scanner._webdav_unsupported is False
+        assert scanner._webdav_unsupported_logged is False

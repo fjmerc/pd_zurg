@@ -950,6 +950,15 @@ def _build_tmdb_aliases():
     )
 
 
+class _WebDAVUnsupportedError(RuntimeError):
+    """Zurg does not honor recursive PROPFIND.
+
+    Raised either on first detection (folders returned with no files) or on
+    subsequent scans once `_webdav_unsupported` has been memoized, so the
+    caller can log the memoized case at DEBUG instead of repeating INFO.
+    """
+
+
 class LibraryScanner:
     def __init__(self):
         self._mount_path = _discover_mount()
@@ -976,6 +985,14 @@ class LibraryScanner:
             self._pending_warning_hours = 24
         self._last_had_local = None    # None=unknown, True=had local content
         self._local_drop_alerted = False
+
+        # Memoized capability: once we detect that Zurg does not honor
+        # `Depth: infinity`, skip the doomed PROPFIND on every subsequent
+        # scan and go straight to FUSE.  `_logged` tracks whether the
+        # detection message has already been emitted at INFO so subsequent
+        # fallbacks don't spam the log every cache TTL.
+        self._webdav_unsupported = False
+        self._webdav_unsupported_logged = False
 
         # Per-title basename sets of previously-created debrid symlinks.
         # Used to classify new symlink_created events as "new import" vs
@@ -1205,7 +1222,17 @@ class LibraryScanner:
                 debrid_movies, debrid_shows = self._webdav_scan_mount(deadline)
                 logger.debug("[library] WebDAV scan succeeded")
             except Exception as e:
-                logger.info(f"[library] WebDAV scan unavailable, using FUSE: {e}")
+                # Quiet down the recurring "using FUSE" log once the
+                # capability is memoized — first detection at INFO, every
+                # subsequent scan at DEBUG.  Other transient WebDAV failures
+                # still log at INFO so they remain visible.
+                is_unsupported = isinstance(e, _WebDAVUnsupportedError)
+                if is_unsupported and self._webdav_unsupported_logged:
+                    logger.debug(f"[library] WebDAV scan unavailable, using FUSE: {e}")
+                else:
+                    logger.info(f"[library] WebDAV scan unavailable, using FUSE: {e}")
+                    if is_unsupported:
+                        self._webdav_unsupported_logged = True
                 try:
                     from utils.rclone_rc import refresh_dir
                     refresh_dir('', recursive=True)
@@ -3585,6 +3612,13 @@ class LibraryScanner:
 
         Raises Exception on any failure so the caller can fall back to FUSE.
         """
+        # Memoized: Zurg already proved it doesn't honor Depth: infinity on a
+        # prior scan.  Skip the PROPFIND round-trip entirely.
+        if self._webdav_unsupported:
+            raise _WebDAVUnsupportedError(
+                "Zurg lacks recursive PROPFIND (memoized)"
+            )
+
         from utils.webdav import propfind
 
         zurg_url = _discover_zurg_url(self._mount_path)
@@ -3689,7 +3723,9 @@ class LibraryScanner:
                 for contents in folders.values()
             )
             if folders and not has_files:
-                raise RuntimeError(
+                # Memoize so future scans skip this round-trip entirely.
+                self._webdav_unsupported = True
+                raise _WebDAVUnsupportedError(
                     f"WebDAV depth-infinity returned {len(folders)} folders but 0 files "
                     f"for {category} — Zurg likely does not support recursive PROPFIND"
                 )

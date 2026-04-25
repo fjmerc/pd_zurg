@@ -521,6 +521,18 @@ class StatusData:
         # Provider API health metrics
         provider_health = _api_metrics.get_metrics()
 
+        # Library composition (counts/sizes by source) — uses cached scan
+        # data only, never triggers a scan on the status poll path.
+        library_stats = None
+        try:
+            from utils.library import get_scanner
+            scanner = get_scanner()
+            if scanner is not None:
+                library_stats = scanner.get_cached_stats()
+        except Exception as e:
+            logger.debug("Library stats unavailable for /api/status: %s", e)
+            library_stats = None
+
         return {
             'version': self.version,
             'uptime_seconds': int(time.time() - self.start_time),
@@ -531,6 +543,7 @@ class StatusData:
             'recent_events': events,
             'error_count': error_count,
             'provider_health': provider_health,
+            'library': library_stats,
         }
 
 
@@ -660,6 +673,26 @@ __NAV_HTML__
     <div class="events" id="events"></div>
   </div>
 </div>
+<div class="grid full" id="lib-card-wrap" style="display:none">
+  <div class="card">
+    <h2>Library Composition</h2>
+    <div class="lib-totals" id="lib-totals"></div>
+    <div class="lib-cats">
+      <div class="lib-cat">
+        <div class="lib-cat-head"><span class="lib-cat-title">Movies</span><span class="lib-cat-sub" id="lib-mov-sub"></span></div>
+        <div class="lib-bar" id="lib-mov-bar"></div>
+        <div class="lib-rows" id="lib-mov-rows"></div>
+      </div>
+      <div class="lib-cat">
+        <div class="lib-cat-head"><span class="lib-cat-title">Shows</span><span class="lib-cat-sub" id="lib-show-sub"></span></div>
+        <div class="lib-bar" id="lib-show-bar"></div>
+        <div class="lib-rows" id="lib-show-rows"></div>
+        <div class="lib-eps" id="lib-eps"></div>
+      </div>
+    </div>
+    <div class="lib-foot" id="lib-foot"></div>
+  </div>
+</div>
 <div class="footer"><span id="conn-status"></span>Refresh: <select id="refresh-interval" onchange="setRefreshInterval(this.value)" style="background:var(--bg);color:var(--text2);border:1px solid var(--border);border-radius:3px;font-size:1em;padding:1px 4px"><option value="5">5s</option><option value="10" selected>10s</option><option value="30">30s</option><option value="0">Paused</option></select></div>
 <script>
 __THEME_TOGGLE_JS__
@@ -722,6 +755,64 @@ function renderServices(svcs){
 
 var _lastFetchTime=0;
 function updateRing(id,pct){var f=document.getElementById(id);if(!f)return;var c=326.73,o=c-(c*Math.min(pct,100)/100);f.style.strokeDashoffset=o;f.style.stroke=pct>85?'var(--red)':pct>60?'var(--yellow)':'var(--green)';}
+
+function renderLibrary(lib){
+  var wrap=document.getElementById('lib-card-wrap');if(!wrap)return;
+  if(!lib||!lib.totals||!lib.totals.items){wrap.style.display='none';return;}
+  wrap.style.display='';
+  var totals=lib.totals||{};
+  var movies=lib.movies||{by_source:{},size_by_source:{}};
+  var shows=lib.shows||{by_source:{},size_by_source:{},episodes:{by_source:{},size_by_source:{}}};
+  var totHtml=''+
+    '<div class="lib-tot-item"><div class="lib-tot-value">'+esc((totals.items||0).toLocaleString())+'</div><div class="lib-tot-label">Total Items</div></div>'+
+    '<div class="lib-tot-item"><div class="lib-tot-value">'+esc((movies.total||0).toLocaleString())+'</div><div class="lib-tot-label">Movies</div></div>'+
+    '<div class="lib-tot-item"><div class="lib-tot-value">'+esc((shows.total||0).toLocaleString())+'</div><div class="lib-tot-label">Shows</div></div>'+
+    '<div class="lib-tot-item"><div class="lib-tot-value">'+esc((shows.episodes&&shows.episodes.total||0).toLocaleString())+'</div><div class="lib-tot-label">Episodes</div></div>'+
+    '<div class="lib-tot-item"><div class="lib-tot-value">'+esc(fmtBytes(totals.size_bytes||0))+'</div><div class="lib-tot-label">Total Size</div></div>';
+  document.getElementById('lib-totals').innerHTML=totHtml;
+  function buildBar(by){
+    var tot=(by.local||0)+(by.debrid||0)+(by.both||0);
+    if(!tot)return '<div class="lib-bar-seg" style="width:100%;background:var(--border)"></div>';
+    var pct=function(n){return (n/tot*100).toFixed(2);};
+    var h='';
+    if(by.local)h+='<div class="lib-bar-seg local" style="width:'+pct(by.local)+'%" title="Local: '+esc(by.local)+'"></div>';
+    if(by.both)h+='<div class="lib-bar-seg both" style="width:'+pct(by.both)+'%" title="Both: '+esc(by.both)+'"></div>';
+    if(by.debrid)h+='<div class="lib-bar-seg debrid" style="width:'+pct(by.debrid)+'%" title="Debrid: '+esc(by.debrid)+'"></div>';
+    return h;
+  }
+  function buildRows(by,sizeBy){
+    var order=['local','both','debrid'];
+    var labels={local:'Local',debrid:'Debrid',both:'Both'};
+    var h='';
+    order.forEach(function(k){
+      var c=by[k]||0;var s=(sizeBy&&sizeBy[k])||0;
+      h+='<div class="lib-row"><span class="lib-swatch '+k+'"></span><span class="lib-src">'+esc(labels[k])+'</span><span class="lib-count">'+esc(c.toLocaleString())+'</span><span class="lib-size">'+esc(s?fmtBytes(s):'—')+'</span></div>';
+    });
+    return h;
+  }
+  document.getElementById('lib-mov-bar').innerHTML=buildBar(movies.by_source||{});
+  document.getElementById('lib-mov-rows').innerHTML=buildRows(movies.by_source||{},movies.size_by_source||{});
+  document.getElementById('lib-mov-sub').textContent=fmtBytes(movies.size_bytes||0);
+  document.getElementById('lib-show-bar').innerHTML=buildBar(shows.by_source||{});
+  document.getElementById('lib-show-rows').innerHTML=buildRows(shows.by_source||{},shows.size_by_source||{});
+  document.getElementById('lib-show-sub').textContent=fmtBytes(shows.size_bytes||0);
+  var eps=shows.episodes||{by_source:{},size_by_source:{}};
+  var ebs=eps.by_source||{};var ess=eps.size_by_source||{};
+  var epsHtml='<div class="lib-eps-line">';
+  ['local','both','debrid'].forEach(function(k){
+    var labels={local:'Local',debrid:'Debrid',both:'Both'};
+    var c=ebs[k]||0;var s=ess[k]||0;
+    if(!c&&!s)return;
+    epsHtml+='<span class="lib-eps-bucket"><span class="sw '+k+'"></span>'+esc(labels[k])+': '+esc(c.toLocaleString())+(s?' · '+esc(fmtBytes(s)):'')+'</span>';
+  });
+  epsHtml+='</div>';
+  document.getElementById('lib-eps').innerHTML=eps.total?epsHtml:'';
+  var foot='';
+  if(lib.last_scan){
+    foot='Last scan: '+esc(timeAgo(lib.last_scan));
+  }
+  document.getElementById('lib-foot').innerHTML=foot;
+}
 function setCardHealth(h2Text,cls){var heads=document.querySelectorAll('.card h2');for(var i=0;i<heads.length;i++){if(heads[i].textContent.trim().startsWith(h2Text)){var c=heads[i].parentElement;c.classList.remove('card-ok','card-warn','card-crit');if(cls)c.classList.add(cls);break;}}}
 function updateCardStates(d){
   var sH='ok',pH='ok',mH='ok',yH='ok',eH='ok',overall='ok';
@@ -889,6 +980,10 @@ function update(){
       }
     }
     document.getElementById('events').innerHTML=e;
+
+    // Library composition
+    renderLibrary(d.library);
+
     _failCount=0;
     document.getElementById('conn-status').textContent='';
     _lastFetchTime=Date.now();
@@ -1027,6 +1122,37 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .info-value{display:block;font-size:1em;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .info-label{display:block;font-size:.7em;color:var(--text3);margin-top:2px;letter-spacing:.05em}
 @media(max-width:600px){.stats-row{flex-wrap:nowrap;gap:12px}.stats-row>div{flex:1 1 0;min-width:0;width:auto}.stat-ring{width:100%;height:auto;max-width:140px}.stat-value{font-size:1.3em}.info-row{flex-wrap:wrap;gap:12px}.info-item{flex:none;width:calc(50% - 6px)}}
+.lib-totals{display:flex;gap:32px;justify-content:space-around;flex-wrap:wrap;padding:6px 0 14px 0;border-bottom:1px solid var(--border2);margin-bottom:14px}
+.lib-tot-item{text-align:center;flex:1;min-width:90px}
+.lib-tot-value{font-size:1.6em;font-weight:600;color:var(--blue)}
+.lib-tot-label{font-size:.7em;color:var(--text3);margin-top:2px;text-transform:uppercase;letter-spacing:.06em}
+.lib-cats{display:grid;grid-template-columns:1fr 1fr;gap:24px}
+@media(max-width:768px){.lib-cats{grid-template-columns:1fr;gap:18px}}
+.lib-cat-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px}
+.lib-cat-title{font-size:.95em;font-weight:600;color:var(--text)}
+.lib-cat-sub{font-size:.75em;color:var(--text2)}
+.lib-bar{display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--border);margin-bottom:10px}
+.lib-bar-seg{height:100%;transition:width .4s ease}
+.lib-bar-seg.local{background:var(--green)}
+.lib-bar-seg.debrid{background:var(--blue)}
+.lib-bar-seg.both{background:var(--yellow)}
+.lib-rows{display:flex;flex-direction:column;gap:4px}
+.lib-row{display:grid;grid-template-columns:14px 1fr auto auto;gap:8px;align-items:center;font-size:.82em}
+.lib-row .lib-swatch{width:10px;height:10px;border-radius:2px;display:inline-block}
+.lib-row .lib-swatch.local{background:var(--green)}
+.lib-row .lib-swatch.debrid{background:var(--blue)}
+.lib-row .lib-swatch.both{background:var(--yellow)}
+.lib-row .lib-src{color:var(--text2);text-transform:capitalize}
+.lib-row .lib-count{color:var(--text);font-variant-numeric:tabular-nums;font-weight:500}
+.lib-row .lib-size{color:var(--text2);font-variant-numeric:tabular-nums;min-width:64px;text-align:right}
+.lib-eps{margin-top:10px;padding-top:8px;border-top:1px solid var(--border2);font-size:.78em;color:var(--text2)}
+.lib-eps-line{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.lib-eps-line .lib-eps-bucket{white-space:nowrap}
+.lib-eps-line .lib-eps-bucket .sw{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px;vertical-align:middle}
+.lib-eps-line .lib-eps-bucket .sw.local{background:var(--green)}
+.lib-eps-line .lib-eps-bucket .sw.debrid{background:var(--blue)}
+.lib-eps-line .lib-eps-bucket .sw.both{background:var(--yellow)}
+.lib-foot{margin-top:14px;font-size:.72em;color:var(--text3);text-align:right}
 """
 
 

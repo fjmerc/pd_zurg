@@ -14,6 +14,7 @@ from utils.library import (
     _discover_mount,
     _norm_for_matching,
     get_wanted_counts,
+    compute_library_stats,
     LibraryScanner,
     setup,
     get_scanner,
@@ -2068,6 +2069,153 @@ class TestGetWantedCounts:
         counts = get_wanted_counts(data, pending)
         assert counts['fallback'] == 1
         assert counts['pending'] == 1
+
+
+class TestComputeLibraryStats:
+    """Tests for compute_library_stats() — composition for the status page."""
+
+    def test_empty_data(self):
+        stats = compute_library_stats({'movies': [], 'shows': []})
+        assert stats['totals'] == {'items': 0, 'size_bytes': 0}
+        assert stats['movies']['total'] == 0
+        assert stats['shows']['total'] == 0
+        assert stats['shows']['episodes']['total'] == 0
+        assert stats['movies']['by_source'] == {'local': 0, 'debrid': 0, 'both': 0}
+
+    def test_movies_grouped_by_source(self):
+        data = {
+            'movies': [
+                {'source': 'local', 'size_bytes': 1000},
+                {'source': 'debrid', 'size_bytes': 2000},
+                {'source': 'debrid', 'size_bytes': 500},
+                {'source': 'both', 'size_bytes': 3000},
+            ],
+            'shows': [],
+        }
+        stats = compute_library_stats(data)
+        assert stats['movies']['total'] == 4
+        assert stats['movies']['by_source'] == {'local': 1, 'debrid': 2, 'both': 1}
+        assert stats['movies']['size_by_source'] == {'local': 1000, 'debrid': 2500, 'both': 3000}
+        assert stats['movies']['size_bytes'] == 6500
+        assert stats['totals']['size_bytes'] == 6500
+
+    def test_shows_episodes_bucketed_by_episode_source(self):
+        data = {
+            'movies': [],
+            'shows': [{
+                'source': 'both',
+                'season_data': [{'episodes': [
+                    {'source': 'local', 'size_bytes': 100},
+                    {'source': 'debrid', 'size_bytes': 200},
+                    {'source': 'both', 'size_bytes': 50},
+                ]}],
+            }],
+        }
+        stats = compute_library_stats(data)
+        assert stats['shows']['total'] == 1
+        assert stats['shows']['by_source']['both'] == 1
+        assert stats['shows']['episodes']['total'] == 3
+        assert stats['shows']['episodes']['by_source'] == {'local': 1, 'debrid': 1, 'both': 1}
+        assert stats['shows']['episodes']['size_by_source'] == {'local': 100, 'debrid': 200, 'both': 50}
+        # Show size_by_source aggregates under the show-level source
+        assert stats['shows']['size_by_source']['both'] == 350
+
+    def test_unknown_source_falls_back_to_debrid(self):
+        data = {
+            'movies': [{'source': 'mystery', 'size_bytes': 100}],
+            'shows': [],
+        }
+        stats = compute_library_stats(data)
+        assert stats['movies']['by_source']['debrid'] == 1
+        assert stats['movies']['size_by_source']['debrid'] == 100
+
+    def test_invalid_size_treated_as_zero(self):
+        data = {
+            'movies': [
+                {'source': 'debrid', 'size_bytes': None},
+                {'source': 'debrid', 'size_bytes': 'oops'},
+                {'source': 'debrid'},
+            ],
+            'shows': [],
+        }
+        stats = compute_library_stats(data)
+        assert stats['movies']['total'] == 3
+        assert stats['movies']['size_bytes'] == 0
+
+    def test_passes_through_scan_metadata(self):
+        data = {
+            'movies': [],
+            'shows': [],
+            'last_scan': '2026-04-25T00:00:00+00:00',
+            'scan_duration_ms': 42,
+        }
+        stats = compute_library_stats(data)
+        assert stats['last_scan'] == '2026-04-25T00:00:00+00:00'
+        assert stats['scan_duration_ms'] == 42
+
+    def test_episode_source_falls_back_to_show_source(self):
+        # Episodes without an explicit source inherit the show's source —
+        # avoids dropping size into the wrong bucket on legacy/partial entries.
+        data = {
+            'movies': [],
+            'shows': [{
+                'source': 'local',
+                'season_data': [{'episodes': [
+                    {'size_bytes': 100},  # no source — should bucket under 'local'
+                    {'size_bytes': 200},  # no source — should bucket under 'local'
+                ]}],
+            }],
+        }
+        stats = compute_library_stats(data)
+        assert stats['shows']['episodes']['by_source']['local'] == 2
+        assert stats['shows']['episodes']['size_by_source']['local'] == 300
+
+    def test_get_cached_stats_returns_none_when_cache_empty(self):
+        # Verify the hot-path accessor never blocks on an empty cache —
+        # it must return None rather than triggering a scan.
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._cache = None
+        import threading
+        scanner._lock = threading.RLock()
+        assert scanner.get_cached_stats() is None
+
+    def test_get_cached_stats_returns_dict_when_cache_populated(self):
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        import threading
+        scanner._lock = threading.RLock()
+        scanner._cache = {
+            'movies': [{'source': 'debrid', 'size_bytes': 1000}],
+            'shows': [],
+            'last_scan': '2026-04-25T00:00:00+00:00',
+        }
+        stats = scanner.get_cached_stats()
+        assert stats is not None
+        assert stats['movies']['total'] == 1
+        assert stats['totals']['size_bytes'] == 1000
+
+    def test_get_cached_stats_snapshots_lists_against_concurrent_mutation(self):
+        # Regression: _cleanup_disc_rips runs `movies[:] = [...]` after
+        # the cache is published.  get_cached_stats() must snapshot the
+        # list under the lock so a concurrent slice-assignment can't
+        # tear iteration in compute_library_stats().
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        import threading
+        scanner._lock = threading.RLock()
+        movies_list = [{'source': 'debrid', 'size_bytes': 1000}]
+        scanner._cache = {'movies': movies_list, 'shows': []}
+        # Mutate the underlying list in place AFTER the snapshot is taken,
+        # mirroring the disc-rip cleanup path.  The snapshot must isolate
+        # the reader from this mutation: simulate by having the helper
+        # observe the list as-of the call moment.
+        stats = scanner.get_cached_stats()
+        movies_list[:] = []  # drop everything from the live list
+        # The just-returned stats must still reflect the pre-mutation
+        # contents, proving they were snapshotted under the lock.
+        assert stats['movies']['total'] == 1
+        assert stats['movies']['size_bytes'] == 1000
+        # And a follow-up call sees the now-empty live list.
+        stats2 = scanner.get_cached_stats()
+        assert stats2['movies']['total'] == 0
 
 
 class TestCleanupDiscRips:

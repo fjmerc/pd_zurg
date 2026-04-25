@@ -959,6 +959,17 @@ class _WebDAVUnsupportedError(RuntimeError):
     """
 
 
+# Re-validate the persisted Zurg capability flag after this many seconds.
+# A new Zurg release could add recursive PROPFIND support, so we don't
+# want a single detection to permanently block the WebDAV path.
+_WEBDAV_CAPABILITY_TTL_S = 7 * 24 * 3600
+
+# Hard upper bound on the capability cache file size.  The legitimate
+# document is a fixed-shape JSON object well under 1 KB; anything larger
+# is a tampered or corrupted file we refuse to parse.
+_WEBDAV_CAPABILITY_MAX_BYTES = 4096
+
+
 class LibraryScanner:
     def __init__(self):
         self._mount_path = _discover_mount()
@@ -990,9 +1001,17 @@ class LibraryScanner:
         # `Depth: infinity`, skip the doomed PROPFIND on every subsequent
         # scan and go straight to FUSE.  `_logged` tracks whether the
         # detection message has already been emitted at INFO so subsequent
-        # fallbacks don't spam the log every cache TTL.
+        # fallbacks don't spam the log every cache TTL.  The flag is
+        # persisted to `library_capabilities.json` so a container restart
+        # doesn't re-pay the doomed PROPFIND cost on every cold scan; the
+        # cache is re-validated after 7 days and on ZURG_VERSION change.
         self._webdav_unsupported = False
         self._webdav_unsupported_logged = False
+        self._capabilities_path = os.path.join(
+            os.environ.get('CONFIG_DIR', '/config'),
+            'library_capabilities.json',
+        )
+        self._load_webdav_capability()
 
         # Per-title basename sets of previously-created debrid symlinks.
         # Used to classify new symlink_created events as "new import" vs
@@ -3604,6 +3623,109 @@ class LibraryScanner:
 
         return movies, shows
 
+    def _load_webdav_capability(self):
+        """Pre-set `_webdav_unsupported` from the persisted capability cache.
+
+        Skips the load (treats as fresh) on any of:
+          * file missing or unreadable
+          * size cap exceeded
+          * not a valid JSON object
+          * `webdav_unsupported` not truthy
+          * `ts` missing, malformed, older than 7 days, or in the far future
+            (clock skew safety: more than a day ahead is rejected)
+          * `zurg_version` differs from the current `ZURG_VERSION` env var
+        Any failure logs a warning but never takes the scanner offline —
+        the worst-case is one extra Depth: infinity attempt next scan.
+        """
+        try:
+            if not os.path.isfile(self._capabilities_path):
+                return
+
+            import json as _json
+            # Open before sizing so the size check uses the same fd that
+            # the read consumes — closes the TOCTOU window between
+            # `getsize` and `open` and removes the prior `except OSError:
+            # pass` fallthrough that could have allowed an unbounded read.
+            # JSONDecodeError and UnicodeDecodeError both subclass
+            # ValueError and are caught by the outer except.
+            with open(self._capabilities_path, 'r', encoding='utf-8') as fh:
+                size = os.fstat(fh.fileno()).st_size
+                if size > _WEBDAV_CAPABILITY_MAX_BYTES:
+                    logger.warning(
+                        "[library] capability cache exceeds size cap, ignoring"
+                    )
+                    return
+                raw = _json.load(fh)
+            if not isinstance(raw, dict):
+                return
+            # Strict-bool: a hand-edited file containing the string "yes"
+            # or "false" should NOT lock the scanner into FUSE mode.  Only
+            # the canonical Python-bool True qualifies.
+            if raw.get('webdav_unsupported') is not True:
+                return
+            ts = raw.get('ts')
+            if not isinstance(ts, (int, float)):
+                return
+            age = time.time() - ts
+            # Two distinct invalidation causes — split the messages so the
+            # log surfaces clock-skew separately from genuine TTL expiry.
+            if age > _WEBDAV_CAPABILITY_TTL_S:
+                logger.info(
+                    "[library] capability cache expired, re-evaluating Zurg PROPFIND support"
+                )
+                return
+            if age < -86400:
+                logger.warning(
+                    "[library] capability cache has a future timestamp "
+                    "(clock skew or tampering?), ignoring"
+                )
+                return
+            recorded_version = raw.get('zurg_version')
+            current_version = os.environ.get('ZURG_VERSION') or None
+            if recorded_version != current_version:
+                logger.info(
+                    f"[library] ZURG_VERSION changed ({recorded_version!r} -> "
+                    f"{current_version!r}); invalidating capability cache"
+                )
+                return
+
+            self._webdav_unsupported = True
+            # Prior detection already surfaced the INFO message at the time
+            # the cache was written; suppress a duplicate boot-time line.
+            self._webdav_unsupported_logged = True
+            logger.info(
+                "[library] Loaded persisted Zurg capability: lacks recursive PROPFIND "
+                "(skipping doomed Depth: infinity probes until cache expires)"
+            )
+        except (OSError, ValueError, TypeError) as e:
+            logger.warning(f"[library] Could not load capability cache: {e}")
+
+    def _persist_webdav_capability(self):
+        """Atomic-write the capability cache after first detection.
+
+        Best-effort: a write failure logs a warning and otherwise no-ops so
+        a read-only `/config` (or quota-exhausted volume) can't fail the
+        scan.  In-memory memoization still works for the rest of the
+        process lifetime; the cost is one re-detection on next restart.
+        """
+        try:
+            from utils.file_utils import atomic_write
+            import json as _json
+            payload = {
+                'webdav_unsupported': True,
+                'ts': time.time(),
+                'zurg_version': os.environ.get('ZURG_VERSION') or None,
+            }
+            with atomic_write(self._capabilities_path) as fh:
+                _json.dump(payload, fh)
+        except (OSError, ValueError, TypeError) as e:
+            # Best-effort: filesystem errors (read-only /config, no
+            # space, missing parent dir) and any future
+            # serialization-shape change must not propagate out of the
+            # detection path and turn a successful FUSE fallback into a
+            # whole-scan failure.
+            logger.warning(f"[library] Could not persist capability cache: {e}")
+
     def _webdav_scan_mount(self, deadline=None):
         """Scan the debrid mount via WebDAV PROPFIND directly to Zurg.
 
@@ -3650,9 +3772,19 @@ class LibraryScanner:
         show_groups = {}
         movie_groups = {}
 
+        # Aggregate detection state — only conclude that Zurg lacks recursive
+        # PROPFIND if EVERY category that returned folders returned zero
+        # files.  A single quirky empty category (e.g. partial torrents,
+        # zero-content folders) shouldn't tar a working Zurg instance into
+        # a 7-day FUSE-only lockout.
+        empty_categories = []         # [(name, folder_count), ...]
+        any_files_seen = False
+        scan_completed = True         # cleared if we break out on deadline
+
         for category in scan_cats:
             if deadline and time.monotonic() > deadline:
                 logger.warning("[library] WebDAV: deadline reached, skipping remaining categories")
+                scan_completed = False
                 break
 
             cat_url = f"{zurg_url}/dav/{urllib_quote(category, safe='')}/"
@@ -3714,21 +3846,21 @@ class LibraryScanner:
                         (parts[2], entry['size'], mount_path)
                     )
 
-            # Zurg may not support true depth-infinity — if every entry is a
-            # collection and no files were found, the PROPFIND only returned
-            # folder names without recursing into them.  Bail out so the
-            # caller falls back to FUSE scanning which handles this correctly.
-            has_files = any(
+            cat_has_files = any(
                 contents['files'] or contents['season_files']
                 for contents in folders.values()
             )
-            if folders and not has_files:
-                # Memoize so future scans skip this round-trip entirely.
-                self._webdav_unsupported = True
-                raise _WebDAVUnsupportedError(
-                    f"WebDAV depth-infinity returned {len(folders)} folders but 0 files "
-                    f"for {category} — Zurg likely does not support recursive PROPFIND"
-                )
+            if folders and not cat_has_files:
+                # This category looks like the "Zurg doesn't recurse"
+                # signature, but defer the verdict until all categories
+                # have been scanned.  Skip processing — empty folders
+                # would mis-classify in the downstream loop (shows could
+                # be reclassified as movies, etc.) and we have no real
+                # data for them anyway.
+                empty_categories.append((category, len(folders)))
+                continue
+            if cat_has_files:
+                any_files_seen = True
 
             # Step 3: Process folders into show_groups / movie_groups
             for folder_name, contents in folders.items():
@@ -3793,6 +3925,32 @@ class LibraryScanner:
                     elif year and not movie_groups[key]['year']:
                         movie_groups[key]['year'] = year
                         movie_groups[key]['title'] = title
+
+        # Post-loop verdict on Zurg's recursive-PROPFIND support.  Only
+        # memoize "unsupported" if the scan completed AND no category
+        # produced any files AND at least one category returned folders.
+        # The scan-completed gate prevents a deadline-induced partial
+        # scan from poisoning the memoization.
+        if scan_completed and empty_categories and not any_files_seen:
+            self._webdav_unsupported = True
+            self._persist_webdav_capability()
+            cat_summary = ', '.join(f'{c}({n})' for c, n in empty_categories)
+            raise _WebDAVUnsupportedError(
+                f"WebDAV depth-infinity returned folders but 0 files for [{cat_summary}] "
+                f"— Zurg likely does not support recursive PROPFIND"
+            )
+        if empty_categories and any_files_seen:
+            # Some categories work, others have folders but no files.
+            # Likely a quirk in those categories (zero-content torrents,
+            # mid-download placeholders) rather than a Zurg-wide
+            # capability issue.  Log for diagnosability and continue
+            # with the categories that did return data.
+            cat_summary = ', '.join(f'{c}({n})' for c, n in empty_categories)
+            logger.info(
+                f"[library] WebDAV: skipped categories with folders-but-no-files "
+                f"[{cat_summary}] (other categories returned files, so Zurg "
+                f"recursion works — not memoizing as unsupported)"
+            )
 
         # Convert to output format (same as _scan_mount)
         # Note: date_added is 0 for WebDAV-scanned items because calling

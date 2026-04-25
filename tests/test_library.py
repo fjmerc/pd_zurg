@@ -677,6 +677,10 @@ class TestLibraryScannerScanDebrid:
         scanner._local_drop_alerted = False
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
+        # Point at a non-writable subpath so any accidental persist is a
+        # safe no-op (the persist method swallows OSError).  Tests that
+        # need a real round-trip override this attribute explicitly.
+        scanner._capabilities_path = '/dev/null/library_capabilities.json'
         return scanner
 
     def test_scan_debrid_movies_returns_correct_items(self, tmp_dir, monkeypatch):
@@ -755,6 +759,10 @@ class TestLibraryScannerScanDebrid:
         scanner._local_drop_alerted = False
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
+        # Point at a non-writable subpath so any accidental persist is a
+        # safe no-op (the persist method swallows OSError).  Tests that
+        # need a real round-trip override this attribute explicitly.
+        scanner._capabilities_path = '/dev/null/library_capabilities.json'
 
         result = scanner.scan()
         assert result["movies"] == []
@@ -981,6 +989,10 @@ class TestLibraryScannerScanLocal:
         scanner._local_drop_alerted = False
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
+        # Point at a non-writable subpath so any accidental persist is a
+        # safe no-op (the persist method swallows OSError).  Tests that
+        # need a real round-trip override this attribute explicitly.
+        scanner._capabilities_path = '/dev/null/library_capabilities.json'
         return scanner
 
     def test_scan_local_movies_source_is_local(self, tmp_dir):
@@ -1076,6 +1088,10 @@ class TestLibraryScannerScanCrossRef:
         scanner._local_drop_alerted = False
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
+        # Point at a non-writable subpath so any accidental persist is a
+        # safe no-op (the persist method swallows OSError).  Tests that
+        # need a real round-trip override this attribute explicitly.
+        scanner._capabilities_path = '/dev/null/library_capabilities.json'
 
         result = scanner.scan()
 
@@ -1115,6 +1131,10 @@ class TestLibraryScannerScanCrossRef:
         scanner._local_drop_alerted = False
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
+        # Point at a non-writable subpath so any accidental persist is a
+        # safe no-op (the persist method swallows OSError).  Tests that
+        # need a real round-trip override this attribute explicitly.
+        scanner._capabilities_path = '/dev/null/library_capabilities.json'
 
         result = scanner.scan()
         local_only = next(m for m in result["movies"] if m["title"] == "Local Only")
@@ -1148,6 +1168,10 @@ class TestLibraryScannerScanCrossRef:
         scanner._local_drop_alerted = False
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
+        # Point at a non-writable subpath so any accidental persist is a
+        # safe no-op (the persist method swallows OSError).  Tests that
+        # need a real round-trip override this attribute explicitly.
+        scanner._capabilities_path = '/dev/null/library_capabilities.json'
 
         result = scanner.scan()
         show = next(s for s in result["shows"] if s["title"] == "Succession")
@@ -1186,6 +1210,10 @@ class TestLibraryScannerScanCrossRef:
         scanner._local_drop_alerted = False
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
+        # Point at a non-writable subpath so any accidental persist is a
+        # safe no-op (the persist method swallows OSError).  Tests that
+        # need a real round-trip override this attribute explicitly.
+        scanner._capabilities_path = '/dev/null/library_capabilities.json'
 
         result = scanner.scan()
         arrival = next(m for m in result["movies"] if m["title"] == "Arrival")
@@ -1371,6 +1399,10 @@ class TestSeasonDataInScanResults:
         scanner._local_drop_alerted = False
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
+        # Point at a non-writable subpath so any accidental persist is a
+        # safe no-op (the persist method swallows OSError).  Tests that
+        # need a real round-trip override this attribute explicitly.
+        scanner._capabilities_path = '/dev/null/library_capabilities.json'
         return scanner
 
     def test_shows_have_season_data(self, tmp_dir, monkeypatch):
@@ -1479,6 +1511,10 @@ class TestEpisodeLevelCrossRef:
         scanner._local_drop_alerted = False
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
+        # Point at a non-writable subpath so any accidental persist is a
+        # safe no-op (the persist method swallows OSError).  Tests that
+        # need a real round-trip override this attribute explicitly.
+        scanner._capabilities_path = '/dev/null/library_capabilities.json'
         return scanner
 
     def test_same_episode_both_sources_gets_both(self, tmp_dir):
@@ -1699,6 +1735,10 @@ class TestLibraryScannerGetData:
         scanner._local_drop_alerted = False
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
+        # Point at a non-writable subpath so any accidental persist is a
+        # safe no-op (the persist method swallows OSError).  Tests that
+        # need a real round-trip override this attribute explicitly.
+        scanner._capabilities_path = '/dev/null/library_capabilities.json'
         return scanner
 
     def test_get_data_returns_scan_result(self):
@@ -1785,6 +1825,10 @@ class TestLibraryScannerRefresh:
         scanner._local_drop_alerted = False
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
+        # Point at a non-writable subpath so any accidental persist is a
+        # safe no-op (the persist method swallows OSError).  Tests that
+        # need a real round-trip override this attribute explicitly.
+        scanner._capabilities_path = '/dev/null/library_capabilities.json'
         return scanner
 
     def test_refresh_triggers_background_scan(self, mocker):
@@ -2543,6 +2587,10 @@ class TestWebDAVUnsupportedMemoization:
         scanner._local_drop_alerted = False
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
+        # Point at a non-writable subpath so any accidental persist is a
+        # safe no-op (the persist method swallows OSError).  Tests that
+        # need a real round-trip override this attribute explicitly.
+        scanner._capabilities_path = '/dev/null/library_capabilities.json'
         return scanner
 
     def test_flag_set_on_first_detection(self, monkeypatch):
@@ -2705,3 +2753,405 @@ class TestWebDAVUnsupportedMemoization:
         assert debug_msgs == []
         assert scanner._webdav_unsupported is False
         assert scanner._webdav_unsupported_logged is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: persist the WebDAV-unsupported memoization across container
+# restarts so the doomed Depth: infinity probe isn't re-attempted on every
+# cold boot.
+# ---------------------------------------------------------------------------
+
+class TestWebDAVCapabilityPersistence:
+
+    def _make_scanner(self, capabilities_path):
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._mount_path = '/mnt/debrid'
+        scanner._local_movies_path = None
+        scanner._local_tv_path = None
+        scanner._cache = None
+        scanner._cache_time = 0
+        scanner._ttl = 600
+        scanner._lock = threading.Lock()
+        scanner._scanning = False
+        scanner._effects_running = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
+        scanner._capabilities_path = capabilities_path
+        return scanner
+
+    def test_persist_round_trip_pre_sets_flag(self, tmp_dir, monkeypatch):
+        """First scanner detects → writes file.  Second scanner reads file
+        on init and pre-sets the flag without any HTTP traffic."""
+        path = os.path.join(tmp_dir, 'library_capabilities.json')
+        monkeypatch.delenv('ZURG_VERSION', raising=False)
+
+        first = self._make_scanner(path)
+        first._webdav_unsupported = True
+        first._persist_webdav_capability()
+        assert os.path.isfile(path)
+
+        # Build a fresh scanner via __init__ pointed at the same CONFIG_DIR
+        # so the load path runs end-to-end.
+        monkeypatch.setenv('CONFIG_DIR', tmp_dir)
+        # Avoid the rest of __init__ poking real paths / discovering mounts.
+        monkeypatch.setattr(library, '_discover_mount', lambda: None)
+        second = library.LibraryScanner()
+        assert second._capabilities_path == path
+        assert second._webdav_unsupported is True
+        # Loaded from disk → suppress the duplicate INFO at first scan.
+        assert second._webdav_unsupported_logged is True
+
+    def test_corrupt_file_does_not_take_scanner_offline(self, tmp_dir):
+        """A garbage capability file logs a warning and falls through to
+        fresh detection — never raises out of __init__."""
+        path = os.path.join(tmp_dir, 'library_capabilities.json')
+        with open(path, 'w') as fh:
+            fh.write('this is not json{][')
+        scanner = self._make_scanner(path)
+        scanner._load_webdav_capability()
+        assert scanner._webdav_unsupported is False
+        assert scanner._webdav_unsupported_logged is False
+
+    def test_oversize_file_rejected(self, tmp_dir):
+        """A capability file larger than the size cap is ignored."""
+        path = os.path.join(tmp_dir, 'library_capabilities.json')
+        with open(path, 'w') as fh:
+            fh.write('a' * (library._WEBDAV_CAPABILITY_MAX_BYTES + 100))
+        scanner = self._make_scanner(path)
+        scanner._load_webdav_capability()
+        assert scanner._webdav_unsupported is False
+
+    def test_stale_cache_re_evaluates(self, tmp_dir):
+        """Records older than the TTL are ignored — fresh detection runs
+        on next scan in case Zurg has been upgraded since."""
+        import json
+        path = os.path.join(tmp_dir, 'library_capabilities.json')
+        with open(path, 'w') as fh:
+            json.dump({
+                'webdav_unsupported': True,
+                'ts': time.time() - (library._WEBDAV_CAPABILITY_TTL_S + 60),
+                'zurg_version': None,
+            }, fh)
+        scanner = self._make_scanner(path)
+        scanner._load_webdav_capability()
+        assert scanner._webdav_unsupported is False
+
+    def test_future_dated_cache_rejected(self, tmp_dir):
+        """A timestamp far in the future (clock skew or tampering) is
+        ignored — better to re-detect than trust a clearly-bogus record."""
+        import json
+        path = os.path.join(tmp_dir, 'library_capabilities.json')
+        with open(path, 'w') as fh:
+            json.dump({
+                'webdav_unsupported': True,
+                'ts': time.time() + (2 * 86400),
+                'zurg_version': None,
+            }, fh)
+        scanner = self._make_scanner(path)
+        scanner._load_webdav_capability()
+        assert scanner._webdav_unsupported is False
+
+    def test_zurg_version_change_invalidates_cache(self, tmp_dir, monkeypatch):
+        """If ZURG_VERSION differs from the recorded one, drop the cache —
+        a Zurg upgrade may have added recursive PROPFIND support."""
+        import json
+        path = os.path.join(tmp_dir, 'library_capabilities.json')
+        with open(path, 'w') as fh:
+            json.dump({
+                'webdav_unsupported': True,
+                'ts': time.time(),
+                'zurg_version': 'v0.9.2',
+            }, fh)
+        monkeypatch.setenv('ZURG_VERSION', 'v0.9.3')
+        scanner = self._make_scanner(path)
+        scanner._load_webdav_capability()
+        assert scanner._webdav_unsupported is False
+
+    def test_zurg_version_match_keeps_cache(self, tmp_dir, monkeypatch):
+        """Matching ZURG_VERSION → cache trusted, flag pre-set."""
+        import json
+        path = os.path.join(tmp_dir, 'library_capabilities.json')
+        with open(path, 'w') as fh:
+            json.dump({
+                'webdav_unsupported': True,
+                'ts': time.time(),
+                'zurg_version': 'v0.9.2',
+            }, fh)
+        monkeypatch.setenv('ZURG_VERSION', 'v0.9.2')
+        scanner = self._make_scanner(path)
+        scanner._load_webdav_capability()
+        assert scanner._webdav_unsupported is True
+        assert scanner._webdav_unsupported_logged is True
+
+    def test_missing_file_no_op(self, tmp_dir):
+        """No capability file → no flag, no error."""
+        path = os.path.join(tmp_dir, 'does-not-exist.json')
+        scanner = self._make_scanner(path)
+        scanner._load_webdav_capability()
+        assert scanner._webdav_unsupported is False
+
+    def test_persist_failure_does_not_raise(self, tmp_dir):
+        """Read-only / unwritable target → warning logged, no exception
+        propagates — the scanner falls back to in-memory memoization for
+        the rest of the process lifetime."""
+        # Point at a directory that doesn't exist as a parent — atomic_write
+        # will fail with OSError, which the persist method must swallow.
+        scanner = self._make_scanner('/dev/null/nope/library_capabilities.json')
+        scanner._webdav_unsupported = True
+        # Must not raise.
+        scanner._persist_webdav_capability()
+
+    def test_detection_writes_file(self, tmp_dir, monkeypatch):
+        """End-to-end: when _webdav_scan_mount detects the bad shape, it
+        persists the capability cache before raising."""
+        path = os.path.join(tmp_dir, 'library_capabilities.json')
+        scanner = self._make_scanner(path)
+        monkeypatch.setattr(library, '_discover_zurg_url',
+                            lambda mp: 'http://zurg:9999')
+        monkeypatch.setattr(library, '_get_zurg_auth', lambda: None)
+
+        def fake_propfind(url, depth, auth, timeout):
+            if depth == 1:
+                return [
+                    {'href': '/dav/', 'name': '', 'is_collection': True, 'size': 0},
+                    {'href': '/dav/movies/', 'name': 'movies',
+                     'is_collection': True, 'size': 0},
+                ]
+            return [
+                {'href': '/dav/movies/', 'name': 'movies',
+                 'is_collection': True, 'size': 0},
+                {'href': '/dav/movies/Inception/', 'name': 'Inception',
+                 'is_collection': True, 'size': 0},
+            ]
+        monkeypatch.setattr('utils.webdav.propfind', fake_propfind)
+        monkeypatch.setenv('ZURG_VERSION', 'v0.9.2-test')
+
+        with pytest.raises(library._WebDAVUnsupportedError):
+            scanner._webdav_scan_mount()
+
+        assert os.path.isfile(path)
+        import json
+        with open(path) as fh:
+            payload = json.load(fh)
+        assert payload['webdav_unsupported'] is True
+        assert payload['zurg_version'] == 'v0.9.2-test'
+        assert isinstance(payload['ts'], (int, float))
+
+    def test_load_does_not_set_flag_when_field_falsy(self, tmp_dir):
+        """A persisted record with `webdav_unsupported: false` (or missing)
+        must not flip the flag — only truthy records lock in FUSE."""
+        import json
+        path = os.path.join(tmp_dir, 'library_capabilities.json')
+        with open(path, 'w') as fh:
+            json.dump({
+                'webdav_unsupported': False,
+                'ts': time.time(),
+                'zurg_version': None,
+            }, fh)
+        scanner = self._make_scanner(path)
+        scanner._load_webdav_capability()
+        assert scanner._webdav_unsupported is False
+
+    def test_load_rejects_non_bool_truthy_values(self, tmp_dir):
+        """A hand-edited file with `webdav_unsupported: "yes"` (or any
+        non-bool truthy) must NOT lock the scanner into FUSE — only the
+        canonical Python `True` value qualifies.  Closes the gap where
+        `not raw.get(...)` would have accepted truthy strings."""
+        import json
+        path = os.path.join(tmp_dir, 'library_capabilities.json')
+        for value in ['yes', 'true', 1, [True], {'inner': True}]:
+            with open(path, 'w') as fh:
+                json.dump({
+                    'webdav_unsupported': value,
+                    'ts': time.time(),
+                    'zurg_version': None,
+                }, fh)
+            scanner = self._make_scanner(path)
+            scanner._load_webdav_capability()
+            assert scanner._webdav_unsupported is False, (
+                f"non-bool value {value!r} incorrectly flipped the flag"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 hardening: aggregate detection across categories so a single
+# quirky empty category doesn't permanently lock the scanner into FUSE.
+# ---------------------------------------------------------------------------
+
+class TestWebDAVCrossCategoryDetection:
+    """Phase 2 must not memoize "Zurg unsupported" based on a single
+    empty/quirky category when other categories prove recursive PROPFIND
+    works.  Tests the aggregate verdict at the bottom of
+    `_webdav_scan_mount`."""
+
+    def _make_scanner(self, capabilities_path):
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._mount_path = '/mnt/debrid'
+        scanner._local_movies_path = None
+        scanner._local_tv_path = None
+        scanner._cache = None
+        scanner._cache_time = 0
+        scanner._ttl = 600
+        scanner._lock = threading.Lock()
+        scanner._scanning = False
+        scanner._effects_running = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
+        scanner._capabilities_path = capabilities_path
+        return scanner
+
+    def test_one_working_category_prevents_unsupported_lockout(self, tmp_dir, monkeypatch):
+        """If category A returns folders+files (Zurg recursion works) and
+        category B returns folders-but-no-files (quirky empty cat), the
+        scan must NOT memoize unsupported — the empty category is
+        skipped, not promoted to a global verdict."""
+        path = os.path.join(tmp_dir, 'library_capabilities.json')
+        scanner = self._make_scanner(path)
+        monkeypatch.setattr(library, '_discover_zurg_url',
+                            lambda mp: 'http://zurg:9999')
+        monkeypatch.setattr(library, '_get_zurg_auth', lambda: None)
+        monkeypatch.setattr(scanner, '_mount_path_for',
+                            lambda cat, rel: f'/mnt/debrid/{cat}/{rel}')
+
+        def fake_propfind(url, depth, auth, timeout):
+            if depth == 1:
+                return [
+                    {'href': '/dav/', 'name': '', 'is_collection': True, 'size': 0},
+                    {'href': '/dav/movies/', 'name': 'movies',
+                     'is_collection': True, 'size': 0},
+                    {'href': '/dav/shows/', 'name': 'shows',
+                     'is_collection': True, 'size': 0},
+                ]
+            if 'movies' in url:
+                # Working: folders WITH files inside.
+                return [
+                    {'href': '/dav/movies/', 'name': 'movies',
+                     'is_collection': True, 'size': 0},
+                    {'href': '/dav/movies/Inception/', 'name': 'Inception',
+                     'is_collection': True, 'size': 0},
+                    {'href': '/dav/movies/Inception/movie.mkv', 'name': 'movie.mkv',
+                     'is_collection': False, 'size': 1000000},
+                ]
+            # shows: folders WITHOUT files (quirky empty cat).
+            return [
+                {'href': '/dav/shows/', 'name': 'shows',
+                 'is_collection': True, 'size': 0},
+                {'href': '/dav/shows/EmptyShow/', 'name': 'EmptyShow',
+                 'is_collection': True, 'size': 0},
+            ]
+        monkeypatch.setattr('utils.webdav.propfind', fake_propfind)
+
+        # Should NOT raise — movies category proves Zurg works.
+        movies, shows = scanner._webdav_scan_mount()
+        assert scanner._webdav_unsupported is False
+        assert not os.path.exists(path), (
+            "capability cache should not be written when at least one category works"
+        )
+        assert any(m['title'] == 'Inception' for m in movies)
+
+    def test_all_empty_categories_trigger_unsupported(self, tmp_dir, monkeypatch):
+        """If every category that returned folders has zero files, the
+        memoization fires and the cache is persisted."""
+        path = os.path.join(tmp_dir, 'library_capabilities.json')
+        scanner = self._make_scanner(path)
+        monkeypatch.setattr(library, '_discover_zurg_url',
+                            lambda mp: 'http://zurg:9999')
+        monkeypatch.setattr(library, '_get_zurg_auth', lambda: None)
+
+        def fake_propfind(url, depth, auth, timeout):
+            if depth == 1:
+                return [
+                    {'href': '/dav/', 'name': '', 'is_collection': True, 'size': 0},
+                    {'href': '/dav/movies/', 'name': 'movies',
+                     'is_collection': True, 'size': 0},
+                    {'href': '/dav/shows/', 'name': 'shows',
+                     'is_collection': True, 'size': 0},
+                ]
+            # Both categories have folders but no files.
+            cat = 'movies' if 'movies' in url else 'shows'
+            return [
+                {'href': f'/dav/{cat}/', 'name': cat,
+                 'is_collection': True, 'size': 0},
+                {'href': f'/dav/{cat}/Folder/', 'name': 'Folder',
+                 'is_collection': True, 'size': 0},
+            ]
+        monkeypatch.setattr('utils.webdav.propfind', fake_propfind)
+
+        with pytest.raises(library._WebDAVUnsupportedError):
+            scanner._webdav_scan_mount()
+        assert scanner._webdav_unsupported is True
+        assert os.path.isfile(path)
+
+    def test_partial_scan_with_empty_category_does_not_memoize(self, tmp_dir, monkeypatch):
+        """If we scan one category (empty) and the deadline forces us to
+        skip the rest, scan_completed=False blocks the verdict — the
+        cache must NOT be written.  Without this gate, a slow first
+        category combined with one quirky empty category would lock the
+        scanner into a 7-day false negative."""
+        path = os.path.join(tmp_dir, 'library_capabilities.json')
+        scanner = self._make_scanner(path)
+        monkeypatch.setattr(library, '_discover_zurg_url',
+                            lambda mp: 'http://zurg:9999')
+        monkeypatch.setattr(library, '_get_zurg_auth', lambda: None)
+
+        # Step the fake clock past the deadline only after the first
+        # category's PROPFIND completes, so the second iteration's
+        # `time.monotonic() > deadline` check fires and breaks the loop.
+        base = time.monotonic()
+        ticks = {'count': 0}
+
+        def fake_monotonic():
+            ticks['count'] += 1
+            # Return base for the first ~5 calls (initial setup + root
+            # PROPFIND + first category iteration), then jump past
+            # base+30 so the next loop-top check breaks out.
+            if ticks['count'] < 6:
+                return base
+            return base + 100
+
+        monkeypatch.setattr(time, 'monotonic', fake_monotonic)
+
+        def fake_propfind(url, depth, auth, timeout):
+            if depth == 1:
+                return [
+                    {'href': '/dav/', 'name': '', 'is_collection': True, 'size': 0},
+                    {'href': '/dav/movies/', 'name': 'movies',
+                     'is_collection': True, 'size': 0},
+                    {'href': '/dav/shows/', 'name': 'shows',
+                     'is_collection': True, 'size': 0},
+                ]
+            return [
+                {'href': '/dav/Cat/', 'name': 'Cat',
+                 'is_collection': True, 'size': 0},
+                {'href': '/dav/Cat/Folder/', 'name': 'Folder',
+                 'is_collection': True, 'size': 0},
+            ]
+        monkeypatch.setattr('utils.webdav.propfind', fake_propfind)
+
+        # Returns ([], []) without raising — partial scan is incomplete.
+        scanner._webdav_scan_mount(deadline=base + 30)
+
+        assert scanner._webdav_unsupported is False, (
+            "incomplete scan must not memoize unsupported"
+        )
+        assert not os.path.exists(path), (
+            "capability cache must not be written from an incomplete scan"
+        )

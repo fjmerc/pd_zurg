@@ -1220,6 +1220,35 @@ class LibraryScanner:
         with self._lock:
             return self._scanning
 
+    def get_cached_stats(self):
+        """Return composition stats from the current cache, or ``None``.
+
+        Non-blocking and never triggers a scan — the status dashboard
+        polls /api/status every few seconds and must not stall waiting
+        on a fresh library scan.
+
+        Snapshots the top-level ``movies``/``shows`` lists under
+        ``_lock`` because ``_scan_effects._cleanup_disc_rips`` does an
+        in-place ``movies[:] = [...]`` slice-assignment AFTER the cache
+        has been published to readers (refresh() publishes before
+        running effects).  Iterating that list without a snapshot can
+        skip or double-count items mid-cleanup.
+        """
+        with self._lock:
+            cache = self._cache
+            if not cache:
+                return None
+            snapshot = {
+                'movies': list(cache.get('movies') or []),
+                'shows': list(cache.get('shows') or []),
+                'last_scan': cache.get('last_scan'),
+                'scan_duration_ms': cache.get('scan_duration_ms'),
+            }
+        try:
+            return compute_library_stats(snapshot)
+        except Exception:
+            return None
+
     def _get_pref(self, norm, preferences):
         """Look up a preference by normalized title, checking aliases if needed."""
         pref = preferences.get(norm)
@@ -4602,6 +4631,87 @@ def setup():
 
 def get_scanner():
     return _scanner
+
+
+def compute_library_stats(data):
+    """Summarize a scan ``data`` payload into composition counts and sizes.
+
+    Returns counts and bytes broken down by source label (``local``/
+    ``debrid``/``both``) for movies, shows, and (for shows) episodes.
+    Both top-level ``size_bytes`` (per-movie / per-show) and per-episode
+    sizes are summed; shows whose source is ``both`` count once under
+    ``both`` for the show row, while their episodes are bucketed by the
+    episode-level source so the user can see how a mixed library is
+    actually distributed across providers.
+    """
+    sources = ('local', 'debrid', 'both')
+    movies_by_src = {s: 0 for s in sources}
+    movies_size_by_src = {s: 0 for s in sources}
+    shows_by_src = {s: 0 for s in sources}
+    shows_size_by_src = {s: 0 for s in sources}
+    episodes_by_src = {s: 0 for s in sources}
+    episodes_size_by_src = {s: 0 for s in sources}
+
+    for movie in data.get('movies', []) or []:
+        src = movie.get('source') or 'debrid'
+        if src not in movies_by_src:
+            src = 'debrid'
+        movies_by_src[src] += 1
+        try:
+            sz = int(movie.get('size_bytes') or 0)
+        except (TypeError, ValueError):
+            sz = 0
+        if sz > 0:
+            movies_size_by_src[src] += sz
+
+    for show in data.get('shows', []) or []:
+        show_src = show.get('source') or 'debrid'
+        if show_src not in shows_by_src:
+            show_src = 'debrid'
+        shows_by_src[show_src] += 1
+        for season in show.get('season_data', []) or []:
+            for ep in season.get('episodes', []) or []:
+                esrc = ep.get('source') or show_src
+                if esrc not in episodes_by_src:
+                    esrc = 'debrid'
+                episodes_by_src[esrc] += 1
+                try:
+                    esz = int(ep.get('size_bytes') or 0)
+                except (TypeError, ValueError):
+                    esz = 0
+                if esz > 0:
+                    episodes_size_by_src[esrc] += esz
+                    shows_size_by_src[show_src] += esz
+
+    movies_total_size = sum(movies_size_by_src.values())
+    shows_total_size = sum(shows_size_by_src.values())
+
+    return {
+        'movies': {
+            'total': sum(movies_by_src.values()),
+            'by_source': movies_by_src,
+            'size_bytes': movies_total_size,
+            'size_by_source': movies_size_by_src,
+        },
+        'shows': {
+            'total': sum(shows_by_src.values()),
+            'by_source': shows_by_src,
+            'episodes': {
+                'total': sum(episodes_by_src.values()),
+                'by_source': episodes_by_src,
+                'size_bytes': sum(episodes_size_by_src.values()),
+                'size_by_source': episodes_size_by_src,
+            },
+            'size_bytes': shows_total_size,
+            'size_by_source': shows_size_by_src,
+        },
+        'totals': {
+            'items': sum(movies_by_src.values()) + sum(shows_by_src.values()),
+            'size_bytes': movies_total_size + shows_total_size,
+        },
+        'last_scan': data.get('last_scan'),
+        'scan_duration_ms': data.get('scan_duration_ms'),
+    }
 
 
 def get_wanted_counts(data, pending=None):

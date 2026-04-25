@@ -455,3 +455,170 @@ def _restore_without_reload(blob, cfg, bdir):
     import unittest.mock as _mock
     with _mock.patch.object(backup, '_reload_services', lambda _: None):
         return backup.restore_from_blob(blob, config_dir=cfg, backup_dir=bdir)
+
+
+# ---------------------------------------------------------------------------
+# Snapshot regex / list / delete
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('name', [
+    'pre-restore-20260422-183238',
+    'pre-restore-20260422-183238-1',
+    'pre-restore-20260422-183238-12',
+    '20260422_183238',                  # legacy format
+    '20260422_183238-2',                # legacy with collision suffix
+])
+def test_snapshot_dirname_re_accepts_valid(name):
+    assert backup.SNAPSHOT_DIRNAME_RE.match(name)
+
+
+@pytest.mark.parametrize('name', [
+    '',
+    '../etc',
+    'pre-restore-bad',
+    'pre-restore-20260422',
+    'pre-restore-20260422-183238/',
+    '20260422-183238',                  # hyphen instead of underscore
+    'random_dir',
+    'zurgarr-backup-2.20.0-20260422-183238.tar.gz',  # archive, not snapshot
+])
+def test_snapshot_dirname_re_rejects_invalid(name):
+    assert not backup.SNAPSHOT_DIRNAME_RE.match(name)
+
+
+def _make_snapshot_dir(backup_dir, name, files=None):
+    snap = os.path.join(backup_dir, name)
+    os.makedirs(snap, exist_ok=True)
+    for fname, contents in (files or {'settings.json': b'{}'}).items():
+        _write(os.path.join(snap, fname), contents)
+    return snap
+
+
+def test_list_snapshots_sorted_newest_first(tmp_dir):
+    bdir = os.path.join(tmp_dir, 'backups')
+    older = _make_snapshot_dir(bdir, 'pre-restore-20260422-183238', {'settings.json': b'{}'})
+    newer = _make_snapshot_dir(bdir, '20260423_120000', {'settings.json': b'{}', '.env': b'A=1\n'})
+    # Force mtimes so ordering is deterministic regardless of FS resolution.
+    os.utime(older, (1000, 1000))
+    os.utime(newer, (2000, 2000))
+
+    entries = backup.list_snapshots(backup_dir=bdir)
+    names = [e['name'] for e in entries]
+    assert names == ['20260423_120000', 'pre-restore-20260422-183238']
+    by_name = {e['name']: e for e in entries}
+    assert by_name['20260423_120000']['file_count'] == 2
+    assert by_name['pre-restore-20260422-183238']['file_count'] == 1
+    assert by_name['20260423_120000']['size'] > 0
+
+
+def test_list_snapshots_skips_archives_and_random(tmp_dir):
+    bdir = os.path.join(tmp_dir, 'backups')
+    os.makedirs(bdir)
+    # An archive file (not a dir) should not appear.
+    _write(os.path.join(bdir, 'zurgarr-backup-2.0.0-20260101-000000.tar.gz'), b'x')
+    # A dir that doesn't match the regex.
+    os.makedirs(os.path.join(bdir, 'random_dir'))
+    # A valid snapshot.
+    _make_snapshot_dir(bdir, 'pre-restore-20260101-000000')
+
+    entries = backup.list_snapshots(backup_dir=bdir)
+    assert [e['name'] for e in entries] == ['pre-restore-20260101-000000']
+
+
+def test_list_snapshots_skips_symlinked_top_level(tmp_dir):
+    bdir = os.path.join(tmp_dir, 'backups')
+    os.makedirs(bdir)
+    real_target = os.path.join(tmp_dir, 'evil_target')
+    os.makedirs(real_target)
+    _write(os.path.join(real_target, 'settings.json'), b'{}')
+    link_path = os.path.join(bdir, 'pre-restore-20260101-000000')
+    os.symlink(real_target, link_path)
+
+    entries = backup.list_snapshots(backup_dir=bdir)
+    assert entries == []
+
+
+def test_delete_backup_removes_archive(tmp_dir):
+    cfg = _populated_config(tmp_dir)
+    bdir = os.path.join(tmp_dir, 'backups')
+    p = backup.create_backup_file(config_dir=cfg, backup_dir=bdir)
+    assert p.exists()
+
+    backup.delete_backup(p.name, backup_dir=bdir)
+    assert not p.exists()
+
+
+@pytest.mark.parametrize('bad_name', [
+    '../etc/passwd',
+    '.env',
+    'pre-restore-20260101-000000',  # snapshot dirname, not archive
+    '',
+])
+def test_delete_backup_rejects_bad_filename(tmp_dir, bad_name):
+    bdir = os.path.join(tmp_dir, 'backups')
+    os.makedirs(bdir)
+    with pytest.raises(backup.RestoreError):
+        backup.delete_backup(bad_name, backup_dir=bdir)
+
+
+def test_delete_backup_missing_file_404(tmp_dir):
+    bdir = os.path.join(tmp_dir, 'backups')
+    os.makedirs(bdir)
+    name = 'zurgarr-backup-2.0.0-20260101-000000.tar.gz'
+    with pytest.raises(backup.RestoreError, match='not found'):
+        backup.delete_backup(name, backup_dir=bdir)
+
+
+def test_delete_snapshot_removes_dir(tmp_dir):
+    bdir = os.path.join(tmp_dir, 'backups')
+    snap = _make_snapshot_dir(bdir, 'pre-restore-20260101-000000', {
+        'settings.json': b'{}',
+        '.env': b'A=1\n',
+    })
+    assert os.path.isdir(snap)
+
+    backup.delete_snapshot('pre-restore-20260101-000000', backup_dir=bdir)
+    assert not os.path.exists(snap)
+
+
+def test_delete_snapshot_legacy_dirname(tmp_dir):
+    bdir = os.path.join(tmp_dir, 'backups')
+    snap = _make_snapshot_dir(bdir, '20260422_183238')
+    backup.delete_snapshot('20260422_183238', backup_dir=bdir)
+    assert not os.path.exists(snap)
+
+
+@pytest.mark.parametrize('bad_name', [
+    '../etc',
+    'random_dir',
+    'zurgarr-backup-2.0.0-20260101-000000.tar.gz',  # archive name
+    '',
+])
+def test_delete_snapshot_rejects_bad_dirname(tmp_dir, bad_name):
+    bdir = os.path.join(tmp_dir, 'backups')
+    os.makedirs(bdir)
+    with pytest.raises(backup.RestoreError):
+        backup.delete_snapshot(bad_name, backup_dir=bdir)
+
+
+def test_delete_snapshot_rejects_symlink(tmp_dir):
+    bdir = os.path.join(tmp_dir, 'backups')
+    os.makedirs(bdir)
+    real_target = os.path.join(tmp_dir, 'real_target')
+    os.makedirs(real_target)
+    _write(os.path.join(real_target, 'settings.json'), b'{}')
+    link_name = 'pre-restore-20260101-000000'
+    os.symlink(real_target, os.path.join(bdir, link_name))
+
+    with pytest.raises(backup.RestoreError, match='symlink|escapes|not found'):
+        backup.delete_snapshot(link_name, backup_dir=bdir)
+    # Real target must still exist — we refused to delete via the symlink.
+    assert os.path.isdir(real_target)
+    assert os.path.isfile(os.path.join(real_target, 'settings.json'))
+
+
+def test_delete_snapshot_missing_dir_not_found(tmp_dir):
+    bdir = os.path.join(tmp_dir, 'backups')
+    os.makedirs(bdir)
+    with pytest.raises(backup.RestoreError, match='not found'):
+        backup.delete_snapshot('pre-restore-20260101-000000', backup_dir=bdir)

@@ -244,6 +244,10 @@ mark{background:var(--yellow);color:#0d1117;border-radius:2px;padding:0 1px}
 .backup-row .b-name{flex:1;font-family:monospace;font-size:.8em;color:var(--text2);word-break:break-all}
 .backup-row .b-meta{font-size:.72em;color:var(--text3);white-space:nowrap}
 .backup-row .b-actions{display:flex;gap:6px;flex-shrink:0}
+.backup-section-head{font-size:.72em;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);padding:8px 0 4px;border-bottom:1px solid var(--border2);margin-bottom:2px}
+.backup-section-head:not(:first-child){margin-top:10px}
+.btn-danger-ghost{color:var(--red,#e76f51)}
+.btn-danger-ghost:hover{background:rgba(231,111,81,.12)}
 </style>
 
 <div class="backup-bar">
@@ -1685,6 +1689,14 @@ function toggleRecentBackups() {
   if (opening) loadRecentBackups();
 }
 
+function _fmtKb(bytes) {
+  return (bytes / 1024).toFixed(1) + ' KB';
+}
+
+function _fmtWhen(iso) {
+  return esc(iso.replace('T', ' ').replace('Z', ' UTC'));
+}
+
 function loadRecentBackups() {
   const list = document.getElementById('backup-list');
   list.innerHTML = '<div class="empty">Loading…</div>';
@@ -1692,28 +1704,92 @@ function loadRecentBackups() {
     .then(r => r.json())
     .then(data => {
       const backups = (data && data.backups) || [];
-      if (!backups.length) {
+      const snapshots = (data && data.snapshots) || [];
+      if (!backups.length && !snapshots.length) {
         list.innerHTML = '<div class="empty">No saved backups yet. Scheduled backups land here (default every 24h) — or click <strong>Download backup</strong> above to create one now.</div>';
         return;
       }
-      list.innerHTML = backups.map(b => {
-        const kb = (b.size / 1024).toFixed(1) + ' KB';
-        const when = esc(b.created_at.replace('T', ' ').replace('Z', ' UTC'));
-        const name = esc(b.name);
-        const jsName = escJs(b.name);
-        return `<div class="backup-row">
-          <span class="b-name">${name}</span>
-          <span class="b-meta">${when} · ${kb}</span>
-          <span class="b-actions">
-            <a class="btn btn-ghost btn-sm" href="/api/settings/backup/${encodeURIComponent(b.name)}" download>Download</a>
-            <button type="button" class="btn btn-ghost btn-sm" onclick="configRestoreFromSaved('${jsName}')">Restore</button>
-          </span>
-        </div>`;
-      }).join('');
+      const parts = [];
+      if (backups.length) {
+        parts.push(`<div class="backup-section-head">Archives (${backups.length})</div>`);
+        parts.push(backups.map(b => {
+          const name = esc(b.name);
+          const jsName = escJs(b.name);
+          return `<div class="backup-row">
+            <span class="b-name">${name}</span>
+            <span class="b-meta">${_fmtWhen(b.created_at)} · ${_fmtKb(b.size)}</span>
+            <span class="b-actions">
+              <a class="btn btn-ghost btn-sm" href="/api/settings/backup/${encodeURIComponent(b.name)}" download>Download</a>
+              <button type="button" class="btn btn-ghost btn-sm" onclick="configRestoreFromSaved('${jsName}')">Restore</button>
+              <button type="button" class="btn btn-ghost btn-sm btn-danger-ghost" onclick="configDeleteBackup('${jsName}')">Delete</button>
+            </span>
+          </div>`;
+        }).join(''));
+      }
+      if (snapshots.length) {
+        parts.push(`<div class="backup-section-head">Pre-restore snapshots (${snapshots.length})</div>`);
+        parts.push(snapshots.map(s => {
+          const name = esc(s.name);
+          const jsName = escJs(s.name);
+          const fileMeta = (s.file_count || 0) + ' file' + (s.file_count === 1 ? '' : 's');
+          return `<div class="backup-row">
+            <span class="b-name">${name}</span>
+            <span class="b-meta">${_fmtWhen(s.created_at)} · ${fileMeta} · ${_fmtKb(s.size)}</span>
+            <span class="b-actions">
+              <button type="button" class="btn btn-ghost btn-sm btn-danger-ghost" onclick="configDeleteSnapshot('${jsName}')">Delete</button>
+            </span>
+          </div>`;
+        }).join(''));
+      }
+      list.innerHTML = parts.join('');
     })
     .catch(err => {
       list.innerHTML = '<div class="empty">Failed to load backups: ' + esc(err.message) + '</div>';
     });
+}
+
+async function configDeleteBackup(filename) {
+  const ok = await inlineConfirm({
+    title: 'Delete backup archive?',
+    message: `Permanently delete <code>${esc(filename)}</code>? This cannot be undone.`,
+    confirmText: 'Delete',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const resp = await fetch('/api/settings/backup/' + encodeURIComponent(filename), {method: 'DELETE'});
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      showBanner('error', 'Delete failed: ' + esc(data.error || resp.statusText));
+      return;
+    }
+    showBanner('info', 'Deleted ' + esc(filename));
+    loadRecentBackups();
+  } catch (err) {
+    showBanner('error', 'Delete failed: ' + esc(err.message));
+  }
+}
+
+async function configDeleteSnapshot(dirname) {
+  const ok = await inlineConfirm({
+    title: 'Delete pre-restore snapshot?',
+    message: `Permanently delete the snapshot directory <code>${esc(dirname)}</code> and its contents? This cannot be undone, and the snapshot will no longer be available for rollback inspection.`,
+    confirmText: 'Delete',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const resp = await fetch('/api/settings/snapshot/' + encodeURIComponent(dirname), {method: 'DELETE'});
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      showBanner('error', 'Delete failed: ' + esc(data.error || resp.statusText));
+      return;
+    }
+    showBanner('info', 'Deleted ' + esc(dirname));
+    loadRecentBackups();
+  } catch (err) {
+    showBanner('error', 'Delete failed: ' + esc(err.message));
+  }
 }
 
 function _restoreConfirmText(source) {

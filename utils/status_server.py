@@ -1189,6 +1189,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 backup_dir = os.environ.get('CONFIG_BACKUP_DIR', _backup.DEFAULT_BACKUP_DIR)
                 self._send_json_response(200, json.dumps({
                     'backups': _backup.list_backups(backup_dir),
+                    'snapshots': _backup.list_snapshots(backup_dir),
                     'backup_dir': backup_dir,
                 }))
             except Exception as e:
@@ -2569,6 +2570,42 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json_response(200, json.dumps({'status': 'removed'}))
             else:
                 self._send_json_response(404, json.dumps({'error': 'Entry not found'}))
+        elif self.path.startswith('/api/settings/backup/'):
+            # Strip query string defensively so a future regex loosening
+            # can't let ``?foo=bar`` slip into the filename.
+            bare_path = urlparse(self.path).path
+            filename = url_unquote(bare_path[len('/api/settings/backup/'):])
+            try:
+                from utils import backup as _backup
+                backup_dir = os.environ.get('CONFIG_BACKUP_DIR', _backup.DEFAULT_BACKUP_DIR)
+                try:
+                    _backup.delete_backup(filename, backup_dir=backup_dir)
+                except _backup.RestoreError as e:
+                    status = 404 if 'not found' in str(e).lower() else 400
+                    self._send_json_response(status, json.dumps({'error': str(e)}))
+                    return
+            except Exception as e:
+                logger.exception("[backup] delete archive failed")
+                self._send_json_response(500, json.dumps({'error': str(e)}))
+                return
+            self._send_json_response(200, json.dumps({'status': 'deleted', 'name': filename}))
+        elif self.path.startswith('/api/settings/snapshot/'):
+            bare_path = urlparse(self.path).path
+            dirname = url_unquote(bare_path[len('/api/settings/snapshot/'):])
+            try:
+                from utils import backup as _backup
+                backup_dir = os.environ.get('CONFIG_BACKUP_DIR', _backup.DEFAULT_BACKUP_DIR)
+                try:
+                    _backup.delete_snapshot(dirname, backup_dir=backup_dir)
+                except _backup.RestoreError as e:
+                    status = 404 if 'not found' in str(e).lower() else 400
+                    self._send_json_response(status, json.dumps({'error': str(e)}))
+                    return
+            except Exception as e:
+                logger.exception("[backup] delete snapshot failed")
+                self._send_json_response(500, json.dumps({'error': str(e)}))
+                return
+            self._send_json_response(200, json.dumps({'status': 'deleted', 'name': dirname}))
         else:
             self.send_response(404)
             self.end_headers()

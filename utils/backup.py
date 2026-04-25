@@ -75,6 +75,15 @@ BACKUP_FILENAME_RE = re.compile(
     r'^zurgarr-backup-[A-Za-z0-9._+-]+-\d{8}-\d{6}(?:-\d+)?\.tar\.gz$'
 )
 
+# Strict pattern for pre-restore snapshot directory names.  Two formats:
+#   - Current: ``pre-restore-YYYYMMDD-HHMMSS[-<n>]`` (see ``_snapshot_current``)
+#   - Legacy:  ``YYYYMMDD_HHMMSS[-<n>]`` left over from earlier versions of
+#     the restore flow.  Both refer to the same kind of artifact and are
+#     safe to delete on user request.
+SNAPSHOT_DIRNAME_RE = re.compile(
+    r'^(?:pre-restore-\d{8}-\d{6}|\d{8}_\d{6})(?:-\d+)?$'
+)
+
 
 # ---------------------------------------------------------------------------
 # Build
@@ -246,6 +255,55 @@ def prune_old_backups(backup_dir=DEFAULT_BACKUP_DIR, keep=7):
         except OSError as exc:
             logger.warning(f'[backup] Failed to prune {entry["name"]}: {exc}')
     return pruned
+
+
+def list_snapshots(backup_dir=DEFAULT_BACKUP_DIR):
+    """List pre-restore snapshot directories, newest first.
+
+    Returns:
+        list of {'name', 'size', 'file_count', 'created_at'} dicts.
+        ``size`` is the sum of regular-file sizes inside the dir;
+        ``file_count`` is how many regular files were counted.
+        Symlinked top-level entries and anything not matching
+        ``SNAPSHOT_DIRNAME_RE`` are skipped.
+    """
+    if not os.path.isdir(backup_dir):
+        return []
+    entries = []
+    for name in os.listdir(backup_dir):
+        if not SNAPSHOT_DIRNAME_RE.match(name):
+            continue
+        full = os.path.join(backup_dir, name)
+        # Reject symlinks: these are not produced by ``_snapshot_current``
+        # and may point outside backup_dir.  Treat as foreign and skip.
+        if os.path.islink(full) or not os.path.isdir(full):
+            continue
+        total_size = 0
+        file_count = 0
+        try:
+            for child in os.listdir(full):
+                child_path = os.path.join(full, child)
+                if os.path.islink(child_path) or not os.path.isfile(child_path):
+                    continue
+                try:
+                    total_size += os.path.getsize(child_path)
+                    file_count += 1
+                except OSError as exc:
+                    logger.debug(f'[backup] Skipping {child_path} during list_snapshots: {exc}')
+                    continue
+            st = os.stat(full)
+        except OSError as exc:
+            logger.debug(f'[backup] Skipping snapshot {full} during list_snapshots: {exc}')
+            continue
+        entries.append({
+            'name': name,
+            'size': total_size,
+            'file_count': file_count,
+            'created_at': datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)
+                                  .strftime('%Y-%m-%dT%H:%M:%SZ'),
+        })
+    entries.sort(key=lambda e: e['created_at'], reverse=True)
+    return entries
 
 
 # ---------------------------------------------------------------------------
@@ -588,3 +646,64 @@ def restore_from_saved(filename, config_dir=DEFAULT_CONFIG_DIR, backup_dir=DEFAU
     with open(candidate, 'rb') as f:
         blob = f.read()
     return _restore_core(blob, config_dir, backup_dir)
+
+
+def resolve_snapshot_path(dirname, backup_dir=DEFAULT_BACKUP_DIR):
+    """Validate ``dirname`` and return its resolved Path inside ``backup_dir``.
+
+    Mirrors ``resolve_backup_path`` for pre-restore snapshot directories.
+    Checks:
+      1. Match SNAPSHOT_DIRNAME_RE exactly.
+      2. The resolved path is a direct child of the resolved backup_dir.
+      3. The path is a real directory and not a symlink (rmtree on a
+         symlinked top-level would raise, but we reject earlier with a
+         clearer error so the API can return 400 instead of 500).
+
+    Raises RestoreError on any check failure.
+    """
+    if not isinstance(dirname, str) or not SNAPSHOT_DIRNAME_RE.match(dirname):
+        raise RestoreError(f'Invalid snapshot dirname: {dirname!r}')
+    backup_root = Path(backup_dir).resolve()
+    candidate = (backup_root / dirname).resolve()
+    try:
+        candidate.relative_to(backup_root)
+    except ValueError:
+        raise RestoreError(f'Snapshot path escapes backup dir: {dirname!r}')
+    if candidate.parent != backup_root:
+        raise RestoreError(f'Snapshot path not a direct child of backup dir: {dirname!r}')
+    # is_symlink() must be checked on the unresolved path — Path.resolve()
+    # already followed any symlink.
+    if (backup_root / dirname).is_symlink():
+        raise RestoreError(f'Refusing to delete symlinked snapshot: {dirname!r}')
+    if not candidate.is_dir():
+        raise RestoreError(f'Snapshot not found: {dirname}')
+    return candidate
+
+
+def delete_backup(filename, backup_dir=DEFAULT_BACKUP_DIR):
+    """Delete a single saved backup archive.
+
+    Validation and the destructive op both run under ``_restore_lock``
+    so a user-initiated delete can't race rollback consuming the same
+    file, and the regex/symlink check can't be raced by a swap-in
+    after validation but before unlink.  Raises RestoreError on
+    validation failure.
+    """
+    with _restore_lock:
+        candidate = resolve_backup_path(filename, backup_dir=backup_dir)
+        os.unlink(candidate)
+        logger.info(f'[backup] Deleted archive: {filename}')
+
+
+def delete_snapshot(dirname, backup_dir=DEFAULT_BACKUP_DIR):
+    """Delete a single pre-restore snapshot directory.
+
+    Same locking rationale as ``delete_backup`` — keeping the symlink
+    check and ``rmtree`` under the same lock closes the otherwise-narrow
+    TOCTOU window where a directory could be swapped for a symlink
+    between validation and destruction.
+    """
+    with _restore_lock:
+        candidate = resolve_snapshot_path(dirname, backup_dir=backup_dir)
+        shutil.rmtree(candidate)
+        logger.info(f'[backup] Deleted snapshot dir: {dirname}')

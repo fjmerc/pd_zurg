@@ -373,11 +373,11 @@ function fmt(s){
   return h+'h '+m+'m';
 }
 function fmtBytes(b){
-  if(b>1125899906842624)return(b/1125899906842624).toFixed(2)+'P';
-  if(b>1099511627776)return(b/1099511627776).toFixed(2)+'T';
-  if(b>1073741824)return(b/1073741824).toFixed(1)+'G';
-  if(b>1048576)return(b/1048576).toFixed(0)+'M';
-  return(b/1024).toFixed(0)+'K';
+  if(b>1125899906842624)return(b/1125899906842624).toFixed(2)+' PB';
+  if(b>1099511627776)return(b/1099511627776).toFixed(2)+' TB';
+  if(b>1073741824)return(b/1073741824).toFixed(1)+' GB';
+  if(b>1048576)return(b/1048576).toFixed(0)+' MB';
+  return(b/1024).toFixed(0)+' KB';
 }
 /* Auth detection */
 window._hasAuth=false;

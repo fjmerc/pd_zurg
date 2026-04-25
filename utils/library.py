@@ -5,7 +5,6 @@ unified item list, cross-referencing by title to detect content present
 in both sources.
 """
 
-import concurrent.futures
 import os
 import re
 import shutil
@@ -13,10 +12,9 @@ import threading
 import unicodedata
 import time
 from datetime import datetime, timedelta, timezone
-from urllib.parse import quote as urllib_quote, unquote as urllib_unquote
+from urllib.parse import quote as urllib_quote
 from utils.logger import get_logger
 from utils.quality_parser import parse_quality
-from utils import webdav as _webdav
 
 logger = get_logger()
 
@@ -963,11 +961,6 @@ class LibraryScanner:
         self._lock = threading.Lock()
         self._scanning = False
         self._effects_running = False
-        # Set to True the first time a depth=infinity PROPFIND comes back with
-        # folders-but-no-files, indicating Zurg doesn't recurse.  Subsequent
-        # scans then skip straight to the depth=1 walk instead of paying for
-        # a doomed-to-fail infinity request every cycle.
-        self._webdav_unsupported = False
         self._path_index = {}
         self._local_path_index = {}
         self._path_lock = threading.Lock()
@@ -3592,6 +3585,8 @@ class LibraryScanner:
 
         Raises Exception on any failure so the caller can fall back to FUSE.
         """
+        from utils.webdav import propfind
+
         zurg_url = _discover_zurg_url(self._mount_path)
         if not zurg_url:
             raise RuntimeError("Cannot discover Zurg URL for WebDAV scan")
@@ -3601,7 +3596,7 @@ class LibraryScanner:
         remaining = max(5, int(deadline - time.monotonic())) if deadline else 30
 
         # Step 1: List categories (mirrors _scan_mount's category selection)
-        entries = _webdav.propfind(base_dav, depth=1, auth=auth, timeout=min(remaining, 10))
+        entries = propfind(base_dav, depth=1, auth=auth, timeout=min(remaining, 10))
         # Skip the root directory itself — its href may be '/', '/dav/', or empty
         _root_hrefs = {'/', '/dav/', '/dav', ''}
         all_cats = []
@@ -3627,13 +3622,77 @@ class LibraryScanner:
                 break
 
             cat_url = f"{zurg_url}/dav/{urllib_quote(category, safe='')}/"
+            remaining = max(5, int(deadline - time.monotonic())) if deadline else 30
             cat_is_shows = category.lower() in self._SHOW_CATEGORIES
 
-            folders = self._fetch_category_folders(
-                category, cat_url, auth, deadline,
-            )
-            if folders is None:
+            try:
+                cat_entries = propfind(cat_url, depth='infinity', auth=auth,
+                                       timeout=min(remaining, 25))
+            except Exception as e:
+                logger.warning(f"[library] WebDAV PROPFIND failed for {category}, skipping: {e}")
                 continue
+
+            # Group entries by torrent folder.
+            # Hrefs are already URL-decoded by webdav.propfind().
+            # Zurg may return absolute (/dav/movies/...) or relative (folder/file)
+            # hrefs — normalise both to a relative path below the category.
+            cat_prefix = f"/dav/{category}/"
+            cat_prefix_short = f"/{category}/"
+            folders = {}
+
+            for entry in cat_entries:
+                href = entry['href']
+                if href.startswith(cat_prefix):
+                    rel = href[len(cat_prefix):]
+                elif href.startswith(cat_prefix_short):
+                    rel = href[len(cat_prefix_short):]
+                elif not href.startswith('/'):
+                    # Relative href (bare folder/file path)
+                    rel = href
+                else:
+                    continue
+                rel = rel.rstrip('/')
+                if not rel:
+                    continue  # category dir itself
+
+                parts = rel.split('/')
+                folder_name = parts[0]
+                if folder_name.lower() in _SKIP_FOLDERS:
+                    continue
+
+                if folder_name not in folders:
+                    folders[folder_name] = {'files': [], 'season_files': {}}
+
+                if entry['is_collection']:
+                    continue  # skip directory entries, we only need files
+
+                mount_path = self._mount_path_for(category, rel)
+                if not mount_path:
+                    continue
+                if len(parts) == 2:
+                    # File directly in torrent folder: folder/file.mkv
+                    folders[folder_name]['files'].append(
+                        (parts[1], entry['size'], mount_path)
+                    )
+                elif len(parts) == 3:
+                    # File in subfolder: folder/Season 1/S01E01.mkv
+                    folders[folder_name]['season_files'].setdefault(parts[1], []).append(
+                        (parts[2], entry['size'], mount_path)
+                    )
+
+            # Zurg may not support true depth-infinity — if every entry is a
+            # collection and no files were found, the PROPFIND only returned
+            # folder names without recursing into them.  Bail out so the
+            # caller falls back to FUSE scanning which handles this correctly.
+            has_files = any(
+                contents['files'] or contents['season_files']
+                for contents in folders.values()
+            )
+            if folders and not has_files:
+                raise RuntimeError(
+                    f"WebDAV depth-infinity returned {len(folders)} folders but 0 files "
+                    f"for {category} — Zurg likely does not support recursive PROPFIND"
+                )
 
             # Step 3: Process folders into show_groups / movie_groups
             for folder_name, contents in folders.items():
@@ -3737,240 +3796,6 @@ class LibraryScanner:
             })
 
         return movies, shows
-
-    def _fetch_category_folders(self, category, cat_url, auth, deadline):
-        """Fetch all torrent-folder contents under *category* via WebDAV.
-
-        Tries depth=infinity first.  If Zurg returns folders without recursing
-        into them (folders-but-no-files), memoises that on the scanner and
-        retries via per-folder depth=1 PROPFIND.  Subsequent calls skip
-        straight to depth=1 once the flag is set.
-
-        Returns a folders dict (``{folder_name: {'files': [...], 'season_files': {...}}}``)
-        or ``None`` if the fetch failed transiently and the caller should
-        skip this category.  Raises RuntimeError when even the depth=1 walk
-        produces no files, so the caller can fall back to FUSE.
-        """
-        remaining = max(5, int(deadline - time.monotonic())) if deadline else 30
-
-        if self._webdav_unsupported:
-            try:
-                cat_entries = self._propfind_recursive_shallow(
-                    cat_url, auth, deadline,
-                )
-            except Exception as e:
-                logger.warning(
-                    f"[library] WebDAV depth=1 walk failed for {category}, skipping: {e}"
-                )
-                return None
-            return self._build_folders_from_entries(category, cat_entries)
-
-        try:
-            cat_entries = _webdav.propfind(cat_url, depth='infinity', auth=auth,
-                                   timeout=min(remaining, 25))
-        except Exception as e:
-            logger.warning(f"[library] WebDAV PROPFIND failed for {category}, skipping: {e}")
-            return None
-
-        folders = self._build_folders_from_entries(category, cat_entries)
-        has_files = any(
-            contents['files'] or contents['season_files']
-            for contents in folders.values()
-        )
-        if not folders or has_files:
-            return folders
-
-        # Folders but no files — Zurg ignored depth=infinity and only returned
-        # the top level.  Switch to per-folder depth=1 walk for this scan and
-        # all future scans on this scanner instance.
-        logger.info(
-            f"[library] WebDAV depth=infinity returned {len(folders)} folders "
-            f"but 0 files for {category}; Zurg lacks recursive PROPFIND, "
-            f"switching to depth=1 walk"
-        )
-        self._webdav_unsupported = True
-        try:
-            cat_entries = self._propfind_recursive_shallow(
-                cat_url, auth, deadline,
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"WebDAV depth=1 walk failed after depth=infinity returned "
-                f"no files for {category}: {e}"
-            ) from e
-
-        folders = self._build_folders_from_entries(category, cat_entries)
-        has_files = any(
-            contents['files'] or contents['season_files']
-            for contents in folders.values()
-        )
-        if folders and not has_files:
-            # Even depth=1 found no files — caller falls back to FUSE.
-            raise RuntimeError(
-                f"WebDAV depth=1 walk returned {len(folders)} folders but 0 "
-                f"files for {category}"
-            )
-        return folders
-
-    def _build_folders_from_entries(self, category, cat_entries):
-        """Group a flat list of WebDAV entries by torrent folder.
-
-        Hrefs are already URL-decoded by ``webdav.propfind``.  Zurg may
-        return absolute (``/dav/movies/...``) or relative (``folder/file``)
-        hrefs — both are normalised to a relative path below the category.
-        """
-        cat_prefix = f"/dav/{category}/"
-        cat_prefix_short = f"/{category}/"
-        folders = {}
-
-        for entry in cat_entries:
-            href = entry['href']
-            if href.startswith(cat_prefix):
-                rel = href[len(cat_prefix):]
-            elif href.startswith(cat_prefix_short):
-                rel = href[len(cat_prefix_short):]
-            elif not href.startswith('/'):
-                rel = href
-            else:
-                continue
-            rel = rel.rstrip('/')
-            if not rel:
-                continue  # category dir itself
-
-            parts = rel.split('/')
-            folder_name = parts[0]
-            if folder_name.lower() in _SKIP_FOLDERS:
-                continue
-
-            if folder_name not in folders:
-                folders[folder_name] = {'files': [], 'season_files': {}}
-
-            if entry['is_collection']:
-                continue  # skip directory entries, we only need files
-
-            mount_path = self._mount_path_for(category, rel)
-            if not mount_path:
-                continue
-            if len(parts) == 2:
-                # File directly in torrent folder: folder/file.mkv
-                folders[folder_name]['files'].append(
-                    (parts[1], entry['size'], mount_path)
-                )
-            elif len(parts) == 3:
-                # File in subfolder: folder/Season 1/S01E01.mkv
-                folders[folder_name]['season_files'].setdefault(parts[1], []).append(
-                    (parts[2], entry['size'], mount_path)
-                )
-        return folders
-
-    def _propfind_recursive_shallow(self, cat_url, auth, deadline):
-        """Walk a category via repeated depth=1 PROPFINDs.
-
-        For Zurg builds that ignore ``Depth: infinity``.  Issues one PROPFIND
-        for the category, one per top-level folder (in parallel), and one
-        per second-level subdirectory (e.g. ``Season 1/``).  The returned
-        entry list matches the shape of a successful depth=infinity response
-        so ``_build_folders_from_entries`` can consume either.
-
-        Raises if the top-level PROPFIND fails — individual folder failures
-        are logged and skipped so one bad torrent dir doesn't blank the whole
-        category.
-        """
-        def _remaining():
-            if deadline is None:
-                return 25
-            r = int(deadline - time.monotonic())
-            return r if r > 0 else 0
-
-        if _remaining() <= 0:
-            raise RuntimeError("WebDAV depth=1 walk: deadline exhausted before start")
-
-        scheme_host = cat_url.split('/dav/', 1)[0]
-
-        def _href_to_url(href):
-            """Build a fully-qualified, percent-encoded URL from a decoded href."""
-            url = scheme_host + urllib_quote(href, safe='/')
-            return url if url.endswith('/') else url + '/'
-
-        def _url_to_path(url):
-            """Decoded server-relative path for a fully-qualified URL.  Used to
-            compare against ``propfind`` hrefs (which are already decoded)."""
-            stripped = url.rstrip('/')
-            if scheme_host and stripped.startswith(scheme_host):
-                stripped = stripped[len(scheme_host):]
-            return urllib_unquote(stripped)
-
-        top = _webdav.propfind(cat_url, depth=1, auth=auth, timeout=min(_remaining(), 15))
-
-        # Identify the category root via its shortest decoded href so we can
-        # filter out the self-entry that depth=1 returns alongside children.
-        root_href = None
-        for entry in top:
-            h = entry['href'].rstrip('/')
-            if root_href is None or len(h) < len(root_href):
-                root_href = h
-
-        all_entries = list(top)
-        subfolder_urls = []
-        for entry in top:
-            if not entry['is_collection']:
-                continue
-            if entry['href'].rstrip('/') == root_href:
-                continue
-            subfolder_urls.append(_href_to_url(entry['href']))
-
-        if not subfolder_urls:
-            return all_entries
-
-        def _walk_folder(folder_url):
-            """PROPFIND a single torrent folder and any subdirs."""
-            entries = _webdav.propfind(folder_url, depth=1, auth=auth,
-                               timeout=min(max(_remaining(), 5), 15))
-            results = list(entries)
-            # The self-entry's href is the decoded server-relative path of
-            # ``folder_url``.  Compare in the decoded space so folder names
-            # containing spaces or other percent-encoded characters match.
-            self_path = _url_to_path(folder_url)
-            for sub in entries:
-                if not sub['is_collection']:
-                    continue
-                if sub['href'].rstrip('/') == self_path:
-                    continue
-                sub_url = _href_to_url(sub['href'])
-                try:
-                    results.extend(
-                        _webdav.propfind(sub_url, depth=1, auth=auth,
-                                 timeout=min(max(_remaining(), 5), 10))
-                    )
-                except Exception as e:
-                    logger.debug(
-                        f"[library] depth=1 PROPFIND failed for subdir "
-                        f"{sub['href']}: {e}"
-                    )
-            return results
-
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
-        try:
-            futures = {pool.submit(_walk_folder, u): u for u in subfolder_urls}
-            for fut in concurrent.futures.as_completed(futures):
-                folder_url = futures[fut]
-                try:
-                    all_entries.extend(fut.result())
-                except Exception as e:
-                    logger.debug(
-                        f"[library] depth=1 PROPFIND failed for {folder_url}: {e}"
-                    )
-                if _remaining() <= 0:
-                    logger.warning(
-                        "[library] WebDAV depth=1 walk hit deadline mid-scan"
-                    )
-                    # cancel_futures drops not-yet-started tasks; in-flight
-                    # ones still finish but won't block exit on the queue.
-                    pool.shutdown(wait=False, cancel_futures=True)
-                    break
-        finally:
-            pool.shutdown(wait=False)
-        return all_entries
 
     def _mount_path_for(self, category, rel_path):
         """Translate a WebDAV relative path to a FUSE mount path."""

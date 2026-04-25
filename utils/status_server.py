@@ -801,9 +801,9 @@ function renderLibrary(lib){
       var s=(sizeBy&&sizeBy[k])||0;
       var pct=c/tot*100;
       var label='';
-      if(pct>=22&&s)label=c.toLocaleString()+' · '+fmtBytes(s);
+      if(pct>=22&&s)label=c.toLocaleString()+' ('+fmtBytes(s)+')';
       else if(pct>=10)label=c.toLocaleString();
-      var tip=SRC_LABELS[k]+': '+c.toLocaleString()+(s?' · '+fmtBytes(s):'')+' ('+pct.toFixed(1)+'%)';
+      var tip=SRC_LABELS[k]+' — '+c.toLocaleString()+(s?' ('+fmtBytes(s)+')':'')+' · '+pct.toFixed(1)+'%';
       h+='<div class="lib-bar-seg '+k+'" style="width:'+pct.toFixed(2)+'%" title="'+esc(tip)+'">';
       if(label)h+='<span class="lib-bar-label">'+esc(label)+'</span>';
       h+='</div>';
@@ -812,7 +812,7 @@ function renderLibrary(lib){
   }
 
   function setBar(prefix,total,sizeBytes,by,sizeBy){
-    var meta=total?(total.toLocaleString()+' · '+fmtBytes(sizeBytes||0)):'—';
+    var meta=total?(total.toLocaleString()+' ('+fmtBytes(sizeBytes||0)+')'):'—';
     document.getElementById(prefix+'-meta').textContent=meta;
     document.getElementById(prefix+'-bar').innerHTML=buildBar(by||{},sizeBy||{});
   }

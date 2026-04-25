@@ -970,6 +970,146 @@ _WEBDAV_CAPABILITY_TTL_S = 7 * 24 * 3600
 _WEBDAV_CAPABILITY_MAX_BYTES = 4096
 
 
+# Schema version for the persisted library cache (movies/shows + path
+# indexes).  Bump on incompatible field renames so an upgrade
+# automatically discards stale on-disk caches instead of mis-loading
+# them; in-memory state is unaffected.
+_LIBRARY_CACHE_SCHEMA = 1
+
+# Hard upper bound on the persisted library cache file size.  At ~1840
+# items with full metadata, expected payloads are 5–10 MB; the cap is
+# generous enough for libraries 2–3× larger before the scanner refuses
+# to load.
+_LIBRARY_CACHE_MAX_BYTES = 16 * 1024 * 1024
+
+# A persisted cache whose `ts` is more than this many seconds in the
+# future is rejected as clock-skew / tampering.  Mirrors the capability
+# cache's posture; one day is loose enough to absorb container clock
+# drift without letting a forged record permanently shadow a real scan.
+_LIBRARY_CACHE_FUTURE_TS_TOLERANCE_S = 86400
+
+
+def _strict_int(x):
+    """True only for canonical Python ints, not bools.
+
+    ``bool`` is a subclass of ``int`` in Python, so a hand-edited cache
+    with ``"season": true`` would pass a naive ``isinstance(x, int)``
+    check.  Used by the strict cache loader to reject such values.
+    """
+    return isinstance(x, int) and not isinstance(x, bool)
+
+
+def _strict_number(x):
+    """True only for canonical numeric types, not bools."""
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
+def _serialize_cache_state(cache, path_index, local_path_index, alias_norms):
+    """Build the schema-1 envelope that ``library_cache.json`` stores.
+
+    Tuple-keyed indexes serialize as lists of ``[norm, sn, en, path]``
+    rows because JSON object keys must be strings.  Alias sets become
+    sorted lists for deterministic round-trip.
+    """
+    from version import VERSION as _VERSION
+    return {
+        'schema': _LIBRARY_CACHE_SCHEMA,
+        'ts': time.time(),
+        'zurgarr_version': _VERSION,
+        'cache': cache,
+        'path_index': [
+            [norm, sn, en, p] for (norm, sn, en), p in path_index.items()
+        ],
+        'local_path_index': [
+            [norm, sn, en, p] for (norm, sn, en), p in local_path_index.items()
+        ],
+        'alias_norms': {k: sorted(v) for k, v in alias_norms.items()},
+    }
+
+
+def _deserialize_cache_state(envelope):
+    """Validate and convert the persisted envelope back to live state.
+
+    Returns ``(cache, path_index, local_path_index, alias_norms)`` on
+    success or ``None`` on any failure.  Strict-types throughout: any
+    field of the wrong shape — including the ``bool``-as-``int`` trap —
+    rejects the whole envelope.
+    """
+    from version import VERSION as _VERSION
+
+    if not isinstance(envelope, dict):
+        return None
+    # ``schema`` must be a strict int (rejects ``bool`` as well — see
+    # ``_strict_int``) that equals the current schema.
+    schema = envelope.get('schema')
+    if not _strict_int(schema) or schema != _LIBRARY_CACHE_SCHEMA:
+        return None
+    ts = envelope.get('ts')
+    if not _strict_number(ts):
+        return None
+    if ts > time.time() + _LIBRARY_CACHE_FUTURE_TS_TOLERANCE_S:
+        return None
+    if envelope.get('zurgarr_version') != _VERSION:
+        return None
+
+    cache = envelope.get('cache')
+    if not isinstance(cache, dict):
+        return None
+    if not isinstance(cache.get('movies'), list):
+        return None
+    if not isinstance(cache.get('shows'), list):
+        return None
+    # Inner cache fields used by downstream consumers — strict-validate
+    # so a tampered file can't silently feed wrong types into the UI
+    # render path or scan-effects loop.  ``preferences`` is allowed to
+    # be missing (some old envelopes won't have it); when present it
+    # must be a dict.
+    if 'preferences' in cache and not isinstance(cache['preferences'], dict):
+        return None
+    if not isinstance(cache.get('last_scan'), str):
+        return None
+    if not _strict_int(cache.get('scan_duration_ms')):
+        return None
+
+    raw_pi = envelope.get('path_index')
+    raw_lpi = envelope.get('local_path_index')
+    raw_an = envelope.get('alias_norms')
+    if not isinstance(raw_pi, list) or not isinstance(raw_lpi, list):
+        return None
+    if not isinstance(raw_an, dict):
+        return None
+
+    def _to_index(rows):
+        out = {}
+        for row in rows:
+            if not isinstance(row, list) or len(row) != 4:
+                return None
+            norm, sn, en, p = row
+            if not isinstance(norm, str) or not isinstance(p, str):
+                return None
+            if not _strict_int(sn) or not _strict_int(en):
+                return None
+            out[(norm, sn, en)] = p
+        return out
+
+    path_index = _to_index(raw_pi)
+    if path_index is None:
+        return None
+    local_path_index = _to_index(raw_lpi)
+    if local_path_index is None:
+        return None
+
+    alias_norms = {}
+    for k, v in raw_an.items():
+        if not isinstance(k, str) or not isinstance(v, list):
+            return None
+        if not all(isinstance(x, str) for x in v):
+            return None
+        alias_norms[k] = set(v)
+
+    return cache, path_index, local_path_index, alias_norms
+
+
 class LibraryScanner:
     def __init__(self):
         self._mount_path = _discover_mount()
@@ -1012,6 +1152,19 @@ class LibraryScanner:
             'library_capabilities.json',
         )
         self._load_webdav_capability()
+
+        # Persisted snapshot of the last successful scan — populated on
+        # every scan completion and reloaded on startup so the Library
+        # page renders the last-known-good list immediately instead of
+        # waiting on a cold scan (51s on the user's instance, where
+        # Zurg lacks recursive PROPFIND so the FUSE walk is the only
+        # path).  Strict validation; any failure mode falls back to
+        # current behavior (fresh scan).
+        self._library_cache_path = os.path.join(
+            os.environ.get('CONFIG_DIR', '/config'),
+            'library_cache.json',
+        )
+        self._load_persisted_cache()
 
         # Per-title basename sets of previously-created debrid symlinks.
         # Used to classify new symlink_created events as "new import" vs
@@ -1546,9 +1699,14 @@ class LibraryScanner:
 
         # Cache expired or empty — scan synchronously so caller always gets data
         data = self.scan()
+        # Capture a coherent index snapshot before any concurrent scan can
+        # rebind the live ones — pairs this ``data`` with these indexes on
+        # disk so the warm-start state is internally consistent.
+        idx = self._snapshot_indexes_for_persist()
         with self._lock:
             self._cache = data
             self._cache_time = time.monotonic()
+        self._persist_cache(data, *idx)
         return data
 
     def refresh(self, _rescan_depth=0):
@@ -1565,6 +1723,8 @@ class LibraryScanner:
                 had_mount_before = self._mount_path is not None
                 data = self._scan_read()
                 has_mount_now = self._mount_path is not None
+                # Capture index snapshot before another scan can rebind.
+                idx = self._snapshot_indexes_for_persist()
                 with self._lock:
                     self._cache = data
                     if not self._mount_path:
@@ -1575,6 +1735,7 @@ class LibraryScanner:
                         f"[library] Read scan complete: {len(data['movies'])} movies, "
                         f"{len(data['shows'])} shows in {data['scan_duration_ms']}ms"
                     )
+                self._persist_cache(data, *idx)
                 # Mount appeared mid-scan — the scan started before the mount
                 # was available so debrid content is missing.  Schedule a
                 # follow-up scan so it appears within seconds of startup.
@@ -3725,6 +3886,116 @@ class LibraryScanner:
             # detection path and turn a successful FUSE fallback into a
             # whole-scan failure.
             logger.warning(f"[library] Could not persist capability cache: {e}")
+
+    def _load_persisted_cache(self):
+        """Pre-populate ``_cache`` and the path indexes from disk.
+
+        Mirrors ``_load_webdav_capability``'s posture: any validation
+        failure leaves init state untouched (current behavior — fresh
+        scan).  The size cap is checked via ``os.fstat`` on the open
+        fd, not ``os.path.getsize``, to close the TOCTOU window between
+        sizing and reading (carried forward from
+        ``_load_webdav_capability``).
+
+        On success ``_cache_time`` is set so the next ``get_data()``
+        call still serves from the persisted cache, but a refresh is
+        scheduled within roughly a minute to bring the on-disk
+        snapshot up to date with the live mount.
+        """
+        try:
+            if not os.path.isfile(self._library_cache_path):
+                return
+
+            import json as _json
+            with open(self._library_cache_path, 'r', encoding='utf-8') as fh:
+                size = os.fstat(fh.fileno()).st_size
+                if size > _LIBRARY_CACHE_MAX_BYTES:
+                    logger.warning(
+                        "[library] cache file exceeds size cap, ignoring"
+                    )
+                    return
+                envelope = _json.load(fh)
+
+            result = _deserialize_cache_state(envelope)
+            if result is None:
+                logger.warning(
+                    "[library] cache file failed validation, ignoring"
+                )
+                return
+
+            cache, path_index, local_path_index, alias_norms = result
+            with self._lock:
+                self._cache = cache
+                # Mark the persisted view fresh so the first ``get_data()``
+                # call after restart serves it immediately.  The scheduled
+                # ``library_scan`` task triggers the next refresh on its
+                # normal cadence; we don't need to pre-age cache_time to
+                # force a sooner one (and the mount-absent branch's
+                # ttl=10 makes any pre-aging fragile anyway).
+                self._cache_time = time.monotonic()
+            with self._path_lock:
+                self._path_index = path_index
+                self._local_path_index = local_path_index
+                self._alias_norms = alias_norms
+
+            logger.info(
+                f"[library] Loaded persisted cache: "
+                f"{len(cache.get('movies', []))} movies, "
+                f"{len(cache.get('shows', []))} shows"
+            )
+        except (OSError, ValueError, TypeError) as e:
+            logger.warning(f"[library] Could not load library cache: {e}")
+
+    def _snapshot_indexes_for_persist(self):
+        """Capture a coherent copy of the three index structures.
+
+        Returned as ``(path_index, local_path_index, alias_norms)``
+        snapshots — independent of any subsequent rebind by another
+        scan thread.  Callers should invoke this *immediately* after
+        ``_scan_read`` returns so the snapshot reflects the same scan
+        whose ``data`` they are about to persist; the surrounding code
+        is structured so concurrent scans rebind the live indexes via
+        ``_path_lock`` without disturbing this captured view.
+        """
+        with self._path_lock:
+            pi = dict(self._path_index)
+            lpi = dict(self._local_path_index)
+            an = {k: set(v) for k, v in self._alias_norms.items()}
+        return pi, lpi, an
+
+    def _persist_cache(self, cache, path_index, local_path_index, alias_norms):
+        """Atomic-write the library cache + indexes after a scan.
+
+        ``path_index`` / ``local_path_index`` / ``alias_norms`` must be
+        callee-owned snapshots — typically captured via
+        ``_snapshot_indexes_for_persist`` immediately after the scan
+        that produced ``cache``, so the on-disk envelope pairs the same
+        scan's cache and indexes.  (A residual microsecond race exists
+        between ``_scan_read`` returning and the snapshot-capture call;
+        it can only mismatch when two scans complete in interleaved
+        order, which is rare and bounded by the scheduler cadence
+        refreshing the persisted view on every cycle.)
+
+        Best-effort: a write failure logs a warning but never propagates
+        out of the scan path (read-only ``/config``, quota exhaustion,
+        or a future change adding a non-serializable field would
+        otherwise turn a successful scan into a failed one).
+        """
+        # Tolerate partially-constructed instances (e.g. unit-test scanners
+        # built via ``LibraryScanner.__new__``) that skipped __init__ and
+        # therefore lack the path attribute.  No-op rather than raise.
+        if not getattr(self, '_library_cache_path', None):
+            return
+        try:
+            from utils.file_utils import atomic_write
+            import json as _json
+            envelope = _serialize_cache_state(
+                cache, path_index, local_path_index, alias_norms
+            )
+            with atomic_write(self._library_cache_path) as fh:
+                _json.dump(envelope, fh)
+        except (OSError, ValueError, TypeError) as e:
+            logger.warning(f"[library] Could not persist library cache: {e}")
 
     def _webdav_scan_mount(self, deadline=None):
         """Scan the debrid mount via WebDAV PROPFIND directly to Zurg.

@@ -3155,3 +3155,281 @@ class TestWebDAVCrossCategoryDetection:
         assert not os.path.exists(path), (
             "capability cache must not be written from an incomplete scan"
         )
+
+
+# ---------------------------------------------------------------------------
+# Library cache persistence (plan 37)
+# ---------------------------------------------------------------------------
+
+
+class TestLibraryCachePersistence:
+    """Persist `_cache` + path indexes to /config/library_cache.json so cold
+    start serves last-known-good library instantly instead of waiting on a
+    51-second FUSE walk.
+    """
+
+    def _sample_state(self):
+        cache = {
+            'movies': [{'title': 'Some Movie', 'year': 2024}],
+            'shows': [{'title': 'Some Show'}],
+            'preferences': {'show': 'prefer-debrid'},
+            'last_scan': '2026-04-25T14:00:00+00:00',
+            'scan_duration_ms': 51000,
+        }
+        path_index = {
+            ('some show', 1, 1): '/mnt/zurgarr/shows/Some Show/S01E01.mkv',
+            ('some show', 1, 2): '/mnt/zurgarr/shows/Some Show/S01E02.mkv',
+        }
+        local_path_index = {
+            ('some show', 1, 1): '/local/tv/Some Show/S01E01.mkv',
+        }
+        alias_norms = {'some show': {'some show', 'the show'}}
+        return cache, path_index, local_path_index, alias_norms
+
+    def _make_scanner(self, cache_path):
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._mount_path = '/mnt/debrid'
+        scanner._local_movies_path = None
+        scanner._local_tv_path = None
+        scanner._cache = None
+        scanner._cache_time = 0
+        scanner._ttl = 600
+        scanner._lock = threading.Lock()
+        scanner._scanning = False
+        scanner._effects_running = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._library_cache_path = cache_path
+        return scanner
+
+    # --- serialize/deserialize helpers ---
+
+    def test_round_trip_preserves_cache_and_indexes(self):
+        cache, pi, lpi, an = self._sample_state()
+        env = library._serialize_cache_state(cache, pi, lpi, an)
+        result = library._deserialize_cache_state(env)
+        assert result is not None
+        c2, pi2, lpi2, an2 = result
+        assert c2 == cache
+        assert pi2 == pi
+        assert lpi2 == lpi
+        assert an2 == an
+
+    def test_tuple_keys_round_trip(self):
+        """JSON has no tuple keys — serialize as 4-element rows, restore as tuples."""
+        cache, pi, _, _ = self._sample_state()
+        env = library._serialize_cache_state(cache, pi, {}, {})
+        # Wire-format check: rows are lists, not tuples.
+        assert all(isinstance(row, list) and len(row) == 4 for row in env['path_index'])
+        result = library._deserialize_cache_state(env)
+        _, pi2, _, _ = result
+        # Keys must be tuples again so existing get(...) calls keep working.
+        for k in pi2:
+            assert isinstance(k, tuple) and len(k) == 3
+
+    def test_alias_norms_set_round_trip(self):
+        cache, _, _, _ = self._sample_state()
+        an = {'a': {'a', 'b', 'c'}}
+        env = library._serialize_cache_state(cache, {}, {}, an)
+        # Wire format is sorted list for deterministic disk content.
+        assert env['alias_norms']['a'] == ['a', 'b', 'c']
+        result = library._deserialize_cache_state(env)
+        _, _, _, an2 = result
+        assert an2 == an
+        assert isinstance(an2['a'], set)
+
+    # --- invalidation on load ---
+
+    def test_missing_file_no_op(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'library_cache.json')
+        scanner = self._make_scanner(path)
+        scanner._load_persisted_cache()
+        assert scanner._cache is None
+        assert scanner._path_index == {}
+
+    def test_corrupt_json_treated_as_missing(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'library_cache.json')
+        with open(path, 'w') as fh:
+            fh.write('}}}not json[[')
+        scanner = self._make_scanner(path)
+        scanner._load_persisted_cache()
+        assert scanner._cache is None
+
+    def test_size_cap_via_fstat_rejects_oversize(self, tmp_dir):
+        """File larger than the 16 MB cap is rejected before json.load runs."""
+        path = os.path.join(tmp_dir, 'library_cache.json')
+        with open(path, 'w') as fh:
+            # One byte over the cap is enough.  Doesn't matter that the
+            # content isn't valid JSON — the size check fires first.
+            fh.write('a' * (library._LIBRARY_CACHE_MAX_BYTES + 1))
+        scanner = self._make_scanner(path)
+        scanner._load_persisted_cache()
+        assert scanner._cache is None
+
+    def test_schema_mismatch_rejected(self, tmp_dir):
+        import json
+        cache, pi, lpi, an = self._sample_state()
+        env = library._serialize_cache_state(cache, pi, lpi, an)
+        env['schema'] = 99
+        path = os.path.join(tmp_dir, 'library_cache.json')
+        with open(path, 'w') as fh:
+            json.dump(env, fh)
+        scanner = self._make_scanner(path)
+        scanner._load_persisted_cache()
+        assert scanner._cache is None
+
+    def test_version_mismatch_rejected(self, tmp_dir):
+        import json
+        cache, pi, lpi, an = self._sample_state()
+        env = library._serialize_cache_state(cache, pi, lpi, an)
+        env['zurgarr_version'] = '0.0.0-not-real'
+        path = os.path.join(tmp_dir, 'library_cache.json')
+        with open(path, 'w') as fh:
+            json.dump(env, fh)
+        scanner = self._make_scanner(path)
+        scanner._load_persisted_cache()
+        assert scanner._cache is None
+
+    def test_future_dated_ts_rejected(self, tmp_dir):
+        import json
+        cache, pi, lpi, an = self._sample_state()
+        env = library._serialize_cache_state(cache, pi, lpi, an)
+        env['ts'] = time.time() + library._LIBRARY_CACHE_FUTURE_TS_TOLERANCE_S + 60
+        path = os.path.join(tmp_dir, 'library_cache.json')
+        with open(path, 'w') as fh:
+            json.dump(env, fh)
+        scanner = self._make_scanner(path)
+        scanner._load_persisted_cache()
+        assert scanner._cache is None
+
+    def test_persist_failure_swallowed(self, tmp_dir, monkeypatch):
+        """A write failure must NOT propagate out of the scan path."""
+        path = os.path.join(tmp_dir, 'library_cache.json')
+        scanner = self._make_scanner(path)
+        cache, pi, lpi, an = self._sample_state()
+
+        def boom(*args, **kwargs):
+            raise OSError('disk is read-only in tests')
+
+        # atomic_write is imported lazily inside _persist_cache.
+        import utils.file_utils as fu
+        monkeypatch.setattr(fu, 'atomic_write', boom)
+        # Must not raise.
+        scanner._persist_cache(cache, pi, lpi, an)
+        # File never created.
+        assert not os.path.exists(path)
+
+    def test_persist_no_op_when_path_unset(self, tmp_dir):
+        """Partially-constructed scanners (built via ``__new__`` in unit
+        tests, lacking ``_library_cache_path``) must no-op silently
+        rather than raise — the existing capability test helpers rely on
+        this."""
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        # Intentionally no _library_cache_path attribute.
+        scanner._path_lock = threading.Lock()
+        cache, pi, lpi, an = self._sample_state()
+        # Must not raise.
+        scanner._persist_cache(cache, pi, lpi, an)
+
+    # --- strict field types ---
+
+    def test_strict_int_rejects_bool_in_path_index(self):
+        cache, _, _, _ = self._sample_state()
+        env = library._serialize_cache_state(cache, {}, {}, {})
+        env['path_index'] = [['show', True, 1, '/p']]
+        assert library._deserialize_cache_state(env) is None
+
+    def test_path_index_row_arity_validated(self):
+        cache, _, _, _ = self._sample_state()
+        env = library._serialize_cache_state(cache, {}, {}, {})
+        env['path_index'] = [['show', 1, 1]]  # missing path
+        assert library._deserialize_cache_state(env) is None
+
+    def test_movies_must_be_list(self):
+        cache, pi, lpi, an = self._sample_state()
+        env = library._serialize_cache_state(cache, pi, lpi, an)
+        env['cache']['movies'] = 'not a list'
+        assert library._deserialize_cache_state(env) is None
+
+    def test_alias_norms_values_must_be_list_of_str(self):
+        cache, _, _, _ = self._sample_state()
+        env = library._serialize_cache_state(cache, {}, {}, {})
+        env['alias_norms'] = {'a': [1, 2]}
+        assert library._deserialize_cache_state(env) is None
+
+    # --- end-to-end ---
+
+    def test_end_to_end_warm_start(self, tmp_dir, monkeypatch):
+        """Persist via one scanner, load via a fresh LibraryScanner() and
+        verify get_data() returns the persisted cache without scanning."""
+        cache_path = os.path.join(tmp_dir, 'library_cache.json')
+        scanner = self._make_scanner(cache_path)
+        cache, pi, lpi, an = self._sample_state()
+        scanner._persist_cache(cache, pi, lpi, an)
+        assert os.path.isfile(cache_path)
+
+        # Build a fresh scanner via __init__ pointed at the same CONFIG_DIR.
+        # _discover_mount and the scan-state load are stubbed so __init__
+        # doesn't poke unrelated paths.
+        monkeypatch.setenv('CONFIG_DIR', tmp_dir)
+        monkeypatch.setattr(library, '_discover_mount', lambda: None)
+        fresh = library.LibraryScanner()
+        assert fresh._library_cache_path == cache_path
+        assert fresh._cache == cache
+        assert fresh._path_index == pi
+        assert fresh._local_path_index == lpi
+        assert fresh._alias_norms == an
+
+        # get_data() must return the loaded cache without triggering a scan.
+        scan_called = []
+        monkeypatch.setattr(fresh, 'scan', lambda *a, **k: scan_called.append(1) or cache)
+        out = fresh.get_data()
+        assert out == cache
+        assert scan_called == [], 'get_data() should serve from persisted cache'
+
+    def test_load_failure_leaves_init_state_untouched(self, tmp_dir):
+        """Even with a corrupt file, _cache stays None and indexes stay {}."""
+        path = os.path.join(tmp_dir, 'library_cache.json')
+        with open(path, 'w') as fh:
+            fh.write('garbage')
+        scanner = self._make_scanner(path)
+        scanner._cache = None
+        scanner._path_index = {}
+        scanner._load_persisted_cache()
+        assert scanner._cache is None
+        assert scanner._path_index == {}
+
+    def test_successful_load_sets_cache_time(self, tmp_dir):
+        """A successful load advances ``_cache_time`` to ``time.monotonic()``
+        so the very next ``get_data()`` call serves the persisted view
+        without triggering a synchronous scan."""
+        cache_path = os.path.join(tmp_dir, 'library_cache.json')
+        scanner = self._make_scanner(cache_path)
+        cache, pi, lpi, an = self._sample_state()
+        scanner._persist_cache(cache, pi, lpi, an)
+
+        fresh = self._make_scanner(cache_path)
+        before = time.monotonic()
+        fresh._load_persisted_cache()
+        after = time.monotonic()
+        # Must be set to a recent monotonic timestamp.
+        assert before <= fresh._cache_time <= after
+
+    @pytest.mark.parametrize('mutation', [
+        ('preferences', 'not a dict'),
+        ('last_scan', 12345),
+        ('scan_duration_ms', 'not a number'),
+        ('scan_duration_ms', True),  # bool-as-int trap
+    ])
+    def test_inner_cache_strict_types_rejected(self, mutation):
+        """Inner cache fields used by downstream consumers must pass
+        strict-type validation; a tampered file with the wrong type
+        rejects the whole envelope."""
+        cache, pi, lpi, an = self._sample_state()
+        env = library._serialize_cache_state(cache, pi, lpi, an)
+        key, val = mutation
+        env['cache'][key] = val
+        assert library._deserialize_cache_state(env) is None

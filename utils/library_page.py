@@ -1868,6 +1868,20 @@ function _applyLibraryData(data, opts) {
   _searchEnabled  = !!data.search_enabled;
   _lastScan       = data.last_scan || null;
   _scanDurationMs = data.scan_duration_ms || null;
+  // Sync the scanning indicator from the server so a background scan
+  // (cold-start or scheduler-triggered) drives the "Refreshing…" UI even
+  // when the user didn't click the manual Refresh button.  Suppress when
+  // the manual-refresh poll is in flight: that path manages _scanning
+  // itself and clearing it here would let the user start a duplicate
+  // refresh mid-flow.  Repaint scan-info immediately even on the quiet
+  // path so a detail-view smart-poll tick that observes scan completion
+  // doesn't leave a stale "Refreshing…" dot until the next 30s tick.
+  if (!_refreshPollTimer) {
+    var prevScanning = _scanning;
+    _scanning = !!data.scanning;
+    if (prevScanning !== _scanning) updateScanInfo();
+    _setRefreshButtonDisabled(_scanning);
+  }
 
   // Auto-switch tab if wanted preset has no matches in current tab but other tab does
   if (!_inDetailView && _activeWantedPreset && _activeWantedPreset !== 'recent') {
@@ -1896,6 +1910,11 @@ function _applyLibraryData(data, opts) {
     updateScanInfo();
   }
   _checkSmartPoll();
+  // If the server reports a background scan in flight, poll until it
+  // finishes and re-apply the fresh data.  Reuses _refreshPollTimer so
+  // the manual-refresh path and this auto-poll cleanly serialize: the
+  // call below no-ops while a manual refresh is already polling.
+  _ensureBackgroundScanPoll();
 
   if (_inDetailView && _detailItem) {
     var items = _detailItem.type === 'movie' ? _allMovies : _allShows;
@@ -1998,6 +2017,94 @@ function _finishRefresh() {
   _scanning = false;
   document.getElementById('btn-refresh').disabled = false;
   updateScanInfo();
+}
+
+// Disable / re-enable the manual Refresh button.  Used by both the
+// manual-refresh path (already calls this implicitly) and the new
+// background-scan auto-poll, so the user can't click an enabled button
+// that would silently no-op via ``triggerRefresh``'s ``if (_scanning)
+// return`` guard.
+function _setRefreshButtonDisabled(disabled) {
+  var btn = document.getElementById('btn-refresh');
+  if (btn) btn.disabled = !!disabled;
+}
+
+// Deadline (ms epoch) for the active background-scan auto-poll cycle.
+// Module-level so a smart-poll tick re-entering ``_ensureBackgroundScanPoll``
+// observes the same ceiling instead of a fresh-from-zero counter — fixes
+// the per-invocation reset bug surfaced by code-review.
+var _bgScanDeadline = null;
+
+// Picks up a background scan started by the scheduler (or a cold-start
+// refresh kicked off before the page rendered) and polls /api/library
+// until it completes, then re-applies the fresh data.  The manual
+// Refresh button uses _pollRefresh which owns _refreshPollTimer; this
+// helper no-ops while that's running so the two paths never double-poll.
+function _ensureBackgroundScanPoll() {
+  if (_refreshPollTimer) return;       // manual or auto poll already running
+  if (!_scanning) return;              // nothing to wait for
+
+  if (!_bgScanDeadline) {
+    _bgScanDeadline = Date.now() + 3 * 60 * 1000;  // 3-minute ceiling
+  }
+
+  function _bgFinish(scanningStillTrue) {
+    // Single exit point so success / timeout / hand-off all reset state
+    // identically: no stuck "Refreshing…" indicator, no left-disabled
+    // button, no stale deadline.
+    _refreshPollTimer = null;
+    _bgScanDeadline = null;
+    if (scanningStillTrue) {
+      // Cap hit while server still claimed scanning — best-effort one
+      // last fetch so the displayed timestamp catches up if the scan
+      // actually completed between our last poll and now.
+      fetch('/api/library')
+        .then(function(r) { return r.ok ? r.json() : null; })
+        .then(function(data) {
+          if (data) { _applyLibraryData(data); return; }
+          _scanning = false;
+          updateScanInfo();
+          _setRefreshButtonDisabled(false);
+        })
+        .catch(function() {
+          _scanning = false;
+          updateScanInfo();
+          _setRefreshButtonDisabled(false);
+        });
+    }
+  }
+
+  function _poll() {
+    if (Date.now() > _bgScanDeadline) {
+      _bgFinish(true);
+      return;
+    }
+    fetch('/api/library')
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(data) {
+        if (!data) {
+          _refreshPollTimer = setTimeout(_poll, 3000);
+          return;
+        }
+        if (data.scanning) {
+          _refreshPollTimer = setTimeout(_poll, 3000);
+        } else {
+          // Scan finished — clear timer / deadline FIRST so
+          // _applyLibraryData's re-entrant call to
+          // _ensureBackgroundScanPoll() doesn't see a stale timer
+          // reference and start a second poll.
+          _refreshPollTimer = null;
+          _bgScanDeadline = null;
+          _applyLibraryData(data);
+        }
+      })
+      .catch(function() {
+        _refreshPollTimer = setTimeout(_poll, 3000);
+      });
+  }
+
+  _setRefreshButtonDisabled(true);
+  _refreshPollTimer = setTimeout(_poll, 3000);
 }
 
 function triggerRefresh() {

@@ -31,7 +31,7 @@ a:hover{text-decoration:underline}
 .sidebar-brand-link{display:inline-flex;align-items:center;gap:8px}
 .sidebar-brand-mark{flex-shrink:0;display:block}
 .sidebar-version{display:block;font-size:.7em;color:var(--text3);margin-top:1px}
-.sidebar-nav{display:flex;flex-direction:column;padding:8px 0}
+.sidebar-nav{display:flex;flex-direction:column;padding:8px 0;flex:1 1 auto}
 .sidebar-link{display:flex;align-items:center;gap:10px;padding:9px 16px;color:var(--text2);font-size:.85em;font-weight:500;text-decoration:none;border-left:3px solid transparent;transition:color var(--motion-fast),background var(--motion-fast),border-color var(--motion-fast)}
 .sidebar-link:hover{color:var(--text);background:var(--border2);text-decoration:none}
 .sidebar-link.active{color:var(--blue);border-left-color:var(--blue);background:rgba(88,166,255,.08)}
@@ -41,8 +41,13 @@ a:hover{text-decoration:underline}
 .sidebar-link svg{width:18px;height:18px;flex-shrink:0;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .sidebar-badge{display:inline-block;background:var(--red);color:#fff;border-radius:8px;font-size:.72em;font-weight:700;padding:1px 6px;margin-left:auto;min-width:16px;text-align:center;line-height:1.4}
 .sidebar-divider{height:1px;background:var(--border);margin:4px 12px}
-.sidebar-theme{background:none;border:none;color:var(--text3);cursor:pointer;font-size:1em;padding:4px;border-radius:4px;line-height:1;flex-shrink:0;transition:color var(--motion-fast)}
-.sidebar-theme:hover{color:var(--blue)}
+.sidebar-footer{padding:12px 14px;border-top:1px solid var(--border)}
+.theme-switch{display:flex;background:var(--border2);border-radius:999px;padding:3px;gap:2px}
+.theme-opt{flex:1;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:6px 10px;background:none;border:none;color:var(--text3);cursor:pointer;border-radius:999px;font-size:.78em;font-weight:500;line-height:1;font-family:inherit;transition:background var(--motion-fast),color var(--motion-fast)}
+.theme-opt:hover{color:var(--text2)}
+.theme-opt.active{background:var(--card);color:var(--text);box-shadow:0 1px 2px rgba(0,0,0,.25)}
+[data-theme="light"] .theme-opt.active{box-shadow:0 1px 2px rgba(0,0,0,.08)}
+.theme-opt svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
 
 /* === Main Content === */
 .main-content{margin-left:var(--sidebar-w);padding:20px;min-height:100vh}
@@ -57,6 +62,7 @@ a:hover{text-decoration:underline}
   .sidebar{transform:translateX(-100%);transition:transform .3s ease}
   .sidebar.open{transform:translateX(0)}
   .hamburger-btn{display:block}
+  .sidebar.open ~ .hamburger-btn{display:none}
   .main-content{margin-left:0;padding:16px;padding-top:44px}
 }
 
@@ -79,10 +85,6 @@ a:hover{text-decoration:underline}
 .btn.confirming{border-color:var(--orange);color:var(--orange);font-weight:600;animation:pulse-confirm .8s ease-in-out infinite}
 .btn.confirming.btn-danger{border-color:var(--red);color:var(--red)}
 @keyframes pulse-confirm{0%,100%{opacity:1}50%{opacity:.7}}
-
-/* === Theme Toggle === */
-.theme-toggle{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;cursor:pointer;padding:4px 8px;font-size:.85em;line-height:1;transition:border-color var(--motion-fast),color var(--motion-fast)}
-.theme-toggle:hover{border-color:var(--blue);color:var(--blue)}
 
 /* === Spinner === */
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle}
@@ -119,22 +121,26 @@ THEME_INIT_SCRIPT = (
 )
 
 # ---------------------------------------------------------------------------
-# Theme toggle JS (applyTheme + toggleTheme — included in page <script>)
+# Theme toggle JS (applyTheme + setTheme — included in page <script>)
 # ---------------------------------------------------------------------------
 
 THEME_TOGGLE_JS = r"""
 function applyTheme(theme){
   document.documentElement.setAttribute('data-theme',theme);
-  document.querySelector('meta[name="color-scheme"]').content=theme==='light'?'light':'dark';
-  document.getElementById('theme-btn').textContent=theme==='light'?'\u{1F319}':'\u{2600}\u{FE0F}';
+  var meta=document.querySelector('meta[name="color-scheme"]');
+  if(meta)meta.content=theme==='light'?'light':'dark';
+  var opts=document.querySelectorAll('.theme-opt');
+  for(var i=0;i<opts.length;i++){
+    var v=opts[i].getAttribute('data-theme-set');
+    if(v===theme){opts[i].classList.add('active');opts[i].setAttribute('aria-checked','true');opts[i].setAttribute('tabindex','0');}
+    else{opts[i].classList.remove('active');opts[i].setAttribute('aria-checked','false');opts[i].setAttribute('tabindex','-1');}
+  }
 }
-function toggleTheme(){
-  var cur=document.documentElement.getAttribute('data-theme')||'dark';
-  var next=cur==='dark'?'light':'dark';
-  applyTheme(next);
-  try{localStorage.setItem('zurgarr_theme',next);}catch(e){}
+function setTheme(theme){
+  applyTheme(theme);
+  try{localStorage.setItem('zurgarr_theme',theme);}catch(e){}
 }
-(function(){var t=document.documentElement.getAttribute('data-theme');if(t)applyTheme(t);})();
+(function(){var t=document.documentElement.getAttribute('data-theme')||'dark';applyTheme(t);})();
 """
 
 # ---------------------------------------------------------------------------
@@ -418,12 +424,25 @@ function showConfirm(title,msg){
 # Global functions (must be on window for inline onclick handlers)
 SIDEBAR_JS_GLOBALS = r"""
 function toggleSidebar(){
-  document.getElementById('sidebar').classList.toggle('open');
-  document.getElementById('sidebar-backdrop').classList.toggle('visible');
+  var sb=document.getElementById('sidebar');
+  var bd=document.getElementById('sidebar-backdrop');
+  var opening=!sb.classList.contains('open');
+  sb.classList.toggle('open');
+  bd.classList.toggle('visible');
+  if(opening){
+    var first=sb.querySelector('.sidebar-link');
+    if(first)first.focus();
+  }
 }
 function closeSidebar(){
-  document.getElementById('sidebar').classList.remove('open');
+  var sb=document.getElementById('sidebar');
+  var wasOpen=sb.classList.contains('open');
+  sb.classList.remove('open');
   document.getElementById('sidebar-backdrop').classList.remove('visible');
+  if(wasOpen&&window.innerWidth<=768){
+    var hb=document.getElementById('hamburger-btn');
+    if(hb)hb.focus();
+  }
 }
 """
 
@@ -440,6 +459,13 @@ SIDEBAR_JS_INIT = r"""
   window.addEventListener('resize',function(){
     if(window.innerWidth>768)closeSidebar();
   });
+  /* Close mobile sidebar with Escape */
+  document.addEventListener('keydown',function(e){
+    if(e.key==='Escape'){
+      var sb=document.getElementById('sidebar');
+      if(sb&&sb.classList.contains('open')&&window.innerWidth<=768)closeSidebar();
+    }
+  });
 """
 
 # ---------------------------------------------------------------------------
@@ -453,6 +479,8 @@ _ICON_ACTIVITY = '<svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9
 _ICON_SETTINGS = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>'
 _ICON_SYSTEM = '<svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>'
 _ICON_HAMBURGER = '<svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>'
+_ICON_SUN = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>'
+_ICON_MOON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>'
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -548,8 +576,6 @@ def get_nav_html(current_page='status'):
         '</a>'
         '<span class="sidebar-version" id="header-meta"></span>'
         '</div>'
-        '<button class="sidebar-theme" onclick="toggleTheme()" '
-        'title="Toggle theme" id="theme-btn">&#x2600;&#xFE0F;</button>'
         '</div>'
         '<div class="sidebar-divider"></div>'
         '<nav class="sidebar-nav">'
@@ -557,6 +583,16 @@ def get_nav_html(current_page='status'):
         + '<div class="sidebar-divider"></div>'
         + ''.join(nav_system)
         + '</nav>'
+        '<div class="sidebar-footer">'
+        '<div class="theme-switch" role="radiogroup" aria-label="Theme">'
+        '<button type="button" class="theme-opt" role="radio" data-theme-set="light" '
+        'onclick="setTheme(\'light\')" aria-label="Light theme" aria-checked="false" tabindex="-1">'
+        + _ICON_SUN + '<span>Light</span></button>'
+        '<button type="button" class="theme-opt active" role="radio" data-theme-set="dark" '
+        'onclick="setTheme(\'dark\')" aria-label="Dark theme" aria-checked="true" tabindex="0">'
+        + _ICON_MOON + '<span>Dark</span></button>'
+        '</div>'
+        '</div>'
         '</aside>'
         '<div class="sidebar-backdrop" id="sidebar-backdrop" onclick="closeSidebar()"></div>'
         '<button class="hamburger-btn" id="hamburger-btn" onclick="toggleSidebar()" '

@@ -1082,7 +1082,7 @@ class SonarrClient(_ArrClientBase):
                 meta['cycle_first_ts'] = first_ts
             _history.log_event('search_triggered', f'Sonarr episodes {episode_ids}',
                                source='arr',
-                               detail=f'EpisodeSearch for {len(episode_ids)} episode(s)',
+                               detail=f'Sonarr search — {len(episode_ids)} episode' + ('s' if len(episode_ids) != 1 else ''),
                                meta=meta,
                                media_title=media_title)
         return result
@@ -1107,7 +1107,7 @@ class SonarrClient(_ArrClientBase):
             if prior_event_id:
                 meta['prior_event_id'] = prior_event_id
             _history.log_event('rescan_triggered', f'Sonarr series {series_id}',
-                               source='arr', detail='RescanSeries',
+                               source='arr', detail='Sonarr rescan',
                                meta=meta,
                                media_title=media_title)
         return result
@@ -2071,7 +2071,7 @@ class RadarrClient(_ArrClientBase):
                 meta['cycle_n'] = count
                 meta['cycle_first_ts'] = first_ts
             _history.log_event('search_triggered', f'Radarr movie {movie_id}',
-                               source='arr', detail='MoviesSearch',
+                               source='arr', detail='Radarr search',
                                meta=meta,
                                media_title=media_title)
         return result
@@ -2090,7 +2090,7 @@ class RadarrClient(_ArrClientBase):
             if prior_event_id:
                 meta['prior_event_id'] = prior_event_id
             _history.log_event('rescan_triggered', f'Radarr movie {movie_id}',
-                               source='arr', detail='RescanMovie',
+                               source='arr', detail='Radarr rescan',
                                meta=meta,
                                media_title=media_title)
         return result

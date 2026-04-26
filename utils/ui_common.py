@@ -24,13 +24,14 @@ a:hover{text-decoration:underline}
 
 /* === Sidebar === */
 .sidebar{position:fixed;top:0;left:0;bottom:0;width:var(--sidebar-w);background:var(--sidebar-bg);border-right:1px solid var(--border);display:flex;flex-direction:column;z-index:1000;overflow-y:auto;overflow-x:hidden}
-.sidebar-brand{padding:14px 16px;display:flex;align-items:center;gap:8px}
+.sidebar-brand{padding:14px 16px;display:flex;align-items:center;justify-content:center;gap:8px}
 .sidebar-brand a{font-size:1.2em;font-weight:700;color:var(--blue);text-decoration:none}
 .sidebar-brand a:hover{text-decoration:none;opacity:.85}
-.sidebar-brand-info{flex:1;min-width:0}
+.sidebar-brand-info{min-width:0;text-align:center}
 .sidebar-brand-link{display:inline-flex;align-items:center;gap:8px}
 .sidebar-brand-mark{flex-shrink:0;display:block}
-.sidebar-version{display:block;font-size:.7em;color:var(--text3);margin-top:1px}
+.sidebar-version{display:block;font-size:.7em;color:var(--text3);text-align:center;padding:8px 16px}
+.sidebar-version:empty{display:none}
 .sidebar-nav{display:flex;flex-direction:column;padding:8px 0;flex:1 1 auto}
 .sidebar-link{display:flex;align-items:center;gap:10px;padding:9px 16px;color:var(--text2);font-size:.85em;font-weight:500;text-decoration:none;border-left:3px solid transparent;transition:color var(--motion-fast),background var(--motion-fast),border-color var(--motion-fast)}
 .sidebar-link:hover{color:var(--text);background:var(--border2);text-decoration:none}
@@ -574,7 +575,6 @@ def get_nav_html(current_page='status'):
         '</svg>'
         '<span>Zurgarr</span>'
         '</a>'
-        '<span class="sidebar-version" id="header-meta"></span>'
         '</div>'
         '</div>'
         '<div class="sidebar-divider"></div>'
@@ -583,6 +583,7 @@ def get_nav_html(current_page='status'):
         + '<div class="sidebar-divider"></div>'
         + ''.join(nav_system)
         + '</nav>'
+        '<span class="sidebar-version" id="header-meta"></span>'
         '<div class="sidebar-footer">'
         '<div class="theme-switch" role="radiogroup" aria-label="Theme">'
         '<button type="button" class="theme-opt" role="radio" data-theme-set="light" '

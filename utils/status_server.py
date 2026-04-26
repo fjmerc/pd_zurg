@@ -687,24 +687,33 @@ __NAV_HTML__
       </div>
       <div class="lib-headline-meta" id="lib-headline-meta"></div>
     </div>
+    <div class="lib-filter" id="lib-filter" role="tablist" aria-label="Source filter">
+      <button class="lib-filter-btn" data-flt="all" role="tab">All</button>
+      <button class="lib-filter-btn" data-flt="local" role="tab">Local</button>
+      <button class="lib-filter-btn" data-flt="debrid" role="tab">Cloud</button>
+    </div>
+    <div class="lib-filter-empty" id="lib-filter-empty" hidden>
+      <span>No items match this filter.</span>
+      <button class="btn btn-ghost btn-sm" id="lib-filter-clear">Show all</button>
+    </div>
     <div class="lib-cats">
       <div class="lib-cat">
         <div class="lib-cat-head"><span class="lib-cat-title">Movies</span><span class="lib-cat-meta" id="lib-mov-meta"></span></div>
         <div class="lib-bar" id="lib-mov-bar"></div>
       </div>
-      <div class="lib-cat">
-        <div class="lib-cat-head"><span class="lib-cat-title">Shows</span><span class="lib-cat-meta" id="lib-show-meta"></span></div>
+      <div class="lib-cat" id="lib-show-cat">
+        <div class="lib-cat-head lib-shows-head" id="lib-shows-head" role="button" tabindex="0" aria-expanded="false" aria-controls="lib-eps-wrap"><span class="lib-cat-title"><span class="lib-chevron" aria-hidden="true">&#9656;</span>Shows</span><span class="lib-cat-meta" id="lib-show-meta"></span></div>
         <div class="lib-bar" id="lib-show-bar"></div>
-      </div>
-      <div class="lib-cat" id="lib-eps-wrap">
-        <div class="lib-cat-head"><span class="lib-cat-title lib-eps-title">Episodes</span><span class="lib-cat-meta" id="lib-eps-meta"></span></div>
-        <div class="lib-bar lib-bar-eps" id="lib-eps-bar"></div>
+        <div class="lib-cat lib-cat-nested" id="lib-eps-wrap">
+          <div class="lib-cat-head"><span class="lib-cat-title lib-eps-title">Episodes</span><span class="lib-cat-meta" id="lib-eps-meta"></span></div>
+          <div class="lib-bar lib-bar-eps" id="lib-eps-bar"></div>
+        </div>
       </div>
     </div>
     <div class="lib-legend">
       <span><span class="lib-swatch local"></span>Local</span>
       <span><span class="lib-swatch both"></span>Both</span>
-      <span><span class="lib-swatch debrid"></span>Debrid</span>
+      <span><span class="lib-swatch debrid"></span>Cloud</span>
     </div>
     <div class="lib-foot" id="lib-foot"></div>
   </div>
@@ -772,25 +781,57 @@ function renderServices(svcs){
 var _lastFetchTime=0;
 function updateRing(id,pct){var f=document.getElementById(id);if(!f)return;var c=326.73,o=c-(c*Math.min(pct,100)/100);f.style.strokeDashoffset=o;f.style.stroke=pct>85?'var(--red)':pct>60?'var(--yellow)':'var(--green)';}
 
+// Persisted across refreshes (the card re-renders every 10s on /api/status
+// poll). Read from localStorage, fall back to defaults.  'all' filter shows
+// everything; 'local' keeps items present locally (local + both); 'debrid'
+// keeps items reachable via debrid (debrid + both).  'both' appears in both
+// filtered views since those items genuinely are both.
+var _libFilter=(function(){try{var v=localStorage.getItem('libFilter');return (v==='local'||v==='debrid')?v:'all'}catch(e){return 'all'}})();
+var _libEpsExpanded=(function(){try{return localStorage.getItem('libEpsExpanded')==='1'}catch(e){return false}})();
+var _libWired=false;
+var _lastLib=null;  // latest payload so click handlers re-render with fresh data, not the stale `lib` captured at wiring time.
+function _libFilterCounts(by,sizeBy){
+  // Strip the source bucket excluded by the active filter so totals + bar
+  // segments + tooltips all agree.  'all' returns inputs unchanged.
+  by=by||{};sizeBy=sizeBy||{};
+  if(_libFilter==='all')return {by:by,sizeBy:sizeBy};
+  var keep=_libFilter==='local'?['local','both']:['debrid','both'];
+  var nb={},ns={};
+  keep.forEach(function(k){if(by[k])nb[k]=by[k];if(sizeBy[k])ns[k]=sizeBy[k];});
+  return {by:nb,sizeBy:ns};
+}
+function _libSumCount(by){return (by.local||0)+(by.both||0)+(by.debrid||0);}
+function _libSumSize(sizeBy){return (sizeBy.local||0)+(sizeBy.both||0)+(sizeBy.debrid||0);}
+
 function renderLibrary(lib){
   var wrap=document.getElementById('lib-card-wrap');if(!wrap)return;
   if(!lib||!lib.totals||!lib.totals.items){wrap.style.display='none';return;}
   wrap.style.display='';
-  var totals=lib.totals||{};
+  _lastLib=lib;
   var movies=lib.movies||{total:0,by_source:{},size_by_source:{}};
   var shows=lib.shows||{total:0,by_source:{},size_by_source:{},episodes:{total:0,by_source:{},size_by_source:{}}};
   var eps=shows.episodes||{total:0,by_source:{},size_by_source:{}};
 
-  // Headline
-  document.getElementById('lib-total-size').textContent=fmtBytes(totals.size_bytes||0);
+  // Apply the source filter once per category; downstream code treats the
+  // filtered counts as the truth.
+  var fMov=_libFilterCounts(movies.by_source,movies.size_by_source);
+  var fShow=_libFilterCounts(shows.by_source,shows.size_by_source);
+  var fEps=_libFilterCounts(eps.by_source,eps.size_by_source);
+  var movTot=_libSumCount(fMov.by),movSize=_libSumSize(fMov.sizeBy);
+  var showTot=_libSumCount(fShow.by),showSize=_libSumSize(fShow.sizeBy);
+  var epsTot=_libSumCount(fEps.by),epsSize=_libSumSize(fEps.sizeBy);
+  var totalSize=movSize+showSize;
+
+  // Headline (filtered)
+  document.getElementById('lib-total-size').textContent=fmtBytes(totalSize);
   var metaParts=[];
-  metaParts.push((movies.total||0).toLocaleString()+' movies');
-  metaParts.push((shows.total||0).toLocaleString()+' shows');
-  if(eps.total)metaParts.push((eps.total||0).toLocaleString()+' episodes');
+  metaParts.push(movTot.toLocaleString()+' movies');
+  metaParts.push(showTot.toLocaleString()+' shows');
+  if(epsTot)metaParts.push(epsTot.toLocaleString()+' episodes');
   document.getElementById('lib-headline-meta').textContent=metaParts.join(' · ');
 
   // Source labels for tooltips
-  var SRC_LABELS={local:'Local',debrid:'Debrid',both:'Both'};
+  var SRC_LABELS={local:'Local',debrid:'Cloud',both:'Both'};
 
   // Build a stacked bar: order local → both → debrid for visual consistency.
   // Labels render inline when the segment is wide enough; tooltip carries
@@ -821,16 +862,78 @@ function renderLibrary(lib){
     document.getElementById(prefix+'-bar').innerHTML=buildBar(by||{},sizeBy||{});
   }
 
-  setBar('lib-mov',movies.total||0,movies.size_bytes||0,movies.by_source,movies.size_by_source);
-  setBar('lib-show',shows.total||0,shows.size_bytes||0,shows.by_source,shows.size_by_source);
+  setBar('lib-mov',movTot,movSize,fMov.by,fMov.sizeBy);
+  setBar('lib-show',showTot,showSize,fShow.by,fShow.sizeBy);
 
-  // Episodes: hide the row when a movie-only library has no shows.
+  // Episodes: hide outright when no shows in this filter; otherwise honor
+  // the user's expand/collapse choice on the Shows row.  When epsTot===0
+  // we also strip the disclosure affordance so the Shows row doesn't
+  // advertise an expand control that has nothing to reveal (chevron,
+  // ARIA, cursor and click behavior are all gated on data-has-eps).
   var epsWrap=document.getElementById('lib-eps-wrap');
-  if(eps.total){
-    epsWrap.style.display='';
-    setBar('lib-eps',eps.total||0,eps.size_bytes||0,eps.by_source,eps.size_by_source);
+  var showsHead=document.getElementById('lib-shows-head');
+  if(epsTot){
+    epsWrap.hidden=!_libEpsExpanded;
+    setBar('lib-eps',epsTot,epsSize,fEps.by,fEps.sizeBy);
+    if(showsHead){
+      showsHead.setAttribute('data-has-eps','true');
+      showsHead.setAttribute('aria-expanded',_libEpsExpanded?'true':'false');
+      showsHead.setAttribute('tabindex','0');
+    }
   }else{
-    epsWrap.style.display='none';
+    epsWrap.hidden=true;
+    if(showsHead){
+      showsHead.setAttribute('data-has-eps','false');
+      showsHead.removeAttribute('aria-expanded');
+      showsHead.setAttribute('tabindex','-1');
+    }
+  }
+
+  // Reflect active filter in the segmented control
+  var fbtns=document.querySelectorAll('#lib-filter .lib-filter-btn');
+  fbtns.forEach(function(b){b.classList.toggle('active',b.getAttribute('data-flt')===_libFilter);});
+
+  // Empty-state when an active filter excludes everything — the Total Size
+  // and per-category bars all read zero with no explanation otherwise.
+  var emptyEl=document.getElementById('lib-filter-empty');
+  if(emptyEl){
+    var allZero=_libFilter!=='all'&&movTot===0&&showTot===0&&epsTot===0;
+    emptyEl.hidden=!allZero;
+  }
+
+  // One-time wiring: filter clicks + Shows disclosure toggle.  Guarded so
+  // the 10s status poll doesn't restack handlers.
+  if(!_libWired){
+    fbtns.forEach(function(b){b.addEventListener('click',function(){
+      var v=b.getAttribute('data-flt');
+      if(v!=='all'&&v!=='local'&&v!=='debrid')return;
+      _libFilter=v;
+      try{localStorage.setItem('libFilter',v);}catch(e){}
+      if(_lastLib)renderLibrary(_lastLib);
+    });});
+    if(showsHead){
+      var toggleEps=function(){
+        // No-op when there's nothing to reveal — keeps the affordance
+        // honest under filters that produce zero episodes.
+        if(showsHead.getAttribute('data-has-eps')!=='true')return;
+        _libEpsExpanded=!_libEpsExpanded;
+        try{localStorage.setItem('libEpsExpanded',_libEpsExpanded?'1':'0');}catch(e){}
+        if(_lastLib)renderLibrary(_lastLib);
+      };
+      showsHead.addEventListener('click',toggleEps);
+      showsHead.addEventListener('keydown',function(e){
+        if(e.key==='Enter'||e.key===' '){e.preventDefault();toggleEps();}
+      });
+    }
+    var clearBtn=document.getElementById('lib-filter-clear');
+    if(clearBtn){
+      clearBtn.addEventListener('click',function(){
+        _libFilter='all';
+        try{localStorage.setItem('libFilter','all');}catch(e){}
+        if(_lastLib)renderLibrary(_lastLib);
+      });
+    }
+    _libWired=true;
   }
 
   document.getElementById('lib-foot').textContent=lib.last_scan?('Last scan: '+timeAgo(lib.last_scan)):'';
@@ -1152,9 +1255,28 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 @media(max-width:600px){.lib-headline-meta{text-align:left;width:100%}}
 .lib-cats{display:flex;flex-direction:column;gap:14px}
 .lib-cat-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;gap:12px;flex-wrap:wrap}
-.lib-cat-title{font-size:.92em;font-weight:600;color:var(--text)}
+.lib-cat-title{font-size:.92em;font-weight:600;color:var(--text);display:inline-flex;align-items:center;gap:6px}
 .lib-cat-title.lib-eps-title{font-weight:500;color:var(--text2);font-size:.82em}
 .lib-cat-meta{font-size:.78em;color:var(--text2);font-variant-numeric:tabular-nums}
+.lib-shows-head{cursor:pointer;user-select:none;border-radius:4px;padding:2px 6px;margin:0 -6px 6px;transition:background var(--motion-fast)}
+.lib-shows-head:hover{background:var(--border2)}
+.lib-shows-head:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.lib-shows-head[data-has-eps="false"]{cursor:default}
+.lib-shows-head[data-has-eps="false"]:hover{background:transparent}
+.lib-shows-head[data-has-eps="false"] .lib-chevron{visibility:hidden}
+.lib-chevron{display:inline-block;font-size:.7em;color:var(--text3);transition:transform var(--motion-fast);transform:rotate(0deg);width:.8em;text-align:center}
+.lib-shows-head[aria-expanded="true"] .lib-chevron{transform:rotate(90deg)}
+.lib-filter-empty{display:flex;align-items:center;justify-content:center;gap:10px;padding:16px;background:var(--card-alt,var(--border2));border-radius:6px;margin-bottom:14px;font-size:.85em;color:var(--text2)}
+.lib-cat-nested{margin-top:10px;padding-left:14px;border-left:2px solid var(--border2)}
+.lib-cat-nested[hidden]{display:none}
+.lib-filter{display:flex;gap:0;margin-bottom:14px;justify-content:flex-end}
+.lib-filter-btn{background:var(--bg);color:var(--text2);border:1px solid var(--border);padding:4px 12px;font-size:.78em;cursor:pointer;font-family:inherit;transition:background var(--motion-fast),color var(--motion-fast)}
+.lib-filter-btn:first-child{border-radius:4px 0 0 4px}
+.lib-filter-btn:last-child{border-radius:0 4px 4px 0;border-left:none}
+.lib-filter-btn:not(:first-child):not(:last-child){border-left:none}
+.lib-filter-btn:hover{color:var(--text);background:var(--border2)}
+.lib-filter-btn.active{background:var(--blue);color:#fff;border-color:var(--blue)}
+.lib-filter-btn:focus-visible{outline:2px solid var(--blue);outline-offset:2px;z-index:1;position:relative}
 .lib-bar{display:flex;height:26px;border-radius:5px;overflow:hidden;background:var(--border);position:relative}
 .lib-bar.lib-bar-eps{height:18px}
 .lib-bar-empty{flex:1;background:repeating-linear-gradient(45deg,var(--border) 0 6px,transparent 6px 12px)}

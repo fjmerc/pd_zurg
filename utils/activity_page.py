@@ -76,7 +76,7 @@ __NAV_HTML__
     <button class="btn btn-ghost btn-sm" onclick="clearHistory()" id="activity-clear-btn" style="display:none">Clear</button>
     <button class="btn btn-ghost btn-sm" data-kb="refresh" onclick="loadActivity()">Refresh</button>
   </div>
-  <table><thead><tr><th style="width:80px;text-align:center">Time</th><th style="width:90px;text-align:center">Type</th><th>Title</th><th>Detail</th><th style="width:60px">Source</th></tr></thead>
+  <table><thead><tr><th style="width:80px;text-align:center">Time</th><th style="width:90px;text-align:center">Type</th><th>Title</th><th>Detail</th><th style="width:60px;text-align:center">Source</th></tr></thead>
   <tbody id="activity-body"></tbody></table>
   <div style="display:flex;justify-content:center;margin-top:8px;gap:8px" id="activity-pager"></div>
 </div>
@@ -107,7 +107,6 @@ function switchTab(name){
 
 /* Activity (History) */
 var _actPage=1;
-var _actIcons={grabbed:'\u2B07',cached:'\u2705',symlink_created:'\uD83D\uDD17',failed:'\u274C',cleanup:'\uD83D\uDDD1',switched_source:'\u21C4',search_triggered:'\uD83D\uDD0D',rescan_triggered:'\uD83D\uDD04',task_completed:'\u2699',blocklisted:'\uD83D\uDEAB',blocklist_added:'\u26D4'};
 function loadActivity(page){
   if(page)_actPage=page; else if(!arguments.length){}else{_actPage=1;}
   var t=document.getElementById('activity-type').value;
@@ -145,7 +144,6 @@ function loadActivity(page){
       for (var j=0;j<d.events.length;j++) runs.push({groupKey:'', events:[d.events[j]]});
     }
     function rowFor(e, runInfo){
-      var icon=_actIcons[e.type]||'\u2022';
       var fmt = window._formatActivityEvent ? window._formatActivityEvent(e) : {short: e.detail||''};
       var timeCell;
       if (runInfo){
@@ -156,7 +154,7 @@ function loadActivity(page){
       }
       var countBadge = runInfo ? (' <span class="act-run-count">' + runInfo.events.length + '×</span>') : '';
       var row='<tr><td style="font-size:.8em;color:var(--text3);white-space:nowrap">'+timeCell+'</td>';
-      row+='<td><span class="type-badge type-'+esc(e.type)+'">'+icon+' '+esc(e.type.replace(/_/g,' '))+countBadge+'</span></td>';
+      row+='<td><span class="type-badge type-'+esc(e.type)+'">'+esc(e.type.replace(/_/g,' '))+countBadge+'</span></td>';
       /* Link titles to the library detail page when we have a canonical
          name: either the event was enriched with media_title (blackhole/arr),
          or it came from the library scanner where title is already canonical.
@@ -285,7 +283,7 @@ _ACTIVITY_EXTRA_CSS = """
 table{width:100%;border-collapse:collapse}
 th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border2);font-size:.85em}
 th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;letter-spacing:.05em}
-#activity-body td:nth-child(1),#activity-body td:nth-child(2){text-align:center}
+#activity-body td:nth-child(1),#activity-body td:nth-child(2),#activity-body td:nth-child(5){text-align:center}
 #blocklist-body td:nth-child(5){text-align:center}
 .act-link{color:inherit;text-decoration:none;border-bottom:1px dotted var(--text3);transition:color var(--motion-fast),border-color var(--motion-fast)}
 .act-link:hover{color:var(--blue);border-bottom-color:var(--blue);text-decoration:none}

@@ -1267,6 +1267,7 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .lib-chevron{display:inline-block;font-size:.7em;color:var(--text3);transition:transform var(--motion-fast);transform:rotate(0deg);width:.8em;text-align:center}
 .lib-shows-head[aria-expanded="true"] .lib-chevron{transform:rotate(90deg)}
 .lib-filter-empty{display:flex;align-items:center;justify-content:center;gap:10px;padding:16px;background:var(--card-alt,var(--border2));border-radius:6px;margin-bottom:14px;font-size:.85em;color:var(--text2)}
+.lib-filter-empty[hidden]{display:none}
 .lib-cat-nested{margin-top:10px;padding-left:14px;border-left:2px solid var(--border2)}
 .lib-cat-nested[hidden]{display:none}
 .lib-filter{display:flex;gap:0;margin-bottom:14px;justify-content:flex-end}

@@ -2401,7 +2401,7 @@ function _renderMovieDetail(movie, meta) {
     movieActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" title="Delete from Radarr" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'movie\')})">&#128465; Delete</button>');
   }
   if (_searchEnabled && movie.imdb_id) {
-    movieActionBtns.push('<button class="btn btn-ghost btn-sm" data-imdb="' + escAttr(movie.imdb_id) + '" data-mtype="movie" data-label="' + escAttr(movie.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button>');
+    movieActionBtns.push('<button class="btn btn-ghost btn-sm" data-imdb="' + escAttr(movie.imdb_id) + '" data-mtype="movie" data-label="' + escAttr(movie.title) + '" data-media-title="' + escAttr(movie.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button>');
   }
   if (movieActionBtns.length) {
     html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">' + movieActionBtns.join('') + '</div>';
@@ -2634,7 +2634,7 @@ function _renderSeasonEpisodes(season, si) {
       html += '<button class="btn btn-ghost btn-icon" title="' + escAttr(blTitle) + '" aria-label="Block ' + epLabel + '" data-folder="' + escAttr(epFolder) + '" onclick="event.stopPropagation();_blockFromBtn(this)">&#128683;</button>';
     }
     if (_searchEnabled && _detailItem && _detailItem.imdb_id) {
-      html += ' <button class="btn btn-ghost btn-sm" title="Search torrents for ' + escAttr(epLabel) + '" data-imdb="' + escAttr(_detailItem.imdb_id) + '" data-mtype="series" data-season="' + season.number + '" data-episode="' + ep.number + '" data-label="' + escAttr(_detailItem.title + ' ' + epLabel) + '" onclick="event.stopPropagation();openSearchFromBtn(this)">&#128269;</button>';
+      html += ' <button class="btn btn-ghost btn-sm" title="Search torrents for ' + escAttr(epLabel) + '" data-imdb="' + escAttr(_detailItem.imdb_id) + '" data-mtype="series" data-season="' + season.number + '" data-episode="' + ep.number + '" data-label="' + escAttr(_detailItem.title + ' ' + epLabel) + '" data-media-title="' + escAttr(_detailItem.title) + '" onclick="event.stopPropagation();openSearchFromBtn(this)">&#128269;</button>';
     }
     html += '</td>';
     html += '</tr>';
@@ -2762,7 +2762,7 @@ function _renderShowDetail(show, meta) {
     showActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" title="Delete from Sonarr" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'show\')})">&#128465; Delete</button>');
   }
   if (_searchEnabled && show.imdb_id) {
-    showActionBtns.push('<button class="btn btn-ghost btn-sm" data-imdb="' + escAttr(show.imdb_id) + '" data-mtype="series" data-label="' + escAttr(show.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button>');
+    showActionBtns.push('<button class="btn btn-ghost btn-sm" data-imdb="' + escAttr(show.imdb_id) + '" data-mtype="series" data-label="' + escAttr(show.title) + '" data-media-title="' + escAttr(show.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button>');
   }
   if (showActionBtns.length) {
     html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">' + showActionBtns.join('') + '</div>';
@@ -4064,6 +4064,8 @@ var _searchResults = [];
 var _searchSortCol = 'quality';
 var _searchSortAsc = false;
 var _searchQualityFilter = 0;
+var _searchMediaTitle = '';
+var _searchEpisodeTag = '';
 
 function openSearchFromBtn(btn) {
   var imdbId = btn.getAttribute('data-imdb');
@@ -4071,10 +4073,11 @@ function openSearchFromBtn(btn) {
   var season = btn.getAttribute('data-season');
   var episode = btn.getAttribute('data-episode');
   var label = btn.getAttribute('data-label') || '';
-  openSearchModal(imdbId, mediaType, season ? parseInt(season, 10) : null, episode ? parseInt(episode, 10) : null, label);
+  var mediaTitle = btn.getAttribute('data-media-title') || '';
+  openSearchModal(imdbId, mediaType, season ? parseInt(season, 10) : null, episode ? parseInt(episode, 10) : null, label, mediaTitle);
 }
 
-function openSearchModal(imdbId, mediaType, season, episode, displayTitle) {
+function openSearchModal(imdbId, mediaType, season, episode, displayTitle, mediaTitle) {
   var overlay = document.createElement('div');
   overlay.className = 'search-overlay';
   overlay.id = 'search-overlay';
@@ -4099,6 +4102,20 @@ function openSearchModal(imdbId, mediaType, season, episode, displayTitle) {
   _searchSortCol = 'quality';
   _searchSortAsc = false;
   _searchQualityFilter = 0;
+  // Stash add-context so addSearchResult can attach media_title + episode
+  // to the POST body — drives the show/movie detail-page Activity panel
+  // exact-match in query_by_show.
+  _searchMediaTitle = mediaTitle || '';
+  _searchEpisodeTag = '';
+  // null/undefined check (not falsy) so Season 0 / Episode 0 specials
+  // still get tagged correctly.
+  if (season != null && episode != null) {
+    var s = parseInt(season, 10), e = parseInt(episode, 10);
+    if (!isNaN(s) && s >= 0 && !isNaN(e) && e >= 0) {
+      var pad = function(n) { return n < 10 ? '0' + n : String(n); };
+      _searchEpisodeTag = 'S' + pad(s) + 'E' + pad(e);
+    }
+  }
 
   var payload = {imdb_id: imdbId, type: mediaType};
   if (seasonStr) payload.season = parseInt(seasonStr, 10);
@@ -4124,6 +4141,11 @@ function closeSearchModal() {
   var overlay = document.getElementById('search-overlay');
   if (overlay) overlay.remove();
   document.body.style.overflow = '';
+  // Clear add-context so a future addSearchResult call (e.g. from a
+  // future code path that reuses the helper) can't mis-tag an unrelated
+  // event with stale show/episode context.
+  _searchMediaTitle = '';
+  _searchEpisodeTag = '';
 }
 
 function _renderSearchResults() {
@@ -4231,10 +4253,13 @@ function addSearchResult(btn) {
   btn.disabled = true;
   btn.textContent = '\u2026';
 
+  var addBody = {info_hash: r.info_hash, title: r.title};
+  if (_searchMediaTitle) addBody.media_title = _searchMediaTitle;
+  if (_searchEpisodeTag) addBody.episode = _searchEpisodeTag;
   fetch('/api/search/add', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({info_hash: r.info_hash, title: r.title})
+    body: JSON.stringify(addBody)
   })
   .then(function(resp) { return resp.json(); })
   .then(function(data) {

@@ -717,12 +717,16 @@ def search_torrents(imdb_id, media_type='movie', season=None, episode=None,
 # F9.3 — Add to debrid
 # ---------------------------------------------------------------------------
 
-def add_to_debrid(info_hash, title=''):
+def add_to_debrid(info_hash, title='', media_title=None, episode=None):
     """Add a torrent to the configured debrid provider via magnet.
 
     Args:
         info_hash: 40-char hex info hash
         title: Release title for logging/history
+        media_title: Canonical library title (e.g. "The Wayfinders") so the
+            event surfaces in that show/movie's detail-page Activity panel,
+            which exact-matches on title or media_title.
+        episode: Optional "SxxEyy" string for episode-scoped adds.
 
     Returns:
         {'success': bool, 'torrent_id': str, 'service': str, 'error': str,
@@ -817,8 +821,10 @@ def add_to_debrid(info_hash, title=''):
             _hist.log_event(
                 'debrid_add',
                 title or info_hash[:16],
+                episode=episode,
                 detail=f'Added to {service} via search',
                 source='search',
+                media_title=media_title,
                 meta={'cause': 'debrid_add_via_search',
                       'info_hash': info_hash,
                       'service': service,
@@ -829,8 +835,10 @@ def add_to_debrid(info_hash, title=''):
             _hist.log_event(
                 'debrid_add_failed',
                 title or info_hash[:16],
+                episode=episode,
                 detail=f'Failed to add to {service}: {err}',
                 source='search',
+                media_title=media_title,
                 meta={'cause': 'debrid_add_failed',
                       'info_hash': info_hash,
                       'service': service,

@@ -98,7 +98,29 @@ def test_preference_source_switch_arrow():
 def test_task_library_scan_counts():
     ev = _ev('task_library_scan', movies=565, shows=117, duration_ms=80645)
     s = format_event(ev)['short']
-    assert '565 movies' in s and '117 shows' in s and '80645ms' in s
+    assert '565 movies' in s and '117 shows' in s and '80.6s' in s
+
+
+def test_task_library_scan_sub_second_uses_ms():
+    ev = _ev('task_library_scan', movies=10, shows=2, duration_ms=850)
+    s = format_event(ev)['short']
+    assert '850ms' in s
+
+
+def test_task_library_scan_exactly_1000ms_uses_seconds():
+    ev = _ev('task_library_scan', movies=1, shows=0, duration_ms=1000)
+    s = format_event(ev)['short']
+    assert '1.0s' in s
+
+
+def test_task_library_scan_drops_non_positive_duration():
+    """Zero/negative durations are dropped so server and JS renderers agree."""
+    from utils.activity_format import fmt_duration_ms
+    assert fmt_duration_ms(0) == ''
+    assert fmt_duration_ms(-1) == ''
+    assert fmt_duration_ms(float('nan')) == ''
+    assert fmt_duration_ms('abc') == ''
+    assert fmt_duration_ms(None) == ''
 
 
 def test_task_verify_symlinks_empty_when_no_action():

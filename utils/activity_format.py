@@ -28,6 +28,24 @@ _UNIT_TABLE = (
 )
 
 
+def fmt_duration_ms(dur):
+    """Format a millisecond duration: <1000ms as integer ms, otherwise seconds with one decimal.
+
+    Returns '' for non-numeric, NaN, infinite, or non-positive inputs so callers
+    can ``or`` a fallback. Mirrors the inline JS in FORMATTER_JS — keep the two
+    in sync.
+    """
+    try:
+        ms = float(dur)
+    except (TypeError, ValueError):
+        return ''
+    if ms != ms or ms <= 0:  # NaN check + drop zero/negatives (matches JS guard)
+        return ''
+    if ms < 1000:
+        return f'{int(round(ms))}ms'
+    return f'{ms / 1000:.1f}s'
+
+
 def _elapsed_human(first_ts):
     """Return '5d 3h' / '2h 14m' / '45m' / '30s' for an ISO timestamp, or ''.
 
@@ -321,8 +339,9 @@ def _fmt_task_library_scan(ev, meta):
     pieces = [f'{m} movies', f'{s} shows']
     if sc:
         pieces.append(f'{sc} new symlinks')
-    if dur:
-        pieces.append(f'{int(dur)}ms')
+    d = fmt_duration_ms(dur)
+    if d:
+        pieces.append(d)
     short = 'Library scan — ' + ', '.join(pieces)
     return short, short
 
@@ -431,7 +450,7 @@ def format_event(event):
     return {'short': short, 'long': long_, 'group_key': group_key}
 
 
-__all__ = ['format_event', 'FORMATTER_JS']
+__all__ = ['format_event', 'FORMATTER_JS', 'fmt_duration_ms']
 
 
 # ---------------------------------------------------------------------------
@@ -557,7 +576,12 @@ FORMATTER_JS = r"""
     task_library_scan: function(ev,m){
       var parts = [(m.movies||0) + ' movies', (m.shows||0) + ' shows'];
       if (m.symlinks_created) parts.push(m.symlinks_created + ' new symlinks');
-      if (m.duration_ms) parts.push(Math.round(m.duration_ms) + 'ms');
+      if (m.duration_ms) {
+        var ms = Number(m.duration_ms);
+        if (isFinite(ms) && ms > 0) {
+          parts.push(ms < 1000 ? Math.round(ms) + 'ms' : (ms / 1000).toFixed(1) + 's');
+        }
+      }
       return 'Library scan — ' + parts.join(', ');
     },
     task_housekeeping: function(){ return 'Housekeeping — retention/cleanup pass complete'; },

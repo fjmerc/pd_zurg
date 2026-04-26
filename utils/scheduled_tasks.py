@@ -17,6 +17,8 @@ try:
 except ImportError:
     _history = None
 
+from utils.activity_format import fmt_duration_ms
+
 
 # ---------------------------------------------------------------------------
 # Default intervals (seconds)
@@ -123,19 +125,21 @@ def library_scan():
     shows = len(data.get('shows', []))
     duration_ms = data.get('scan_duration_ms', 0)
 
+    dur_str = fmt_duration_ms(duration_ms) or '0ms'
+
     if _history:
         # Symlinks-created count isn't returned by scan() today; the scanner
         # logs per-title symlink_created events separately, so leave it 0
         # here rather than fabricate.
         _history.log_event('task_completed', 'Library Scan', source='scheduler',
-                           detail=f'{movies} movies, {shows} shows ({duration_ms}ms)',
+                           detail=f'{movies} movies, {shows} shows ({dur_str})',
                            meta={'cause': 'task_library_scan',
                                  'movies': movies, 'shows': shows,
                                  'duration_ms': duration_ms})
 
     return {
         'status': 'success',
-        'message': f'{movies} movies, {shows} shows ({duration_ms}ms)',
+        'message': f'{movies} movies, {shows} shows ({dur_str})',
         'items': movies + shows,
     }
 

@@ -543,7 +543,7 @@ def _get_zurg_auth():
     return (user, password) if user and password else None
 
 
-def _enrich_with_tmdb_cache(movies, shows):
+def _enrich_with_tmdb_cache(movies, shows, _shared_tmdb_cache=None):
     """Attach cached TMDB poster/status data to library items for grid cards.
 
     Performs a single bulk cache lookup (no API calls).  Items without
@@ -556,6 +556,16 @@ def _enrich_with_tmdb_cache(movies, shows):
     so the UI shows a clean name.  Returns a list of (old_norm, new_norm)
     rename pairs so the caller can wire them into the scanner's alias map,
     keeping disk-stored prefs/pending lookups working.
+
+    Args:
+        movies, shows: lists of library items to enrich in place.
+        _shared_tmdb_cache: optional pre-loaded TMDB cache dict from the
+            caller.  When provided, skips the per-call disk read AND
+            ensures the merge step and the enrichment step see the same
+            cache snapshot — without that consistency, a populate-cache
+            write between the two loads could leave a parser-junk
+            debrid item un-merged at merge-time and renamed at
+            enrichment-time, surfacing as a transient duplicate row.
     """
     try:
         from utils.tmdb import get_cached_posters, background_populate_cache, find_show_by_season
@@ -581,6 +591,56 @@ def _enrich_with_tmdb_cache(movies, shows):
     ]
 
     cached = get_cached_posters(all_items)
+
+    # Pre-load full TMDB cache once for the canonical-prefix fallback
+    # below.  Used when get_cached_posters returns no match for an item
+    # because its parsed title carries extra junk (actor name, genre
+    # tag) that prevents direct cache key lookup — the resolver bridges
+    # parsed-folder-name to the canonical TMDB entry.  When the caller
+    # already loaded the cache (the merge step in _scan_read does), we
+    # reuse that snapshot so both phases see consistent state.
+    if _shared_tmdb_cache is not None:
+        _full_tmdb_cache = _shared_tmdb_cache
+    else:
+        try:
+            from utils import tmdb as _tmdb_mod
+            with _tmdb_mod._cache_lock:
+                _full_tmdb_cache = _tmdb_mod._load_cache()
+        except Exception as e:
+            logger.debug("[library] full TMDB cache load for enrichment failed: %s", e)
+            _full_tmdb_cache = {}
+
+    def _resolve_canonical_info(item, is_tv):
+        """When direct cache lookup misses, try the prefix resolver and
+        rebuild a get_cached_posters-shaped info dict from the matched
+        cache entry.  Returns the info dict on hit, None on miss.
+        """
+        parsed_t = item.get('_parsed_title') or item.get('title') or ''
+        yr = item.get('year')
+        canonical = _find_canonical_tmdb_via_prefix(
+            parsed_t, yr, is_tv=is_tv, _tmdb_cache=_full_tmdb_cache,
+        )
+        if not canonical:
+            return None
+        # Re-query get_cached_posters with the canonical title — produces
+        # the exact same shape get_cached_posters returns for direct hits,
+        # so _maybe_rename and downstream code see a consistent dict.
+        # ``yr`` is the debrid item's parsed year; if it diverges from the
+        # canonical TMDB release year (off-by-one is common around
+        # festival vs wide-release dates), the year-qualified key misses
+        # but the yearless fallback below recovers it because
+        # get_cached_posters stores info under both keys (tmdb.py:664-666).
+        try:
+            recheck = get_cached_posters([{
+                'title': canonical['title'],
+                'year': yr,
+                'type': 'show' if is_tv else 'movie',
+            }])
+        except Exception:
+            return None
+        canon_norm = _normalize_title(canonical['title'])
+        return (recheck.get(f"{canon_norm} ({yr})" if yr else canon_norm)
+                or recheck.get(canon_norm))
 
     uncached = []
     renames = []  # list of (old_norm, new_norm)
@@ -615,6 +675,11 @@ def _enrich_with_tmdb_cache(movies, shows):
         key = _normalize_title(movie['title'])
         yr = movie.get('year')
         info = cached.get(f"{key} ({yr})" if yr else key) or cached.get(key)
+        if not info:
+            # Direct lookup missed — try the canonical-prefix fallback so
+            # parser-junk titles like "Gattaca Ethan Hawke Sci Fi" still
+            # get renamed to the canonical TMDB title and pick up posters.
+            info = _resolve_canonical_info(movie, is_tv=False)
         if info:
             _maybe_rename(movie, info)
             movie['poster_url'] = info['poster_url'] or None
@@ -630,6 +695,9 @@ def _enrich_with_tmdb_cache(movies, shows):
         key = _normalize_title(show['title'])
         yr = show.get('year')
         info = cached.get(f"{key} ({yr})" if yr else key) or cached.get(key)
+        if not info:
+            # Symmetric with the movies branch.
+            info = _resolve_canonical_info(show, is_tv=True)
         if info:
             # Season-aware validation: if the show has seasons beyond what
             # the cached TMDB entry covers, the cache may have matched the
@@ -1557,6 +1625,19 @@ class LibraryScanner:
         debrid_shows = self._dedup_by_tmdb(debrid_shows, show_aliases)
         debrid_movies = self._dedup_by_tmdb(debrid_movies, movie_aliases)
 
+        # Pre-load the full TMDB cache once for the canonical-prefix
+        # fallback used in the title-level merge step (and the enrichment
+        # step further down).  Without this, every parser-junk-bearing
+        # debrid item that fails the direct + alias merge match would
+        # re-read /config/tmdb_cache.json from disk via the resolver.
+        try:
+            from utils import tmdb as _tmdb_mod
+            with _tmdb_mod._cache_lock:
+                _full_tmdb_cache = _tmdb_mod._load_cache()
+        except Exception as e:
+            logger.debug("[library] full TMDB cache load for merge failed: %s", e)
+            _full_tmdb_cache = {}
+
         local_movies = self._scan_local_movies()
         local_shows = self._scan_local_shows()
 
@@ -1597,11 +1678,39 @@ class LibraryScanner:
                     if alias in local_movie_keys:
                         matched_key = alias
                         break
+            if matched_key is None:
+                # Final fallback: token-aligned prefix lookup against the
+                # TMDB cache.  Bridges parser-junk debrid titles (e.g.
+                # "Gattaca Ethan Hawke Sci Fi") to their canonical local
+                # counterpart ("Gattaca").  Without this, debrid releases
+                # whose folder name carries actor/genre tokens before the
+                # year stay split into a separate library item from their
+                # local copy — and the user sees two posters.
+                parsed_t = item.get('_parsed_title') or item.get('title') or ''
+                yr = item.get('year')
+                canonical = _find_canonical_tmdb_via_prefix(
+                    parsed_t, yr, is_tv=False, _tmdb_cache=_full_tmdb_cache,
+                )
+                if canonical:
+                    canon_key = _normalize_title(canonical['title'])
+                    # Self-loop guard: canon_key == key means the parsed
+                    # title is already canonical and any alias would be a
+                    # degenerate self-edge polluting alias_norms_local.
+                    if (canon_key and canon_key != key
+                            and canon_key in local_movie_keys):
+                        matched_key = canon_key
+                        logger.debug(
+                            f"[library] TMDB prefix match (movie): debrid '{key}' "
+                            f"→ canonical '{canon_key}'"
+                        )
             if matched_key is not None:
                 if matched_key != key:
                     logger.debug(
-                        f"[library] TMDB alias match (movie): debrid '{key}' ↔ local '{matched_key}'"
+                        f"[library] alias-merge (movie): debrid '{key}' ↔ local '{matched_key}'"
                     )
+                    # Single registration site for both alias-match and
+                    # prefix-match paths.  Set semantics make this idempotent
+                    # across rescans.
                     alias_norms_local.setdefault(key, set()).add(matched_key)
                     alias_norms_local.setdefault(matched_key, set()).add(key)
                 item = dict(item)
@@ -1636,10 +1745,28 @@ class LibraryScanner:
                     if alias in local_show_map:
                         local_key = alias
                         break
+            if local_key is None:
+                # Final fallback: token-aligned prefix lookup against the
+                # TMDB cache — symmetric with the movies merge cascade.
+                parsed_t = item.get('_parsed_title') or item.get('title') or ''
+                yr = item.get('year')
+                canonical = _find_canonical_tmdb_via_prefix(
+                    parsed_t, yr, is_tv=True, _tmdb_cache=_full_tmdb_cache,
+                )
+                if canonical:
+                    canon_key = _normalize_title(canonical['title'])
+                    # Self-loop guard — see movies branch comment.
+                    if (canon_key and canon_key != key
+                            and canon_key in local_show_map):
+                        local_key = canon_key
+                        logger.debug(
+                            f"[library] TMDB prefix match (show): debrid '{key}' "
+                            f"→ canonical '{canon_key}'"
+                        )
             if local_key is not None:
                 if local_key != key:
                     logger.debug(
-                        f"[library] TMDB alias match: debrid '{key}' ↔ local '{local_key}'"
+                        f"[library] alias-merge (show): debrid '{key}' ↔ local '{local_key}'"
                     )
                     alias_norms_local.setdefault(key, set()).add(local_key)
                     alias_norms_local.setdefault(local_key, set()).add(key)
@@ -1699,7 +1826,13 @@ class LibraryScanner:
         # (e.g. multi-language torrent folders that bundle two titles).  Wire
         # the (old → new) normalized-title pairs into the local alias map so
         # prefs/pending entries saved under the old name still resolve.
-        renames = _enrich_with_tmdb_cache(movies, shows) or []
+        # Reuse the cache snapshot loaded for the merge step so both
+        # phases see the same state (closes a transient-duplicate window
+        # where a populate-cache write between two loads could leave an
+        # item un-merged-then-renamed within a single scan).
+        renames = _enrich_with_tmdb_cache(
+            movies, shows, _shared_tmdb_cache=_full_tmdb_cache,
+        ) or []
         for old_norm, new_norm in renames:
             if not old_norm or not new_norm:
                 continue

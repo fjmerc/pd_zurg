@@ -1690,6 +1690,429 @@ class TestFindCanonicalTmdbViaPrefix:
 
 
 # ---------------------------------------------------------------------------
+# Merge + enrichment canonical-prefix fallbacks
+#
+# These tests cover the FULL fix path for the "two posters" bug:
+# parser-junk debrid title (e.g. "Gattaca Ethan Hawke Sci Fi") must (1)
+# merge with the local "Gattaca" item as source='both' (the merge step
+# fix) AND (2) get its display title renamed to canonical "Gattaca" (the
+# enrichment step fix).  Without both fixes the user sees two posters.
+# ---------------------------------------------------------------------------
+
+class TestMergeStepCanonicalFallback:
+    """Tests for the new prefix-canonical fallback in the title-level
+    merge step inside _scan_read.  Exercises the path via real LibraryScanner
+    instances with a stubbed TMDB cache."""
+
+    def _build_scanner(self, tmp_dir):
+        """Construct a LibraryScanner with realistic state for scan()."""
+        library._scanner = None
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._mount_path = os.path.join(tmp_dir, 'mount')
+        scanner._local_movies_path = os.path.join(tmp_dir, 'local_movies')
+        scanner._local_tv_path = os.path.join(tmp_dir, 'local_tv')
+        scanner._cache = None
+        scanner._cache_time = 0
+        scanner._ttl = 600
+        scanner._lock = threading.Lock()
+        scanner._scanning = False
+        scanner._effects_running = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
+        scanner._capabilities_path = '/dev/null/library_capabilities.json'
+        return scanner
+
+    def _patch_tmdb(self, monkeypatch, cache):
+        """Patch tmdb._load_cache and disable the network-touching paths."""
+        from utils import tmdb as _tmdb
+        monkeypatch.setattr(_tmdb, '_load_cache', lambda: cache)
+        # Also patch get_cached_posters / build_tmdb_aliases / etc. so the
+        # scan doesn't hit the real /config/tmdb_cache.json.
+        # get_cached_posters is keyed by parsed-norm; for our test
+        # scenario it should miss for the parser-junk title, hit for the
+        # canonical title.
+        monkeypatch.setattr(_tmdb, 'get_cached_posters', lambda items: {})
+        monkeypatch.setattr(_tmdb, 'background_populate_cache', lambda items: None)
+        monkeypatch.setattr(_tmdb, 'find_show_by_season',
+                            lambda norm, max_sn, year=None: None)
+        monkeypatch.setattr(_tmdb, 'get_cached_tmdb_ids',
+                            lambda: {'movies': {}, 'shows': {}})
+
+    def test_movie_parser_junk_merges_with_local_via_canonical(
+            self, tmp_dir, monkeypatch):
+        """The Gattaca regression case: debrid folder name carries actor
+        and genre tokens, local folder has the canonical name. Without
+        the fix they appear as two separate items; with the fix they
+        merge as source='both'.
+        """
+        # Set up filesystem: one canonical local Gattaca + one parser-junk debrid.
+        local_movies = os.path.join(tmp_dir, 'local_movies')
+        os.makedirs(os.path.join(local_movies, 'Gattaca (1997)'))
+        open(os.path.join(local_movies, 'Gattaca (1997)', 'Gattaca.mkv'), 'w').close()
+        mount_movies = os.path.join(tmp_dir, 'mount', 'movies')
+        os.makedirs(os.path.join(mount_movies,
+                                 'Gattaca - Ethan Hawke - Sci Fi (1997)'))
+        open(os.path.join(mount_movies,
+                          'Gattaca - Ethan Hawke - Sci Fi (1997)',
+                          'Gattaca.1997.mp4'), 'w').close()
+
+        # Stub TMDB cache: only the canonical Gattaca entry.  Direct
+        # lookup by parser-junk norm misses; prefix resolver hits.
+        self._patch_tmdb(monkeypatch, {
+            'movies': {
+                'gattaca (1997)': {
+                    'title': 'Gattaca',
+                    'tmdb_id': 782,
+                    'release_date': '1997-10-24',
+                },
+            },
+            'shows': {},
+        })
+
+        scanner = self._build_scanner(tmp_dir)
+        result = scanner.scan()
+
+        # Exactly one Gattaca movie, source='both', NOT two split items.
+        gattacas = [m for m in result['movies']
+                    if 'gattaca' in m['title'].lower()]
+        assert len(gattacas) == 1, (
+            f"Expected single merged Gattaca item, got {len(gattacas)}: "
+            f"{[m['title'] for m in gattacas]}"
+        )
+        assert gattacas[0]['source'] == 'both'
+
+    def test_show_parser_junk_merges_with_local_via_canonical(
+            self, tmp_dir, monkeypatch):
+        """Symmetric show case — parser-junk debrid show title merges
+        with canonical local show title."""
+        local_tv = os.path.join(tmp_dir, 'local_tv')
+        _make_show(local_tv, 'Severance (2022)', {'Season 1': ['ep1.mkv']})
+        mount_shows = os.path.join(tmp_dir, 'mount', 'shows')
+        _make_show(mount_shows,
+                   'Severance - Adam Scott - Sci Fi Mystery (2022)',
+                   {'Season 1': ['ep1.mkv']})
+
+        self._patch_tmdb(monkeypatch, {
+            'movies': {},
+            'shows': {
+                'severance (2022)': {
+                    'title': 'Severance',
+                    'tmdb_id': 95396,
+                    'first_air_date': '2022-02-18',
+                },
+            },
+        })
+
+        scanner = self._build_scanner(tmp_dir)
+        result = scanner.scan()
+
+        severances = [s for s in result['shows']
+                      if 'severance' in s['title'].lower()]
+        assert len(severances) == 1, (
+            f"Expected single merged Severance item, got {len(severances)}"
+        )
+        assert severances[0]['source'] == 'both'
+
+    def test_no_match_when_canonical_not_in_local(
+            self, tmp_dir, monkeypatch):
+        """Regression guard: parser-junk debrid item whose canonical
+        is NOT in local must NOT spuriously merge — should remain a
+        single debrid item."""
+        local_movies = os.path.join(tmp_dir, 'local_movies')
+        os.makedirs(local_movies)  # empty
+        mount_movies = os.path.join(tmp_dir, 'mount', 'movies')
+        os.makedirs(os.path.join(mount_movies,
+                                 'Gattaca - Ethan Hawke - Sci Fi (1997)'))
+        open(os.path.join(mount_movies,
+                          'Gattaca - Ethan Hawke - Sci Fi (1997)',
+                          'Gattaca.1997.mp4'), 'w').close()
+
+        self._patch_tmdb(monkeypatch, {
+            'movies': {
+                'gattaca (1997)': {
+                    'title': 'Gattaca',
+                    'tmdb_id': 782,
+                    'release_date': '1997-10-24',
+                },
+            },
+            'shows': {},
+        })
+
+        scanner = self._build_scanner(tmp_dir)
+        result = scanner.scan()
+
+        # No local Gattaca → no merge → single debrid-only item
+        # (with title renamed to canonical via the enrichment step).
+        gattacas = [m for m in result['movies']
+                    if 'gattaca' in m['title'].lower()]
+        assert len(gattacas) == 1
+        assert gattacas[0]['source'] == 'debrid'
+
+    def test_self_loop_guard_prevents_degenerate_alias(
+            self, tmp_dir, monkeypatch):
+        """When the prefix resolver returns a canonical title equal to
+        the parsed title's normalized form (canon_key == key), the
+        merge step must NOT register a self-edge in alias_norms_local.
+
+        Reaches the prefix branch only when direct/alias match miss but
+        canon_key happens to equal key (degenerate case — defensive).
+        """
+        # Set up: NO local Gattaca, only debrid. Direct match misses
+        # (no local key). Prefix resolver runs. Canonical norm equals
+        # parsed norm (both "gattaca"). The new guard rejects this,
+        # leaving local_key=None and merging as debrid-only — not
+        # polluting alias_norms_local with {"gattaca": {"gattaca"}}.
+        local_movies = os.path.join(tmp_dir, 'local_movies')
+        os.makedirs(local_movies)  # empty
+        mount_movies = os.path.join(tmp_dir, 'mount', 'movies')
+        os.makedirs(os.path.join(mount_movies, 'Gattaca (1997)'))
+        open(os.path.join(mount_movies, 'Gattaca (1997)',
+                          'Gattaca.mp4'), 'w').close()
+
+        self._patch_tmdb(monkeypatch, {
+            'movies': {
+                'gattaca (1997)': {
+                    'title': 'Gattaca',
+                    'tmdb_id': 782,
+                    'release_date': '1997-10-24',
+                },
+            },
+            'shows': {},
+        })
+
+        scanner = self._build_scanner(tmp_dir)
+        result = scanner.scan()
+
+        # Single Gattaca, source=debrid (no merge possible)
+        gattacas = [m for m in result['movies']
+                    if 'gattaca' in m['title'].lower()]
+        assert len(gattacas) == 1
+        assert gattacas[0]['source'] == 'debrid'
+        # alias_norms_local should NOT contain a self-loop {gattaca: {gattaca}}
+        aliases = scanner._alias_norms.get('gattaca', set())
+        assert 'gattaca' not in aliases, (
+            f"Self-loop in alias_norms_local: gattaca → {aliases}"
+        )
+
+    def test_existing_direct_match_still_works(
+            self, tmp_dir, monkeypatch):
+        """Regression guard: when debrid and local share a parsed-norm
+        directly (no parser junk), the original direct-match path still
+        fires and the prefix resolver isn't needed."""
+        local_movies = os.path.join(tmp_dir, 'local_movies')
+        os.makedirs(os.path.join(local_movies, 'Inception (2010)'))
+        open(os.path.join(local_movies, 'Inception (2010)',
+                          'Inception.mkv'), 'w').close()
+        mount_movies = os.path.join(tmp_dir, 'mount', 'movies')
+        os.makedirs(os.path.join(mount_movies, 'Inception (2010)'))
+        open(os.path.join(mount_movies, 'Inception (2010)',
+                          'Inception.mkv'), 'w').close()
+
+        self._patch_tmdb(monkeypatch, {
+            'movies': {},  # empty cache: prefix resolver can't fire
+            'shows': {},
+        })
+
+        scanner = self._build_scanner(tmp_dir)
+        result = scanner.scan()
+
+        inceptions = [m for m in result['movies']
+                      if m['title'].lower() == 'inception']
+        assert len(inceptions) == 1
+        assert inceptions[0]['source'] == 'both'
+
+
+class TestEnrichmentCanonicalFallback:
+    """Tests for _enrich_with_tmdb_cache's new prefix-canonical
+    fallback — when get_cached_posters misses, the resolver provides the
+    canonical entry so _maybe_rename can upgrade the display title."""
+
+    def test_movie_renamed_via_prefix_when_direct_lookup_misses(
+            self, monkeypatch):
+        """Parser-junk title gets renamed to canonical when get_cached_posters
+        returns no info for the parsed key but the resolver finds the
+        canonical entry."""
+        from utils import tmdb as _tmdb
+        from utils.library import _enrich_with_tmdb_cache
+
+        # Direct cache lookup misses (parser-junk key not in cache).
+        # Then prefix resolver runs against full cache, finds canonical.
+        # Final get_cached_posters re-query (with canonical title) hits.
+        full_cache = {
+            'movies': {
+                'gattaca (1997)': {
+                    'title': 'Gattaca',
+                    'tmdb_id': 782,
+                    'release_date': '1997-10-24',
+                    'poster_path': '/test.jpg',
+                },
+            },
+            'shows': {},
+        }
+        monkeypatch.setattr(_tmdb, '_load_cache', lambda: full_cache)
+        monkeypatch.setattr(_tmdb, 'background_populate_cache',
+                            lambda items: None)
+        monkeypatch.setattr(_tmdb, 'find_show_by_season',
+                            lambda *a, **kw: None)
+
+        # First call (with parsed-junk title) misses; second call (with
+        # canonical) hits. Use a counter to differentiate.
+        calls = []
+        def fake_get_cached_posters(items):
+            calls.append(items)
+            # Return a hit only when the canonical title is queried.
+            for item in items:
+                title = item.get('title', '')
+                if title.strip().lower() == 'gattaca':
+                    return {'gattaca': {
+                        'poster_url': 'https://image/test.jpg',
+                        'tmdb_status': 'Released',
+                        'imdb_id': 'tt0119177',
+                        'title': 'Gattaca',
+                    }}
+            return {}
+        monkeypatch.setattr(_tmdb, 'get_cached_posters', fake_get_cached_posters)
+
+        movies = [{'title': 'Gattaca Ethan Hawke Sci Fi', 'year': 1997,
+                   'source': 'debrid'}]
+        shows = []
+        renames = _enrich_with_tmdb_cache(movies, shows)
+
+        # Title renamed to canonical
+        assert movies[0]['title'] == 'Gattaca'
+        # Original parsed title preserved for downstream key lookups
+        assert movies[0]['_parsed_title'] == 'Gattaca Ethan Hawke Sci Fi'
+        # Poster came from the canonical re-query
+        assert movies[0]['poster_url'] == 'https://image/test.jpg'
+        # Rename pair recorded for alias bookkeeping
+        assert renames == [
+            ('gattaca ethan hawke sci fi', 'gattaca'),
+        ]
+
+    def test_show_renamed_via_prefix_when_direct_lookup_misses(
+            self, monkeypatch):
+        """Symmetric show case — display title gets upgraded to canonical."""
+        from utils import tmdb as _tmdb
+        from utils.library import _enrich_with_tmdb_cache
+
+        full_cache = {
+            'movies': {},
+            'shows': {
+                'severance (2022)': {
+                    'title': 'Severance',
+                    'tmdb_id': 95396,
+                    'first_air_date': '2022-02-18',
+                    'poster_path': '/sev.jpg',
+                },
+            },
+        }
+        monkeypatch.setattr(_tmdb, '_load_cache', lambda: full_cache)
+        monkeypatch.setattr(_tmdb, 'background_populate_cache',
+                            lambda items: None)
+        monkeypatch.setattr(_tmdb, 'find_show_by_season',
+                            lambda *a, **kw: None)
+
+        def fake_get_cached_posters(items):
+            for item in items:
+                if item.get('title', '').strip().lower() == 'severance':
+                    return {'severance': {
+                        'poster_url': 'https://image/sev.jpg',
+                        'tmdb_status': 'Returning Series',
+                        'imdb_id': 'tt11280740',
+                        'title': 'Severance',
+                        'total_episodes': 19,
+                        'max_cached_season': 2,
+                    }}
+            return {}
+        monkeypatch.setattr(_tmdb, 'get_cached_posters', fake_get_cached_posters)
+
+        shows = [{
+            'title': 'Severance Adam Scott Sci Fi Mystery',
+            'year': 2022,
+            'source': 'debrid',
+            'episodes': 5,
+            'season_data': [{'number': 1, 'episodes': []}],
+        }]
+        movies = []
+        renames = _enrich_with_tmdb_cache(movies, shows)
+
+        assert shows[0]['title'] == 'Severance'
+        assert shows[0]['_parsed_title'] == 'Severance Adam Scott Sci Fi Mystery'
+        assert shows[0]['poster_url'] == 'https://image/sev.jpg'
+
+    def test_no_rename_when_resolver_misses(self, monkeypatch):
+        """Regression guard: no canonical match → no rename, no
+        spurious side effects.  Item gets default None fields and is
+        added to uncached for background population."""
+        from utils import tmdb as _tmdb
+        from utils.library import _enrich_with_tmdb_cache
+
+        monkeypatch.setattr(_tmdb, '_load_cache', lambda: {})  # empty cache
+        monkeypatch.setattr(_tmdb, 'get_cached_posters', lambda items: {})
+        monkeypatch.setattr(_tmdb, 'background_populate_cache',
+                            lambda items: None)
+        monkeypatch.setattr(_tmdb, 'find_show_by_season',
+                            lambda *a, **kw: None)
+
+        movies = [{'title': 'Unknown Movie XYZ', 'year': 2099,
+                   'source': 'debrid'}]
+        shows = []
+        renames = _enrich_with_tmdb_cache(movies, shows)
+
+        # Title untouched
+        assert movies[0]['title'] == 'Unknown Movie XYZ'
+        assert '_parsed_title' not in movies[0]
+        # Default fields
+        assert movies[0]['poster_url'] is None
+        assert movies[0]['tmdb_status'] is None
+        # No rename pairs
+        assert renames == []
+
+    def test_direct_lookup_still_short_circuits(self, monkeypatch):
+        """Regression guard: when get_cached_posters returns a direct
+        hit, the prefix resolver isn't called.  Previous behavior must
+        be preserved bit-for-bit.
+        """
+        from utils import tmdb as _tmdb
+        from utils.library import _enrich_with_tmdb_cache
+
+        # Empty full-cache so if the resolver WERE called it would miss.
+        # Direct hit must still produce the rename via the original code path.
+        monkeypatch.setattr(_tmdb, '_load_cache', lambda: {})
+        monkeypatch.setattr(_tmdb, 'background_populate_cache',
+                            lambda items: None)
+        monkeypatch.setattr(_tmdb, 'find_show_by_season',
+                            lambda *a, **kw: None)
+
+        def fake_get_cached_posters(items):
+            return {'inception': {
+                'poster_url': 'https://image/i.jpg',
+                'tmdb_status': 'Released',
+                'imdb_id': 'tt1375666',
+                'title': 'Inception',
+            }}
+        monkeypatch.setattr(_tmdb, 'get_cached_posters', fake_get_cached_posters)
+
+        movies = [{'title': 'Inception', 'year': 2010, 'source': 'local'}]
+        shows = []
+        _enrich_with_tmdb_cache(movies, shows)
+
+        # No rename (display already matches canonical)
+        assert movies[0]['title'] == 'Inception'
+        assert '_parsed_title' not in movies[0]
+        assert movies[0]['poster_url'] == 'https://image/i.jpg'
+
+
+# ---------------------------------------------------------------------------
 # season_data in scan results
 # ---------------------------------------------------------------------------
 
@@ -3129,7 +3552,7 @@ class TestWebDAVUnsupportedMemoization:
                             lambda items, _aliases: items)
         monkeypatch.setattr(library, '_build_tmdb_aliases', lambda: ({}, {}))
         monkeypatch.setattr(library, '_enrich_with_tmdb_cache',
-                            lambda movies, shows: [])
+                            lambda movies, shows, **kw: [])
         monkeypatch.setattr(library, '_apply_sonarr_monitored_filter',
                             lambda shows: None)
         from utils import library_prefs
@@ -3192,7 +3615,7 @@ class TestWebDAVUnsupportedMemoization:
                             lambda items, _aliases: items)
         monkeypatch.setattr(library, '_build_tmdb_aliases', lambda: ({}, {}))
         monkeypatch.setattr(library, '_enrich_with_tmdb_cache',
-                            lambda movies, shows: [])
+                            lambda movies, shows, **kw: [])
         monkeypatch.setattr(library, '_apply_sonarr_monitored_filter',
                             lambda shows: None)
         from utils import library_prefs

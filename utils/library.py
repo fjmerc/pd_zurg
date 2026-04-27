@@ -905,6 +905,110 @@ def _norm_for_matching(title):
     return t
 
 
+_BARE_YEAR_RE = re.compile(r'\s*\(\d{4}\)\s*$')
+
+
+def _extract_tmdb_entry_year(entry):
+    """Pull a 4-digit year from a TMDB cache entry. Movies use
+    ``release_date``, shows use ``first_air_date``. Returns int or None.
+    """
+    for key in ('release_date', 'first_air_date'):
+        date = entry.get(key, '') or ''
+        if isinstance(date, str) and len(date) >= 4 and date[:4].isdigit():
+            return int(date[:4])
+    return None
+
+
+def _find_canonical_tmdb_via_prefix(parsed_title, parsed_year, is_tv,
+                                    _tmdb_cache=None):
+    """Token-aligned prefix lookup against the TMDB cache.
+
+    Recovers the canonical TMDB entry when the parsed title contains
+    extra tokens (actor names, genre tags) appended before the year —
+    e.g.  parsed ``"Gattaca Ethan Hawke Sci Fi"`` + 1997 resolves to the
+    cache entry for ``"Gattaca"``.  Complements the existing direct
+    ``cached_tmdb_*.get(_norm)`` cascade step which only does an exact
+    key match.
+
+    Strict to limit false positives:
+    - Token-aligned prefix on the cache key (release names start with
+      the title; we don't accept mid-string matches).
+    - Year confirmation when both sides have a year.
+    - Single-token candidates require year confirmation (defends
+      against cache entries titled "The" / "It" prefixing every release).
+    - Multi-token candidates fail-open on missing entry-year (legacy
+      entries lack ``release_date`` / ``first_air_date``).
+    - Longest-prefix wins.
+
+    Args:
+        parsed_title: parsed-from-folder title string.
+        parsed_year: parsed year int, or None.
+        is_tv: True for shows, False for movies.
+        _tmdb_cache: optional pre-loaded cache dict (for tests).
+
+    Returns:
+        Dict with ``title`` (canonical str) and ``tmdb_id`` (int) on hit,
+        or None.  Safe under all error paths — never raises.
+    """
+    if not parsed_title:
+        return None
+    if _tmdb_cache is None:
+        try:
+            from utils import tmdb as _tmdb
+            with _tmdb._cache_lock:
+                _tmdb_cache = _tmdb._load_cache()
+        except Exception as e:
+            logger.debug("[library] canonical lookup cache load failed: %s", e)
+            return None
+
+    section_key = 'shows' if is_tv else 'movies'
+    section = _tmdb_cache.get(section_key, {})
+    if not section or not isinstance(section, dict):
+        return None
+
+    parsed_tokens = _norm_for_matching(parsed_title).split()
+    if not parsed_tokens:
+        return None
+
+    best = None
+    best_token_count = 0
+    for cache_key, entry in section.items():
+        try:
+            if not isinstance(entry, dict) or not isinstance(cache_key, str):
+                continue
+            bare_key = _BARE_YEAR_RE.sub('', cache_key)
+            candidate_tokens = _norm_for_matching(bare_key).split()
+            if not candidate_tokens or len(candidate_tokens) > len(parsed_tokens):
+                continue
+            if parsed_tokens[:len(candidate_tokens)] != candidate_tokens:
+                continue
+            # Single-word cache title prefixing a multi-word parse:
+            # demand year confirmation (fail-closed).
+            if len(candidate_tokens) == 1 and len(parsed_tokens) > 1:
+                if parsed_year is None:
+                    continue
+                entry_year = _extract_tmdb_entry_year(entry)
+                if entry_year != parsed_year:
+                    continue
+            elif parsed_year is not None:
+                # Multi-token candidate: fail-open on missing entry year.
+                entry_year = _extract_tmdb_entry_year(entry)
+                if entry_year is not None and entry_year != parsed_year:
+                    continue
+            if len(candidate_tokens) > best_token_count:
+                title_str = entry.get('title')
+                tmdb_id = entry.get('tmdb_id')
+                if (isinstance(title_str, str) and title_str.strip()
+                        and tmdb_id):
+                    best = {'title': title_str.strip(), 'tmdb_id': tmdb_id}
+                    best_token_count = len(candidate_tokens)
+        except Exception as e:
+            logger.debug("[library] skipping malformed cache entry %r: %s",
+                         cache_key, e)
+            continue
+    return best
+
+
 # Public aliases for cross-module reuse (e.g., debrid_client title matching)
 parse_folder_name = _parse_folder_name
 normalize_title = _normalize_title
@@ -3166,6 +3270,21 @@ class LibraryScanner:
         cached_tmdb_movies = cached_tmdb_ids.get('movies', {})
         cached_tmdb_shows = cached_tmdb_ids.get('shows', {})
 
+        # Pre-load the full TMDB cache once for the scan-scoped prefix-match
+        # fallback (the new final cascade step in dir-selection / rescan).
+        # Without this, each invocation of _find_canonical_tmdb_via_prefix
+        # re-reads /config/tmdb_cache.json from disk and re-acquires
+        # _tmdb._cache_lock — multiplied by up to 4 cascade sites × N
+        # symlinked items, that's hundreds of redundant reads per scan and
+        # widens the lock window for concurrent TMDB writers.
+        from utils import tmdb as _tmdb_mod
+        try:
+            with _tmdb_mod._cache_lock:
+                _tmdb_full_cache = _tmdb_mod._load_cache()
+        except Exception as e:
+            logger.debug("[library] full TMDB cache load for prefix-match failed: %s", e)
+            _tmdb_full_cache = {}
+
         # --- Movies ---
         if self._local_movies_path:
             real_movies_root = os.path.realpath(self._local_movies_path)
@@ -3204,6 +3323,21 @@ class LibraryScanner:
                     tmdb_id = (cached_tmdb_movies.get(f"{_norm} ({year})") if year else None) or cached_tmdb_movies.get(_norm)
                     if tmdb_id:
                         arr_info = radarr_by_tmdb.get(tmdb_id)
+                # Final TMDB fallback: token-aligned prefix match.  Recovers
+                # parsed titles where extra tokens (actor name, genre tag)
+                # were appended before the year — e.g. "Gattaca Ethan
+                # Hawke Sci Fi" → cache entry "Gattaca" → Radarr id.
+                # Without this, the cascade falls through to a parsed-title
+                # folder name and creates an orphan symlink dir alongside
+                # the canonical one.
+                if not arr_info:
+                    parsed_t = movie.get('_parsed_title') or title
+                    canonical = _find_canonical_tmdb_via_prefix(
+                        parsed_t, year, is_tv=False,
+                        _tmdb_cache=_tmdb_full_cache,
+                    )
+                    if canonical:
+                        arr_info = radarr_by_tmdb.get(canonical['tmdb_id'])
                 if arr_info and arr_info['folder']:
                     movie_dir = arr_info['folder']
                 else:
@@ -3326,6 +3460,18 @@ class LibraryScanner:
                         alt_id = find_show_tmdb_id_by_season(parsed_norm, show_max_sn, year)
                         if alt_id and alt_id != tmdb_id:
                             arr_info = sonarr_by_tmdb.get(alt_id)
+                # Final TMDB fallback: token-aligned prefix match.
+                # Symmetric with the movies cascade — recovers parsed
+                # titles with appended actor/genre/role tokens that
+                # prevent direct cache key match.
+                if not arr_info:
+                    parsed_t = show.get('_parsed_title') or title
+                    canonical = _find_canonical_tmdb_via_prefix(
+                        parsed_t, year, is_tv=True,
+                        _tmdb_cache=_tmdb_full_cache,
+                    )
+                    if canonical:
+                        arr_info = sonarr_by_tmdb.get(canonical['tmdb_id'])
                 if arr_info and arr_info['folder']:
                     show_dir = arr_info['folder']
                 else:
@@ -3566,6 +3712,16 @@ class LibraryScanner:
                             alt_id = find_show_tmdb_id_by_season(norm_t, max_sn, _yr)
                             if alt_id and alt_id != tmdb_id:
                                 info = sonarr_by_tmdb.get(alt_id)
+                if not info:
+                    # Final TMDB fallback: token-aligned prefix match —
+                    # symmetric with the show dir-selection cascade.
+                    parsed_t = _symlink_parsed.get(title) or title
+                    canonical = _find_canonical_tmdb_via_prefix(
+                        parsed_t, _yr, is_tv=True,
+                        _tmdb_cache=_tmdb_full_cache,
+                    )
+                    if canonical:
+                        info = sonarr_by_tmdb.get(canonical['tmdb_id'])
                 if info and info.get('id') and info.get('client'):
                     try:
                         prior = (getattr(self, '_pending_rescan_prior_ids', {}) or {}).get(title)
@@ -3617,6 +3773,18 @@ class LibraryScanner:
                     tmdb_id = (cached_tmdb_movies.get(f"{_norm_t} ({_yr})") if _yr else None) or cached_tmdb_movies.get(_norm_t)
                     if tmdb_id:
                         info = radarr_by_tmdb.get(tmdb_id)
+                if not info:
+                    # Final TMDB fallback: token-aligned prefix match —
+                    # symmetric with the movie dir-selection cascade.
+                    # (no season-aware sub-step for movies —
+                    # find_show_tmdb_id_by_season is TV-only.)
+                    parsed_t = _symlink_parsed.get(title) or title
+                    canonical = _find_canonical_tmdb_via_prefix(
+                        parsed_t, _yr, is_tv=False,
+                        _tmdb_cache=_tmdb_full_cache,
+                    )
+                    if canonical:
+                        info = radarr_by_tmdb.get(canonical['tmdb_id'])
                 if info and info.get('id') and info.get('client'):
                     try:
                         prior = (getattr(self, '_pending_rescan_prior_ids', {}) or {}).get(title)

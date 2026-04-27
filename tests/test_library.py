@@ -1370,6 +1370,326 @@ class TestNormForMatching:
 
 
 # ---------------------------------------------------------------------------
+# Canonical-title TMDB-cache prefix lookup
+# ---------------------------------------------------------------------------
+
+class TestExtractTmdbEntryYear:
+    """Sanity tests for _extract_tmdb_entry_year — pulls a 4-digit year
+    from a TMDB cache entry's release_date / first_air_date field."""
+
+    def test_release_date(self):
+        from utils.library import _extract_tmdb_entry_year
+        assert _extract_tmdb_entry_year({'release_date': '1997-10-24'}) == 1997
+
+    def test_first_air_date(self):
+        from utils.library import _extract_tmdb_entry_year
+        assert _extract_tmdb_entry_year({'first_air_date': '2008-01-20'}) == 2008
+
+    def test_release_date_takes_precedence(self):
+        from utils.library import _extract_tmdb_entry_year
+        assert _extract_tmdb_entry_year({
+            'release_date': '1997-10-24',
+            'first_air_date': '2020-01-01',
+        }) == 1997
+
+    def test_missing_returns_none(self):
+        from utils.library import _extract_tmdb_entry_year
+        assert _extract_tmdb_entry_year({}) is None
+
+    def test_malformed_returns_none(self):
+        """Defensive: short/non-string/garbage dates return None, no crash."""
+        from utils.library import _extract_tmdb_entry_year
+        assert _extract_tmdb_entry_year({'release_date': ''}) is None
+        assert _extract_tmdb_entry_year({'release_date': '19'}) is None
+        assert _extract_tmdb_entry_year({'release_date': '19xx-01-01'}) is None
+        assert _extract_tmdb_entry_year({'release_date': None}) is None
+        assert _extract_tmdb_entry_year({'release_date': 1997}) is None
+        assert _extract_tmdb_entry_year({'release_date': ['1997']}) is None
+
+
+class TestFindCanonicalTmdbViaPrefix:
+    """Tests for _find_canonical_tmdb_via_prefix — token-aligned prefix
+    lookup against the TMDB cache, used as the final fallback in the
+    arr-info matching cascade in _create_debrid_symlinks.
+
+    All tests inject a fixture cache via the _tmdb_cache parameter so
+    behavior is deterministic without a real /config/tmdb_cache.json."""
+
+    def _movies_cache(self, *entries):
+        return {'movies': {key: ent for key, ent in entries}}
+
+    def _shows_cache(self, *entries):
+        return {'shows': {key: ent for key, ent in entries}}
+
+    def test_recovers_from_actor_genre_junk(self):
+        """The Gattaca regression case — parsed title has actor name +
+        genre tag appended; prefix match finds the canonical entry."""
+        from utils.library import _find_canonical_tmdb_via_prefix
+        cache = self._movies_cache(
+            ('gattaca (1997)', {
+                'title': 'Gattaca',
+                'tmdb_id': 782,
+                'release_date': '1997-10-24',
+            }),
+        )
+        result = _find_canonical_tmdb_via_prefix(
+            'Gattaca Ethan Hawke Sci Fi', 1997, is_tv=False,
+            _tmdb_cache=cache,
+        )
+        assert result == {'title': 'Gattaca', 'tmdb_id': 782}
+
+    def test_year_mismatch_excludes(self):
+        """Multi-token candidate with year confirmation: parsed year
+        != entry year → skip."""
+        from utils.library import _find_canonical_tmdb_via_prefix
+        cache = self._movies_cache(
+            ('gattaca extra (2020)', {
+                'title': 'Gattaca Extra',
+                'tmdb_id': 999,
+                'release_date': '2020-01-01',
+            }),
+        )
+        result = _find_canonical_tmdb_via_prefix(
+            'Gattaca Extra Words 1997', 1997, is_tv=False, _tmdb_cache=cache,
+        )
+        assert result is None
+
+    def test_longest_prefix_wins(self):
+        """When two candidates are valid prefixes, the longer (more
+        specific) wins."""
+        from utils.library import _find_canonical_tmdb_via_prefix
+        cache = self._movies_cache(
+            ('the dark (2005)', {
+                'title': 'The Dark',
+                'tmdb_id': 1,
+                'release_date': '2005-01-01',
+            }),
+            ('the dark knight (2008)', {
+                'title': 'The Dark Knight',
+                'tmdb_id': 155,
+                'release_date': '2008-07-18',
+            }),
+        )
+        result = _find_canonical_tmdb_via_prefix(
+            'The Dark Knight Extended Cut', 2008, is_tv=False, _tmdb_cache=cache,
+        )
+        assert result == {'title': 'The Dark Knight', 'tmdb_id': 155}
+
+    def test_non_prefix_rejected(self):
+        """A cache entry whose tokens appear mid-string (not at start)
+        must not match. Real release names put the title first."""
+        from utils.library import _find_canonical_tmdb_via_prefix
+        cache = self._movies_cache(
+            ('sci fi (2020)', {
+                'title': 'Sci Fi',
+                'tmdb_id': 555,
+                'release_date': '2020-01-01',
+            }),
+        )
+        result = _find_canonical_tmdb_via_prefix(
+            'Gattaca Ethan Hawke Sci Fi', 1997, is_tv=False, _tmdb_cache=cache,
+        )
+        assert result is None
+
+    def test_single_token_requires_year(self):
+        """Single-word cache entry like "The" must not prefix-match a
+        multi-word parse without year confirmation."""
+        from utils.library import _find_canonical_tmdb_via_prefix
+        cache = self._movies_cache(
+            ('the', {
+                'title': 'The',
+                'tmdb_id': 480530,
+                'release_date': '2017-01-01',
+            }),
+        )
+        # parsed year 2008 ≠ entry year 2017 → reject
+        assert _find_canonical_tmdb_via_prefix(
+            'The Dark Knight', 2008, is_tv=False, _tmdb_cache=cache,
+        ) is None
+        # No parsed year → reject (cannot disambiguate)
+        assert _find_canonical_tmdb_via_prefix(
+            'The Dark Knight', None, is_tv=False, _tmdb_cache=cache,
+        ) is None
+
+    def test_single_token_year_match_accepted(self):
+        """Single-token candidate with matching year IS accepted —
+        the year provides the disambiguation."""
+        from utils.library import _find_canonical_tmdb_via_prefix
+        cache = self._movies_cache(
+            ('gattaca', {
+                'title': 'Gattaca',
+                'tmdb_id': 782,
+                'release_date': '1997-10-24',
+            }),
+        )
+        result = _find_canonical_tmdb_via_prefix(
+            'Gattaca Ethan Hawke', 1997, is_tv=False, _tmdb_cache=cache,
+        )
+        assert result == {'title': 'Gattaca', 'tmdb_id': 782}
+
+    def test_single_token_no_entry_year_fail_closed(self):
+        """Single-token candidate with no entry year is rejected even
+        if filename has a year — fail-closed for narrow guard."""
+        from utils.library import _find_canonical_tmdb_via_prefix
+        cache = self._movies_cache(
+            ('the', {'title': 'The', 'tmdb_id': 1}),  # no release_date
+        )
+        assert _find_canonical_tmdb_via_prefix(
+            'The Dark Knight', 2008, is_tv=False, _tmdb_cache=cache,
+        ) is None
+
+    def test_multi_token_entry_year_missing_fail_open(self):
+        """Multi-token candidate with missing release_date: fail-open
+        (legacy entries lack the field; specificity protects)."""
+        from utils.library import _find_canonical_tmdb_via_prefix
+        cache = self._movies_cache(
+            ('the dark knight (2008)', {
+                'title': 'The Dark Knight',
+                'tmdb_id': 155,
+                # no release_date — legacy entry
+            }),
+        )
+        result = _find_canonical_tmdb_via_prefix(
+            'The Dark Knight Extras', 2008, is_tv=False, _tmdb_cache=cache,
+        )
+        assert result == {'title': 'The Dark Knight', 'tmdb_id': 155}
+
+    def test_shows_section_for_tv(self):
+        """is_tv=True must look in the 'shows' section, not 'movies'."""
+        from utils.library import _find_canonical_tmdb_via_prefix
+        cache = {
+            'movies': {
+                'breaking bad': {
+                    'title': 'Breaking Bad MOVIE SPOOF',
+                    'tmdb_id': 999,
+                    'release_date': '2008-01-01',
+                },
+            },
+            'shows': {
+                'breaking bad': {
+                    'title': 'Breaking Bad',
+                    'tmdb_id': 1396,
+                    'first_air_date': '2008-01-20',
+                },
+            },
+        }
+        result = _find_canonical_tmdb_via_prefix(
+            'Breaking Bad Mr Chips', 2008, is_tv=True, _tmdb_cache=cache,
+        )
+        assert result == {'title': 'Breaking Bad', 'tmdb_id': 1396}
+
+    def test_empty_cache_returns_none(self):
+        """No section, no entries → None."""
+        from utils.library import _find_canonical_tmdb_via_prefix
+        assert _find_canonical_tmdb_via_prefix(
+            'Gattaca', 1997, is_tv=False, _tmdb_cache={},
+        ) is None
+        assert _find_canonical_tmdb_via_prefix(
+            'Gattaca', 1997, is_tv=False, _tmdb_cache={'movies': {}},
+        ) is None
+
+    def test_empty_title_returns_none(self):
+        """Defensive: empty/None inputs return None."""
+        from utils.library import _find_canonical_tmdb_via_prefix
+        cache = self._movies_cache(
+            ('gattaca', {'title': 'Gattaca', 'tmdb_id': 782,
+                         'release_date': '1997-10-24'}),
+        )
+        assert _find_canonical_tmdb_via_prefix(
+            '', 1997, is_tv=False, _tmdb_cache=cache,
+        ) is None
+        assert _find_canonical_tmdb_via_prefix(
+            None, 1997, is_tv=False, _tmdb_cache=cache,
+        ) is None
+
+    def test_non_dict_cache_entry_skipped(self):
+        """Defensive: corrupt cache (non-dict entry) doesn't crash."""
+        from utils.library import _find_canonical_tmdb_via_prefix
+        cache = {
+            'movies': {
+                'gattaca': 'not a dict',  # corrupt
+                'gattaca (1997)': {
+                    'title': 'Gattaca',
+                    'tmdb_id': 782,
+                    'release_date': '1997-10-24',
+                },
+            },
+        }
+        result = _find_canonical_tmdb_via_prefix(
+            'Gattaca Ethan Hawke', 1997, is_tv=False, _tmdb_cache=cache,
+        )
+        assert result == {'title': 'Gattaca', 'tmdb_id': 782}
+
+    def test_non_string_cache_key_skipped(self):
+        """Defensive: non-string cache key doesn't crash the loop."""
+        from utils.library import _find_canonical_tmdb_via_prefix
+        cache = {
+            'movies': {
+                42: {'title': 'X', 'tmdb_id': 1},  # non-string key
+                'gattaca': {'title': 'Gattaca', 'tmdb_id': 782,
+                            'release_date': '1997-10-24'},
+            },
+        }
+        result = _find_canonical_tmdb_via_prefix(
+            'Gattaca Ethan', 1997, is_tv=False, _tmdb_cache=cache,
+        )
+        assert result == {'title': 'Gattaca', 'tmdb_id': 782}
+
+    def test_non_string_title_field_skipped(self):
+        """Defensive: entry with non-string 'title' is skipped, sibling
+        valid entry still wins."""
+        from utils.library import _find_canonical_tmdb_via_prefix
+        cache = self._movies_cache(
+            ('gattaca (1997)', {
+                'title': {'unexpected': 'dict'},  # corrupt — not a str
+                'tmdb_id': 999,
+                'release_date': '1997-10-24',
+            }),
+            ('gattaca ethan hawke (1997)', {
+                'title': 'Gattaca',
+                'tmdb_id': 782,
+                'release_date': '1997-10-24',
+            }),
+        )
+        result = _find_canonical_tmdb_via_prefix(
+            'Gattaca Ethan Hawke Sci Fi', 1997, is_tv=False, _tmdb_cache=cache,
+        )
+        assert result == {'title': 'Gattaca', 'tmdb_id': 782}
+
+    def test_missing_tmdb_id_excludes_entry(self):
+        """An entry without tmdb_id can't fulfill a downstream
+        radarr_by_tmdb lookup — must be skipped."""
+        from utils.library import _find_canonical_tmdb_via_prefix
+        cache = self._movies_cache(
+            ('gattaca', {
+                'title': 'Gattaca',
+                # no tmdb_id
+                'release_date': '1997-10-24',
+            }),
+        )
+        result = _find_canonical_tmdb_via_prefix(
+            'Gattaca Ethan Hawke', 1997, is_tv=False, _tmdb_cache=cache,
+        )
+        assert result is None
+
+    def test_year_missing_in_filename_multi_token_fail_open(self):
+        """When parsed_year is None and candidate is multi-token, fail
+        open (year filter skipped entirely)."""
+        from utils.library import _find_canonical_tmdb_via_prefix
+        cache = self._movies_cache(
+            ('the dark knight (2008)', {
+                'title': 'The Dark Knight',
+                'tmdb_id': 155,
+                'release_date': '2008-07-18',
+            }),
+        )
+        result = _find_canonical_tmdb_via_prefix(
+            'The Dark Knight', None, is_tv=False, _tmdb_cache=cache,
+        )
+        assert result == {'title': 'The Dark Knight', 'tmdb_id': 155}
+
+
+# ---------------------------------------------------------------------------
 # season_data in scan results
 # ---------------------------------------------------------------------------
 

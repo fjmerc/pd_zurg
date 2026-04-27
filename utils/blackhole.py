@@ -210,8 +210,186 @@ def _parse_episodes(filename):
     return set(nums)
 
 
+_BARE_YEAR_RE = re.compile(r'\s*\(\d{4}\)\s*$')
+
+
+def _safe_entry_title(entry):
+    """Extract the canonical title from a TMDB cache entry, defending
+    against malformed entries where ``title`` is non-string (dict, list,
+    int) — calling ``.strip()`` on those would raise AttributeError and
+    crash the whole resolution path.  Returns a stripped str, or ''.
+    """
+    t = entry.get('title')
+    return t.strip() if isinstance(t, str) else ''
+
+
+def _extract_entry_year(entry):
+    """Pull a 4-digit year from a TMDB cache entry. Movies use ``release_date``,
+    shows use ``first_air_date``. Returns int or None.
+    """
+    for key in ('release_date', 'first_air_date'):
+        date = entry.get(key, '') or ''
+        if isinstance(date, str) and len(date) >= 4 and date[:4].isdigit():
+            try:
+                return int(date[:4])
+            except ValueError:
+                pass
+    return None
+
+
+def _lookup_canonical_in_tmdb(title, year, is_tv):
+    """Look up a canonical media title in the local TMDB cache.
+
+    Tries (1) direct year-qualified key match, then (2) token-aligned prefix
+    match against cache keys to recover from parsers that left actor names
+    or genre tags appended to the title (e.g.  "Gattaca Ethan Hawke Sci Fi"
+    → "Gattaca").  Year, when available on both sides, must match.
+
+    Returns the canonical TMDB title (str) on hit, None otherwise.  Safe
+    when the cache file is missing or the tmdb module fails to import.
+    """
+    try:
+        from utils import tmdb as _tmdb
+        from utils.library import normalize_title, norm_for_matching
+    except Exception as e:
+        # Module-level failure (genuine import bug, not a missing cache
+        # file) — log so silent grab-event degradation is discoverable.
+        logger.debug("[blackhole] canonical-title lookup imports failed: %s", e)
+        return None
+
+    try:
+        with _tmdb._cache_lock:
+            cache = _tmdb._load_cache()
+    except Exception as e:
+        logger.debug("[blackhole] canonical-title cache load failed: %s", e)
+        return None
+
+    section_key = 'shows' if is_tv else 'movies'
+    section = cache.get(section_key, {})
+    if not section or not isinstance(section, dict):
+        return None
+
+    norm = normalize_title(title or '')
+    if not norm:
+        return None
+
+    # (1) Direct year-qualified lookup — fastest path
+    try:
+        entry = _tmdb._cache_lookup(section, norm, year)
+    except Exception:
+        entry = None
+    if isinstance(entry, dict):
+        canonical = _safe_entry_title(entry)
+        if canonical:
+            return canonical
+
+    # (2) Token-aligned prefix match.  The robust parser may leave
+    # extraneous words (actor name, genre tag) appended to the title; we
+    # pick the longest cache entry whose token sequence is a strict
+    # prefix of the parsed token sequence.
+    parsed_tokens = norm_for_matching(title or '').split()
+    if not parsed_tokens:
+        return None
+
+    best_canonical = None
+    best_token_count = 0
+
+    for cache_key, entry in section.items():
+        try:
+            if not isinstance(entry, dict) or not isinstance(cache_key, str):
+                continue
+            bare_key = _BARE_YEAR_RE.sub('', cache_key)
+            candidate_tokens = norm_for_matching(bare_key).split()
+            if not candidate_tokens:
+                continue
+            if len(candidate_tokens) > len(parsed_tokens):
+                continue
+            if parsed_tokens[:len(candidate_tokens)] != candidate_tokens:
+                continue
+            # Single-word cache title prefixing a multi-word parse is a
+            # high false-positive risk — e.g. cache entry "The" (the 2017
+            # film) would prefix-match every release whose name starts
+            # with "The".  Demand year confirmation in this narrow case;
+            # the multi-word matches below are inherently more specific.
+            if len(candidate_tokens) == 1 and len(parsed_tokens) > 1:
+                if year is None:
+                    continue
+                entry_year = _extract_entry_year(entry)
+                if entry_year != year:  # also rejects None (fail-closed here)
+                    continue
+            elif year is not None:
+                # Multi-token candidate: keep prior fail-open behavior so
+                # legacy entries lacking release_date/first_air_date can
+                # still resolve (the candidate's specificity already
+                # protects against false positives).
+                entry_year = _extract_entry_year(entry)
+                if entry_year is not None and entry_year != year:
+                    continue
+            # Longest = most specific.  Ties go to first-seen.
+            if len(candidate_tokens) > best_token_count:
+                canonical = _safe_entry_title(entry)
+                if canonical:
+                    best_canonical = canonical
+                    best_token_count = len(candidate_tokens)
+        except Exception as e:
+            # Defensive: a single malformed entry must not poison the
+            # whole scan — drop it and keep going.
+            logger.debug("[blackhole] skipping malformed cache entry %r: %s",
+                         cache_key, e)
+            continue
+
+    return best_canonical
+
+
+def _resolve_canonical_title(filename, fallback_name, is_tv):
+    """Refine a release filename's media title via the library's robust
+    parser plus an optional TMDB-cache canonical lookup.
+
+    Returns the best available title — preferring TMDB-canonical, then
+    the library parser's output, then ``fallback_name`` (typically the
+    naive parse_release_name output).  Never returns the empty string
+    or None when ``fallback_name`` is truthy; on any error path the
+    caller still gets the original behavior.
+    """
+    if not filename:
+        return fallback_name
+
+    base = re.sub(r'\.(torrent|magnet)$', '', filename, flags=re.IGNORECASE)
+    if not base:
+        return fallback_name
+
+    # Lazy import — avoids circular-import risk and keeps blackhole
+    # module load cheap when the library module isn't needed.
+    try:
+        from utils.library import parse_folder_name
+    except Exception:
+        return fallback_name
+
+    try:
+        robust_title, robust_year = parse_folder_name(base)
+    except Exception:
+        return fallback_name
+
+    if not robust_title:
+        return fallback_name
+
+    canonical = _lookup_canonical_in_tmdb(robust_title, robust_year, is_tv)
+    if canonical:
+        return canonical
+    return robust_title
+
+
 def _enrich_for_history(filename):
-    """Extract media_title and episode string from a torrent filename for history logging."""
+    """Extract media_title and episode string from a torrent filename for history logging.
+
+    The media_title is resolved via a 3-step cascade: (1) naive parser
+    establishes is_tv + season/episode for the ep_str, (2) the library's
+    robust parser refines the title (handles bracketed/parenthesized
+    years, dash separators, edition tags), (3) when the title still has
+    extra junk (actor names, genre tags injected mid-name), a
+    token-aligned prefix lookup against the TMDB cache resolves it to
+    the canonical media title.  Each step falls back safely.
+    """
     name, season, is_tv = parse_release_name(filename)
     eps = _parse_episodes(filename)
     ep_str = None
@@ -219,7 +397,9 @@ def _enrich_for_history(filename):
         ep_str = f"S{season:02d}" + "".join(f"E{e:02d}" for e in sorted(eps))
     elif is_tv and season is not None:
         ep_str = f"S{season:02d}"
-    return name or None, ep_str
+
+    refined = _resolve_canonical_title(filename, name, is_tv)
+    return (refined or None), ep_str
 
 
 def _local_episodes(season_dir):

@@ -1934,6 +1934,522 @@ class TestEnrichForHistory:
         assert name is None
 
 
+class TestEnrichForHistoryRobustParsing:
+    """Tests for robust title parsing in _enrich_for_history.
+
+    Covers cases where the naive parse_release_name fails: parens around
+    year, brackets around year, dash separators, and inline-junk
+    (actor/genre tags) before the year.  These all fall back to the
+    library parser path since no TMDB cache is present in the test env.
+    """
+
+    def test_parens_year_movie(self):
+        """Filename with `(YYYY)` — naive year regex misses; library parser
+        catches it via MID_YEAR_PATTERN."""
+        name, ep = _enrich_for_history('Gattaca.(1997).1080p.BluRay.x264.torrent')
+        assert name == 'Gattaca'
+        assert ep is None
+
+    def test_parens_year_with_actor_and_genre(self):
+        """The reported Gattaca regression: actor name + genre tag before
+        the parenthesized year. Library parser strips year/quality and
+        leaves "Gattaca Ethan Hawke Sci Fi" — still cleaner than the
+        naive parser's "Gattaca Ethan Hawke Sci Fi (1997)" output (year
+        and quality artifacts gone).  The TMDB-cache lookup recovers the
+        canonical title — exercised in TestCanonicalTitleResolution."""
+        name, ep = _enrich_for_history(
+            'Gattaca.Ethan.Hawke.Sci.Fi.(1997).1080p.BluRay.x264-GROUP.torrent'
+        )
+        # No cache file in test env → falls back to library parser output.
+        # The year MUST be stripped (this is the core regression).
+        assert name == 'Gattaca Ethan Hawke Sci Fi'
+        assert '(1997)' not in name
+        assert '1080p' not in name
+        assert ep is None
+
+    def test_bracket_year_movie(self):
+        """Bracketed year `[YYYY]` — naive year regex misses; library
+        parser's BRACKET_YEAR_PATTERN catches it."""
+        name, ep = _enrich_for_history('Gattaca.[1997].1080p.BluRay.torrent')
+        assert name == 'Gattaca'
+        assert ep is None
+
+    def test_dash_separated_year_movie(self):
+        """Dashes around the year — naive regex requires `.`/space."""
+        name, ep = _enrich_for_history('Gattaca-1997-1080p-BluRay-GROUP.torrent')
+        assert name == 'Gattaca'
+        assert ep is None
+
+    def test_edition_tag_stripped(self):
+        """Edition/cut tags between title and quality — library parser
+        strips via _EDITION_PATTERN."""
+        name, ep = _enrich_for_history('Blade.Runner.1982.Final.Cut.1080p.BluRay.torrent')
+        # year stripped, quality stripped; "Final Cut" is also an edition tag
+        assert name == 'Blade Runner'
+        assert ep is None
+
+    def test_site_prefix_stripped(self):
+        """Indexer URL prefix at start of filename — library parser
+        strips via _SITE_PREFIX_PATTERN."""
+        name, ep = _enrich_for_history('www.UIndex.org.Gattaca.1997.1080p.BluRay.torrent')
+        assert name == 'Gattaca'
+        assert ep is None
+
+    def test_existing_dotted_year_still_works(self):
+        """Regression guard: filenames the naive parser already handled
+        (dot-separated year) must still resolve."""
+        name, ep = _enrich_for_history('Gattaca.1997.1080p.BluRay.torrent')
+        assert name == 'Gattaca'
+        assert ep is None
+
+    def test_tv_unaffected_by_robust_path(self):
+        """Regression guard: TV episode parsing path still produces the
+        same media_title and ep_str."""
+        name, ep = _enrich_for_history('Bad.Monkey.S01E01.1080p.ATVP.WEB-DL.torrent')
+        assert name == 'Bad Monkey'
+        assert ep == 'S01E01'
+
+    def test_tv_with_year_prefix(self):
+        """TV release with year prefix, no parens — library parser
+        strips trailing year after season cut."""
+        name, ep = _enrich_for_history('Fargo.2014.S03E01.720p.torrent')
+        assert name == 'Fargo'
+        assert ep == 'S03E01'
+
+    def test_empty_filename_after_strip(self):
+        """Pathological input: only the extension. Must still return
+        None, not crash."""
+        name, ep = _enrich_for_history('.torrent')
+        assert name is None
+        assert ep is None
+
+
+class TestCanonicalTitleResolution:
+    """Tests for _resolve_canonical_title and _lookup_canonical_in_tmdb.
+
+    Each test stubs the TMDB cache loader to return a controlled fixture,
+    so the lookup logic is exercised deterministically without touching
+    the real /config/tmdb_cache.json file.
+    """
+
+    def _patch_cache(self, monkeypatch, cache):
+        """Patch tmdb._load_cache so the resolver sees the fixture."""
+        from utils import tmdb as _tmdb
+        monkeypatch.setattr(_tmdb, '_load_cache', lambda: cache)
+
+    def test_direct_year_qualified_hit(self, monkeypatch):
+        """Parser produces clean title; cache has a year-qualified entry
+        — lookup returns its canonical 'title' field."""
+        from utils.blackhole import _resolve_canonical_title
+        self._patch_cache(monkeypatch, {
+            'movies': {
+                'gattaca (1997)': {
+                    'title': 'Gattaca',
+                    'release_date': '1997-10-24',
+                },
+            },
+        })
+        result = _resolve_canonical_title(
+            'Gattaca.1997.1080p.BluRay.torrent', 'Gattaca', is_tv=False,
+        )
+        assert result == 'Gattaca'
+
+    def test_prefix_match_recovers_from_actor_genre_junk(self, monkeypatch):
+        """The Gattaca regression case — parser leaves "Gattaca Ethan
+        Hawke Sci Fi" and the prefix matcher resolves it to canonical
+        "Gattaca" via the cache."""
+        from utils.blackhole import _resolve_canonical_title
+        self._patch_cache(monkeypatch, {
+            'movies': {
+                'gattaca (1997)': {
+                    'title': 'Gattaca',
+                    'release_date': '1997-10-24',
+                },
+            },
+        })
+        result = _resolve_canonical_title(
+            'Gattaca.Ethan.Hawke.Sci.Fi.(1997).1080p.BluRay.x264-GROUP.torrent',
+            'Gattaca Ethan Hawke Sci Fi (1997)', is_tv=False,
+        )
+        assert result == 'Gattaca'
+
+    def test_year_mismatch_excludes_candidate(self, monkeypatch):
+        """When parsed year disagrees with cache entry's year, prefix
+        match must NOT fire — no false positive."""
+        from utils.blackhole import _resolve_canonical_title
+        self._patch_cache(monkeypatch, {
+            'movies': {
+                'gattaca (2020)': {
+                    'title': 'Gattaca',
+                    'release_date': '2020-01-01',
+                },
+            },
+        })
+        result = _resolve_canonical_title(
+            'Gattaca.Ethan.Hawke.Sci.Fi.(1997).1080p.torrent',
+            'fallback', is_tv=False,
+        )
+        # Year mismatch → cache miss → falls back to library parser output.
+        assert result == 'Gattaca Ethan Hawke Sci Fi'
+
+    def test_longest_prefix_wins(self, monkeypatch):
+        """When multiple cache entries are valid prefixes, the longest
+        (most specific) wins. Prevents 'The Dark' from beating 'The
+        Dark Knight' for a Dark Knight release."""
+        from utils.blackhole import _resolve_canonical_title
+        self._patch_cache(monkeypatch, {
+            'movies': {
+                'the dark (2005)': {
+                    'title': 'The Dark',
+                    'release_date': '2005-01-01',
+                },
+                'the dark knight (2008)': {
+                    'title': 'The Dark Knight',
+                    'release_date': '2008-07-18',
+                },
+            },
+        })
+        result = _resolve_canonical_title(
+            'The.Dark.Knight.2008.BluRay.1080p.torrent',
+            'The Dark Knight', is_tv=False,
+        )
+        assert result == 'The Dark Knight'
+
+    def test_non_prefix_does_not_match(self, monkeypatch):
+        """A cache entry whose tokens appear MID-string (not at start)
+        must not match. Real release names put the title first."""
+        from utils.blackhole import _resolve_canonical_title
+        self._patch_cache(monkeypatch, {
+            'movies': {
+                'sci fi (2020)': {
+                    'title': 'Sci Fi',
+                    'release_date': '2020-01-01',
+                },
+            },
+        })
+        result = _resolve_canonical_title(
+            'Gattaca.Ethan.Hawke.Sci.Fi.(1997).1080p.torrent',
+            'fallback', is_tv=False,
+        )
+        # "sci fi" appears mid-string in parsed tokens, not at start.
+        # No prefix match → fall back to library parser output.
+        assert result == 'Gattaca Ethan Hawke Sci Fi'
+
+    def test_show_section_used_for_tv(self, monkeypatch):
+        """is_tv=True must look in the 'shows' section, not 'movies'."""
+        from utils.blackhole import _resolve_canonical_title
+        self._patch_cache(monkeypatch, {
+            'movies': {
+                'breaking bad (2008)': {
+                    'title': 'Breaking Bad MOVIE',
+                    'release_date': '2008-01-01',
+                },
+            },
+            'shows': {
+                'breaking bad': {
+                    'title': 'Breaking Bad',
+                    'first_air_date': '2008-01-20',
+                },
+            },
+        })
+        result = _resolve_canonical_title(
+            'Breaking.Bad.S01E05.1080p.torrent',
+            'Breaking Bad', is_tv=True,
+        )
+        assert result == 'Breaking Bad'  # from shows, not the movie spoof
+
+    def test_empty_cache_falls_back_to_library_parser(self, monkeypatch):
+        """No cache file — resolver returns library parser output."""
+        from utils.blackhole import _resolve_canonical_title
+        self._patch_cache(monkeypatch, {})
+        result = _resolve_canonical_title(
+            'Gattaca.(1997).1080p.BluRay.torrent', 'fallback', is_tv=False,
+        )
+        assert result == 'Gattaca'
+
+    def test_load_cache_exception_falls_back(self, monkeypatch):
+        """Cache load raises — resolver still produces library parser
+        output (never propagates the error)."""
+        from utils.blackhole import _resolve_canonical_title
+        from utils import tmdb as _tmdb
+
+        def _raise():
+            raise OSError("disk error")
+        monkeypatch.setattr(_tmdb, '_load_cache', _raise)
+        result = _resolve_canonical_title(
+            'Gattaca.1997.1080p.torrent', 'Gattaca', is_tv=False,
+        )
+        assert result == 'Gattaca'
+
+    def test_robust_parser_failure_falls_back_to_naive(self, monkeypatch):
+        """If parse_folder_name explodes for any reason, resolver returns
+        the original fallback_name (never None, never empty)."""
+        from utils.blackhole import _resolve_canonical_title
+        from utils import library
+
+        def _raise(name):
+            raise RuntimeError("boom")
+        monkeypatch.setattr(library, 'parse_folder_name', _raise)
+        result = _resolve_canonical_title(
+            'Gattaca.1997.torrent', 'naive fallback', is_tv=False,
+        )
+        assert result == 'naive fallback'
+
+    def test_empty_filename_returns_fallback(self):
+        """Defensive: empty input returns the fallback unchanged."""
+        from utils.blackhole import _resolve_canonical_title
+        assert _resolve_canonical_title('', 'x', is_tv=False) == 'x'
+        assert _resolve_canonical_title(None, 'x', is_tv=False) == 'x'
+
+    def test_only_extension_returns_fallback(self):
+        """Filename of just `.torrent` strips to empty — fallback
+        passthrough, no resolver work."""
+        from utils.blackhole import _resolve_canonical_title
+        assert _resolve_canonical_title('.torrent', 'x', is_tv=False) == 'x'
+
+    def test_year_missing_does_not_filter(self, monkeypatch):
+        """When parsed_year is None, year filtering is skipped entirely."""
+        from utils.blackhole import _resolve_canonical_title
+        self._patch_cache(monkeypatch, {
+            'movies': {
+                'somemovie': {
+                    'title': 'SomeMovie',
+                    'release_date': '2000-01-01',
+                },
+            },
+        })
+        # Library parser won't find a year in this filename.
+        result = _resolve_canonical_title(
+            'SomeMovie.1080p.WEB.torrent', 'SomeMovie', is_tv=False,
+        )
+        # Direct match: norm "somemovie" hits the bare key.
+        assert result == 'SomeMovie'
+
+    def test_multi_token_entry_year_missing_fails_open(self, monkeypatch):
+        """Multi-token cache entry without release_date: parsed-year
+        filter falls open (legacy entries lack the field; the candidate's
+        token-count specificity already protects against false positives).
+
+        Single-token candidates use stricter fail-closed semantics — see
+        test_single_token_prefix_no_entry_year_rejected.
+        """
+        from utils.blackhole import _resolve_canonical_title
+        self._patch_cache(monkeypatch, {
+            'movies': {
+                'the dark knight (2008)': {
+                    'title': 'The Dark Knight',
+                    # no release_date — legacy entry
+                },
+            },
+        })
+        # Multi-token prefix ["the","dark","knight"] matches parser
+        # output exactly.  Parsed year 2008, entry year missing →
+        # fail-open accepts.
+        result = _resolve_canonical_title(
+            'The.Dark.Knight.Extras.2008.1080p.torrent',
+            'fallback', is_tv=False,
+        )
+        assert result == 'The Dark Knight'
+
+    def test_non_dict_cache_entry_skipped(self, monkeypatch):
+        """Defensive: malformed cache shouldn't crash. Non-dict entries
+        must be skipped silently."""
+        from utils.blackhole import _resolve_canonical_title
+        self._patch_cache(monkeypatch, {
+            'movies': {
+                'gattaca': 'not a dict',  # corrupt entry
+                'gattaca (1997)': {
+                    'title': 'Gattaca',
+                    'release_date': '1997-10-24',
+                },
+            },
+        })
+        result = _resolve_canonical_title(
+            'Gattaca.Ethan.Hawke.(1997).torrent', 'fallback', is_tv=False,
+        )
+        assert result == 'Gattaca'
+
+    def test_non_string_title_in_entry_does_not_crash(self, monkeypatch):
+        """Defensive: malformed cache entry where 'title' is a dict/list/int
+        must not raise AttributeError out of the resolver.  Pre-fix this
+        would propagate up to _enrich_for_history's caller and break the
+        whole grab-event logging path on a single bad entry."""
+        from utils.blackhole import _resolve_canonical_title
+        self._patch_cache(monkeypatch, {
+            'movies': {
+                'gattaca (1997)': {
+                    'title': {'unexpected': 'dict'},  # corrupt — not a string
+                    'release_date': '1997-10-24',
+                },
+                'gattaca (2020)': {
+                    'title': ['also', 'wrong'],  # corrupt — not a string
+                    'release_date': '2020-01-01',
+                },
+            },
+        })
+        # Direct hit returns '' (skipped), prefix match also returns '' →
+        # falls back to library parser output.  Critically: no exception.
+        result = _resolve_canonical_title(
+            'Gattaca.1997.1080p.BluRay.torrent', 'fallback', is_tv=False,
+        )
+        assert result == 'Gattaca'
+
+    def test_non_string_title_during_prefix_scan_skipped(self, monkeypatch):
+        """Even when the bad entry would otherwise prefix-match, it must
+        be skipped without crashing, and a sibling valid entry must
+        still win."""
+        from utils.blackhole import _resolve_canonical_title
+        self._patch_cache(monkeypatch, {
+            'movies': {
+                'gattaca (1997)': {
+                    'title': 12345,  # int — not a string
+                    'release_date': '1997-10-24',
+                },
+                'gattaca ethan hawke sci fi (1997)': {
+                    'title': 'Gattaca',  # the valid one
+                    'release_date': '1997-10-24',
+                },
+            },
+        })
+        result = _resolve_canonical_title(
+            'Gattaca.Ethan.Hawke.Sci.Fi.(1997).1080p.torrent',
+            'fallback', is_tv=False,
+        )
+        assert result == 'Gattaca'
+
+    def test_single_token_prefix_requires_year(self, monkeypatch):
+        """Single-word cache entry like 'The' (the 2017 film) must NOT
+        prefix-match a multi-word parse without year confirmation —
+        otherwise every release starting with 'The' resolves to the
+        wrong canonical."""
+        from utils.blackhole import _resolve_canonical_title
+        self._patch_cache(monkeypatch, {
+            'movies': {
+                'the': {
+                    'title': 'The',
+                    'release_date': '2017-01-01',
+                },
+            },
+        })
+        result = _resolve_canonical_title(
+            'The.Dark.Knight.2008.BluRay.1080p.torrent',
+            'fallback', is_tv=False,
+        )
+        # Year mismatch (2008 vs 2017): single-token guard rejects.
+        # Falls back to library parser output.
+        assert result == 'The Dark Knight'
+
+    def test_single_token_prefix_no_year_in_filename_rejected(self, monkeypatch):
+        """If the filename has no year, single-token cache entries must
+        not prefix-match (no way to disambiguate)."""
+        from utils.blackhole import _resolve_canonical_title
+        self._patch_cache(monkeypatch, {
+            'movies': {
+                'the': {
+                    'title': 'The',
+                    'release_date': '2017-01-01',
+                },
+            },
+        })
+        # No year-bearing filename → parser yields year=None
+        result = _resolve_canonical_title(
+            'The.Dark.Knight.BluRay.1080p.torrent',
+            'fallback', is_tv=False,
+        )
+        # Single-token guard fires (year is None) → no match → fallback
+        assert result == 'The Dark Knight'
+
+    def test_single_token_prefix_year_match_accepted(self, monkeypatch):
+        """Single-token candidate with matching year IS accepted —
+        the year provides the disambiguation."""
+        from utils.blackhole import _resolve_canonical_title
+        self._patch_cache(monkeypatch, {
+            'movies': {
+                'gattaca': {
+                    'title': 'Gattaca',
+                    'release_date': '1997-10-24',
+                },
+            },
+        })
+        # Single-token candidate "gattaca" matches multi-word parsed
+        # output, year 1997 == entry year 1997 → accepted.
+        result = _resolve_canonical_title(
+            'Gattaca.Ethan.Hawke.(1997).1080p.torrent',
+            'fallback', is_tv=False,
+        )
+        assert result == 'Gattaca'
+
+    def test_single_token_prefix_no_entry_year_rejected(self, monkeypatch):
+        """Single-token candidate without an entry year is rejected even
+        if the filename has a year — fail-closed for narrow guard."""
+        from utils.blackhole import _resolve_canonical_title
+        self._patch_cache(monkeypatch, {
+            'movies': {
+                'the': {
+                    'title': 'The',
+                    # no release_date
+                },
+            },
+        })
+        result = _resolve_canonical_title(
+            'The.Dark.Knight.2008.1080p.torrent',
+            'fallback', is_tv=False,
+        )
+        # Single-token + missing entry_year + non-None parsed_year:
+        # fail-closed → no match → fallback to library parser.
+        assert result == 'The Dark Knight'
+
+    def test_extract_entry_year_release_date(self):
+        """_extract_entry_year reads release_date for movies."""
+        from utils.blackhole import _extract_entry_year
+        assert _extract_entry_year({'release_date': '1997-10-24'}) == 1997
+        assert _extract_entry_year({'release_date': '2008-07-18'}) == 2008
+
+    def test_extract_entry_year_first_air_date(self):
+        """_extract_entry_year reads first_air_date for shows."""
+        from utils.blackhole import _extract_entry_year
+        assert _extract_entry_year({'first_air_date': '2008-01-20'}) == 2008
+        # release_date takes precedence when both present
+        assert _extract_entry_year(
+            {'release_date': '1997-10-24', 'first_air_date': '2020-01-01'}
+        ) == 1997
+
+    def test_extract_entry_year_missing_returns_none(self):
+        """No date field → None."""
+        from utils.blackhole import _extract_entry_year
+        assert _extract_entry_year({}) is None
+        assert _extract_entry_year({'title': 'X'}) is None
+
+    def test_extract_entry_year_malformed_returns_none(self):
+        """Malformed date strings, non-string values, short strings →
+        None (no crash)."""
+        from utils.blackhole import _extract_entry_year
+        assert _extract_entry_year({'release_date': ''}) is None
+        assert _extract_entry_year({'release_date': '19'}) is None  # too short
+        assert _extract_entry_year({'release_date': '19xx-01-01'}) is None
+        assert _extract_entry_year({'release_date': None}) is None
+        assert _extract_entry_year({'release_date': 1997}) is None  # int, not str
+        assert _extract_entry_year({'release_date': ['1997']}) is None  # list
+
+    def test_enrich_uses_canonical_title_end_to_end(self, monkeypatch):
+        """End-to-end: _enrich_for_history must surface the canonical
+        TMDB title when a hit is found."""
+        from utils import tmdb as _tmdb
+        monkeypatch.setattr(_tmdb, '_load_cache', lambda: {
+            'movies': {
+                'gattaca (1997)': {
+                    'title': 'Gattaca',
+                    'release_date': '1997-10-24',
+                },
+            },
+        })
+        name, ep = _enrich_for_history(
+            'Gattaca.Ethan.Hawke.Sci.Fi.(1997).1080p.BluRay.x264-GROUP.torrent'
+        )
+        assert name == 'Gattaca'
+        assert ep is None
+
+
 class TestDiscRipDetection:
     """Tests for _has_usable_media_files and _extract_filenames_from_info."""
 

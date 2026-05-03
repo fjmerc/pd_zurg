@@ -3197,6 +3197,23 @@ class LibraryScanner:
             return
 
         removed = 0
+        # Unique release names of deleted symlinks; fed to _attempt_arr_research
+        # below so Sonarr/Radarr can re-search disappeared content.  Mirrors the
+        # phase-3 step in scheduled_tasks.verify_symlinks — without this, the
+        # library cleanup silently deletes broken symlinks and the arrs only
+        # learn about it on their next disk scan.
+        affected_releases = set()
+        # Hoisted out of the per-symlink loop so an ImportError raises once and
+        # loud instead of N times into a debug log.  Symmetric with the
+        # post-loop _attempt_arr_research import below.
+        try:
+            from utils.scheduled_tasks import _extract_release_info
+        except ImportError as exc:
+            logger.warning(
+                "[library] Could not import _extract_release_info — broken-symlink "
+                "release tracking disabled this scan: %s", exc,
+            )
+            _extract_release_info = None
 
         for lib_path in (self._local_movies_path, self._local_tv_path):
             if not lib_path or not os.path.isdir(lib_path):
@@ -3240,11 +3257,67 @@ class LibraryScanner:
                                         )
                                     except OSError as e:
                                         logger.debug("[library] Failed to remove broken symlink %s: %s", fpath, e)
+                                        continue
+                                    # Record for re-search after the loop.  WARNING (not
+                                    # debug) because a parse failure here loses the
+                                    # reconcile signal — the symlink is gone but the arr
+                                    # won't be told until verify_symlinks runs (≤6 h).
+                                    if _extract_release_info is not None:
+                                        try:
+                                            release_name, _, _ = _extract_release_info(
+                                                target, [base_prefix]
+                                            )
+                                        except Exception as exc:
+                                            logger.warning(
+                                                "[library] Could not parse release name from %s — "
+                                                "arr re-search will be deferred to verify_symlinks: %s",
+                                                target, exc,
+                                            )
+                                            release_name = None
+                                        if release_name:
+                                            affected_releases.add(release_name)
             except (PermissionError, OSError) as e:
                 logger.debug("[library] Cannot scan %s for broken symlinks: %s", lib_path, e)
 
-        if removed:
-            logger.info("[library] Cleaned up %d broken debrid symlink(s) from local library", removed)
+        if not removed:
+            return
+
+        logger.info("[library] Cleaned up %d broken debrid symlink(s) from local library", removed)
+
+        # Trigger arr re-search for disappeared content so Sonarr/Radarr stop
+        # serving phantom file records.  Gated on gap_fill_enabled() to honor
+        # the same opt-out as verify_symlinks.  _attempt_arr_research has its
+        # own retrigger cooldown so frequent library scans don't stampede.
+        searched = 0
+        if affected_releases and gap_fill_enabled():
+            try:
+                from utils.scheduled_tasks import _attempt_arr_research
+            except ImportError:
+                _attempt_arr_research = None
+            if _attempt_arr_research:
+                for release_name in affected_releases:
+                    try:
+                        if _attempt_arr_research(release_name):
+                            searched += 1
+                    except Exception as exc:
+                        logger.warning(
+                            "[library] Re-search failed for '%s': %s",
+                            release_name, exc,
+                        )
+
+        if _history:
+            try:
+                _history.log_event(
+                    'cleanup', 'Library Symlink Cleanup',
+                    source='library_scan',
+                    meta={
+                        'cause': 'library_symlink_cleanup',
+                        'deleted': removed,
+                        'searched': searched,
+                    },
+                )
+            except Exception as exc:
+                logger.debug("[library] Failed to log cleanup event: %s", exc)
 
     def _create_debrid_symlinks(self, shows, movies, path_index):
         """Create local library symlinks for debrid-only content.

@@ -134,6 +134,18 @@ def test_task_verify_symlinks_with_counts():
     assert 'repaired 2' in s and 'searched 5' in s and 'deleted 1' in s
 
 
+def test_library_symlink_cleanup_empty_when_no_action():
+    ev = _ev('library_symlink_cleanup')
+    assert 'nothing to do' in format_event(ev)['short']
+
+
+def test_library_symlink_cleanup_with_counts():
+    ev = _ev('library_symlink_cleanup', deleted=24, searched=2)
+    s = format_event(ev)['short']
+    assert 'deleted 24' in s and 'searched 2' in s
+    assert 'Library symlink cleanup' in s
+
+
 def test_blackhole_new_import_with_count():
     ev = _ev('blackhole_new_import', count=5, release='Big.Pack.2024')
     assert 'Blackhole import: 5 files from Big.Pack.2024' in format_event(ev)['short']

@@ -376,6 +376,18 @@ def _fmt_task_verify_symlinks(ev, meta):
     return short, short
 
 
+def _fmt_library_symlink_cleanup(ev, meta):
+    s = meta.get('searched', 0)
+    d = meta.get('deleted', 0)
+    pieces = []
+    if s:
+        pieces.append(f'searched {s}')
+    if d:
+        pieces.append(f'deleted {d}')
+    short = 'Library symlink cleanup — ' + (', '.join(pieces) if pieces else 'nothing to do')
+    return short, short
+
+
 _CAUSE_FORMATTERS = {
     'library_new_import': _fmt_library_new_import,
     'library_upgrade_replaced': _fmt_library_upgrade_replaced,
@@ -415,6 +427,7 @@ _CAUSE_FORMATTERS = {
     'task_stale_grab_detection': _fmt_task_stale_grab_detection,
     'task_routing_audit': _fmt_task_routing_audit,
     'task_verify_symlinks': _fmt_task_verify_symlinks,
+    'library_symlink_cleanup': _fmt_library_symlink_cleanup,
 }
 
 
@@ -593,6 +606,12 @@ FORMATTER_JS = r"""
       if (m.searched) parts.push('searched ' + m.searched);
       if (m.deleted)  parts.push('deleted ' + m.deleted);
       return 'Symlink verify — ' + (parts.length ? parts.join(', ') : 'nothing to do');
+    },
+    library_symlink_cleanup: function(ev,m){
+      var parts = [];
+      if (m.searched) parts.push('searched ' + m.searched);
+      if (m.deleted)  parts.push('deleted ' + m.deleted);
+      return 'Library symlink cleanup — ' + (parts.length ? parts.join(', ') : 'nothing to do');
     }
   };
 

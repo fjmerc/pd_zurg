@@ -174,7 +174,7 @@ here is inert while it's OFF.
 |---|---|---|
 | `TMDB_API_KEY` | [TMDB](https://www.themoviedb.org/) API key (free). Enables posters, episode titles, missing-episode detection, IMDb ID resolution | |
 | `HISTORY_RETENTION_DAYS` | Days to keep activity history | `30` |
-| `BLOCKLIST_AUTO_ADD` | Auto-blocklist torrents that hit terminal debrid errors | `true` |
+| `BLOCKLIST_AUTO_ADD` | Auto-blocklist torrents that hit terminal debrid errors, disc-rip rejection, or uncached-timeout failures | `true` |
 | `BLOCKLIST_EXPIRY_DAYS` | Auto-expire auto-added blocklist entries after N days (0=never). Manual entries kept forever | `0` |
 | `LIBRARY_PREFERENCE_AUTO_ENFORCE` | Auto-switch sources when content arrives matching a stored preference | `false` |
 | `DEBRID_UNAVAILABLE_THRESHOLD_DAYS` | Days of failed searches before marking content debrid-unavailable | `3` |

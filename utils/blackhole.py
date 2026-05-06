@@ -1815,24 +1815,47 @@ class BlackholeWatcher:
                             f"[blackhole] Failed to delete timed-out torrent "
                             f"{torrent_id} from debrid: {msg}"
                         )
-                    # History event fires regardless of whether the delete
-                    # landed — the timeout happened either way and the audit
-                    # trail should reflect it.  Detail string distinguishes
-                    # the two outcomes for post-hoc analysis.
-                    if _history:
-                        _mt, _ep = _enrich_for_history(filename)
-                        _detail = ('Timed out uncached — removed from debrid'
-                                   if deleted_from_debrid
-                                   else 'Timed out uncached — debrid cleanup skipped')
-                        _history.log_event(
-                            'failed', filename, episode=_ep, source='blackhole',
-                            detail=_detail,
-                            meta={'cause': 'uncached_timeout',
-                                  'torrent_id': str(torrent_id),
-                                  'deleted': deleted_from_debrid,
-                                  'provider': self.debrid_service},
-                            media_title=_mt,
-                        )
+                # History fires regardless of cleanup opt-in — the timeout
+                # happened either way and the audit trail must reflect it.
+                # ``meta.deleted`` distinguishes the two outcomes (cleanup
+                # ran vs. user opted out) for post-hoc analysis.  Enrich
+                # unconditionally to mirror the disc-rip path below; the
+                # ``_history``/``_blocklist`` consumers below each have
+                # their own truthy guard.
+                _mt, _ep = _enrich_for_history(filename)
+                if _history:
+                    _detail = ('Timed out uncached — removed from debrid'
+                               if deleted_from_debrid
+                               else 'Timed out uncached — debrid cleanup skipped')
+                    _history.log_event(
+                        'failed', filename, episode=_ep, source='blackhole',
+                        detail=_detail,
+                        meta={'cause': 'uncached_timeout',
+                              'torrent_id': str(torrent_id),
+                              'deleted': deleted_from_debrid,
+                              'provider': self.debrid_service},
+                        media_title=_mt,
+                    )
+                # Auto-blocklist the hash so the same dead-swarm release
+                # isn't re-grabbed on every wanted-search cycle.  Mirrors
+                # the terminal_error path below — same env gate, same
+                # source, same history shape.  Hash comes from the most
+                # recent successful check_status; empty hash (every poll
+                # raised before timeout) silently skips the add.
+                if _blocklist and str(os.environ.get('BLOCKLIST_AUTO_ADD', 'true')).lower() == 'true':
+                    bl_hash = self._extract_hash_from_info(info)
+                    if bl_hash:
+                        _blocklist.add(bl_hash, filename,
+                                       reason='Uncached on debrid (timed out)',
+                                       source='auto')
+                        if _history:
+                            _history.log_event('blocklist_added', filename, episode=_ep,
+                                               source='blackhole',
+                                               detail='Auto-blocklisted: uncached timeout',
+                                               meta={'cause': 'auto_blocklist_added',
+                                                     'blocklist_reason': 'uncached_timeout',
+                                                     'info_hash': bl_hash},
+                                               media_title=_mt)
                 if _notify:
                     _notify('download_error', 'Blackhole: Torrent Timeout',
                             f'{filename} timed out waiting for debrid processing',

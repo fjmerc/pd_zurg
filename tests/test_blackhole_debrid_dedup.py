@@ -382,6 +382,156 @@ class TestBlackholeTimeoutCleanup:
         watcher._remove_pending.assert_called_once_with('T123')
 
 
+class TestBlackholeUncachedTimeoutAutoBlocklist:
+    """Closes the grab/fail/regrab loop where Sonarr keeps re-grabbing the
+    same uncached release every wanted-search cycle.  After the
+    ``mount_poll_timeout`` fires:
+      1. ``failed`` history event lands regardless of the cleanup opt-in
+         (previously gated by ``BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT``).
+      2. ``BLOCKLIST_AUTO_ADD`` (default true) adds the hash so the next
+         drop of the same .magnet is rejected at ``_process_file``.
+    """
+
+    @pytest.fixture
+    def watcher_polling(self):
+        """Watcher that lets ``check_status`` run at least once so ``info``
+        is populated with the hash that ``_extract_hash_from_info`` reads.
+        Mirrors ``test_delete_after_real_status_polls`` shape."""
+        from utils.blackhole import BlackholeWatcher
+        w = BlackholeWatcher.__new__(BlackholeWatcher)
+        w.debrid_service = 'realdebrid'
+        w.debrid_api_key = 'test_key'
+        # 0.3s/0.05s mirrors ``test_delete_after_real_status_polls`` —
+        # tight enough to keep the test fast, loose enough that CI jitter
+        # doesn't fire the timeout before the first ``check_status`` call
+        # populates ``info`` with the hash that ``_extract_hash_from_info``
+        # reads.
+        w.mount_poll_timeout = 0.3
+        w.mount_poll_interval = 0.05
+        w._stop_event = threading.Event()
+        w._remove_pending = MagicMock()
+        w._check_realdebrid_status = MagicMock(
+            return_value=('downloading', {'hash': 'b' * 40,
+                                          'status': 'downloading'})
+        )
+        w._check_alldebrid_status = MagicMock()
+        w._check_torbox_status = MagicMock()
+        w._is_torrent_ready = MagicMock(return_value=False)
+        w._is_terminal_error = MagicMock(return_value=False)
+        return w
+
+    def test_history_fires_when_cleanup_opt_in_is_off(self, watcher_polling,
+                                                        monkeypatch):
+        """Buddy-bug fix: with the default ``BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT``
+        (off), users were never seeing uncached timeouts in the activity
+        feed because the history call was inside the cleanup gate."""
+        monkeypatch.delenv('BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', raising=False)
+        monkeypatch.setenv('BLOCKLIST_AUTO_ADD', 'false')  # isolate history
+        mock_history = MagicMock()
+        with patch('utils.blackhole._history', mock_history):
+            watcher_polling._monitor_and_symlink('T123', 'release.magnet')
+        types_logged = [c.args[0] for c in mock_history.log_event.call_args_list]
+        assert 'failed' in types_logged
+        failed_call = next(c for c in mock_history.log_event.call_args_list
+                           if c.args[0] == 'failed')
+        meta = failed_call.kwargs.get('meta', {})
+        assert meta.get('cause') == 'uncached_timeout'
+        assert meta.get('deleted') is False
+        detail = failed_call.kwargs.get('detail', '')
+        assert 'skipped' in detail.lower()
+
+    def test_blocklist_add_default_on_with_cleanup_off(self, watcher_polling,
+                                                         monkeypatch):
+        """Default ``BLOCKLIST_AUTO_ADD=true`` blocklists the hash even when
+        the user hasn't opted into RD cleanup — the loop-breaking effect is
+        independent of the cleanup gate."""
+        monkeypatch.delenv('BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', raising=False)
+        monkeypatch.delenv('BLOCKLIST_AUTO_ADD', raising=False)
+        mock_blocklist = MagicMock()
+        mock_history = MagicMock()
+        with patch('utils.blackhole._blocklist', mock_blocklist), \
+             patch('utils.blackhole._history', mock_history):
+            watcher_polling._monitor_and_symlink('T123', 'release.magnet')
+        mock_blocklist.add.assert_called_once()
+        args, kwargs = mock_blocklist.add.call_args
+        assert args[0] == ('B' * 40)  # hash uppercased by _extract_hash_from_info
+        assert args[1] == 'release.magnet'
+        assert kwargs.get('source') == 'auto'
+        assert 'uncached' in kwargs.get('reason', '').lower()
+        types_logged = [c.args[0] for c in mock_history.log_event.call_args_list]
+        assert 'blocklist_added' in types_logged
+        bl_call = next(c for c in mock_history.log_event.call_args_list
+                       if c.args[0] == 'blocklist_added')
+        bl_meta = bl_call.kwargs.get('meta', {})
+        assert bl_meta.get('cause') == 'auto_blocklist_added'
+        assert bl_meta.get('blocklist_reason') == 'uncached_timeout'
+        assert bl_meta.get('info_hash') == ('B' * 40)
+
+    def test_blocklist_add_skipped_when_disabled(self, watcher_polling,
+                                                   monkeypatch):
+        monkeypatch.setenv('BLOCKLIST_AUTO_ADD', 'false')
+        mock_blocklist = MagicMock()
+        mock_history = MagicMock()
+        with patch('utils.blackhole._blocklist', mock_blocklist), \
+             patch('utils.blackhole._history', mock_history):
+            watcher_polling._monitor_and_symlink('T123', 'release.magnet')
+        mock_blocklist.add.assert_not_called()
+        # ``failed`` event still fires — gate is independent of history.
+        types_logged = [c.args[0] for c in mock_history.log_event.call_args_list]
+        assert 'failed' in types_logged
+        assert 'blocklist_added' not in types_logged
+
+    def test_blocklist_skipped_when_hash_unavailable(self, monkeypatch):
+        """If every status poll raised before timeout, ``info`` stays
+        empty and ``_extract_hash_from_info`` returns ''.  The blocklist
+        add is silently skipped — we never store an empty-hash entry."""
+        from utils.blackhole import BlackholeWatcher
+        w = BlackholeWatcher.__new__(BlackholeWatcher)
+        w.debrid_service = 'realdebrid'
+        w.debrid_api_key = 'test_key'
+        w.mount_poll_timeout = 0  # fire immediately, info stays {}
+        w.mount_poll_interval = 1
+        w._stop_event = threading.Event()
+        w._remove_pending = MagicMock()
+        w._check_realdebrid_status = MagicMock()
+        w._check_alldebrid_status = MagicMock()
+        w._check_torbox_status = MagicMock()
+        monkeypatch.setenv('BLOCKLIST_AUTO_ADD', 'true')
+        mock_blocklist = MagicMock()
+        mock_history = MagicMock()
+        with patch('utils.blackhole._blocklist', mock_blocklist), \
+             patch('utils.blackhole._history', mock_history):
+            w._monitor_and_symlink('T123', 'release.magnet')
+        mock_blocklist.add.assert_not_called()
+        types_logged = [c.args[0] for c in mock_history.log_event.call_args_list]
+        # ``failed`` history still fires for audit trail; only the
+        # blocklist add is skipped because we have no hash to record.
+        assert 'failed' in types_logged
+        assert 'blocklist_added' not in types_logged
+
+    def test_blocklist_add_with_cleanup_on_records_deleted_meta(
+        self, watcher_polling, monkeypatch
+    ):
+        """End-to-end: cleanup opt-in + auto-blocklist both fire, history
+        records ``deleted=True`` on the failed event and the blocklist
+        entry for the hash."""
+        monkeypatch.setenv('BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'true')
+        monkeypatch.setenv('BLOCKLIST_AUTO_ADD', 'true')
+        mock_client = MagicMock()
+        mock_blocklist = MagicMock()
+        mock_history = MagicMock()
+        with patch('utils.debrid_client.get_debrid_client',
+                   return_value=(mock_client, 'realdebrid')), \
+             patch('utils.blackhole._blocklist', mock_blocklist), \
+             patch('utils.blackhole._history', mock_history):
+            watcher_polling._monitor_and_symlink('T123', 'release.magnet')
+        mock_client.delete_torrent.assert_called_once_with('T123')
+        mock_blocklist.add.assert_called_once()
+        failed_call = next(c for c in mock_history.log_event.call_args_list
+                           if c.args[0] == 'failed')
+        assert failed_call.kwargs.get('meta', {}).get('deleted') is True
+
+
 class TestPlexDebridCacheRuleEnforcer:
     """Startup migration that injects the cache-required rule into every
     plex_debrid content version when ``PD_ENFORCE_CACHED_VERSIONS`` is on.

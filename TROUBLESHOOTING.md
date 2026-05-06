@@ -89,13 +89,26 @@ If you're still seeing duplicates:
 ## Sonarr/Radarr keeps re-grabbing the same failed torrent
 
 The blocklist should prevent this. It auto-blocks torrents that hit
-terminal debrid errors (`BLOCKLIST_AUTO_ADD` defaults to **ON**).
+terminal debrid errors, disc-rip rejection, or uncached-timeout
+(`BLOCKLIST_AUTO_ADD` defaults to **ON**).
 
 - Check `http://your-host:8080/blocklist` — the offending hash should
   be there.
 - If `BLOCKLIST_EXPIRY_DAYS` is non-zero, auto-added entries expire
   after that many days. Set it to `0` to keep them forever.
 - Manual entries in `/blocklist` are never expired.
+
+**Common case: dead-swarm release on an old show.** A UK BBC show or a
+2006-era series whose only release matching your quality profile has 0
+seeders never caches on debrid. The Activity feed will show a series of
+`grabbed → failed (Timed out uncached)` pairs every ~6 hours for the
+same release. The blocklist now catches this on first failure and the
+next `.magnet` drop with the same info-hash is rejected before it ever
+hits the debrid API (`blocklisted` event in the feed). If you want
+Sonarr to mark the grab as failed in *its* history too (so it auto-
+searches an alternative release on its next pass), do it manually from
+Sonarr Activity → History → blue X — pd_zurg's blocklist doesn't
+currently push grab-fail back to the arr.
 
 If the re-grabs keep happening for different hashes of the same release
 (quality variants), that's Sonarr/Radarr's normal retry behavior after

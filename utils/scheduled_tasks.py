@@ -34,6 +34,11 @@ _DEFAULTS = {
     'HOUSEKEEPING_INTERVAL': 24 * 3600,        # 24 hours
     'CONFIG_BACKUP_INTERVAL': 24 * 3600,       # 24 hours
     'MOUNT_LIVENESS_INTERVAL': 60,             # 1 minute
+    # Debrid health reconciler (plan 38). 12h matches a healthy 5000-torrent
+    # library producing ~5000 probes per sweep at the module's 60/min limit
+    # (≈85 min) — well clear of 12h, leaving headroom for other RD traffic.
+    # Power-user override via env var; not surfaced in the Settings UI.
+    'DEBRID_HEALTH_INTERVAL': 12 * 3600,       # 12 hours
 }
 
 
@@ -1118,6 +1123,23 @@ def register_all():
             interval_seconds=_get_interval('MOUNT_LIVENESS_INTERVAL'),
             description='Verify rclone FUSE mount is responsive',
             initial_delay=60,
+        )
+
+    # Debrid Health Reconciler (plan 38) — register whenever any RD
+    # credential is present in the environment, so the task surfaces
+    # in the scheduler UI even when DEBRID_HEALTH_ENABLED is OFF.
+    # The sweep itself is a no-op when disabled; this preserves the
+    # user's ability to manually trigger from the System page without
+    # restarting the container after toggling the env var ON.
+    rd_configured = bool(os.environ.get('RD_API_KEY') or os.path.isfile('/run/secrets/rd_api_key'))
+    if rd_configured:
+        from utils.debrid_health import run_sweep as _debrid_health_run
+        scheduler.register(
+            'debrid_health_reconcile',
+            _debrid_health_run,
+            interval_seconds=_get_interval('DEBRID_HEALTH_INTERVAL'),
+            description='Probe RD torrents for May 2026 keyword-filter blocks (infringing_file / error 35)',
+            initial_delay=900,  # 15 min after startup
         )
 
     # Notification Digest — daily summary if enabled

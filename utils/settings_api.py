@@ -193,6 +193,14 @@ ENV_SCHEMA = [
         ],
     },
     {
+        'name': 'Debrid Health',
+        'description': 'Background reconciler that detects Real-Debrid keyword-filter blocks (the May 2026 infringing_file / error 35 filter-gate) on the existing torrent set. Without this, Zurg keeps advertising blocked torrents as healthy — your library shows phantom content that won\'t play. Probes one sample file per torrent (default every 12h, rate-limited under RD\'s quota) and persists per-torrent block state to /config/debrid_health.json. Detection only in this phase; auto-remediation (delete from RD + arr re-search) and UI badges follow in later phases of plan 38.',
+        'fields': [
+            ('DEBRID_HEALTH_ENABLED', 'Enable Debrid Health Reconciler', 'boolean', False,
+             'Master kill switch for the periodic probe sweep. Default ON — turn OFF only if RD\'s API drifts and the prober starts misbehaving, or if you want to silence the background API calls entirely (default: ON).'),
+        ],
+    },
+    {
         'name': 'Debrid Search',
         'description': 'Interactive torrent search and one-click add to debrid',
         'fields': [
@@ -267,6 +275,9 @@ _ENV_DEFAULTS = {
     # as ON when the var isn't set in .env, matching runtime behavior in
     # utils/library.py::gap_fill_enabled().
     'GAP_FILL_ENABLED': 'true',
+    # Debrid health detection is on by default; matches
+    # utils/debrid_health.py::_enabled() and base/__init__.py Config.
+    'DEBRID_HEALTH_ENABLED': 'true',
     # Quality compromise true-defaults — see Config.load() in base/__init__.py.
     # Listed so the Settings UI renders the matching toggles as ON out of
     # the box instead of misleading the user with an OFF toggle when the

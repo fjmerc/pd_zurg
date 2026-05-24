@@ -168,6 +168,18 @@ here is inert while it's OFF.
 
 ---
 
+## Debrid health reconciler
+
+Background sweep that probes each Real-Debrid torrent for the **May 2026 keyword filter-gate** (RD returns `infringing_file` / error 35 for cached torrents whose filenames trip its keyword blocklist — `WEB-DL`, `AMZN`, `[RARBG]`, etc.). Without this, Zurg's WebDAV listing keeps showing blocked torrents as healthy and your library renders phantom content that won't play. State is persisted to `/config/debrid_health.json`. Detection only in the current release; auto-remediation lands in a later phase.
+
+| Variable | Description | Default |
+|---|---|---|
+| `DEBRID_HEALTH_ENABLED` | Master kill switch for the periodic probe sweep. Turn OFF only if RD's API drifts and the prober misbehaves, or to silence background API calls entirely | `true` |
+
+Sweep cadence (`DEBRID_HEALTH_INTERVAL`, default 12h) is a power-user override read directly from env and not surfaced in the Settings UI. Per-torrent re-probe TTL (7 d for healthy), rate limit (60/min, well under RD's 250/min user quota), and sweep cap (2000 probes per run) are intentionally hardcoded module constants to keep the env surface minimal — open a feature request if you actually need to tune one.
+
+---
+
 ## Library browser, preferences, gap-fill
 
 | Variable | Description | Default |

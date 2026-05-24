@@ -247,12 +247,19 @@ def _find_release_on_mount(release_name, rclone_mount):
     return None, None
 
 
-def _attempt_arr_research(release_name):
+def _attempt_arr_research(release_name, force_episodes=False):
     """Trigger Sonarr/Radarr search for a lost release.
 
     Uses ``parse_release_name`` to identify the content, then looks it up in
     the arr library and triggers a search.  Respects the shared retrigger
     cooldown to prevent search storms.
+
+    ``force_episodes`` skips the ``hasFile`` gate on the TV branch so the
+    caller can queue a search even when Sonarr's last scan still believes
+    the episode is present.  Used by ``debrid_health._remediate`` because
+    the just-issued ``delete_torrent`` won't drop out of Zurg's WebDAV
+    listing for ~15-30 s — Sonarr's view lags the truth, and we'd
+    otherwise skip every episode in the affected release.
 
     Returns True if a search was actually triggered.
     """
@@ -283,13 +290,16 @@ def _attempt_arr_research(release_name):
         for ep in episodes:
             if season is not None and ep.get('seasonNumber') != season:
                 continue
-            if not ep.get('hasFile'):
-                ep_id = ep.get('id')
-                if ep_id:
-                    item_key = ('sonarr', ep_id)
-                    if item_key not in _retrigger_history:
-                        target_eps.append(ep_id)
-                        _retrigger_history[item_key] = now_epoch
+            if not force_episodes and ep.get('hasFile'):
+                continue
+            ep_id = ep.get('id')
+            if not ep_id:
+                continue
+            item_key = ('sonarr', ep_id)
+            if item_key in _retrigger_history:
+                continue
+            target_eps.append(ep_id)
+            _retrigger_history[item_key] = now_epoch
 
         if target_eps:
             client.search_episodes(target_eps, media_title=name,

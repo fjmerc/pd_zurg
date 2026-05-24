@@ -710,3 +710,158 @@ class TestRemediation:
         assert mock_remediation_deps['log_event'].call_count == 1
         meta = mock_remediation_deps['log_event'].call_args.kwargs['meta']
         assert meta['info_hash'] == 'CCCC2222'
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.1: force_episodes — TV re-search must fire even when Sonarr still
+# thinks the episode is present.
+#
+# Regression scenario from the 2026-05-24 live sweep: 0/23 TV episodes were
+# re-searched after auto-remediation because ``delete_torrent`` hasn't
+# propagated through Zurg's WebDAV listing yet, so Sonarr's ``hasFile``
+# state lags the truth by ~15-30 s. The fix wires ``force_episodes=True``
+# through ``_remediate`` so the gate is bypassed for this caller only.
+# ---------------------------------------------------------------------------
+
+class TestForceEpisodesGate:
+
+    @pytest.fixture
+    def _remediation_persistence_stubs(self, monkeypatch):
+        """Patch the destructive side effects of remediation EXCEPT
+        ``_attempt_arr_research`` — this suite needs the real function so
+        the ``force_episodes`` path is actually exercised."""
+        monkeypatch.setattr(
+            'utils.blocklist.add', MagicMock(return_value='blocklist-id'),
+        )
+        monkeypatch.setattr(
+            'utils.history.log_event', MagicMock(return_value='event-id'),
+        )
+        monkeypatch.setattr('utils.notifications.notify', MagicMock())
+
+    @pytest.fixture
+    def _clean_retrigger_history(self):
+        """``_retrigger_history`` is module-level state shared across the
+        whole process — snapshot + restore so a test that fills it can't
+        poison sibling tests."""
+        from utils.scheduled_tasks import _retrigger_history
+        snapshot = dict(_retrigger_history)
+        _retrigger_history.clear()
+        yield _retrigger_history
+        _retrigger_history.clear()
+        _retrigger_history.update(snapshot)
+
+    def test_debrid_health_remediates_tv_with_hasFile_true(
+            self, state_path, no_sleep, rd_enabled, auto_remediate_on,
+            _remediation_persistence_stubs, _clean_retrigger_history,
+    ):
+        """End-to-end: a blocked TV release with Sonarr's last scan still
+        reporting ``hasFile=True`` MUST still result in ``search_episodes``
+        being called. Pre-fix this skipped every episode in the release."""
+        rd_client = _mock_client(
+            torrents=[_torrent(
+                'T1', 'AAAA0000',
+                filename='Landman.S01E04.1080p.AMZN.WEB-DL.mkv',
+            )],
+            probe_results={'T1': {
+                'status': 'blocked', 'reason': 'infringing_file', 'http': 451,
+            }},
+        )
+        rd_client.delete_torrent.return_value = True
+
+        sonarr = MagicMock()
+        sonarr.configured = True
+        sonarr.find_series_in_library.return_value = {'id': 100, 'title': 'Landman'}
+        # hasFile=True is the whole point of this test — pre-fix this
+        # skipped queueing the episode for search.
+        sonarr.get_episodes.return_value = [
+            {'id': 555, 'seasonNumber': 1, 'episodeNumber': 4, 'hasFile': True},
+            {'id': 556, 'seasonNumber': 1, 'episodeNumber': 5, 'hasFile': True},
+            {'id': 600, 'seasonNumber': 2, 'episodeNumber': 1, 'hasFile': True},
+        ]
+
+        with _patch_client(rd_client), \
+                patch('utils.arr_client.SonarrClient', return_value=sonarr):
+            debrid_health.run_sweep()
+
+        # search_episodes called once with only the S01 episodes — the
+        # season filter still applies, only the ``hasFile`` gate is lifted.
+        sonarr.search_episodes.assert_called_once()
+        called_eps = sonarr.search_episodes.call_args.args[0]
+        assert sorted(called_eps) == [555, 556]
+
+    def test_attempt_arr_research_default_skips_hasFile_true(
+            self, _clean_retrigger_history,
+    ):
+        """Contract pin: ``_attempt_arr_research`` without ``force_episodes``
+        MUST keep skipping episodes with ``hasFile=True``. This is the
+        behaviour ``verify_symlinks`` and ``library._cleanup_broken_debrid_
+        symlinks`` rely on (they only re-search what Sonarr already considers
+        missing — anything else would risk spurious searches when a symlink
+        is replaced rather than deleted)."""
+        from utils.scheduled_tasks import _attempt_arr_research
+
+        sonarr = MagicMock()
+        sonarr.configured = True
+        sonarr.find_series_in_library.return_value = {'id': 100, 'title': 'Landman'}
+        sonarr.get_episodes.return_value = [
+            {'id': 555, 'seasonNumber': 1, 'episodeNumber': 4, 'hasFile': True},
+        ]
+
+        with patch('utils.arr_client.SonarrClient', return_value=sonarr):
+            triggered = _attempt_arr_research('Landman.S01E04.1080p.AMZN.WEB-DL')
+
+        assert triggered is False
+        sonarr.search_episodes.assert_not_called()
+
+    def test_attempt_arr_research_force_episodes_includes_hasFile_true(
+            self, _clean_retrigger_history,
+    ):
+        """Direct unit test: ``force_episodes=True`` queues episodes for
+        search regardless of ``hasFile`` state. Season filter still applies."""
+        from utils.scheduled_tasks import _attempt_arr_research
+
+        sonarr = MagicMock()
+        sonarr.configured = True
+        sonarr.find_series_in_library.return_value = {'id': 100, 'title': 'Landman'}
+        sonarr.get_episodes.return_value = [
+            {'id': 555, 'seasonNumber': 1, 'episodeNumber': 4, 'hasFile': True},
+            {'id': 556, 'seasonNumber': 1, 'episodeNumber': 5, 'hasFile': False},
+            {'id': 600, 'seasonNumber': 2, 'episodeNumber': 1, 'hasFile': True},
+        ]
+
+        with patch('utils.arr_client.SonarrClient', return_value=sonarr):
+            triggered = _attempt_arr_research(
+                'Landman.S01E04.1080p.AMZN.WEB-DL', force_episodes=True,
+            )
+
+        assert triggered is True
+        sonarr.search_episodes.assert_called_once()
+        called_eps = sonarr.search_episodes.call_args.args[0]
+        assert sorted(called_eps) == [555, 556]
+
+    def test_force_episodes_respects_retrigger_cooldown(
+            self, _clean_retrigger_history,
+    ):
+        """``force_episodes`` lifts the hasFile gate but NOT the 2 h
+        cooldown — successive remediations of the same release within the
+        window must dedupe at the per-episode level. Protects against the
+        broken-symlink and debrid-health paths fighting over the same item."""
+        from utils.scheduled_tasks import _attempt_arr_research
+
+        sonarr = MagicMock()
+        sonarr.configured = True
+        sonarr.find_series_in_library.return_value = {'id': 100, 'title': 'Landman'}
+        sonarr.get_episodes.return_value = [
+            {'id': 555, 'seasonNumber': 1, 'episodeNumber': 4, 'hasFile': True},
+        ]
+
+        with patch('utils.arr_client.SonarrClient', return_value=sonarr):
+            assert _attempt_arr_research(
+                'Landman.S01E04.WEB-DL', force_episodes=True,
+            ) is True
+            # Same release, same window — search must NOT fire again.
+            assert _attempt_arr_research(
+                'Landman.S01E04.WEB-DL', force_episodes=True,
+            ) is False
+
+        assert sonarr.search_episodes.call_count == 1

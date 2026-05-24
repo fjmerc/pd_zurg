@@ -234,11 +234,17 @@ def _remediate(client, torrent_id, torrent_hash, filename, probe_result):
     # Step 3: arr re-search. Release name = filename without media
     # extension; matches the shape ``_attempt_arr_research`` expects
     # (same source format used by blackhole and verify_symlinks).
+    # force_episodes=True because Zurg's WebDAV listing keeps the just-
+    # deleted file visible for ~15-30 s, so Sonarr's ``hasFile`` is still
+    # True at this instant — without the override, every TV episode in
+    # the release would be skipped (see 2026-05-24 live sweep regression).
     release_name = os.path.splitext(filename)[0] if filename else ''
     if release_name:
         try:
             from utils.scheduled_tasks import _attempt_arr_research
-            actions['researched'] = bool(_attempt_arr_research(release_name))
+            actions['researched'] = bool(
+                _attempt_arr_research(release_name, force_episodes=True)
+            )
         except Exception as e:
             logger.warning(
                 f"[debrid_health] arr re-search failed for {release_name!r}: {e}"

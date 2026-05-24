@@ -67,6 +67,7 @@ CAUSE_LOCAL_FALLBACK_GRAB = 'local_fallback_grab'
 
 # Management
 CAUSE_PREFERENCE_SOURCE_SWITCH = 'preference_source_switch'
+CAUSE_DEBRID_FILTERED = 'debrid_filtered'
 CAUSE_ROUTING_REPAIRED = 'routing_repaired'
 CAUSE_ARR_DELETED_USER = 'arr_deleted_user'
 CAUSE_ARR_DELETED_CLEANUP = 'arr_deleted_cleanup'

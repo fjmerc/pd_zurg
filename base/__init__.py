@@ -73,7 +73,7 @@ __all__ = [
     # Symlink repair
     'SYMLINK_REPAIR_AUTO_SEARCH',
     # Debrid health reconciler (plan 38)
-    'DEBRID_HEALTH_ENABLED',
+    'DEBRID_HEALTH_ENABLED', 'DEBRID_HEALTH_AUTO_REMEDIATE',
     # Routing audit
     'ROUTING_AUTO_TAG_UNTAGGED',
     # Gap-fill reconcile
@@ -229,8 +229,11 @@ class Config:
         self.SYMLINK_REPAIR_AUTO_SEARCH = os.getenv('SYMLINK_REPAIR_AUTO_SEARCH', 'false')
         # Debrid health reconciler (plan 38) — detects RD's May 2026 keyword
         # filter blocks on the existing torrent set. Default ON for detection;
-        # remediation (delete + arr re-search) gates separately in phase 4.
+        # remediation (delete + arr re-search) gates separately via
+        # AUTO_REMEDIATE — opt-in because the remediation path mutates RD
+        # account state (deletes torrents) and triggers arr searches.
         self.DEBRID_HEALTH_ENABLED = os.getenv('DEBRID_HEALTH_ENABLED', 'true')
+        self.DEBRID_HEALTH_AUTO_REMEDIATE = os.getenv('DEBRID_HEALTH_AUTO_REMEDIATE', 'false')
         # Routing audit (auto-tag untagged monitored series/movies with debrid tag)
         self.ROUTING_AUTO_TAG_UNTAGGED = os.getenv('ROUTING_AUTO_TAG_UNTAGGED', 'true')
         # Gap-fill reconcile — unconditional missing-episode search across
@@ -360,6 +363,7 @@ BLOCKLIST_AUTO_ADD = config.BLOCKLIST_AUTO_ADD
 BLOCKLIST_EXPIRY_DAYS = config.BLOCKLIST_EXPIRY_DAYS
 SYMLINK_REPAIR_AUTO_SEARCH = config.SYMLINK_REPAIR_AUTO_SEARCH
 DEBRID_HEALTH_ENABLED = config.DEBRID_HEALTH_ENABLED
+DEBRID_HEALTH_AUTO_REMEDIATE = config.DEBRID_HEALTH_AUTO_REMEDIATE
 ROUTING_AUTO_TAG_UNTAGGED = config.ROUTING_AUTO_TAG_UNTAGGED
 GAP_FILL_ENABLED = config.GAP_FILL_ENABLED
 TORRENTIO_URL = config.TORRENTIO_URL

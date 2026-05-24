@@ -35,6 +35,7 @@ _STATE_MAX_BYTES = 10 * 1024 * 1024     # 10 MiB hard ceiling on the state file
 _PROBE_TTL = 7 * 24 * 3600              # don't re-probe healthy torrents for 7d
 _RATE_LIMIT_PER_MIN = 60                # under RD's 250/min user quota
 _MAX_PER_SWEEP = 2000                   # probe cap per sweep
+_REMEDIATE_MAX_PER_SWEEP = 100          # delete cap per sweep — defense against mass-delete on first auto-remediate enable
 _PERSIST_EVERY = 25                     # incremental save every N probes
 _VALID_STATUSES = ('healthy', 'blocked', 'unknown')
 
@@ -56,6 +57,13 @@ def _enabled():
     without needing a restart, so the scheduled task can be turned off
     on a live container."""
     return str(os.environ.get('DEBRID_HEALTH_ENABLED', 'true')).lower() == 'true'
+
+
+def _auto_remediate_enabled():
+    """Whether the sweep should delete blocked torrents from RD + trigger
+    arr re-search. Off by default — mutating debrid state is opt-in.
+    Honours runtime env-var changes for the same reason as ``_enabled``."""
+    return str(os.environ.get('DEBRID_HEALTH_AUTO_REMEDIATE', 'false')).lower() == 'true'
 
 
 def _empty_state():
@@ -175,6 +183,91 @@ def _should_skip(torrent_hash, state, now):
     return isinstance(ts, (int, float)) and (now - ts) < _PROBE_TTL
 
 
+def _remediate(client, torrent_id, torrent_hash, filename, probe_result):
+    """Run the three-step remediation pipeline for a confirmed-blocked torrent.
+
+    Order is deliberate:
+      1. **Blocklist first.** Even if the RD delete fails, the next time
+         Sonarr/Radarr tries to grab the same release, the blackhole's
+         pre-submit blocklist check (blackhole.py) rejects it — breaks the
+         grab → filter → re-grab loop.
+      2. **Delete from RD.** Removes the entry from ``/torrents`` so Zurg
+         drops it from the WebDAV listing on next sync, which in turn lets
+         pd_zurg's existing ``_cleanup_broken_debrid_symlinks`` reap the
+         dangling symlinks.
+      3. **Trigger arr re-search.** Sonarr/Radarr look for a replacement
+         release. Shares the 2 h ``_retrigger_history`` cooldown with the
+         broken-symlink and stale-grab paths so a single release isn't
+         re-searched twice within the window even if multiple subsystems
+         fire on it at the same time.
+
+    Each step is independently try/except'd so a failure in one doesn't
+    abort the others. Returns a dict of booleans describing what
+    succeeded — caller stores these on the state entry and the history
+    event so a partial failure is visible in the activity feed.
+    """
+    actions = {'blocklisted': False, 'deleted': False, 'researched': False}
+
+    # Step 1: blocklist (idempotent — re-adding an existing hash is a no-op)
+    try:
+        from utils import blocklist as _blocklist
+        reason = probe_result.get('reason') or 'unknown'
+        entry_id = _blocklist.add(
+            torrent_hash, filename,
+            reason=f'RD filter ({reason})',
+            source='auto',
+        )
+        actions['blocklisted'] = bool(entry_id)
+    except Exception as e:
+        logger.warning(
+            f"[debrid_health] blocklist add failed for {torrent_hash}: {e}"
+        )
+
+    # Step 2: delete from RD
+    try:
+        actions['deleted'] = bool(client.delete_torrent(torrent_id))
+    except Exception as e:
+        logger.warning(
+            f"[debrid_health] delete_torrent failed for {torrent_id}: {e}"
+        )
+
+    # Step 3: arr re-search. Release name = filename without media
+    # extension; matches the shape ``_attempt_arr_research`` expects
+    # (same source format used by blackhole and verify_symlinks).
+    release_name = os.path.splitext(filename)[0] if filename else ''
+    if release_name:
+        try:
+            from utils.scheduled_tasks import _attempt_arr_research
+            actions['researched'] = bool(_attempt_arr_research(release_name))
+        except Exception as e:
+            logger.warning(
+                f"[debrid_health] arr re-search failed for {release_name!r}: {e}"
+            )
+
+    # Step 4: history event — emitted regardless of which steps succeeded
+    # so a partial failure is auditable in the activity feed.
+    try:
+        from utils import history as _history
+        _history.log_event(
+            type='debrid',
+            title=filename or torrent_id,
+            source='debrid_health',
+            detail='Filter-blocked on debrid — auto-remediated',
+            meta={
+                'cause': _history.CAUSE_DEBRID_FILTERED,
+                'reason': probe_result.get('reason') or 'infringing_file',
+                'http': probe_result.get('http'),
+                'info_hash': torrent_hash,
+                'torrent_id': torrent_id,
+                **actions,
+            },
+        )
+    except Exception as e:
+        logger.debug(f"[debrid_health] history log failed: {e}")
+
+    return actions
+
+
 def run_sweep():
     """Probe up to ``_MAX_PER_SWEEP`` Real-Debrid torrents and persist state.
 
@@ -204,7 +297,8 @@ def run_sweep():
     state = _get_state()
     now = time.time()
     counts = {'probed': 0, 'healthy': 0, 'blocked': 0,
-              'unknown': 0, 'skipped': 0}
+              'unknown': 0, 'skipped': 0, 'remediated': 0}
+    remediate_on = _auto_remediate_enabled()
 
     # Two-pass: filter eligibility first so the rate-limit accounting
     # below knows the true probe count (skipped torrents don't consume
@@ -233,15 +327,30 @@ def run_sweep():
         counts['probed'] += 1
         counts[status] += 1
 
+        entry = {
+            'status': status,
+            'reason': result.get('reason') or result.get('error', ''),
+            'http': result.get('http'),
+            'ts': time.time(),
+            'torrent_id': tid,
+            'filename': filename,
+        }
+
+        # Auto-remediate the blocked entry if enabled and under the
+        # per-sweep cap. Cap exists separately from _MAX_PER_SWEEP so
+        # a first-run enable of AUTO_REMEDIATE on a large library can't
+        # mass-delete in one shot — remaining blocked entries stay
+        # flagged and remediate on subsequent sweeps.
+        if (status == 'blocked'
+                and remediate_on
+                and counts['remediated'] < _REMEDIATE_MAX_PER_SWEEP):
+            actions = _remediate(client, tid, torrent_hash, filename, result)
+            entry['remediated'] = True
+            entry['remediation_actions'] = actions
+            counts['remediated'] += 1
+
         with _lock:
-            state['probed'][torrent_hash] = {
-                'status': status,
-                'reason': result.get('reason') or result.get('error', ''),
-                'http': result.get('http'),
-                'ts': time.time(),
-                'torrent_id': tid,
-                'filename': filename,
-            }
+            state['probed'][torrent_hash] = entry
 
         if counts['probed'] % _PERSIST_EVERY == 0:
             with _lock:
@@ -255,12 +364,36 @@ def run_sweep():
     with _lock:
         _save_state(state)
 
-    msg = (
-        f"probed {counts['probed']}, healthy {counts['healthy']}, "
-        f"blocked {counts['blocked']}, unknown {counts['unknown']}, "
-        f"skipped {counts['skipped']}"
-    )
+    msg_parts = [
+        f"probed {counts['probed']}",
+        f"healthy {counts['healthy']}",
+        f"blocked {counts['blocked']}",
+        f"unknown {counts['unknown']}",
+        f"skipped {counts['skipped']}",
+    ]
+    if remediate_on:
+        msg_parts.append(f"remediated {counts['remediated']}")
+    msg = ', '.join(msg_parts)
     logger.info(f"[debrid_health] sweep complete: {msg}")
+
+    # One summary notification per sweep when anything was remediated.
+    # Per-item events still flow to history.py for the activity feed —
+    # this saves the user from N apprise messages on a large initial
+    # cleanup. Skipped entirely when remediation is off or zero deletes.
+    if remediate_on and counts['remediated']:
+        try:
+            from utils.notifications import notify
+            notify(
+                'debrid_filtered',
+                f'Debrid health: {counts["remediated"]} filter-blocked torrent(s) removed',
+                f"Removed from debrid: {counts['remediated']}. "
+                f"Total blocked detected this sweep: {counts['blocked']}. "
+                f"Arr re-search triggered per release where applicable.",
+                level='warning',
+            )
+        except Exception as e:
+            logger.debug(f"[debrid_health] sweep summary notify failed: {e}")
+
     return {'status': 'success', 'message': msg, 'items': counts['probed']}
 
 

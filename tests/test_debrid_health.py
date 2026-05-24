@@ -443,3 +443,270 @@ class TestDisabledAndErrors:
             result = debrid_health.run_sweep()
         assert result['items'] == 1
         assert client.probe_file.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Auto-remediation (Phase 4)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def auto_remediate_on(monkeypatch):
+    monkeypatch.setenv('DEBRID_HEALTH_AUTO_REMEDIATE', 'true')
+
+
+@pytest.fixture
+def mock_remediation_deps(monkeypatch):
+    """Patch blocklist.add, scheduled_tasks._attempt_arr_research,
+    history.log_event, and notifications.notify so tests can assert on
+    the remediation pipeline without touching real persistence or arrs."""
+    from unittest.mock import MagicMock
+    deps = {
+        'blocklist_add': MagicMock(return_value='blocklist-entry-id'),
+        'arr_research': MagicMock(return_value=True),
+        'log_event': MagicMock(return_value='event-id'),
+        'notify': MagicMock(),
+    }
+    monkeypatch.setattr('utils.blocklist.add', deps['blocklist_add'])
+    monkeypatch.setattr(
+        'utils.scheduled_tasks._attempt_arr_research', deps['arr_research'],
+    )
+    monkeypatch.setattr('utils.history.log_event', deps['log_event'])
+    monkeypatch.setattr('utils.notifications.notify', deps['notify'])
+    return deps
+
+
+class TestRemediation:
+    """Phase 4 — auto-remediate confirmed-blocked torrents.
+
+    When AUTO_REMEDIATE is on AND a probe returns ``blocked``, the
+    reconciler runs the three-step pipeline:
+      1. blocklist.add (hash, to break the grab → filter → re-grab loop)
+      2. client.delete_torrent (cleans up RD)
+      3. _attempt_arr_research (Sonarr/Radarr search for replacement)
+    Followed by a history event with cause=debrid_filtered.
+    A single per-sweep summary notification fires under event 'debrid_filtered'.
+    """
+
+    _BLOCKED = {'status': 'blocked', 'reason': 'infringing_file', 'http': 451}
+
+    def test_off_by_default_no_destructive_calls(
+            self, state_path, no_sleep, rd_enabled, mock_remediation_deps):
+        """The single most important test: with AUTO_REMEDIATE unset,
+        confirmed blocks must NOT call blocklist.add / delete_torrent /
+        arr re-search / history. Detection-only is the safe default."""
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000')],
+            probe_results={'T1': self._BLOCKED},
+        )
+        with _patch_client(client):
+            debrid_health.run_sweep()
+
+        assert mock_remediation_deps['blocklist_add'].call_count == 0
+        assert client.delete_torrent.call_count == 0
+        assert mock_remediation_deps['arr_research'].call_count == 0
+        assert mock_remediation_deps['log_event'].call_count == 0
+        assert mock_remediation_deps['notify'].call_count == 0
+
+    def test_on_triggers_full_pipeline(
+            self, state_path, no_sleep, rd_enabled, auto_remediate_on,
+            mock_remediation_deps):
+        """AUTO_REMEDIATE on, single blocked torrent: blocklist + delete
+        + arr re-search + history event all fire. One summary notify."""
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000', filename='Landman.S01E04.1080p.AMZN.WEB-DL.mkv')],
+            probe_results={'T1': self._BLOCKED},
+        )
+        client.delete_torrent.return_value = True
+
+        with _patch_client(client):
+            result = debrid_health.run_sweep()
+
+        # Blocklist called with uppercased hash, filename, auto source
+        mock_remediation_deps['blocklist_add'].assert_called_once()
+        args, kwargs = mock_remediation_deps['blocklist_add'].call_args
+        assert args[0] == 'AAAA0000'
+        assert 'Landman' in args[1]
+        assert kwargs['source'] == 'auto'
+        assert 'infringing_file' in kwargs['reason']
+
+        # Delete called with torrent id
+        client.delete_torrent.assert_called_once_with('T1')
+
+        # Arr re-search called with release name (filename minus extension)
+        mock_remediation_deps['arr_research'].assert_called_once()
+        assert mock_remediation_deps['arr_research'].call_args[0][0] == \
+            'Landman.S01E04.1080p.AMZN.WEB-DL'
+
+        # History event with the correct cause + meta
+        mock_remediation_deps['log_event'].assert_called_once()
+        log_kwargs = mock_remediation_deps['log_event'].call_args.kwargs
+        assert log_kwargs['type'] == 'debrid'
+        assert log_kwargs['source'] == 'debrid_health'
+        meta = log_kwargs['meta']
+        assert meta['cause'] == 'debrid_filtered'
+        assert meta['reason'] == 'infringing_file'
+        assert meta['http'] == 451
+        assert meta['info_hash'] == 'AAAA0000'
+        assert meta['deleted'] is True
+        assert meta['blocklisted'] is True
+        assert meta['researched'] is True
+
+        # One summary notification for the sweep
+        mock_remediation_deps['notify'].assert_called_once()
+        notify_args = mock_remediation_deps['notify'].call_args.args
+        assert notify_args[0] == 'debrid_filtered'
+        assert '1' in notify_args[1]  # count
+
+        # Sweep result reports remediation count
+        assert 'remediated 1' in result['message']
+
+    def test_remediate_cap_honoured(
+            self, state_path, no_sleep, rd_enabled, auto_remediate_on,
+            mock_remediation_deps, monkeypatch):
+        """A first-run enable on a huge backlog must NOT mass-delete.
+        Cap at _REMEDIATE_MAX_PER_SWEEP; remaining blocked entries stay
+        flagged for next sweep."""
+        monkeypatch.setattr(debrid_health, '_REMEDIATE_MAX_PER_SWEEP', 3)
+        client = _mock_client(
+            torrents=[_torrent(f'T{i}', f'HASH{i:04d}') for i in range(10)],
+            probe_results={f'T{i}': self._BLOCKED for i in range(10)},
+        )
+        client.delete_torrent.return_value = True
+
+        with _patch_client(client):
+            result = debrid_health.run_sweep()
+
+        # All 10 probed and classified as blocked — but only 3 deleted
+        assert client.probe_file.call_count == 10
+        assert mock_remediation_deps['blocklist_add'].call_count == 3
+        assert client.delete_torrent.call_count == 3
+        assert mock_remediation_deps['log_event'].call_count == 3
+        assert 'remediated 3' in result['message']
+        assert 'blocked 10' in result['message']
+
+        # State persists ALL 10 as blocked — the next sweep will
+        # remediate the remaining 7 (blocked entries always re-probe).
+        with open(state_path) as f:
+            saved = __import__('json').load(f)
+        blocked_count = sum(
+            1 for e in saved['probed'].values()
+            if e.get('status') == 'blocked'
+        )
+        assert blocked_count == 10
+        # First 3 carry the remediated flag, rest don't.
+        remediated = sum(
+            1 for e in saved['probed'].values() if e.get('remediated')
+        )
+        assert remediated == 3
+
+    def test_blocklist_failure_does_not_stop_delete(
+            self, state_path, no_sleep, rd_enabled, auto_remediate_on,
+            mock_remediation_deps):
+        """Failure isolation: a blocklist.add raise must not prevent the
+        RD delete or the arr re-search. Captured in the history event's
+        action flags so the partial success is auditable."""
+        mock_remediation_deps['blocklist_add'].side_effect = RuntimeError('disk full')
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000', filename='r.mkv')],
+            probe_results={'T1': self._BLOCKED},
+        )
+        client.delete_torrent.return_value = True
+
+        with _patch_client(client):
+            debrid_health.run_sweep()
+
+        # Delete and re-search still ran despite the blocklist failure
+        client.delete_torrent.assert_called_once()
+        mock_remediation_deps['arr_research'].assert_called_once()
+
+        # History event records what actually succeeded
+        meta = mock_remediation_deps['log_event'].call_args.kwargs['meta']
+        assert meta['blocklisted'] is False
+        assert meta['deleted'] is True
+        assert meta['researched'] is True
+
+    def test_delete_failure_does_not_stop_research_or_history(
+            self, state_path, no_sleep, rd_enabled, auto_remediate_on,
+            mock_remediation_deps):
+        """delete_torrent can return False (e.g., RD API hiccup). The
+        next sweep will retry — blocklist already protects against
+        re-grabs in the interim. Arr re-search and history still fire."""
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000', filename='r.mkv')],
+            probe_results={'T1': self._BLOCKED},
+        )
+        client.delete_torrent.return_value = False  # delete reports failure
+
+        with _patch_client(client):
+            debrid_health.run_sweep()
+
+        mock_remediation_deps['blocklist_add'].assert_called_once()
+        mock_remediation_deps['arr_research'].assert_called_once()
+        meta = mock_remediation_deps['log_event'].call_args.kwargs['meta']
+        assert meta['blocklisted'] is True
+        assert meta['deleted'] is False
+        assert meta['researched'] is True
+
+    def test_arr_research_returns_false_does_not_crash(
+            self, state_path, no_sleep, rd_enabled, auto_remediate_on,
+            mock_remediation_deps):
+        """_attempt_arr_research returns False when no arr knows the
+        release (e.g., grabbed manually via DMM). Should not block the
+        sweep or other torrents."""
+        mock_remediation_deps['arr_research'].return_value = False
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000', filename='r.mkv')],
+            probe_results={'T1': self._BLOCKED},
+        )
+        client.delete_torrent.return_value = True
+
+        with _patch_client(client):
+            debrid_health.run_sweep()
+
+        meta = mock_remediation_deps['log_event'].call_args.kwargs['meta']
+        assert meta['researched'] is False
+        # Other actions still succeeded
+        assert meta['blocklisted'] is True
+        assert meta['deleted'] is True
+
+    def test_no_summary_notify_when_zero_remediated(
+            self, state_path, no_sleep, rd_enabled, auto_remediate_on,
+            mock_remediation_deps):
+        """All-healthy sweep with AUTO_REMEDIATE on shouldn't notify —
+        notification is for remediation activity, not for empty sweeps."""
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000')],
+            probe_results={'T1': {'status': 'healthy'}},
+        )
+        with _patch_client(client):
+            debrid_health.run_sweep()
+        assert mock_remediation_deps['notify'].call_count == 0
+
+    def test_healthy_and_unknown_dont_trigger_remediation(
+            self, state_path, no_sleep, rd_enabled, auto_remediate_on,
+            mock_remediation_deps):
+        """Only ``blocked`` triggers remediation. ``healthy`` and
+        ``unknown`` are NEVER touched — defense against false positives
+        from transient RD throttling (the 503 case from live validation)."""
+        client = _mock_client(
+            torrents=[
+                _torrent('T1', 'AAAA0000'),
+                _torrent('T2', 'BBBB1111'),
+                _torrent('T3', 'CCCC2222'),
+            ],
+            probe_results={
+                'T1': {'status': 'healthy'},
+                'T2': {'status': 'unknown', 'error': 'http_503'},
+                'T3': self._BLOCKED,
+            },
+        )
+        client.delete_torrent.return_value = True
+
+        with _patch_client(client):
+            debrid_health.run_sweep()
+
+        # Only the blocked one triggers remediation
+        client.delete_torrent.assert_called_once_with('T3')
+        assert mock_remediation_deps['log_event'].call_count == 1
+        meta = mock_remediation_deps['log_event'].call_args.kwargs['meta']
+        assert meta['info_hash'] == 'CCCC2222'

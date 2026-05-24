@@ -111,7 +111,7 @@ ENV_SCHEMA = [
              'Comma-separated event types: startup, shutdown, download_complete, download_error, '
              'library_refresh, symlink_created, symlink_failed, debrid_unavailable, pending_warning, '
              'local_fallback_triggered, blocklist_added, arr_deleted, health_error, symlink_repaired, '
-             'daily_digest, debrid_add_success, debrid_add_failed, compromise_grabbed. '
+             'daily_digest, debrid_add_success, debrid_add_failed, compromise_grabbed, debrid_filtered. '
              'Leave empty for all events'),
             ('NOTIFICATION_LEVEL', 'Minimum Level', 'select:info,warning,error', False, 'Minimum severity to send notifications'),
             ('NOTIFICATION_DIGEST_ENABLED', 'Daily Digest', 'boolean', False, 'Send a daily summary notification'),
@@ -198,6 +198,8 @@ ENV_SCHEMA = [
         'fields': [
             ('DEBRID_HEALTH_ENABLED', 'Enable Debrid Health Reconciler', 'boolean', False,
              'Master kill switch for the periodic probe sweep. Default ON — turn OFF only if RD\'s API drifts and the prober starts misbehaving, or if you want to silence the background API calls entirely (default: ON).'),
+            ('DEBRID_HEALTH_AUTO_REMEDIATE', 'Auto-Remediate Blocked Torrents', 'boolean', False,
+             'When a probe confirms a torrent is filter-blocked: blocklist the hash, delete the torrent from your RD account, and trigger Sonarr/Radarr to re-search for a replacement. OFF by default because this mutates your debrid account state — review the detected blocks via /api/library or /config/debrid_health.json first, then flip ON. Hard-capped at 100 remediations per sweep so a first-run enable on a large library cannot mass-delete. The hash blocklist prevents re-grabs of the same release (default: OFF).'),
         ],
     },
     {

@@ -262,6 +262,31 @@ def _fmt_auto_blocklist(ev, meta):
     return f'Auto-blocklisted: {reason}', f'Auto-blocklisted: {reason}'
 
 
+def _fmt_debrid_filtered(ev, meta):
+    """Format a debrid-filter remediation event.
+
+    The same cause slug fires whether AUTO_REMEDIATE is on (with action
+    flags set) or detection only (no action flags). The action tail
+    surfaces what actually succeeded so a partial failure (e.g. delete
+    worked but arr re-search didn't) reads clearly in the activity feed.
+    """
+    reason = meta.get('reason', 'infringing_file')
+    http = meta.get('http')
+    head = f'Filter-blocked on debrid ({reason}'
+    if http:
+        head += f', HTTP {http}'
+    head += ')'
+    actions = []
+    if meta.get('deleted'):
+        actions.append('removed from debrid')
+    if meta.get('blocklisted'):
+        actions.append('hash blocklisted')
+    if meta.get('researched'):
+        actions.append('arr re-search triggered')
+    tail = ' — ' + ', '.join(actions) if actions else ' — detection only'
+    return head + tail, head + tail
+
+
 def _fmt_debrid_unavailable_marked(ev, meta):
     days = meta.get('age_days')
     attempts = meta.get('search_attempts')
@@ -411,6 +436,7 @@ _CAUSE_FORMATTERS = {
     'arr_deleted_cleanup': _fmt_arr_deleted,
     'auto_blocklist_added': _fmt_auto_blocklist,
     'debrid_unavailable_marked': _fmt_debrid_unavailable_marked,
+    'debrid_filtered': _fmt_debrid_filtered,
     'terminal_error': _fmt_terminal_error,
     'uncached_timeout': _fmt_uncached_timeout,
     'uncached_rejected': _fmt_uncached_rejected,
@@ -571,6 +597,15 @@ FORMATTER_JS = r"""
         ? (' — ' + m.search_attempts + ' searches so far, retries continue in arr')
         : ' — retries continue in arr';
       return base + tail;
+    },
+    debrid_filtered: function(ev,m){
+      var reason = m.reason || 'infringing_file';
+      var head = 'Filter-blocked on debrid (' + reason + (m.http ? (', HTTP ' + m.http) : '') + ')';
+      var actions = [];
+      if (m.deleted)     actions.push('removed from debrid');
+      if (m.blocklisted) actions.push('hash blocklisted');
+      if (m.researched)  actions.push('arr re-search triggered');
+      return head + ' — ' + (actions.length ? actions.join(', ') : 'detection only');
     },
     terminal_error: function(ev,m){ return 'Failed on ' + (m.provider||'debrid') + ': ' + (m.status || m.error || 'unknown'); },
     uncached_timeout: function(ev,m){ return 'Timed out waiting for cache' + (m.deleted ? ' — removed from debrid' : ' — debrid cleanup skipped'); },

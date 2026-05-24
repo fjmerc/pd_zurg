@@ -161,6 +161,43 @@ def test_terminal_error_shows_status():
     assert 'Failed on realdebrid: magnet_error' == format_event(ev)['short']
 
 
+def test_debrid_filtered_detection_only():
+    """AUTO_REMEDIATE off — no action flags, render as 'detection only'."""
+    ev = _ev('debrid_filtered', reason='infringing_file', http=451)
+    s = format_event(ev)['short']
+    assert 'Filter-blocked on debrid (infringing_file, HTTP 451)' in s
+    assert 'detection only' in s
+
+
+def test_debrid_filtered_with_all_actions():
+    """AUTO_REMEDIATE on, everything succeeded — action tail lists each."""
+    ev = _ev('debrid_filtered', reason='infringing_file', http=451,
+             deleted=True, blocklisted=True, researched=True)
+    s = format_event(ev)['short']
+    assert 'removed from debrid' in s
+    assert 'hash blocklisted' in s
+    assert 'arr re-search triggered' in s
+
+
+def test_debrid_filtered_partial_action():
+    """Delete succeeded but arr re-search didn't — only true flags appear."""
+    ev = _ev('debrid_filtered', reason='infringing_file', http=451,
+             deleted=True, blocklisted=True, researched=False)
+    s = format_event(ev)['short']
+    assert 'removed from debrid' in s
+    assert 'hash blocklisted' in s
+    assert 'arr re-search triggered' not in s
+
+
+def test_debrid_filtered_without_http_still_renders():
+    """Defensive: a malformed event missing http still renders cleanly."""
+    ev = _ev('debrid_filtered', reason='infringing_file', deleted=True)
+    s = format_event(ev)['short']
+    assert 'Filter-blocked on debrid (infringing_file)' in s
+    assert 'HTTP' not in s
+    assert 'removed from debrid' in s
+
+
 def test_uncached_timeout_deleted_vs_not():
     kept = format_event(_ev('uncached_timeout', deleted=False))['short']
     removed = format_event(_ev('uncached_timeout', deleted=True))['short']

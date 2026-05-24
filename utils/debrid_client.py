@@ -228,7 +228,14 @@ class RealDebridClient(DebridClientBase):
         if resp.status_code == 404:
             return {'status': 'blocked', 'reason': 'not_found', 'http': 404}
 
-        if resp.status_code == 403:
+        # 403 and 451 both carry the filter-block body in the wild.
+        # Verified live 2026-05-24: RD's May 2026 filter actually returns
+        # HTTP 451 "Unavailable For Legal Reasons" (RFC 7725) with body
+        # ``{"error":"infringing_file","error_code":35}`` — not the 403
+        # that ElfHosted's writeup and Decypharr's repair worker assume.
+        # Treat both status codes identically since the body shape is the
+        # same; either accept means the file is filter-blocked.
+        if resp.status_code in (403, 451):
             try:
                 body = resp.json()
             except ValueError:
@@ -240,16 +247,19 @@ class RealDebridClient(DebridClientBase):
                 return {
                     'status': 'blocked',
                     'reason': 'infringing_file',
-                    'http': 403,
+                    'http': resp.status_code,
                 }
-            # 403 with a body shape we don't recognise — RD's filter
-            # format may have drifted. Surface at WARN so future drift
-            # is visible without crashing the sweep.
+            # Recognised status code but unrecognised body shape — RD's
+            # response format may have drifted. Surface at WARN so future
+            # drift is visible without crashing the sweep.
             logger.warning(
-                f"[debrid] RD probe got unclassified 403 for {torrent_id}: "
-                f"body_keys={list(body.keys())}"
+                f"[debrid] RD probe got unclassified {resp.status_code} "
+                f"for {torrent_id}: body_keys={list(body.keys())}"
             )
-            return {'status': 'unknown', 'error': 'http_403_unclassified'}
+            return {
+                'status': 'unknown',
+                'error': f'http_{resp.status_code}_unclassified',
+            }
 
         return {'status': 'unknown', 'error': f'http_{resp.status_code}'}
 

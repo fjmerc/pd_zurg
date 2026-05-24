@@ -371,9 +371,14 @@ class TestProbeFile:
     The probe POSTs to ``/unrestrict/link`` with a sample file link and
     classifies the response:
         200 → healthy
-        403 + ``error_code: 35`` or ``error: 'infringing_file'`` → blocked
+        403 or 451 with body ``error_code: 35`` / ``error: 'infringing_file'`` → blocked
         404 → blocked (not_found)
         anything else → unknown (retry-eligible)
+
+    Note: live RD probing on 2026-05-24 confirmed the May 2026 filter
+    returns HTTP 451 (RFC 7725 "Unavailable For Legal Reasons"), not 403
+    as ElfHosted's writeup and Decypharr's repair worker assume. Body
+    shape matches docs: ``{"error":"infringing_file","error_code":35}``.
     """
 
     _SAMPLE_LINK = 'https://real-debrid.com/d/ABC123XYZ'
@@ -389,8 +394,10 @@ class TestProbeFile:
         assert result == {'status': 'healthy'}
 
     @patch('utils.debrid_client.requests.post')
-    def test_blocked_infringing_by_error_code(self, mock_post, rd):
-        """RD's documented filter response: HTTP 403 + error_code 35."""
+    def test_blocked_infringing_by_error_code_on_403(self, mock_post, rd):
+        """Documented-but-not-observed shape: HTTP 403 + error_code 35.
+        Kept supported since ElfHosted's writeup specified 403 — RD's
+        previous response format may resurface."""
         mock_post.return_value = _mock_response(
             status_code=403,
             json_data={'error': 'infringing_file', 'error_code': 35},
@@ -399,15 +406,29 @@ class TestProbeFile:
         assert result == {'status': 'blocked', 'reason': 'infringing_file', 'http': 403}
 
     @patch('utils.debrid_client.requests.post')
+    def test_blocked_infringing_by_error_code_on_451(self, mock_post, rd):
+        """Live-observed (2026-05-24) shape: HTTP 451 + error_code 35.
+        This is the actual May 2026 filter response in production. Without
+        451 handling, every filter-blocked torrent buckets as unknown and
+        the reconciler's blocked-set stays empty."""
+        mock_post.return_value = _mock_response(
+            status_code=451,
+            json_data={'error': 'infringing_file', 'error_code': 35},
+        )
+        result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
+        assert result == {'status': 'blocked', 'reason': 'infringing_file', 'http': 451}
+
+    @patch('utils.debrid_client.requests.post')
     def test_blocked_infringing_by_error_key_alone(self, mock_post, rd):
         """If RD drops error_code but keeps the error string, still classify
-        as blocked — defense against minor body-format drift."""
+        as blocked — defense against minor body-format drift. Exercised on
+        the live 451 path."""
         mock_post.return_value = _mock_response(
-            status_code=403,
+            status_code=451,
             json_data={'error': 'infringing_file'},
         )
         result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
-        assert result == {'status': 'blocked', 'reason': 'infringing_file', 'http': 403}
+        assert result == {'status': 'blocked', 'reason': 'infringing_file', 'http': 451}
 
     @patch('utils.debrid_client.requests.post')
     def test_blocked_not_found(self, mock_post, rd):
@@ -422,29 +443,31 @@ class TestProbeFile:
         assert result == {'status': 'unknown', 'error': 'http_503'}
 
     @patch('utils.debrid_client.requests.post')
-    def test_403_with_malformed_body_does_not_crash(self, mock_post, rd):
-        """A 403 with a body that fails JSON parsing must NOT crash the
-        sweep — classifying as unknown lets the next probe retry."""
-        resp = _mock_response(status_code=403)
+    def test_451_with_malformed_body_does_not_crash(self, mock_post, rd):
+        """A 451 with a body that fails JSON parsing must NOT crash the
+        sweep — classifying as unknown lets the next probe retry. (Same
+        defensive path for 403; the implementation shares the branch.)"""
+        resp = _mock_response(status_code=451)
         resp.json.side_effect = ValueError('not json')
         mock_post.return_value = resp
         result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
-        assert result == {'status': 'unknown', 'error': 'http_403_unclassified'}
+        assert result == {'status': 'unknown', 'error': 'http_451_unclassified'}
 
     @patch('utils.debrid_client.requests.post')
-    def test_403_with_unrecognised_body_is_unknown_not_blocked(self, mock_post, rd, caplog):
-        """A 403 whose body shape we don't recognise must NOT be silently
+    def test_451_with_unrecognised_body_is_unknown_not_blocked(self, mock_post, rd, caplog):
+        """A 451 whose body shape we don't recognise must NOT be silently
         treated as blocked (would mass-delete on auto-remediate). Surface
-        at WARN so future RD filter-format drift is visible."""
+        at WARN so future RD filter-format drift is visible — same posture
+        for 403."""
         mock_post.return_value = _mock_response(
-            status_code=403,
-            json_data={'error': 'some_other_403_reason'},
+            status_code=451,
+            json_data={'error': 'some_other_legal_reason'},
         )
         import logging
         with caplog.at_level(logging.WARNING):
             result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
-        assert result == {'status': 'unknown', 'error': 'http_403_unclassified'}
-        assert any('unclassified 403' in r.message for r in caplog.records)
+        assert result == {'status': 'unknown', 'error': 'http_451_unclassified'}
+        assert any('unclassified 451' in r.message for r in caplog.records)
 
     @patch('utils.debrid_client.requests.post')
     def test_network_error_returns_unknown(self, mock_post, rd):

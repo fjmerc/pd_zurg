@@ -68,6 +68,24 @@ __NAV_HTML__
 
 <!-- Tasks Tab -->
 <div class="tab-panel" id="panel-tasks">
+  <!-- Debrid Health mini-dashboard (plan 38 phase 5). Hidden when RD
+       is not configured (the reconciler task isn't even registered in
+       that case, so there's nothing to surface). -->
+  <div id="dh-card" class="dh-card" style="display:none">
+    <div class="dh-card-head">
+      <span class="dh-card-title">Debrid Health</span>
+      <span id="dh-card-auto" class="dh-pill"></span>
+    </div>
+    <div class="dh-card-body">
+      <div class="dh-row"><span class="dh-label">Last sweep:</span><span id="dh-last-sweep">—</span></div>
+      <div class="dh-row"><span class="dh-label">Probed:</span><span id="dh-counts">—</span></div>
+      <div class="dh-row"><span class="dh-label">Remediated (24h):</span><span id="dh-24h">—</span></div>
+    </div>
+    <div class="dh-card-actions">
+      <button id="dh-run-btn" class="btn btn-ghost btn-sm" onclick="runDebridHealth(this)">Run sweep now</button>
+      <a class="btn btn-ghost btn-sm" href="/activity?type=debrid">View activity &rarr;</a>
+    </div>
+  </div>
   <div style="margin-bottom:8px">
     <button class="btn btn-ghost btn-sm" data-kb="refresh" onclick="updateTasks()">Refresh</button>
   </div>
@@ -285,6 +303,48 @@ function runTask(btn,name){
   }).catch(function(){btn.disabled=false;btn.textContent='Run';});
 }
 
+/* Debrid Health mini-dashboard (plan 38 phase 5) */
+function fmtAge(epoch){
+  if(!epoch)return 'never';
+  var s=Math.max(0,Math.floor(Date.now()/1000-epoch));
+  if(s<60)return s+'s ago';
+  if(s<3600)return Math.floor(s/60)+'m ago';
+  if(s<86400)return Math.floor(s/3600)+'h ago';
+  return Math.floor(s/86400)+'d ago';
+}
+function updateDebridHealth(){
+  fetch('/api/debrid_health/summary').then(function(r){return r.json()}).then(function(s){
+    var card=document.getElementById('dh-card');
+    if(!s||!s.rd_configured){card.style.display='none';return;}
+    card.style.display='';
+    var auto=document.getElementById('dh-card-auto');
+    auto.textContent='Auto-remediate: '+(s.auto_remediate?'ON':'OFF');
+    auto.className='dh-pill '+(s.auto_remediate?'dh-pill-on':'dh-pill-off');
+    if(!s.enabled){
+      auto.textContent='Disabled';
+      auto.className='dh-pill dh-pill-off';
+    }
+    document.getElementById('dh-last-sweep').textContent=fmtAge(s.last_sweep_ts);
+    var c=s.counts||{};
+    var parts=[];
+    parts.push((c.total||0)+' total');
+    parts.push((c.healthy||0)+' healthy');
+    var blockedPart=(c.blocked||0)+' blocked';
+    if(c.blocked)blockedPart='<span class="dh-bad">'+blockedPart+'</span>';
+    parts.push(blockedPart);
+    if(c.unknown)parts.push((c.unknown||0)+' unknown');
+    document.getElementById('dh-counts').innerHTML=parts.join(' · ');
+    document.getElementById('dh-24h').textContent=(s.remediated_24h||0);
+  }).catch(function(){});
+}
+function runDebridHealth(btn){
+  btn.disabled=true;btn.textContent='...';
+  fetch('/api/tasks/debrid_health_reconcile/run',{method:'POST'}).then(function(r){return r.json()}).then(function(d){
+    btn.textContent=d.status==='started'?'Started':'Already running';
+    setTimeout(function(){btn.disabled=false;btn.textContent='Run sweep now';updateDebridHealth();updateTasks();},3000);
+  }).catch(function(){btn.disabled=false;btn.textContent='Run sweep now';});
+}
+
 /* Config viewer (load once) */
 fetch('/api/config').then(function(r){return r.json()}).then(function(cfg){
   var h='';
@@ -301,9 +361,10 @@ window.onKbEscape=function(){
 };
 
 /* Initial load (wait for auth detection) + polling */
-window._hasAuthReady.then(function(){updateLogs();updateTasks();});
+window._hasAuthReady.then(function(){updateLogs();updateTasks();updateDebridHealth();});
 setInterval(updateLogs,10000);
 setInterval(updateTasks,15000);
+setInterval(updateDebridHealth,30000);
 __WANTED_BADGE_JS__
 </script>
 </main>
@@ -322,6 +383,17 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .log-line.error{color:var(--red)}.log-line.warning{color:var(--yellow)}.log-line.debug{color:var(--text3)}
 #log-search:focus{border-color:var(--input-focus)}
 .task-ok{color:var(--green)}.task-err{color:var(--red)}.task-running{color:var(--blue)}
+.dh-card{border:1px solid var(--border2);border-radius:6px;padding:12px 14px;margin-bottom:12px;background:var(--bg)}
+.dh-card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.dh-card-title{font-weight:600;font-size:.85em;color:var(--text)}
+.dh-pill{font-size:.7em;padding:2px 8px;border-radius:10px;border:1px solid var(--border2);color:var(--text2);text-transform:uppercase;letter-spacing:.04em}
+.dh-pill-on{color:var(--green);border-color:var(--green)}
+.dh-pill-off{color:var(--text3)}
+.dh-card-body{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}
+.dh-row{display:flex;gap:8px;font-size:.8em;color:var(--text)}
+.dh-label{color:var(--text2);min-width:130px}
+.dh-bad{color:var(--red);font-weight:600}
+.dh-card-actions{display:flex;gap:8px;flex-wrap:wrap}
 details{margin-top:0}
 details summary{cursor:pointer;color:var(--text2);font-size:.85em;padding:4px 0;font-weight:500}
 details summary:hover{color:var(--blue)}

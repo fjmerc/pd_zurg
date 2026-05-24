@@ -169,6 +169,79 @@ def get_blocked_hashes():
 
 
 # ---------------------------------------------------------------------------
+# Summary API (used by the System page mini-dashboard, plan 38 phase 5)
+# ---------------------------------------------------------------------------
+
+def get_summary():
+    """Snapshot of reconciler state for the System page UI.
+
+    Returns a dict with:
+      - ``rd_configured``: bool — false when no RD credential is present;
+        the UI hides the card in that case (no signal to show).
+      - ``enabled``: bool — current ``DEBRID_HEALTH_ENABLED`` value.
+      - ``auto_remediate``: bool — current ``DEBRID_HEALTH_AUTO_REMEDIATE``.
+      - ``last_sweep_ts``: epoch seconds of the most recent probe in
+        state (None if no sweep has run). Approximates the sweep end time
+        — probes within a sweep are spread across the rate-limit window
+        but the max is close enough for "how stale is this data".
+      - ``counts``: {healthy, blocked, unknown, total}.
+      - ``remediated_24h``: count of ``debrid_filtered`` history events
+        in the last 24 h. Best-effort — silently 0 on any history error.
+
+    No state file schema change. ``last_sweep_ts`` is computed on-the-fly
+    from per-entry timestamps so existing state files don't need a
+    migration.
+    """
+    rd_configured = bool(
+        os.environ.get('RD_API_KEY')
+        or os.path.isfile('/run/secrets/rd_api_key')
+    )
+    if not rd_configured:
+        return {'rd_configured': False}
+
+    counts = {'healthy': 0, 'blocked': 0, 'unknown': 0, 'total': 0}
+    last_sweep_ts = None
+    state = _get_state()
+    with _lock:
+        for entry in state['probed'].values():
+            if not isinstance(entry, dict):
+                continue
+            status = entry.get('status')
+            if status in counts:
+                counts[status] += 1
+            counts['total'] += 1
+            ts = entry.get('ts')
+            if isinstance(ts, (int, float)):
+                if last_sweep_ts is None or ts > last_sweep_ts:
+                    last_sweep_ts = ts
+
+    remediated_24h = 0
+    try:
+        from datetime import datetime, timedelta, timezone
+        from utils import history as _history
+        start = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat(timespec='seconds')
+        # type='debrid' is the only event type the reconciler emits;
+        # filter by cause client-side because history.query has no
+        # native meta-filter parameter.
+        result = _history.query(type='debrid', start=start, limit=200)
+        for ev in result.get('events', []):
+            meta = ev.get('meta') or {}
+            if meta.get('cause') == 'debrid_filtered':
+                remediated_24h += 1
+    except Exception as e:
+        logger.debug(f"[debrid_health] summary history query failed: {e}")
+
+    return {
+        'rd_configured': True,
+        'enabled': _enabled(),
+        'auto_remediate': _auto_remediate_enabled(),
+        'last_sweep_ts': last_sweep_ts,
+        'counts': counts,
+        'remediated_24h': remediated_24h,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Sweep
 # ---------------------------------------------------------------------------
 

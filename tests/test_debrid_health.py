@@ -989,6 +989,91 @@ class TestRetriggerHistoryRollback:
         assert ('radarr', 42) not in _clean_retrigger_history
 
 
+class TestGetSummary:
+    """Phase 5 — summary helper for the System page mini-dashboard."""
+
+    @pytest.fixture
+    def rd_creds(self, monkeypatch):
+        monkeypatch.setenv('RD_API_KEY', 'test-key')
+
+    def test_no_rd_configured_returns_minimal(self, state_path, monkeypatch):
+        monkeypatch.delenv('RD_API_KEY', raising=False)
+        # /run/secrets/rd_api_key shouldn't exist in the test env, but be
+        # explicit to avoid flakiness on a developer host that happens to.
+        monkeypatch.setattr(
+            'os.path.isfile',
+            lambda p: False if p == '/run/secrets/rd_api_key' else os.path.isfile(p),
+        )
+        summary = debrid_health.get_summary()
+        assert summary == {'rd_configured': False}
+
+    def test_empty_state_returns_zero_counts(self, state_path, rd_creds, rd_enabled):
+        summary = debrid_health.get_summary()
+        assert summary['rd_configured'] is True
+        assert summary['enabled'] is True
+        assert summary['auto_remediate'] is False
+        assert summary['last_sweep_ts'] is None
+        assert summary['counts'] == {'healthy': 0, 'blocked': 0, 'unknown': 0, 'total': 0}
+        assert summary['remediated_24h'] == 0
+
+    def test_mixed_state_counts_correctly(self, state_path, rd_creds, rd_enabled):
+        now = time.time()
+        state_path.write_text(json.dumps({
+            'version': 1,
+            'probed': {
+                'A': {'status': 'healthy', 'ts': now - 7200},
+                'B': {'status': 'healthy', 'ts': now - 3600},
+                'C': {'status': 'blocked', 'ts': now - 1800, 'reason': 'infringing_file'},
+                'D': {'status': 'unknown', 'ts': now - 900, 'error': 'http_503'},
+                'E': {'status': 'unknown', 'ts': now - 60, 'error': 'http_503'},
+            },
+        }))
+        summary = debrid_health.get_summary()
+        assert summary['counts'] == {'healthy': 2, 'blocked': 1, 'unknown': 2, 'total': 5}
+        # last_sweep_ts is the MAX ts across all entries (= most recent probe)
+        assert summary['last_sweep_ts'] == pytest.approx(now - 60, abs=1)
+
+    def test_auto_remediate_reflects_env(self, state_path, rd_creds, rd_enabled, auto_remediate_on):
+        summary = debrid_health.get_summary()
+        assert summary['auto_remediate'] is True
+
+    def test_disabled_env_still_reports(self, state_path, rd_creds, monkeypatch):
+        """When DEBRID_HEALTH_ENABLED=false the card still surfaces state
+        (counts from the last sweep before the disable) — operators need
+        to see that the prober is off."""
+        monkeypatch.setenv('DEBRID_HEALTH_ENABLED', 'false')
+        summary = debrid_health.get_summary()
+        assert summary['enabled'] is False
+        assert summary['rd_configured'] is True
+
+    def test_remediated_24h_filters_by_cause(self, state_path, rd_creds, rd_enabled, monkeypatch):
+        """remediated_24h counts only debrid history events whose
+        meta.cause == 'debrid_filtered'. Other debrid-type events (if
+        any get added in future) MUST NOT be counted."""
+        mock_query = MagicMock(return_value={'events': [
+            {'meta': {'cause': 'debrid_filtered'}, 'title': 'A'},
+            {'meta': {'cause': 'debrid_filtered'}, 'title': 'B'},
+            {'meta': {'cause': 'debrid_filtered'}, 'title': 'C'},
+            {'meta': {'cause': 'something_else'}, 'title': 'D'},
+            {'meta': None, 'title': 'E'},
+            {},  # no meta key at all
+        ]})
+        monkeypatch.setattr('utils.history.query', mock_query)
+        summary = debrid_health.get_summary()
+        assert summary['remediated_24h'] == 3
+
+    def test_remediated_24h_swallows_history_error(self, state_path, rd_creds, rd_enabled, monkeypatch):
+        """A history.query failure must not break the summary endpoint —
+        the card silently degrades to 0 rather than 500ing the response."""
+        def boom(**kw):
+            raise RuntimeError('history broken')
+        monkeypatch.setattr('utils.history.query', boom)
+        summary = debrid_health.get_summary()
+        assert summary['remediated_24h'] == 0
+        # other fields still populated
+        assert summary['rd_configured'] is True
+
+
 class TestRemediateFilenameSanitisation:
     """M2: a RD filename packed with path components (e.g. an uploader
     nested the file under ``Show/S01/ep.mkv``) MUST be reduced to the

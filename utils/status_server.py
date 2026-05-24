@@ -1374,6 +1374,12 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             from utils.task_scheduler import scheduler
             data = json.dumps(scheduler.get_status())
             self._send_json_response(200, data)
+        elif self.path == '/api/debrid_health/summary':
+            try:
+                from utils.debrid_health import get_summary
+                self._send_json_response(200, json.dumps(get_summary()))
+            except Exception as e:
+                self._send_json_response(500, json.dumps({'error': str(e)}))
         elif self.path == '/settings':
             # Settings editor — requires auth
             if not self.auth_credentials:

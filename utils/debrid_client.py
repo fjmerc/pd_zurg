@@ -6,13 +6,14 @@ source preference system to remove debrid content when the user
 chooses to prefer local copies.
 """
 
+import os
 import re
 
 import requests
 
 from base import load_secret_or_env
 from utils.api_metrics import tracked_request
-from utils.library import normalize_title, parse_folder_name
+from utils.library import MEDIA_EXTENSIONS, normalize_title, parse_folder_name
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -173,6 +174,143 @@ class RealDebridClient(DebridClientBase):
         except requests.RequestException as e:
             logger.error(f"[debrid] RD delete failed for {torrent_id}: {self._sanitize_error(e)}")
             return False
+
+    def probe_file(self, torrent_id, sample_file_link=None):
+        """Probe a torrent for RD-side filter blocks.
+
+        Detects the May 2026 keyword filter-gate (RD returns 403 with
+        ``{"error":"infringing_file","error_code":35}`` or 404 for
+        filtered files). Used by the debrid health reconciler.
+
+        Args:
+            torrent_id: RD torrent ID. Validated against ``_SAFE_ID``.
+            sample_file_link: Optional pre-fetched RD restricted link.
+                When ``None``, ``/torrents/info/{id}`` is called and the
+                smallest selected media file's link is used.
+
+        Returns a dict:
+            ``{'status': 'healthy'}`` — 200 from ``/unrestrict/link``.
+            ``{'status': 'blocked', 'reason': 'infringing_file', 'http': 403}``
+                — RD returned a recognised filter response.
+            ``{'status': 'blocked', 'reason': 'not_found', 'http': 404}``
+                — file gone from RD's hosters.
+            ``{'status': 'unknown', 'error': <reason>}`` — anything else
+                (network, 5xx, malformed body, missing media file, etc.).
+                Re-probe ASAP on next sweep; don't reset healthy-TTL.
+        """
+        if not _SAFE_ID.match(str(torrent_id)):
+            logger.error(f"[debrid] RD invalid torrent ID: {torrent_id!r}")
+            return {'status': 'unknown', 'error': 'invalid_torrent_id'}
+
+        if not sample_file_link:
+            sample_file_link = self._pick_smallest_media_link(torrent_id)
+            if not sample_file_link:
+                return {'status': 'unknown', 'error': 'no_media_files'}
+
+        try:
+            resp = tracked_request(
+                self._name, requests.post,
+                f'{self._BASE}/unrestrict/link',
+                headers=self._headers(),
+                data={'link': sample_file_link},
+                timeout=_TIMEOUT,
+            )
+        except requests.RequestException as e:
+            logger.warning(
+                f"[debrid] RD probe failed for {torrent_id}: "
+                f"{self._sanitize_error(e)}"
+            )
+            return {'status': 'unknown', 'error': type(e).__name__}
+
+        if resp.status_code == 200:
+            return {'status': 'healthy'}
+
+        if resp.status_code == 404:
+            return {'status': 'blocked', 'reason': 'not_found', 'http': 404}
+
+        if resp.status_code == 403:
+            try:
+                body = resp.json()
+            except ValueError:
+                body = {}
+            if not isinstance(body, dict):
+                body = {}
+            if (body.get('error_code') == 35
+                    or body.get('error') == 'infringing_file'):
+                return {
+                    'status': 'blocked',
+                    'reason': 'infringing_file',
+                    'http': 403,
+                }
+            # 403 with a body shape we don't recognise — RD's filter
+            # format may have drifted. Surface at WARN so future drift
+            # is visible without crashing the sweep.
+            logger.warning(
+                f"[debrid] RD probe got unclassified 403 for {torrent_id}: "
+                f"body_keys={list(body.keys())}"
+            )
+            return {'status': 'unknown', 'error': 'http_403_unclassified'}
+
+        return {'status': 'unknown', 'error': f'http_{resp.status_code}'}
+
+    def _pick_smallest_media_link(self, torrent_id):
+        """Return the restricted link for the smallest selected media file
+        in ``torrent_id``, or ``None`` on any failure / no media file.
+
+        ``/torrents/info`` returns ``files`` (all files in the torrent,
+        with ``selected: 1`` for included ones) and ``links`` (restricted
+        URLs parallel to the selected subset). We pick the smallest media
+        file to minimise probe traffic — a release that fails the filter
+        almost always fails on every file, so one sample is sufficient
+        signal.
+        """
+        try:
+            resp = tracked_request(
+                self._name, requests.get,
+                f'{self._BASE}/torrents/info/{torrent_id}',
+                headers=self._headers(),
+                timeout=_TIMEOUT,
+            )
+            resp.raise_for_status()
+            info = resp.json()
+        except (requests.RequestException, ValueError) as e:
+            logger.warning(
+                f"[debrid] RD info failed for {torrent_id}: "
+                f"{self._sanitize_error(e)}"
+            )
+            return None
+
+        if not isinstance(info, dict):
+            return None
+
+        files = info.get('files') or []
+        links = info.get('links') or []
+        if not isinstance(files, list) or not isinstance(links, list):
+            return None
+
+        selected = [
+            f for f in files
+            if isinstance(f, dict) and f.get('selected') == 1
+        ]
+        # RD's contract: ``links`` is parallel to the selected file
+        # subset. A mismatch means we can't safely pair files to links —
+        # bail rather than probe the wrong file.
+        if not selected or len(selected) != len(links):
+            return None
+
+        media = [
+            (f, link)
+            for f, link in zip(selected, links)
+            if isinstance(f.get('path'), str)
+            and os.path.splitext(f['path'])[1].lower() in MEDIA_EXTENSIONS
+            and isinstance(f.get('bytes'), int)
+            and f['bytes'] > 0
+            and isinstance(link, str) and link
+        ]
+        if not media:
+            return None
+
+        return min(media, key=lambda pair: pair[0]['bytes'])[1]
 
 
 class AllDebridClient(DebridClientBase):

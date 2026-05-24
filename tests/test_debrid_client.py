@@ -361,6 +361,200 @@ class TestRealDebrid:
 
 
 # ---------------------------------------------------------------------------
+# RealDebrid probe_file — debrid health reconcile detection primitive
+# ---------------------------------------------------------------------------
+
+class TestProbeFile:
+    """Tests for RealDebridClient.probe_file — the detection primitive
+    for the May 2026 RD keyword filter-gate (infringing_file / error 35).
+
+    The probe POSTs to ``/unrestrict/link`` with a sample file link and
+    classifies the response:
+        200 → healthy
+        403 + ``error_code: 35`` or ``error: 'infringing_file'`` → blocked
+        404 → blocked (not_found)
+        anything else → unknown (retry-eligible)
+    """
+
+    _SAMPLE_LINK = 'https://real-debrid.com/d/ABC123XYZ'
+
+    def _info_response(self, files, links):
+        """Build a /torrents/info response body."""
+        return {'id': 'ABC123', 'files': files, 'links': links}
+
+    @patch('utils.debrid_client.requests.post')
+    def test_healthy_returns_status_healthy(self, mock_post, rd):
+        mock_post.return_value = _mock_response(status_code=200, json_data={'download': 'https://...'})
+        result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
+        assert result == {'status': 'healthy'}
+
+    @patch('utils.debrid_client.requests.post')
+    def test_blocked_infringing_by_error_code(self, mock_post, rd):
+        """RD's documented filter response: HTTP 403 + error_code 35."""
+        mock_post.return_value = _mock_response(
+            status_code=403,
+            json_data={'error': 'infringing_file', 'error_code': 35},
+        )
+        result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
+        assert result == {'status': 'blocked', 'reason': 'infringing_file', 'http': 403}
+
+    @patch('utils.debrid_client.requests.post')
+    def test_blocked_infringing_by_error_key_alone(self, mock_post, rd):
+        """If RD drops error_code but keeps the error string, still classify
+        as blocked — defense against minor body-format drift."""
+        mock_post.return_value = _mock_response(
+            status_code=403,
+            json_data={'error': 'infringing_file'},
+        )
+        result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
+        assert result == {'status': 'blocked', 'reason': 'infringing_file', 'http': 403}
+
+    @patch('utils.debrid_client.requests.post')
+    def test_blocked_not_found(self, mock_post, rd):
+        mock_post.return_value = _mock_response(status_code=404)
+        result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
+        assert result == {'status': 'blocked', 'reason': 'not_found', 'http': 404}
+
+    @patch('utils.debrid_client.requests.post')
+    def test_503_returns_unknown_retry_eligible(self, mock_post, rd):
+        mock_post.return_value = _mock_response(status_code=503)
+        result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
+        assert result == {'status': 'unknown', 'error': 'http_503'}
+
+    @patch('utils.debrid_client.requests.post')
+    def test_403_with_malformed_body_does_not_crash(self, mock_post, rd):
+        """A 403 with a body that fails JSON parsing must NOT crash the
+        sweep — classifying as unknown lets the next probe retry."""
+        resp = _mock_response(status_code=403)
+        resp.json.side_effect = ValueError('not json')
+        mock_post.return_value = resp
+        result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
+        assert result == {'status': 'unknown', 'error': 'http_403_unclassified'}
+
+    @patch('utils.debrid_client.requests.post')
+    def test_403_with_unrecognised_body_is_unknown_not_blocked(self, mock_post, rd, caplog):
+        """A 403 whose body shape we don't recognise must NOT be silently
+        treated as blocked (would mass-delete on auto-remediate). Surface
+        at WARN so future RD filter-format drift is visible."""
+        mock_post.return_value = _mock_response(
+            status_code=403,
+            json_data={'error': 'some_other_403_reason'},
+        )
+        import logging
+        with caplog.at_level(logging.WARNING):
+            result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
+        assert result == {'status': 'unknown', 'error': 'http_403_unclassified'}
+        assert any('unclassified 403' in r.message for r in caplog.records)
+
+    @patch('utils.debrid_client.requests.post')
+    def test_network_error_returns_unknown(self, mock_post, rd):
+        import requests as req
+        mock_post.side_effect = req.ConnectionError('timeout')
+        result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
+        assert result == {'status': 'unknown', 'error': 'ConnectionError'}
+
+    def test_invalid_torrent_id_returns_unknown_without_http_call(self, rd):
+        """Bad torrent IDs must be rejected before any HTTP call —
+        same posture as ``delete_torrent``."""
+        with patch('utils.debrid_client.requests.post') as mock_post, \
+             patch('utils.debrid_client.requests.get') as mock_get:
+            result = rd.probe_file('../../etc/passwd', sample_file_link=self._SAMPLE_LINK)
+            assert result == {'status': 'unknown', 'error': 'invalid_torrent_id'}
+            assert mock_post.call_count == 0
+            assert mock_get.call_count == 0
+
+    @patch('utils.debrid_client.requests.post')
+    @patch('utils.debrid_client.requests.get')
+    def test_picks_smallest_media_file_when_link_not_provided(self, mock_get, mock_post, rd):
+        """No sample_file_link → fetch /torrents/info, pick smallest media
+        file, probe that link. Non-media files (.nfo, .srt) and unselected
+        files are excluded."""
+        mock_get.return_value = _mock_response(json_data=self._info_response(
+            files=[
+                {'id': 1, 'path': '/big.mkv',    'bytes': 5_000_000_000, 'selected': 1},
+                {'id': 2, 'path': '/small.mkv',  'bytes': 1_000_000_000, 'selected': 1},
+                {'id': 3, 'path': '/medium.mkv', 'bytes': 3_000_000_000, 'selected': 1},
+                {'id': 4, 'path': '/sample.nfo', 'bytes': 1_000,         'selected': 1},
+                {'id': 5, 'path': '/extras.mkv', 'bytes': 100_000,       'selected': 0},  # unselected
+            ],
+            links=[
+                'https://real-debrid.com/d/BIG',
+                'https://real-debrid.com/d/SMALL',
+                'https://real-debrid.com/d/MEDIUM',
+                'https://real-debrid.com/d/NFO',
+            ],
+        ))
+        mock_post.return_value = _mock_response(status_code=200)
+        result = rd.probe_file('ABC123')
+        assert result == {'status': 'healthy'}
+        # Smallest MEDIA file is /small.mkv at 1GB (not /sample.nfo, not /extras.mkv).
+        assert mock_post.call_args[1]['data']['link'] == 'https://real-debrid.com/d/SMALL'
+
+    @patch('utils.debrid_client.requests.get')
+    def test_no_media_files_in_torrent_is_unknown(self, mock_get, rd):
+        """Torrent with only non-media files → can't probe, return unknown.
+        Don't POST anything."""
+        mock_get.return_value = _mock_response(json_data=self._info_response(
+            files=[
+                {'id': 1, 'path': '/readme.txt', 'bytes': 1000, 'selected': 1},
+                {'id': 2, 'path': '/cover.jpg',  'bytes': 5000, 'selected': 1},
+            ],
+            links=['https://real-debrid.com/d/TXT', 'https://real-debrid.com/d/JPG'],
+        ))
+        with patch('utils.debrid_client.requests.post') as mock_post:
+            result = rd.probe_file('ABC123')
+            assert result == {'status': 'unknown', 'error': 'no_media_files'}
+            assert mock_post.call_count == 0
+
+    @patch('utils.debrid_client.requests.get')
+    def test_info_files_links_length_mismatch_bails(self, mock_get, rd):
+        """RD's contract: links is parallel to selected files. A mismatch
+        means we can't safely pair link to file — bail rather than probe
+        the wrong one (which could mis-flag the wrong torrent on filter
+        detection)."""
+        mock_get.return_value = _mock_response(json_data=self._info_response(
+            files=[
+                {'id': 1, 'path': '/a.mkv', 'bytes': 1000, 'selected': 1},
+                {'id': 2, 'path': '/b.mkv', 'bytes': 2000, 'selected': 1},
+            ],
+            links=['https://real-debrid.com/d/A'],  # length 1 vs selected 2
+        ))
+        with patch('utils.debrid_client.requests.post') as mock_post:
+            result = rd.probe_file('ABC123')
+            assert result == {'status': 'unknown', 'error': 'no_media_files'}
+            assert mock_post.call_count == 0
+
+    @patch('utils.debrid_client.requests.get')
+    def test_info_request_fails_returns_unknown(self, mock_get, rd):
+        import requests as req
+        mock_get.side_effect = req.ConnectionError('timeout')
+        result = rd.probe_file('ABC123')
+        assert result == {'status': 'unknown', 'error': 'no_media_files'}
+
+    @patch('utils.debrid_client.requests.get')
+    def test_info_returns_non_dict_is_unknown(self, mock_get, rd):
+        """Defensive: if RD returns a list or scalar instead of an info
+        dict (e.g. an error envelope shape change), don't crash."""
+        mock_get.return_value = _mock_response(json_data=['not', 'a', 'dict'])
+        result = rd.probe_file('ABC123')
+        assert result == {'status': 'unknown', 'error': 'no_media_files'}
+
+    @patch('utils.debrid_client.requests.post')
+    def test_probe_does_not_leak_api_key_in_logs(self, mock_post, rd, caplog):
+        """The sample file link contains the user's RD path. A network
+        failure log line must go through _sanitize_error so the API key
+        (if it appears in the exception message) is masked."""
+        import requests as req
+        mock_post.side_effect = req.ConnectionError('failure with key test-rd-key embedded')
+        import logging
+        with caplog.at_level(logging.WARNING):
+            rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
+        for record in caplog.records:
+            assert 'test-rd-key' not in record.message, \
+                f"API key leaked in log: {record.message!r}"
+
+
+# ---------------------------------------------------------------------------
 # AllDebrid operations
 # ---------------------------------------------------------------------------
 

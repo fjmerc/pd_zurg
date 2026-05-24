@@ -5,7 +5,9 @@ optional 'message', and optional 'items' count for result tracking.
 """
 
 import os
+import re
 import shutil
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from utils.logger import get_logger
@@ -156,18 +158,34 @@ def library_scan():
 MEDIA_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m4v', '.webm'}
 
 # Track recently re-triggered arr search IDs to prevent search storms.
-# Shared by verify_symlinks (repair) and detect_stale_grabs.
+# Shared by verify_symlinks (repair), detect_stale_grabs, library
+# symlink cleanup, and debrid_health remediation — each of those runs in
+# its own daemon thread off the task scheduler, so every read/write of
+# _retrigger_history must hold _retrigger_history_lock. The lock is held
+# only for the in-memory ops (membership check + insert + delete); arr
+# API calls happen OUTSIDE the lock to avoid serialising network I/O
+# across unrelated tasks.
 # Key: ('sonarr', ep_id) or ('radarr', movie_id), Value: epoch time of last trigger.
 _retrigger_history = {}
+_retrigger_history_lock = threading.Lock()
 _RETRIGGER_COOLDOWN = 7200  # 2 hours — don't re-trigger the same item within this window
+
+# Single-episode release pattern (S##E## with NO trailing E/digit/-, so
+# multi-ep releases like S01E04E05 or S01E04-05 don't match and fall
+# back to season-wide search). Used by force_episodes path to restrict
+# the search to the exact ep that was filter-blocked, instead of
+# triggering an N-episode search storm for a 200-ep anime season when
+# only one ep was actually affected.
+_SINGLE_EP_RE = re.compile(r'[.\s]S\d{1,2}E(\d{1,4})(?![E\d-])', re.IGNORECASE)
 
 
 def _prune_retrigger_history():
     """Remove expired entries from the retrigger cooldown dict."""
     now = time.time()
-    stale = [k for k, v in _retrigger_history.items() if now - v > _RETRIGGER_COOLDOWN]
-    for k in stale:
-        del _retrigger_history[k]
+    with _retrigger_history_lock:
+        stale = [k for k, v in _retrigger_history.items() if now - v > _RETRIGGER_COOLDOWN]
+        for k in stale:
+            del _retrigger_history[k]
 
 # Local library mount health tracking
 _local_library_baselines = {}   # {label: True} — had real files on previous check
@@ -259,7 +277,14 @@ def _attempt_arr_research(release_name, force_episodes=False):
     the episode is present.  Used by ``debrid_health._remediate`` because
     the just-issued ``delete_torrent`` won't drop out of Zurg's WebDAV
     listing for ~15-30 s — Sonarr's view lags the truth, and we'd
-    otherwise skip every episode in the affected release.
+    otherwise skip every episode in the affected release.  When the
+    release name carries a single-ep pattern (``S##E##``), the search is
+    further narrowed to that one episode so a single blocked ep on a
+    200-ep anime season doesn't fan out to 200 search jobs; multi-ep
+    and season-pack releases fall through to the season-wide scope.
+
+    On API failure the cooldown reservation is rolled back so the next
+    sweep can retry instead of being silently muzzled for 2 h.
 
     Returns True if a search was actually triggered.
     """
@@ -286,31 +311,49 @@ def _attempt_arr_research(release_name, force_episodes=False):
         if not episodes:
             return False
 
-        target_eps = []
-        for ep in episodes:
-            if season is not None and ep.get('seasonNumber') != season:
-                continue
-            if not force_episodes and ep.get('hasFile'):
-                continue
-            ep_id = ep.get('id')
-            if not ep_id:
-                continue
-            item_key = ('sonarr', ep_id)
-            if item_key in _retrigger_history:
-                continue
-            target_eps.append(ep_id)
-            _retrigger_history[item_key] = now_epoch
+        target_episode = None
+        if force_episodes:
+            ep_match = _SINGLE_EP_RE.search(release_name)
+            if ep_match:
+                target_episode = int(ep_match.group(1))
 
-        if target_eps:
+        target_eps = []
+        with _retrigger_history_lock:
+            for ep in episodes:
+                if season is not None and ep.get('seasonNumber') != season:
+                    continue
+                if target_episode is not None and ep.get('episodeNumber') != target_episode:
+                    continue
+                if not force_episodes and ep.get('hasFile'):
+                    continue
+                ep_id = ep.get('id')
+                if not ep_id:
+                    continue
+                item_key = ('sonarr', ep_id)
+                if item_key in _retrigger_history:
+                    continue
+                target_eps.append(ep_id)
+                _retrigger_history[item_key] = now_epoch
+
+        if not target_eps:
+            return False
+
+        try:
             client.search_episodes(target_eps, media_title=name,
                                    cause='symlink_repair_research')
-            s_label = f'S{season:02d}' if season is not None else 'all'
-            logger.info(
-                f"[scheduler] Repair: triggered Sonarr search for '{name}' "
-                f"{s_label} ({len(target_eps)} episodes)"
-            )
-            return True
-        return False
+        except Exception:
+            with _retrigger_history_lock:
+                for eid in target_eps:
+                    _retrigger_history.pop(('sonarr', eid), None)
+            raise
+
+        s_label = f'S{season:02d}' if season is not None else 'all'
+        ep_label = f'E{target_episode:02d}' if target_episode is not None else ''
+        logger.info(
+            f"[scheduler] Repair: triggered Sonarr search for '{name}' "
+            f"{s_label}{ep_label} ({len(target_eps)} episodes)"
+        )
+        return True
     else:
         client = RadarrClient()
         if not client.configured:
@@ -321,12 +364,19 @@ def _attempt_arr_research(release_name, force_episodes=False):
             return False
 
         item_key = ('radarr', movie['id'])
-        if item_key in _retrigger_history:
-            return False
+        with _retrigger_history_lock:
+            if item_key in _retrigger_history:
+                return False
+            _retrigger_history[item_key] = now_epoch
 
-        _retrigger_history[item_key] = now_epoch
-        client.search_movie(movie['id'], media_title=name,
-                            cause='symlink_repair_research')
+        try:
+            client.search_movie(movie['id'], media_title=name,
+                                cause='symlink_repair_research')
+        except Exception:
+            with _retrigger_history_lock:
+                _retrigger_history.pop(item_key, None)
+            raise
+
         logger.info(f"[scheduler] Repair: triggered Radarr search for '{name}'")
         return True
 
@@ -742,9 +792,12 @@ def detect_stale_grabs():
             source_title = record.get('sourceTitle', '?')[:60]
             stale_found += 1
 
-            # Dedup: skip if already re-triggered recently
-            if item_key in _retrigger_history:
-                continue
+            # Dedup: skip if already re-triggered recently. Lock held
+            # only for the membership check; the API call below releases
+            # before re-acquiring on the set side.
+            with _retrigger_history_lock:
+                if item_key in _retrigger_history:
+                    continue
 
             # Re-trigger search
             if name == 'sonarr':
@@ -764,7 +817,8 @@ def detect_stale_grabs():
                 client.search_movie(movie_id, media_title=source_title,
                                     cause='stale_grab_retry')
 
-            _retrigger_history[item_key] = now_epoch
+            with _retrigger_history_lock:
+                _retrigger_history[item_key] = now_epoch
             searches_triggered += 1
 
     msg = f'Found {stale_found} stale grabs'

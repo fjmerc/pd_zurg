@@ -756,7 +756,10 @@ class TestForceEpisodesGate:
     ):
         """End-to-end: a blocked TV release with Sonarr's last scan still
         reporting ``hasFile=True`` MUST still result in ``search_episodes``
-        being called. Pre-fix this skipped every episode in the release."""
+        being called. Pre-fix this skipped every episode in the release.
+        Post-fix the search is also restricted to the exact ep the release
+        names (S01E04), not the whole season — otherwise a single blocked
+        ep on a 200-ep anime show would fan out to 200 search jobs."""
         rd_client = _mock_client(
             torrents=[_torrent(
                 'T1', 'AAAA0000',
@@ -783,11 +786,12 @@ class TestForceEpisodesGate:
                 patch('utils.arr_client.SonarrClient', return_value=sonarr):
             debrid_health.run_sweep()
 
-        # search_episodes called once with only the S01 episodes — the
-        # season filter still applies, only the ``hasFile`` gate is lifted.
+        # search_episodes called once with ONLY the targeted ep (S01E04 →
+        # id 555). The season filter excludes S02E01, and the new ep-level
+        # filter excludes S01E05.
         sonarr.search_episodes.assert_called_once()
         called_eps = sonarr.search_episodes.call_args.args[0]
-        assert sorted(called_eps) == [555, 556]
+        assert sorted(called_eps) == [555]
 
     def test_attempt_arr_research_default_skips_hasFile_true(
             self, _clean_retrigger_history,
@@ -813,11 +817,13 @@ class TestForceEpisodesGate:
         assert triggered is False
         sonarr.search_episodes.assert_not_called()
 
-    def test_attempt_arr_research_force_episodes_includes_hasFile_true(
+    def test_attempt_arr_research_force_episodes_includes_hasFile_true_target_ep(
             self, _clean_retrigger_history,
     ):
-        """Direct unit test: ``force_episodes=True`` queues episodes for
-        search regardless of ``hasFile`` state. Season filter still applies."""
+        """Direct unit test: ``force_episodes=True`` queues the targeted
+        single ep for search regardless of ``hasFile`` state. The season
+        filter AND the new ep-level filter both apply, so sibling eps in
+        the same season (S01E05 here) are NOT queued — only S01E04 is."""
         from utils.scheduled_tasks import _attempt_arr_research
 
         sonarr = MagicMock()
@@ -837,7 +843,7 @@ class TestForceEpisodesGate:
         assert triggered is True
         sonarr.search_episodes.assert_called_once()
         called_eps = sonarr.search_episodes.call_args.args[0]
-        assert sorted(called_eps) == [555, 556]
+        assert sorted(called_eps) == [555]
 
     def test_force_episodes_respects_retrigger_cooldown(
             self, _clean_retrigger_history,
@@ -865,3 +871,163 @@ class TestForceEpisodesGate:
             ) is False
 
         assert sonarr.search_episodes.call_count == 1
+
+    def test_force_episodes_season_pack_queues_all_eps_in_season(
+            self, _clean_retrigger_history,
+    ):
+        """A season-pack release name (no E## component) MUST queue every
+        episode in the matched season under ``force_episodes=True`` —
+        the user deleted the whole pack, every ep is now stale."""
+        from utils.scheduled_tasks import _attempt_arr_research
+
+        sonarr = MagicMock()
+        sonarr.configured = True
+        sonarr.find_series_in_library.return_value = {'id': 100, 'title': 'Landman'}
+        sonarr.get_episodes.return_value = [
+            {'id': 555, 'seasonNumber': 1, 'episodeNumber': 1, 'hasFile': True},
+            {'id': 556, 'seasonNumber': 1, 'episodeNumber': 2, 'hasFile': True},
+            {'id': 557, 'seasonNumber': 1, 'episodeNumber': 3, 'hasFile': True},
+            {'id': 600, 'seasonNumber': 2, 'episodeNumber': 1, 'hasFile': True},
+        ]
+
+        with patch('utils.arr_client.SonarrClient', return_value=sonarr):
+            triggered = _attempt_arr_research(
+                'Landman.S01.Complete.2160p.WEB-DL', force_episodes=True,
+            )
+
+        assert triggered is True
+        sonarr.search_episodes.assert_called_once()
+        called_eps = sonarr.search_episodes.call_args.args[0]
+        # All S01 eps, S02 excluded by the season filter.
+        assert sorted(called_eps) == [555, 556, 557]
+
+    def test_force_episodes_multi_ep_release_falls_back_to_season_wide(
+            self, _clean_retrigger_history,
+    ):
+        """A double-ep release (``S01E04E05``) is too ambiguous for the
+        single-ep regex to lock onto, so the implementation MUST fall
+        back to season-wide queueing — otherwise the second ep would
+        silently be left unsearched. Same logic for hyphenated multi-ep
+        ranges (``S01E04-05``)."""
+        from utils.scheduled_tasks import _attempt_arr_research
+
+        sonarr = MagicMock()
+        sonarr.configured = True
+        sonarr.find_series_in_library.return_value = {'id': 100, 'title': 'Landman'}
+        sonarr.get_episodes.return_value = [
+            {'id': 555, 'seasonNumber': 1, 'episodeNumber': 4, 'hasFile': True},
+            {'id': 556, 'seasonNumber': 1, 'episodeNumber': 5, 'hasFile': True},
+            {'id': 557, 'seasonNumber': 1, 'episodeNumber': 6, 'hasFile': True},
+        ]
+
+        with patch('utils.arr_client.SonarrClient', return_value=sonarr):
+            triggered = _attempt_arr_research(
+                'Landman.S01E04E05.WEB-DL', force_episodes=True,
+            )
+
+        assert triggered is True
+        sonarr.search_episodes.assert_called_once()
+        called_eps = sonarr.search_episodes.call_args.args[0]
+        # All S01 eps queued — implementation can't tell which subset the
+        # multi-ep release covers, so plays it safe and queues the whole
+        # season. Better extra searches than missed work.
+        assert sorted(called_eps) == [555, 556, 557]
+
+
+class TestRetriggerHistoryRollback:
+    """L1: when the arr search API raises, the cooldown reservation MUST
+    be rolled back so the next sweep can retry instead of being silently
+    muzzled for 2 h. Pre-fix the cooldown was set before the API call,
+    so an exception left the entries stuck until expiry.
+    """
+
+    @pytest.fixture
+    def _clean_retrigger_history(self):
+        from utils.scheduled_tasks import _retrigger_history
+        snapshot = dict(_retrigger_history)
+        _retrigger_history.clear()
+        yield _retrigger_history
+        _retrigger_history.clear()
+        _retrigger_history.update(snapshot)
+
+    def test_sonarr_search_failure_rolls_back_cooldown(
+            self, _clean_retrigger_history,
+    ):
+        from utils.scheduled_tasks import _attempt_arr_research
+
+        sonarr = MagicMock()
+        sonarr.configured = True
+        sonarr.find_series_in_library.return_value = {'id': 100, 'title': 'Landman'}
+        sonarr.get_episodes.return_value = [
+            {'id': 555, 'seasonNumber': 1, 'episodeNumber': 4, 'hasFile': True},
+        ]
+        sonarr.search_episodes.side_effect = RuntimeError('arr offline')
+
+        with patch('utils.arr_client.SonarrClient', return_value=sonarr):
+            with pytest.raises(RuntimeError):
+                _attempt_arr_research(
+                    'Landman.S01E04.WEB-DL', force_episodes=True,
+                )
+
+        # Cooldown rolled back — next sweep can retry the same ep.
+        assert ('sonarr', 555) not in _clean_retrigger_history
+
+    def test_radarr_search_failure_rolls_back_cooldown(
+            self, _clean_retrigger_history,
+    ):
+        from utils.scheduled_tasks import _attempt_arr_research
+
+        radarr = MagicMock()
+        radarr.configured = True
+        radarr.find_movie_in_library.return_value = {'id': 42, 'title': 'Gattaca'}
+        radarr.search_movie.side_effect = RuntimeError('arr offline')
+
+        with patch('utils.arr_client.RadarrClient', return_value=radarr):
+            with pytest.raises(RuntimeError):
+                _attempt_arr_research('Gattaca.1997.1080p.BluRay')
+
+        assert ('radarr', 42) not in _clean_retrigger_history
+
+
+class TestRemediateFilenameSanitisation:
+    """M2: a RD filename packed with path components (e.g. an uploader
+    nested the file under ``Show/S01/ep.mkv``) MUST be reduced to the
+    basename before parsing into a release name — otherwise the parser
+    sees the path and could fuzzy-match the wrong show in Sonarr, which
+    under ``force_episodes=True`` would queue searches for the wrong
+    show's episodes."""
+
+    def test_remediate_strips_path_components_from_filename(
+            self, monkeypatch,
+    ):
+        from utils import debrid_health
+
+        mock_arr_research = MagicMock(return_value=True)
+        monkeypatch.setattr(
+            'utils.scheduled_tasks._attempt_arr_research', mock_arr_research,
+        )
+        monkeypatch.setattr(
+            'utils.blocklist.add', MagicMock(return_value='id'),
+        )
+        monkeypatch.setattr(
+            'utils.history.log_event', MagicMock(return_value='evt-id'),
+        )
+
+        rd_client = MagicMock()
+        rd_client.delete_torrent.return_value = True
+
+        debrid_health._remediate(
+            client=rd_client,
+            torrent_id='T1',
+            torrent_hash='AAAA0000',
+            filename='Show/S01/Show.S01E04.WEB-DL.mkv',
+            probe_result={'status': 'blocked', 'reason': 'infringing_file',
+                          'http': 451},
+        )
+
+        mock_arr_research.assert_called_once()
+        # Release name passed to _attempt_arr_research must be the
+        # basename minus extension, NO path component.
+        passed_release_name = mock_arr_research.call_args.args[0]
+        assert passed_release_name == 'Show.S01E04.WEB-DL'
+        assert '/' not in passed_release_name

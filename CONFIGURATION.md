@@ -170,7 +170,9 @@ here is inert while it's OFF.
 
 ## Debrid health reconciler
 
-Background sweep that probes each Real-Debrid torrent for the **May 2026 keyword filter-gate** (RD returns `infringing_file` / error 35 for cached torrents whose filenames trip its keyword blocklist — `WEB-DL`, `AMZN`, `[RARBG]`, etc.). Without this, Zurg's WebDAV listing keeps showing blocked torrents as healthy and your library renders phantom content that won't play. State is persisted to `/config/debrid_health.json`. Detection only in the current release; auto-remediation lands in a later phase.
+Background sweep that probes each Real-Debrid torrent for the **May 2026 keyword filter-gate** (RD returns `infringing_file` / error 35 for cached torrents whose filenames trip its keyword blocklist — `WEB-DL`, `AMZN`, `[RARBG]`, etc.). Without this, Zurg's WebDAV listing keeps showing blocked torrents as healthy and your library renders phantom content that won't play. State is persisted to `/config/debrid_health.json`.
+
+**Real-Debrid only.** AllDebrid and TorBox don't currently filter cached content this way, so the reconciler is gated on `RD_API_KEY` being configured — if you only have AD/TB credentials, the task never registers and the sweep never runs (zero overhead). The architecture has a multi-debrid extension hook (per plan 38), so adding AD/TB support if either provider ever introduces a similar filter is one method per provider.
 
 | Variable | Description | Default |
 |---|---|---|

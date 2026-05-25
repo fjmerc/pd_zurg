@@ -3661,6 +3661,157 @@ class TestApplyRadarrWantedMovies:
         assert injected_titles == ['A', 'B']
 
 
+class TestStripGhostDuplicates:
+    """Post-enrichment ghost-deduplication pass.
+
+    The pre-injection dedup in ``_apply_radarr_wanted_movies`` uses the
+    parsed-folder norm at the time of injection — but TMDB enrichment
+    may later rename a real entry to its canonical title that collides
+    with a ghost we already injected. Without this pass the library
+    would render two cards for the same movie (real Available + ghost
+    Wanted). Reviewer-flagged HIGH from commit 071ba5d.
+    """
+
+    def test_ghost_collision_with_real_dropped(self):
+        from utils.library import _strip_ghost_duplicates
+        # Simulates the F1 case: real movie post-rename is now "F1",
+        # ghost was injected pre-rename as "F1". Real wins.
+        movies = [
+            {'title': 'F1', 'year': 2025, 'source': 'debrid'},
+            {'title': 'F1', 'year': 2025, 'source': 'wanted', 'missing': True},
+        ]
+        _strip_ghost_duplicates(movies)
+        assert len(movies) == 1
+        assert movies[0]['source'] == 'debrid'
+
+    def test_ghost_with_unique_title_preserved(self):
+        from utils.library import _strip_ghost_duplicates
+        movies = [
+            {'title': 'Real Movie', 'year': 2024, 'source': 'debrid'},
+            {'title': 'Different Movie', 'year': 2024,
+             'source': 'wanted', 'missing': True},
+        ]
+        _strip_ghost_duplicates(movies)
+        assert len(movies) == 2
+        # Order preserved (real first, ghost second)
+        assert movies[0]['source'] == 'debrid'
+        assert movies[1]['source'] == 'wanted'
+
+    def test_year_mismatch_keeps_both(self):
+        """Same title different year is two genuinely different films
+        (Dune 1984 vs Dune 2021). Don't collapse them."""
+        from utils.library import _strip_ghost_duplicates
+        movies = [
+            {'title': 'Dune', 'year': 1984, 'source': 'local'},
+            {'title': 'Dune', 'year': 2021, 'source': 'wanted',
+             'missing': True},
+        ]
+        _strip_ghost_duplicates(movies)
+        assert len(movies) == 2
+
+    def test_no_real_movies_keeps_all_ghosts(self):
+        from utils.library import _strip_ghost_duplicates
+        movies = [
+            {'title': 'G1', 'year': 2024, 'source': 'wanted', 'missing': True},
+            {'title': 'G2', 'year': 2025, 'source': 'wanted', 'missing': True},
+        ]
+        _strip_ghost_duplicates(movies)
+        assert len(movies) == 2
+
+    def test_only_real_movies_no_op(self):
+        from utils.library import _strip_ghost_duplicates
+        movies = [
+            {'title': 'R1', 'year': 2024, 'source': 'debrid'},
+            {'title': 'R2', 'year': 2025, 'source': 'local'},
+        ]
+        _strip_ghost_duplicates(movies)
+        assert len(movies) == 2
+
+    def test_multiple_ghosts_only_collision_dropped(self):
+        """When several ghosts exist, only the one colliding with a
+        real entry is stripped. Other ghosts survive."""
+        from utils.library import _strip_ghost_duplicates
+        movies = [
+            {'title': 'Real', 'year': 2025, 'source': 'debrid'},
+            {'title': 'Real', 'year': 2025, 'source': 'wanted', 'missing': True},
+            {'title': 'Ghost Unique', 'year': 2025,
+             'source': 'wanted', 'missing': True},
+        ]
+        _strip_ghost_duplicates(movies)
+        assert len(movies) == 2
+        assert movies[0]['title'] == 'Real'
+        assert movies[0]['source'] == 'debrid'
+        assert movies[1]['title'] == 'Ghost Unique'
+
+    def test_empty_movies_no_op(self):
+        from utils.library import _strip_ghost_duplicates
+        movies = []
+        _strip_ghost_duplicates(movies)
+        assert movies == []
+
+
+class TestSearchForMissingEpisodesSkipGhosts:
+    """Ghost entries (source='wanted') MUST NOT be processed by the
+    gap-fill search loop. Reviewer-flagged CRITICAL from commit
+    071ba5d: without this skip, the function calls ensure_and_search
+    on Radarr-monitored movies that Radarr is already searching for,
+    AND writes set_pending() — which causes the next scan's pending
+    suppression to hide the ghost forever (Wanted view self-erases).
+    """
+
+    def test_ghost_movie_skipped_in_search_loop(self, monkeypatch):
+        from utils.library import LibraryScanner
+
+        # Build a scanner with the minimum surface to call
+        # _search_for_missing_episodes. Real movies should pass through
+        # to the search code path; the ghost should be skipped before
+        # ensure_and_search is ever called for it.
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._alias_norms = {}
+        scanner._lock = __import__('threading').RLock()
+
+        radarr_client = MagicMock()
+        radarr_client.configured = True
+        radarr_client.ensure_and_search.return_value = {'status': 'sent'}
+        radarr_client.find_movie_in_library.return_value = {
+            'id': 42, 'tmdbId': 100,
+        }
+        monkeypatch.setattr(
+            'utils.arr_client.get_download_service',
+            lambda mt: (radarr_client, 'radarr') if mt == 'movie'
+            else (None, None),
+        )
+        monkeypatch.setattr('utils.library.gap_fill_enabled', lambda: True)
+        # Suppress all the persistence + history + notification side effects
+        monkeypatch.setattr(
+            'utils.library_prefs.get_all_pending', lambda: {},
+        )
+        monkeypatch.setattr(
+            'utils.library_prefs.set_pending', MagicMock(),
+        )
+        monkeypatch.setattr(
+            'utils.library_prefs.touch_pending_searched', MagicMock(),
+        )
+        monkeypatch.setattr(
+            'utils.library_prefs.update_pending_error', MagicMock(),
+        )
+
+        movies = [
+            # Ghost — should be skipped before reaching ensure_and_search
+            {'title': 'Ghost Movie', 'year': 2025,
+             'source': 'wanted', 'missing': True,
+             '_radarr_tmdb_id': 100},
+        ]
+        # Empty shows, no preferences (route=None → gap-fill path)
+        scanner._search_for_missing_episodes(shows=[], movies=movies,
+                                             preferences={})
+
+        # The critical assertion: ensure_and_search MUST NOT have been
+        # called for the ghost. Pre-fix this fired on every scan and
+        # caused the self-erase bug.
+        assert radarr_client.ensure_and_search.call_count == 0
+
+
 class TestGetRadarrMoviesList:
     """TTL cache for the Radarr movie list."""
 

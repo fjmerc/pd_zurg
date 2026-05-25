@@ -978,6 +978,38 @@ def _apply_sonarr_monitored_filter(shows):
             show['monitored_episodes'] = monitored_total
 
 
+def _strip_ghost_duplicates(movies):
+    """Drop ghost entries whose post-enrichment ``(norm, year)`` collides
+    with a real on-disk movie.
+
+    The pre-enrichment dedup in ``_apply_radarr_wanted_movies`` uses
+    parsed-folder norms, which is correct at injection time but doesn't
+    survive enrichment: ``_enrich_with_tmdb_cache._maybe_rename`` can
+    rewrite a real entry's ``title`` to its canonical TMDB spelling
+    (e.g. ``"F1 The Movie"`` → ``"F1"``), which may now match a ghost
+    we already injected. Without this pass, the library renders the
+    same movie as two cards — one real (Available, green) and one ghost
+    (Wanted, red).
+
+    Real entries always win — they're on disk, the ghost was a synthetic
+    placeholder. Runs in place on the ``movies`` list. O(n).
+    """
+    real_keys = set()
+    for m in movies:
+        if m.get('source') == 'wanted':
+            continue
+        norm = _normalize_title(m.get('title') or '')
+        if norm:
+            real_keys.add((norm, m.get('year')))
+    if not real_keys:
+        return
+    movies[:] = [
+        m for m in movies
+        if m.get('source') != 'wanted'
+        or (_normalize_title(m.get('title') or ''), m.get('year')) not in real_keys
+    ]
+
+
 def _apply_radarr_wanted_movies(movies, pending=None):
     """Inject Radarr-monitored movies with no file into the movie list as
     "ghost" entries so they surface in the Wanted view.
@@ -2016,6 +2048,13 @@ class LibraryScanner:
         # to the UI and to gap-fill so neither invents phantom work.
         _apply_sonarr_monitored_filter(shows)
 
+        # Strip ghost movies that now duplicate a real entry. Enrichment
+        # may have renamed a real movie to a canonical TMDB title that
+        # matches a ghost we injected pre-enrichment (e.g. parsed
+        # "F1 The Movie" → canonical "F1" collides with a Radarr ghost
+        # titled "F1"). Pre-enrichment dedup couldn't see this collision.
+        _strip_ghost_duplicates(movies)
+
         # Build path indexes keyed by post-rename normalized titles.  When
         # two items collide on the same (norm, season, episode) — possible
         # when distinct shows share a canonical title and dedup didn't merge
@@ -2880,6 +2919,16 @@ class LibraryScanner:
                 if time.monotonic() > deadline:
                     logger.info("[library] Search budget exhausted, deferring remaining to next scan")
                     break
+                # Ghost entries (source='wanted') are Radarr's own
+                # monitored-no-file movies — Radarr is ALREADY searching
+                # for them via its scheduled RSS sync. Triggering a
+                # second pd_zurg search here would (a) hit Radarr with
+                # redundant /command/MoviesSearch calls, (b) write a
+                # set_pending entry which would suppress the ghost on
+                # the next scan (the bug surfaced in the 071ba5d review:
+                # Wanted view self-erases after one scan cycle).
+                if movie.get('source') == 'wanted':
+                    continue
                 norm = _normalize_title(movie['title'])
                 route = self._route_for(norm, preferences)
                 direction = {True: 'to-debrid', False: 'to-local', None: 'to-any'}[route]
@@ -3608,7 +3657,15 @@ class LibraryScanner:
         try:
             client, svc = get_download_service('movie')
             if client and svc == 'radarr':
-                for m in (client.get_all_movies() or []):
+                # Share the movie list with _apply_radarr_wanted_movies
+                # via the scan-scoped TTL cache — one HTTP round-trip
+                # per scan cycle instead of one per consumer. Mirrors
+                # the Sonarr pattern at line 3634.
+                radarr_movies_list = _get_radarr_movies_list(client)
+                if radarr_movies_list is None:
+                    radarr_fetch_failed = True
+                    radarr_movies_list = []
+                for m in radarr_movies_list:
                     t = m.get('title', '')
                     if not t:
                         continue

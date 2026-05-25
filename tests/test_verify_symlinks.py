@@ -226,6 +226,139 @@ class TestVerifySymlinks:
         assert os.path.islink(link)  # must NOT be deleted
 
 
+class TestTorBoxFlatMount:
+    """TB-specific verify_symlinks behaviour (plan 39 follow-up).
+
+    TB's WebDAV mount is FLAT (no shows/movies/anime/__all__ subdirs).
+    Symlinks point at BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX (default
+    ``<RD base>_torbox``) and resolve to the TB mount.  verify_symlinks
+    must route translation through the correct (target_base, mount) pair
+    or every TB symlink translates to a non-existent path on the RD
+    mount and gets mass-deleted on every sweep.
+    """
+
+    @pytest.fixture
+    def tb_env(self, tmp_dir, monkeypatch):
+        completed = os.path.join(tmp_dir, 'completed')
+        # Two-tiered: RCLONE_MOUNT_NAME under a parent dir, so the TB
+        # sibling resolves via mount_for_debrid().
+        mount_parent = os.path.join(tmp_dir, 'data')
+        zurg_mount = os.path.join(mount_parent, 'zurg')
+        tb_mount = os.path.join(mount_parent, 'torbox')
+        rd_target_base = os.path.join(tmp_dir, 'mnt', 'debrid')
+        tb_target_base = os.path.join(tmp_dir, 'mnt', 'debrid_torbox')
+        for d in (completed, zurg_mount, tb_mount, rd_target_base, tb_target_base):
+            os.makedirs(d, exist_ok=True)
+        # RD mount needs a non-empty category dir so the mount-health gate passes
+        os.makedirs(os.path.join(zurg_mount, 'shows', '_placeholder'), exist_ok=True)
+        monkeypatch.setenv('BLACKHOLE_COMPLETED_DIR', completed)
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', zurg_mount)
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', rd_target_base)
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', tb_target_base)
+        monkeypatch.setenv('RCLONE_MOUNT_NAME', 'zurg')
+        monkeypatch.setenv('TORBOX_MOUNT_NAME', 'torbox')
+        monkeypatch.setenv('TORBOX_API_KEY', 'fake-tb-key')
+        # local_tv / local_movies unset for these tests
+        monkeypatch.delenv('BLACKHOLE_LOCAL_LIBRARY_TV', raising=False)
+        monkeypatch.delenv('BLACKHOLE_LOCAL_LIBRARY_MOVIES', raising=False)
+        return {
+            'completed': completed,
+            'zurg_mount': zurg_mount,
+            'tb_mount': tb_mount,
+            'rd_target_base': rd_target_base,
+            'tb_target_base': tb_target_base,
+        }
+
+    def test_tb_symlink_existence_check_uses_tb_mount(self, tb_env):
+        """Symlink target on TB base must translate to TB mount, not RD mount.
+
+        Regression for the HIGH bug-hunter finding: without per-pair
+        routing, TB symlinks translate to <RD_mount>/<TB_release>/file
+        which never exists, and every sweep mass-deletes them.
+        """
+        from utils.scheduled_tasks import verify_symlinks
+        # File EXISTS on the TB mount.  Mount is flat — no category subdir.
+        release_dir = os.path.join(tb_env['tb_mount'], 'TB.Show.S01E01-NTb')
+        os.makedirs(release_dir)
+        with open(os.path.join(release_dir, 'ep.mkv'), 'w') as f:
+            f.write('video')
+        # Symlink points at TB base
+        link_target = os.path.join(tb_env['tb_target_base'], 'TB.Show.S01E01-NTb', 'ep.mkv')
+        link = _make_symlink(tb_env['completed'], 'ep.mkv', link_target)
+
+        result = verify_symlinks()
+        assert result['status'] == 'success'
+        assert os.path.islink(link), "TB symlink with existing file must NOT be deleted"
+
+    def test_tb_symlink_repaired_after_release_re_lands_on_flat_mount(self, tb_env):
+        """When the TB mount folder changes name (e.g. re-grab with different
+        torrent name), repair must find the new folder via the flat-root probe
+        and rebuild the symlink against the TB base — not the RD base.
+        """
+        from utils.scheduled_tasks import verify_symlinks
+        # Old symlink points at a folder that no longer exists on the mount
+        old_link_target = os.path.join(tb_env['tb_target_base'], 'old_name', 'ep.mkv')
+        link = _make_symlink(tb_env['completed'], 'ep.mkv', old_link_target)
+        # New folder with same rel_file exists on the FLAT TB mount root
+        new_dir = os.path.join(tb_env['tb_mount'], 'old_name')
+        os.makedirs(new_dir)
+        with open(os.path.join(new_dir, 'ep.mkv'), 'w') as f:
+            f.write('video')
+        # Note: the symlink check_target translates to <tb_mount>/old_name/ep.mkv
+        # which DOES exist after we created it — symlink stays
+        result = verify_symlinks()
+        assert result['status'] == 'success'
+        assert os.path.islink(link)
+
+    def test_tb_only_mount_with_empty_zurg_still_runs(self, tb_env, monkeypatch):
+        """If Zurg mount has no content but TB does, verify_symlinks must
+        NOT abort with 'Mount categories empty'.  Otherwise TB-only setups
+        can never run symlink verification.
+        """
+        from utils.scheduled_tasks import verify_symlinks
+        # Wipe Zurg categories (simulate RD removed everything)
+        import shutil
+        shutil.rmtree(os.path.join(tb_env['zurg_mount'], 'shows'))
+        os.makedirs(os.path.join(tb_env['zurg_mount'], 'shows'), exist_ok=True)
+        # TB mount has content
+        os.makedirs(os.path.join(tb_env['tb_mount'], 'Some.Release'))
+        with open(os.path.join(tb_env['tb_mount'], 'Some.Release', 'f.mkv'), 'w') as f:
+            f.write('x')
+        result = verify_symlinks()
+        assert result['status'] == 'success'
+
+    def test_extract_release_info_accepts_two_part_tb_path(self):
+        """_extract_release_info must accept TB's <base>/<release>/<rel_file> layout."""
+        from utils.scheduled_tasks import _extract_release_info
+        target = '/mnt/debrid_torbox/My.Release.S01E01/episode.mkv'
+        prefixes = ['/mnt/debrid_torbox/']
+        release_name, rel_file, category = _extract_release_info(target, prefixes)
+        assert release_name == 'My.Release.S01E01'
+        assert rel_file == 'episode.mkv'
+        assert category == ''
+
+    def test_extract_release_info_still_accepts_three_part_zurg_path(self):
+        """Zurg layout still parses correctly (regression guard)."""
+        from utils.scheduled_tasks import _extract_release_info
+        target = '/mnt/debrid/shows/My.Release.S01E01/episode.mkv'
+        prefixes = ['/mnt/debrid/']
+        release_name, rel_file, category = _extract_release_info(target, prefixes)
+        assert release_name == 'My.Release.S01E01'
+        assert rel_file == 'episode.mkv'
+        assert category == 'shows'
+
+    def test_find_release_on_mount_probes_flat_root(self, tmp_dir):
+        """_find_release_on_mount must fall through to bare mount root
+        for TB-flat layouts where the release isn't under shows/movies/anime/__all__.
+        """
+        from utils.scheduled_tasks import _find_release_on_mount
+        # Flat-style mount: release directly under root
+        os.makedirs(os.path.join(tmp_dir, 'TB.Release.S01E01'))
+        path, category = _find_release_on_mount('TB.Release.S01E01', tmp_dir)
+        assert path == os.path.join(tmp_dir, 'TB.Release.S01E01')
+        assert category == ''
+
+
 class TestSymlinkRepair:
     """Tests for the repair cascade in verify_symlinks."""
 

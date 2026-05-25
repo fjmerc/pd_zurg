@@ -45,11 +45,114 @@ _watcher = None
 RETRY_SCHEDULE = [300, 900, 3600]  # 5 min, 15 min, 1 hour
 MAX_RETRIES = 3
 
+# Per-provider rate-limit gating.  When a debrid API returns HTTP 429 or a
+# body containing "rate limit", the corresponding provider is marked
+# back-off-until ``now + _RATE_LIMIT_BACKOFF``.  Subsequent ``_add_to_*``
+# calls for the SAME provider sleep until that window expires before
+# hitting the API again — turns a self-DoS during a Sonarr search storm
+# (e.g. MissingEpisodeSearch firing all S01 episodes of the same release
+# group within the same second) into a single bounded wait per episode
+# rather than dozens of immediate-fail-then-retry-in-5min loops that
+# all hit the rate-limit again on retry.
+#
+# Cross-provider isolation: a 429 on RD does not throttle TB calls.
+# That means cache_aware routing can still keep moving even when one
+# debrid is under pressure.
+_RATE_LIMIT_BACKOFF = 60  # seconds; one rate-limit token-bucket window
+_rate_limit_lock = threading.Lock()
+_rate_limit_until = {}    # provider -> unix timestamp until which adds wait
+
+
+def _check_rate_limit(provider):
+    """Block until any active rate-limit window for *provider* expires.
+
+    Cheap when no window is active (one lock acquire + dict lookup).
+    Logs once per actual wait so operators see why a worker paused.
+    """
+    with _rate_limit_lock:
+        until = _rate_limit_until.get(provider, 0)
+    now = time.time()
+    if until > now:
+        wait = until - now
+        logger.warning(
+            f"[blackhole] {provider}: rate-limit window active, sleeping {wait:.1f}s "
+            f"before next add"
+        )
+        time.sleep(wait)
+
+
+def _mark_rate_limited(provider, seconds=None):
+    """Mark *provider* as rate-limited for *seconds* (default _RATE_LIMIT_BACKOFF)."""
+    seconds = seconds if seconds is not None else _RATE_LIMIT_BACKOFF
+    with _rate_limit_lock:
+        _rate_limit_until[provider] = time.time() + seconds
+
+
+def _is_rate_limit_response(response):
+    """Return True iff *response* indicates the debrid API rate-limited us.
+
+    Recognises HTTP 429 (standard) and an HTTP-200/4xx body containing
+    the phrase ``rate limit`` (RD's text response on its custom 429-ish
+    error path, as well as TB's).  Case-insensitive substring match —
+    no full-text parse, just enough to distinguish from real failures.
+    """
+    try:
+        if response.status_code == 429:
+            return True
+        body = (response.text or '').lower()
+        return 'rate limit' in body or 'rate_limit' in body
+    except Exception:
+        return False
+
 # Media file extensions for symlink creation
 MEDIA_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m4v', '.webm'}
 
 # Zurg mount category directories (checked in order; __all__ is fallback)
 MOUNT_CATEGORIES = ['shows', 'movies', 'anime']
+
+# Leading ``[indexer.to] `` prefix that TorBox sometimes adds to its API
+# ``data.name`` field via the indexer scraper. The folder TorBox writes
+# to its WebDAV mount has the bare torrent folder name without that
+# prefix, so the mount lookup needs to try the stripped form too.
+_INDEXER_PREFIX_RE = re.compile(r'^\[[^\]]+\]\s*')
+
+
+def _strip_indexer_prefix(name):
+    """Strip a leading ``[indexer.to] `` block from a release name.
+
+    Returns the stripped name, or *name* unchanged if no leading
+    bracket-block was present.
+    """
+    if not name:
+        return name
+    return _INDEXER_PREFIX_RE.sub('', name, count=1)
+
+
+def _is_safe_mount_name(name):
+    """Reject release-name candidates that could escape the mount root.
+
+    The release name flows in from a debrid API field (TB's ``data.name``,
+    RD's ``filename``, AD's ``magnets.filename``) which is uploader-controlled
+    at submission time.  ``os.path.join('/mnt/tb', '/etc')`` collapses to
+    ``'/etc'`` — an absolute path on the right side wins — and a name
+    containing ``..`` lets the caller climb out of the mount.  Either would
+    make ``_find_on_*_mount`` happily return an ``os.path.isdir`` hit
+    pointing OUTSIDE the intended rclone mount, which then becomes the
+    ``os.walk`` root for symlink creation.
+
+    Returns True iff *name* is a non-empty, single-segment, non-traversing
+    string with no NUL byte and no path separator.  Mount listdir entries
+    are also passed through this helper as defense-in-depth — well-behaved
+    FUSE drivers never return multi-segment names, but TB's WebDAV stack
+    has been observed sanitising names in surprising ways.
+    """
+    if not name or name in ('.', '..'):
+        return False
+    if '/' in name or '\\' in name or '\x00' in name:
+        return False
+    if os.path.isabs(name):
+        return False
+    return True
 
 # Label routing: subdir names in watch_dir that are NOT labels
 # (retry staging and alt-retry staging — handled by dedicated logic)
@@ -151,6 +254,19 @@ def iter_release_dirs(completed_dir):
 RD_TERMINAL_ERRORS = {'magnet_error', 'error', 'virus', 'dead'}
 AD_TERMINAL_ERRORS = {'Error'}
 TB_TERMINAL_ERRORS = {'error', 'failed'}
+
+# TorBox download_state values that mean the file is on TB storage and
+# reachable via WebDAV — i.e. the blackhole should stop polling and
+# proceed to symlink creation.  TB uses ``cached`` for instant-cache
+# hits (the dominant case under plan 39 cache_aware routing, since
+# every TB-routed grab is cache-positive by construction), ``completed``
+# for torrents that went through a full BT download, and ``uploading``
+# for torrents in the post-download seed phase where the file is still
+# present.  Checking only ``completed`` (the pre-fix behaviour) caused
+# every cached TB grab to time out at ``mount_poll_timeout`` (default
+# 300s) and get auto-blocklisted as "Uncached on debrid (timed out)",
+# even though the file had been ready since the moment the add returned.
+TB_READY_STATES = {'completed', 'cached', 'uploading'}
 
 
 def _bencode_end(data, start):
@@ -1147,6 +1263,7 @@ class BlackholeWatcher:
         with single-debrid callers; phase-2 multi-debrid callers pass the
         resolved per-debrid key explicitly via ``self._api_key_for('realdebrid')``.
         """
+        _check_rate_limit('realdebrid')
         api_key = api_key or self.debrid_api_key
         ext = os.path.splitext(file_path)[1].lower()
         headers = {'Authorization': f'Bearer {api_key}'}
@@ -1174,11 +1291,14 @@ class BlackholeWatcher:
             if select_resp.status_code not in (200, 202, 204):
                 logger.warning(f"[blackhole] selectFiles failed for {torrent_id}: HTTP {select_resp.status_code}")
             return True, torrent_id
-        else:
-            return False, response.text[:200]
+        if _is_rate_limit_response(response):
+            _mark_rate_limited('realdebrid')
+            return False, 'rate limit exceeded'
+        return False, response.text[:200]
 
     def _add_to_alldebrid(self, file_path, api_key=None):
         """Add a torrent/magnet to AllDebrid."""
+        _check_rate_limit('alldebrid')
         api_key = api_key or self.debrid_api_key
         ext = os.path.splitext(file_path)[1].lower()
         params = {'agent': 'zurgarr', 'apikey': api_key}
@@ -1197,11 +1317,14 @@ class BlackholeWatcher:
 
         if response.status_code == 200:
             return True, response.json()
-        else:
-            return False, response.text[:200]
+        if _is_rate_limit_response(response):
+            _mark_rate_limited('alldebrid')
+            return False, 'rate limit exceeded'
+        return False, response.text[:200]
 
     def _add_to_torbox(self, file_path, api_key=None):
         """Add a torrent/magnet to TorBox."""
+        _check_rate_limit('torbox')
         api_key = api_key or self.debrid_api_key
         ext = os.path.splitext(file_path)[1].lower()
         headers = {'Authorization': f'Bearer {api_key}'}
@@ -1219,8 +1342,10 @@ class BlackholeWatcher:
 
         if response.status_code in (200, 201):
             return True, response.json()
-        else:
-            return False, response.text[:200]
+        if _is_rate_limit_response(response):
+            _mark_rate_limited('torbox')
+            return False, 'rate limit exceeded'
+        return False, response.text[:200]
 
     # ── Torrent ID extraction ────────────────────────────────────────
 
@@ -1306,7 +1431,7 @@ class BlackholeWatcher:
         elif debrid == 'alldebrid':
             return status == 'Ready'
         elif debrid == 'torbox':
-            return status == 'completed'
+            return status in TB_READY_STATES
         return False
 
     def _is_terminal_error(self, status, debrid=None):
@@ -1417,9 +1542,22 @@ class BlackholeWatcher:
         """Search the rclone mount for a release folder.
 
         Returns (full_path, category, matched_name) or (None, None, None) if not found.
-        Checks categorized directories first, then __all__ as fallback.
-        Also tries stripping video file extensions since Zurg strips them
-        from single-file torrent folder names.
+
+        Zurg-backed mounts (RD/AD) are categorized: probes
+        ``shows/movies/anime`` first, then ``__all__`` as fallback.
+        TorBox's WebDAV mount is flat — releases land directly under the
+        mount root with no category subdivision — so for TB the returned
+        ``category`` is ``''`` (passed through to ``_create_symlinks``
+        which builds host-side targets as ``<TB target base>/<release>/``
+        with no category segment).
+
+        Also tries stripping a trailing media file extension (Zurg strips
+        it from single-file torrent folder names), and for TB additionally
+        tries stripping a leading ``[indexer.to] `` prefix that the
+        scraper sometimes adds to TB's API ``data.name`` while the
+        actual mount folder has the bare name. A final listdir-walk
+        fuzzy match using ``norm_for_matching`` catches further
+        normalization drift between TB's API and its WebDAV layout.
 
         ``debrid`` (plan 39 phase 2) selects which mount to search.  Defaults
         to ``self.debrid_service`` for back-compat with single-debrid callers.
@@ -1427,14 +1565,29 @@ class BlackholeWatcher:
         Zurg mount.  The two are NEVER cross-searched — if a torrent was
         added to TB, only the TB mount can possibly have it.
         """
-        mount_path = self._mount_for(debrid or self.debrid_service)
+        debrid = debrid or self.debrid_service
+        mount_path = self._mount_for(debrid)
+
         # Try both the original name and with video extension stripped
         candidates = [release_name]
         base, ext = os.path.splitext(release_name)
         if ext.lower() in MEDIA_EXTENSIONS and base:
             candidates.append(base)
 
+        if debrid == 'torbox':
+            # Additional indexer-prefix-stripped candidates for TB.
+            stripped = _strip_indexer_prefix(release_name)
+            if stripped and stripped != release_name:
+                candidates.append(stripped)
+                s_base, s_ext = os.path.splitext(stripped)
+                if s_ext.lower() in MEDIA_EXTENSIONS and s_base:
+                    candidates.append(s_base)
+            return self._find_on_torbox_mount(mount_path, release_name, candidates)
+
         for name in candidates:
+            if not _is_safe_mount_name(name):
+                logger.warning(f"[blackhole] Rejecting unsafe mount candidate: {name!r}")
+                continue
             for category in MOUNT_CATEGORIES:
                 path = os.path.join(mount_path, category, name)
                 if os.path.isdir(path):
@@ -1443,6 +1596,72 @@ class BlackholeWatcher:
             path = os.path.join(mount_path, '__all__', name)
             if os.path.isdir(path):
                 return path, '__all__', name
+        return None, None, None
+
+    def _find_on_torbox_mount(self, mount_path, release_name, candidates):
+        """Locate *release_name* on the flat TorBox WebDAV mount.
+
+        Returns ``(full_path, '', matched_name)`` on hit, otherwise
+        ``(None, None, None)``. ``category`` is the empty string because
+        the TB mount has no category subdivision — see ``_find_on_mount``.
+
+        Two-step search:
+        1. Exact-path probes for each candidate (cheapest path; covers
+           the common case where TB's API name matches the folder name).
+        2. ``os.listdir`` + fuzzy compare via ``norm_for_matching`` —
+           catches indexer-tag variations that the leading-bracket
+           regex doesn't (trailing tags, embedded brackets) and other
+           drift between TB's API ``data.name`` and the actual folder
+           it wrote to WebDAV. Only returns a hit when exactly one
+           folder matches — refuses to guess between duplicates.
+        """
+        for name in candidates:
+            if not _is_safe_mount_name(name):
+                logger.warning(f"[blackhole] Rejecting unsafe TB mount candidate: {name!r}")
+                continue
+            path = os.path.join(mount_path, name)
+            if os.path.isdir(path):
+                return path, '', name
+
+        try:
+            from utils.library import norm_for_matching
+        except Exception:
+            return None, None, None
+
+        target_fuzzy = norm_for_matching(_strip_indexer_prefix(release_name) or release_name)
+        if not target_fuzzy:
+            return None, None, None
+
+        try:
+            entries = os.listdir(mount_path)
+        except OSError as e:
+            logger.debug(f"[blackhole] Cannot list TB mount {mount_path}: {e}")
+            return None, None, None
+
+        matches = []
+        for entry in entries:
+            if not _is_safe_mount_name(entry):
+                # Well-behaved FUSE never returns this; defense-in-depth.
+                continue
+            entry_path = os.path.join(mount_path, entry)
+            if not os.path.isdir(entry_path):
+                continue
+            entry_fuzzy = norm_for_matching(_strip_indexer_prefix(entry) or entry)
+            if entry_fuzzy == target_fuzzy:
+                matches.append((entry_path, entry))
+
+        if len(matches) == 1:
+            path, name = matches[0]
+            logger.info(
+                f"[blackhole] TB fuzzy mount match: API name {release_name!r} "
+                f"→ folder {name!r}"
+            )
+            return path, '', name
+        if len(matches) > 1:
+            logger.warning(
+                f"[blackhole] Multiple TB mount candidates for {release_name!r}: "
+                f"{[m[1] for m in matches]} — refusing to guess"
+            )
         return None, None, None
 
     # ── Symlink creation ─────────────────────────────────────────────
@@ -1489,6 +1708,9 @@ class BlackholeWatcher:
         Returns the number of symlinks created.
         """
         debrid = debrid or self.debrid_service
+        if not _is_safe_mount_name(release_name):
+            logger.error(f"[blackhole] Refusing symlink creation for unsafe release_name: {release_name!r}")
+            return 0
         is_multi, _, _ = _is_multi_season_pack(release_name)
 
         if is_multi:
@@ -1499,7 +1721,14 @@ class BlackholeWatcher:
 
         # Single-dir logic (original behavior, now label-aware)
         completed_base = self._completed_base(label)
-        completed_release_dir = os.path.join(completed_base, release_name)
+        completed_release_dir = os.path.normpath(os.path.join(completed_base, release_name))
+        completed_real = os.path.normpath(completed_base)
+        # Defense-in-depth: even with _is_safe_mount_name above, normpath the
+        # full join and verify the result stays under completed_base. Matches
+        # the guard the split-season branch has at the season_dir level.
+        if not completed_release_dir.startswith(completed_real + os.sep) and completed_release_dir != completed_real:
+            logger.error(f"[blackhole] Refusing path-traversal release dir: {completed_release_dir}")
+            return 0
         os.makedirs(completed_release_dir, exist_ok=True)
         symlink_target_base = self._symlink_target_base_for(debrid)
         count = 0

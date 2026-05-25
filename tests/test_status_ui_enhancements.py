@@ -296,3 +296,72 @@ class TestRestartService:
         assert restart_service('ZURG') is False
         assert restart_service('zurg') is False
         assert restart_service('Zurg') is False
+
+
+# ---------------------------------------------------------------------------
+# StatusHandler — client-disconnect swallowing
+# ---------------------------------------------------------------------------
+
+class TestStatusHandlerClientDisconnect:
+    """The handler must swallow BrokenPipeError/ConnectionResetError so a
+    client that closes mid-response doesn't spam multi-line tracebacks
+    into zurgarr's logs.  Other exceptions must still propagate (those
+    are real bugs the operator wants surfaced).
+
+    Regression for live-observed log spam: traefik / watchtower /
+    browser-closed-tab clients disconnect mid-response on the polling
+    endpoints, and socketserver's default ``handle_error`` prints a
+    ~10-line traceback per disconnect.
+    """
+
+    def _make_handler(self):
+        """Construct a bare StatusHandler instance without driving
+        BaseHTTPRequestHandler.__init__ (which expects a live socket)."""
+        from utils.status_server import StatusHandler
+        h = StatusHandler.__new__(StatusHandler)
+        h.client_address = ('127.0.0.1', 9999)
+        return h
+
+    def test_broken_pipe_swallowed(self, monkeypatch):
+        from utils import status_server as ss
+        h = self._make_handler()
+        def boom(self):
+            raise BrokenPipeError("client gone")
+        monkeypatch.setattr(
+            ss.http.server.BaseHTTPRequestHandler, 'handle_one_request', boom,
+        )
+        h.handle_one_request()  # must NOT raise
+
+    def test_connection_reset_swallowed(self, monkeypatch):
+        from utils import status_server as ss
+        h = self._make_handler()
+        def boom(self):
+            raise ConnectionResetError("RST")
+        monkeypatch.setattr(
+            ss.http.server.BaseHTTPRequestHandler, 'handle_one_request', boom,
+        )
+        h.handle_one_request()  # must NOT raise
+
+    def test_other_exceptions_still_raise(self, monkeypatch):
+        """Real bugs must NOT be silently swallowed."""
+        from utils import status_server as ss
+        h = self._make_handler()
+        def boom(self):
+            raise ValueError("real bug")
+        monkeypatch.setattr(
+            ss.http.server.BaseHTTPRequestHandler, 'handle_one_request', boom,
+        )
+        with pytest.raises(ValueError, match="real bug"):
+            h.handle_one_request()
+
+    def test_normal_request_passes_through(self, monkeypatch):
+        """No exception → no interference."""
+        from utils import status_server as ss
+        h = self._make_handler()
+        called = []
+        monkeypatch.setattr(
+            ss.http.server.BaseHTTPRequestHandler, 'handle_one_request',
+            lambda self: called.append(True),
+        )
+        h.handle_one_request()
+        assert called == [True]

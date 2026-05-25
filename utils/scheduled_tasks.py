@@ -221,8 +221,12 @@ def _cleanup_empty_parents(deleted_path, stop_at):
 def _extract_release_info(target, debrid_prefixes):
     """Extract release name, relative file path, and category from a symlink target.
 
-    Given a target like ``/data/movies/Release.Name/sub/file.mkv``, returns
-    ``('Release.Name', 'sub/file.mkv', 'movies')``.
+    Two layouts are recognised:
+    - Zurg (RD/AD): ``<base>/<category>/<release>/<rel_file>`` →
+      returns ``('<release>', '<rel_file>', '<category>')``.
+    - TorBox flat: ``<base>/<release>/<rel_file>`` →
+      returns ``('<release>', '<rel_file>', '')`` (empty category).
+
     Returns ``(None, None, None)`` if the target can't be parsed.
     """
     remainder = None
@@ -234,24 +238,31 @@ def _extract_release_info(target, debrid_prefixes):
         return None, None, None
 
     parts = remainder.split('/')
-    if len(parts) < 3:
+    # Path traversal rejected up-front so neither layout branch has to
+    # repeat the check.  An empty path component (``//`` in the target,
+    # rare but possible) collapses into the wrong release slot too —
+    # reject those.
+    if any(seg in ('..', '') for seg in parts):
         return None, None, None
 
-    category = parts[0]
-    release_name = parts[1]
-    rel_file = '/'.join(parts[2:])
-
-    # Reject path traversal in any component
-    if '..' in category or '..' in release_name or any(seg == '..' for seg in parts[2:]):
-        return None, None, None
-
-    return release_name, rel_file, category
+    if len(parts) >= 3:
+        # Zurg layout: <category>/<release>/<rel_file>
+        return parts[1], '/'.join(parts[2:]), parts[0]
+    if len(parts) == 2:
+        # TorBox flat layout: <release>/<rel_file>
+        return parts[0], parts[1], ''
+    return None, None, None
 
 
 def _find_release_on_mount(release_name, rclone_mount):
-    """Search mount categories for a release folder.
+    """Search the rclone mount for a release folder.
 
     Returns ``(full_path, category)`` or ``(None, None)``.
+
+    Probes categorized Zurg dirs first (``shows/movies/anime`` then
+    ``__all__`` fallback) and lastly the bare mount root — the latter
+    serves TorBox's flat WebDAV mount layout, where releases live
+    directly under the mount root with no category subdivision.
     """
     from utils.blackhole import MOUNT_CATEGORIES
 
@@ -262,6 +273,10 @@ def _find_release_on_mount(release_name, rclone_mount):
     path = os.path.join(rclone_mount, '__all__', release_name)
     if os.path.isdir(path):
         return path, '__all__'
+    # Flat-layout fallback (TorBox).
+    path = os.path.join(rclone_mount, release_name)
+    if os.path.isdir(path):
+        return path, ''
     return None, None
 
 
@@ -388,12 +403,46 @@ def verify_symlinks():
     local_movies = os.environ.get('BLACKHOLE_LOCAL_LIBRARY_MOVIES', '').strip()
     rclone_mount = os.path.realpath(os.environ.get('BLACKHOLE_RCLONE_MOUNT', '/data'))
     symlink_target = os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', '').strip()
-    # Check symlinks pointing to either the rclone mount or the symlink target base
+
+    # Per-debrid (symlink_target_base, rclone_mount) pairs so that a broken
+    # symlink can be translated back to the right mount for existence-checks
+    # and repair.  RD/AD symlinks point at BLACKHOLE_SYMLINK_TARGET_BASE and
+    # resolve to BLACKHOLE_RCLONE_MOUNT; TB symlinks point at
+    # BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX (or the derived ``<RD base>_torbox``
+    # fallback) and resolve to the TB rclone mount.  Without this, every TB
+    # symlink looks like an unrecognised target prefix → skipped from
+    # verification entirely (latent before plan 39, now load-bearing).
+    from utils.blackhole import MOUNT_CATEGORIES
+    from utils.debrid_routing import (
+        TORBOX, mount_for_debrid, symlink_target_base_for_debrid,
+    )
+
+    target_mount_pairs = []  # list of (symlink_target_real, mount_real)
     debrid_prefixes = [rclone_mount + '/']
-    symlink_target_real = ''
     if symlink_target:
-        symlink_target_real = os.path.realpath(symlink_target) + '/'
-        debrid_prefixes.append(symlink_target_real)
+        rd_target_real = os.path.realpath(symlink_target) + '/'
+        debrid_prefixes.append(rd_target_real)
+        target_mount_pairs.append((rd_target_real, rclone_mount))
+
+    # TorBox pair.  ``mount_for_debrid`` needs the parent of the per-debrid
+    # mount-name suffix — same convention used by BlackholeWatcher._mount_for.
+    tb_target = symlink_target_base_for_debrid(TORBOX)
+    tb_mount_real = ''
+    if tb_target:
+        tb_target_real = os.path.realpath(tb_target) + '/'
+        # Resolve TB mount path from RCLONE_MOUNT_NAME parent + TORBOX_MOUNT_NAME.
+        rclonemn = os.environ.get('RCLONE_MOUNT_NAME') or ''
+        base = rclone_mount.rstrip('/')
+        if rclonemn and os.path.basename(base) == rclonemn:
+            parent = os.path.dirname(base)
+            if parent:
+                base = parent
+        tb_mount = mount_for_debrid(TORBOX, rclone_mount_base=base) or ''
+        if tb_mount and os.path.isdir(tb_mount):
+            tb_mount_real = os.path.realpath(tb_mount)
+            debrid_prefixes.append(tb_target_real)
+            debrid_prefixes.append(tb_mount_real + '/')
+            target_mount_pairs.append((tb_target_real, tb_mount_real))
 
     scan_dirs = []
     if os.path.isdir(completed_dir):
@@ -406,33 +455,34 @@ def verify_symlinks():
     if not scan_dirs:
         return {'status': 'success', 'message': 'No directories to check'}
 
-    # Guard: verify the rclone mount exists, is responsive, and has content.
-    # A missing or stalled FUSE mount makes os.path.exists return False for
-    # everything, which would cause mass deletion of all symlinks.  Zurg
-    # category stubs (movies/, shows/) can exist even when all content is
-    # gone, so check that at least one known category dir is non-empty.
-    # The entire guard is inside try/except OSError because os.path.isdir
-    # itself can raise on a stalled FUSE mount (ENOTCONN, EIO).
-    from utils.blackhole import MOUNT_CATEGORIES
+    # Guard: verify at least one configured rclone mount exists, is responsive,
+    # and has content.  A missing or stalled FUSE mount makes os.path.exists
+    # return False for everything, which would cause mass deletion of all
+    # symlinks.  Zurg category stubs (movies/, shows/) can exist even when
+    # all content is gone, so check that at least one category dir is
+    # non-empty; the TB mount is flat (no categories) so we check that its
+    # top-level listing is non-empty instead.  Either being healthy is
+    # enough to proceed — the prefix→mount-pair routing below ensures we
+    # only act on symlinks for mounts we can actually see.
     try:
-        if not os.path.isdir(rclone_mount):
-            logger.warning(f"[scheduler] Mount {rclone_mount} does not exist — aborting symlink verify")
-            return {'status': 'error', 'message': 'Mount not found, aborted'}
-        if not os.listdir(rclone_mount):
-            logger.warning(f"[scheduler] Mount {rclone_mount} is empty — aborting symlink verify")
-            return {'status': 'error', 'message': 'Mount empty, aborted'}
-        # Deeper check: at least one known Zurg category dir has content.
-        # Empty category stubs persist even when debrid has no torrents.
-        has_content = any(
-            os.path.isdir(os.path.join(rclone_mount, cat))
-            and os.listdir(os.path.join(rclone_mount, cat))
-            for cat in MOUNT_CATEGORIES
-        )
-        if not has_content:
-            logger.warning(f"[scheduler] Mount categories at {rclone_mount} are empty — aborting symlink verify")
-            return {'status': 'error', 'message': 'Mount categories empty, aborted'}
+        zurg_has_content = False
+        if os.path.isdir(rclone_mount) and os.listdir(rclone_mount):
+            zurg_has_content = any(
+                os.path.isdir(os.path.join(rclone_mount, cat))
+                and os.listdir(os.path.join(rclone_mount, cat))
+                for cat in MOUNT_CATEGORIES
+            )
+        tb_has_content = False
+        if tb_mount_real and os.path.isdir(tb_mount_real):
+            tb_has_content = bool(os.listdir(tb_mount_real))
+        if not (zurg_has_content or tb_has_content):
+            logger.warning(
+                f"[scheduler] No mount has content (zurg={rclone_mount!r}, "
+                f"tb={tb_mount_real!r}) — aborting symlink verify to prevent mass deletion"
+            )
+            return {'status': 'error', 'message': 'Mounts empty, aborted'}
     except OSError as e:
-        logger.error(f"[scheduler] Mount {rclone_mount} unresponsive — aborting symlink verify to prevent mass deletion: {e}")
+        logger.error(f"[scheduler] Mount unresponsive — aborting symlink verify to prevent mass deletion: {e}")
         return {'status': 'error', 'message': f'Mount unresponsive, aborted: {e}'}
 
     # Phase 1: Identify broken symlinks (don't delete yet)
@@ -456,16 +506,23 @@ def verify_symlinks():
                     continue
 
                 checked += 1
-                # When BLACKHOLE_SYMLINK_TARGET_BASE differs from the rclone
-                # mount, symlinks intentionally point to a path that only
-                # exists inside Radarr/Sonarr's container (e.g. /mnt/debrid).
-                # Translate the target to the local rclone mount path before
-                # checking existence.
-                check_target = target
-                if symlink_target_real and target.startswith(symlink_target_real):
-                    check_target = rclone_mount + '/' + target[len(symlink_target_real):]
+                # Translate the symlink target back to a local mount path
+                # before checking existence.  Each (target_base, mount)
+                # pair maps a host-visible Plex/arr path to the local
+                # rclone-mount equivalent.  TB symlinks point at the TB
+                # base and resolve to the TB mount; RD/AD symlinks point
+                # at the RD base and resolve to the RD mount.  Without
+                # the per-pair routing, a TB symlink translated against
+                # the RD pair lands at /<RD-mount>/<TB-release> which
+                # never exists → mass deletion.
+                check_target, matched_mount = target, rclone_mount
+                for tgt_real, mnt_real in target_mount_pairs:
+                    if target.startswith(tgt_real):
+                        check_target = mnt_real + '/' + target[len(tgt_real):]
+                        matched_mount = mnt_real
+                        break
                 if not os.path.exists(check_target):
-                    to_delete.append((fpath, target, scan_dir))
+                    to_delete.append((fpath, target, scan_dir, matched_mount))
 
     # Phase 2: Attempt repair, then delete confirmed broken symlinks.
     # Auto-search on deletion is enabled by either the legacy opt-in flag
@@ -480,17 +537,23 @@ def verify_symlinks():
     searched = 0
     deleted = 0
 
-    for fpath, target, scan_dir in to_delete:
-        # Step 1: Try to re-find the release on the mount
+    for fpath, target, scan_dir, matched_mount in to_delete:
+        # Step 1: Try to re-find the release on the mount it came from.
         release_name, rel_file, old_cat = _extract_release_info(target, debrid_prefixes)
         if release_name and rel_file:
-            new_path, new_cat = _find_release_on_mount(release_name, rclone_mount)
+            new_path, new_cat = _find_release_on_mount(release_name, matched_mount)
             if new_path and os.path.exists(os.path.join(new_path, rel_file)):
-                # Rebuild the symlink target using the canonical base
-                if symlink_target:
-                    new_target = os.path.join(symlink_target, new_cat, release_name, rel_file)
-                else:
-                    new_target = os.path.join(rclone_mount, new_cat, release_name, rel_file)
+                # Rebuild the symlink target on the same target base it
+                # came from — preserves the RD-vs-TB split that Plex
+                # libraries depend on.
+                rebuild_base = None
+                for tgt_real, mnt_real in target_mount_pairs:
+                    if mnt_real == matched_mount:
+                        rebuild_base = tgt_real.rstrip('/')
+                        break
+                if rebuild_base is None:
+                    rebuild_base = matched_mount
+                new_target = os.path.join(rebuild_base, new_cat, release_name, rel_file)
                 try:
                     tmp_link = fpath + '.repair_tmp'
                     os.symlink(new_target, tmp_link)
@@ -498,7 +561,7 @@ def verify_symlinks():
                     repaired += 1
                     logger.info(
                         f"[scheduler] Repaired symlink: {fpath} "
-                        f"({old_cat} -> {new_cat})"
+                        f"({old_cat!r} -> {new_cat!r})"
                     )
                     continue
                 except OSError as e:

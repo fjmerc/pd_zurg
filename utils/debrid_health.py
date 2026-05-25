@@ -36,7 +36,7 @@ _PROBE_TTL = 7 * 24 * 3600              # don't re-probe healthy torrents for 7d
 _RATE_LIMIT_PER_MIN = 60                # under RD's 250/min user quota
 _MAX_PER_SWEEP = 2000                   # probe cap per sweep
 _REMEDIATE_MAX_PER_SWEEP = 100          # delete cap per sweep — defense against mass-delete on first auto-remediate enable
-_RESCUE_READY_TIMEOUT = 60              # max wall-clock seconds to wait for a TB rescue add to reach 'completed'
+_RESCUE_READY_TIMEOUT = 60              # max wall-clock seconds to wait for a TB rescue add to reach a ready state ('cached'/'completed'/'uploading')
 _RESCUE_POLL_INTERVAL = 3               # seconds between TB status polls during rescue
 _PERSIST_EVERY = 25                     # incremental save every N probes
 _VALID_STATUSES = ('healthy', 'blocked', 'unknown')
@@ -500,8 +500,15 @@ def _attempt_cross_rescue(torrent_hash, filename, source_debrid='realdebrid'):
             state_str = ''
         # Strip + lower in case the provider returns whitespace or
         # capital-cased status strings (TB docs are inconsistent across
-        # endpoints; defensive normalisation).
-        if (state_str or '').strip().lower() == 'completed':
+        # endpoints; defensive normalisation).  Accept TB's full ready
+        # set: ``cached`` (instant cache hit — the dominant rescue case
+        # since cross-rescue is gated on TB-cached cache probe), plus
+        # ``completed`` / ``uploading`` for full-BT-cycle torrents.
+        # Imported from blackhole's TB_READY_STATES so both code paths
+        # stay in lock-step — pre-fix this checked only 'completed' and
+        # silently timed out on every cached-hit rescue.
+        from utils.blackhole import TB_READY_STATES
+        if (state_str or '').strip().lower() in TB_READY_STATES:
             is_ready = True
             break
         if _stop_event.wait(_RESCUE_POLL_INTERVAL):
@@ -509,8 +516,8 @@ def _attempt_cross_rescue(torrent_hash, filename, source_debrid='realdebrid'):
 
     if not is_ready:
         # The hash was reportedly cached on TB but the add didn't reach
-        # 'completed' within budget.  Clean up the TB entry so a future
-        # rescue attempt can re-add cleanly.
+        # a ready state (cached / completed / uploading) within budget.
+        # Clean up the TB entry so a future rescue attempt can re-add cleanly.
         try:
             alt_client.delete_torrent(alt_tid)
         except Exception:

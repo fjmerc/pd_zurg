@@ -650,7 +650,11 @@ class TestTorBox:
         body = mock_post.call_args[1]['json']
         assert body['torrent_id'] == 456
         assert isinstance(body['torrent_id'], int)
-        assert body['operation'] == 'Delete'
+        # TB's API expects lowercase operation verbs.  Capital-D
+        # "Delete" returns 200 + success=False + error=INVALID_OPTION,
+        # which silently fails every delete in production — the source
+        # of the user's ghost-TB-entry accumulation.
+        assert body['operation'] == 'delete'
 
     def test_delete_rejects_float_id(self, tb):
         """IDs with dots are rejected by _SAFE_ID validation."""
@@ -660,6 +664,28 @@ class TestTorBox:
         """Non-success response returns False without leaking response body."""
         with patch('utils.debrid_client.requests.post') as mock_post:
             mock_post.return_value = _mock_response({'success': False, 'detail': 'not found'})
+            assert tb.delete_torrent('456') is False
+
+    def test_delete_failure_response_with_null_detail(self, tb):
+        """Regression: ``{"detail": null}`` must NOT crash with TypeError.
+
+        ``data.get('detail', '')`` returns ``None`` when the key exists with
+        a null value (the default is only used when the key is absent).
+        ``None[:80]`` then raises ``TypeError``, which previously escaped
+        the except tuple and tore down every cleanup-on-failure caller —
+        precisely on the unhappy path the diagnostic log was supposed to
+        illuminate.
+        """
+        with patch('utils.debrid_client.requests.post') as mock_post:
+            mock_post.return_value = _mock_response({'success': False, 'detail': None})
+            assert tb.delete_torrent('456') is False
+
+    def test_delete_failure_response_with_error_field(self, tb):
+        """TB returns ``error`` (not ``detail``) for INVALID_OPTION-style
+        failures — make sure the log falls back to that field too.
+        """
+        with patch('utils.debrid_client.requests.post') as mock_post:
+            mock_post.return_value = _mock_response({'success': False, 'error': 'INVALID_OPTION'})
             assert tb.delete_torrent('456') is False
 
     def test_delete_invalid_id(self, tb):

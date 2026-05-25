@@ -494,11 +494,21 @@ class TorBoxClient(DebridClientBase):
             logger.error(f"[debrid] TB invalid torrent ID: {torrent_id!r}")
             return False
         try:
+            # TB's ``/torrents/controltorrent`` operation field is
+            # case-sensitive — accepts lowercase verbs only ("delete",
+            # "reannounce", "resume", "stop_seeding") and rejects
+            # capitalised forms with HTTP 200 + ``success=false`` +
+            # ``error="INVALID_OPTION"``.  Pre-fix this sent ``"Delete"``
+            # and silently failed every call, which is how the user's
+            # TB account accumulated ghost entries from blackhole
+            # cleanup-on-timeout + rescue cleanup-on-failure — every
+            # delete looked succeeded in our logs (no exception) but
+            # the torrent stayed.
             resp = tracked_request(
                 self._name, requests.post,
                 f'{self._BASE}/torrents/controltorrent',
                 headers=self._headers(),
-                json={'torrent_id': int(torrent_id), 'operation': 'Delete'},
+                json={'torrent_id': int(torrent_id), 'operation': 'delete'},
                 timeout=_TIMEOUT,
             )
             resp.raise_for_status()
@@ -506,9 +516,20 @@ class TorBoxClient(DebridClientBase):
             if data.get('success'):
                 logger.info(f"[debrid] TB deleted torrent: {torrent_id}")
                 return True
-            logger.error(f"[debrid] TB delete failed for {torrent_id}: success={data.get('success')}")
+            # ``data.get('detail', '')`` returns ``None`` (not the default)
+            # when the key is present with a ``null`` value — and TB's
+            # error payloads use ``error``/``detail`` interchangeably with
+            # ``null`` sometimes seen for either.  Coerce-to-empty before
+            # subscripting so the diagnostic log doesn't raise
+            # ``TypeError: 'NoneType' object is not subscriptable`` and
+            # tear down every cleanup-on-failure caller.
+            detail = str(data.get('detail') or data.get('error') or '')[:80]
+            logger.error(
+                f"[debrid] TB delete failed for {torrent_id}: "
+                f"success={data.get('success')} detail={detail}"
+            )
             return False
-        except (requests.RequestException, ValueError) as e:
+        except (requests.RequestException, ValueError, TypeError) as e:
             logger.error(f"[debrid] TB delete failed for {torrent_id}: {self._sanitize_error(e)}")
             return False
 
@@ -570,8 +591,13 @@ class TorBoxClient(DebridClientBase):
         """Return the ``download_state`` of a TB torrent (or '' on error).
 
         Lightweight wrapper used by the phase 3 rescue path to poll for
-        'completed' after add_magnet — distinct from the heavier
+        a ready state after add_magnet — distinct from the heavier
         ``list_torrents`` because we only need one torrent's state.
+        Callers compare against ``blackhole.TB_READY_STATES`` rather
+        than a single literal — TB returns ``cached`` for instant cache
+        hits (typical post-cache-probe rescue), ``completed`` for full
+        BT downloads, and ``uploading`` for the post-download seed
+        phase.  All three indicate the file is on TB storage.
         """
         if not _SAFE_ID.match(str(torrent_id)):
             return ''

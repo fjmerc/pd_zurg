@@ -10,6 +10,8 @@ from utils.blackhole import (
     _is_multi_season_pack, _extract_file_season, _build_season_release_name,
     _enrich_for_history,
     _is_valid_label, iter_release_dirs,
+    _is_rate_limit_response, _check_rate_limit, _mark_rate_limited,
+    _rate_limit_until,
 )
 
 
@@ -629,6 +631,85 @@ class TestRetrySchedule:
         assert RETRY_SCHEDULE[0] >= 60
 
 
+class TestRateLimitGate:
+    """Per-provider rate-limit detection + backoff.
+
+    Regression for observed search-storm behaviour: Sonarr's
+    ``MissingEpisodeSearch`` fires dozens of magnet drops within the same
+    second.  Each one was being submitted to RD/TB/AD blindly — even after
+    the API returned ``rate limit exceeded`` — so the whole batch failed,
+    landed in the 5-min retry queue, then hit the rate limit again on the
+    next retry pass.  This class verifies the detector + per-provider
+    backoff window prevent that loop.
+    """
+
+    def setup_method(self):
+        """Clear the global rate-limit map so tests don't bleed into each other."""
+        _rate_limit_until.clear()
+
+    def teardown_method(self):
+        _rate_limit_until.clear()
+
+    @pytest.mark.parametrize('status,body,expected', [
+        (429, '', True),
+        (429, 'Too Many Requests', True),
+        (200, 'rate limit exceeded', True),  # RD returns 200 + error text
+        (503, 'rate_limit_exceeded', True),  # underscored variant
+        (200, 'success', False),
+        (500, 'internal server error', False),
+        (404, 'not found', False),
+    ])
+    def test_is_rate_limit_response(self, status, body, expected):
+        class _R:
+            def __init__(self, s, b):
+                self.status_code = s
+                self.text = b
+        assert _is_rate_limit_response(_R(status, body)) is expected
+
+    def test_is_rate_limit_response_handles_missing_attrs(self):
+        """A response object with no .text attribute must not crash."""
+        class _R:
+            status_code = 500
+        # Should not raise; non-429 with no body falls through to False.
+        assert _is_rate_limit_response(_R()) is False
+
+    def test_mark_then_check_sleeps_until_window_expires(self, monkeypatch):
+        """``_check_rate_limit`` blocks until the marked window expires."""
+        sleeps = []
+        monkeypatch.setattr('utils.blackhole.time.sleep', lambda s: sleeps.append(s))
+        _mark_rate_limited('realdebrid', seconds=2)
+        _check_rate_limit('realdebrid')
+        assert len(sleeps) == 1
+        # Slept for approximately the remaining window (allow 0.5s test jitter).
+        assert 1.0 < sleeps[0] <= 2.0
+
+    def test_check_rate_limit_no_op_when_no_window(self, monkeypatch):
+        """No active window → no sleep."""
+        sleeps = []
+        monkeypatch.setattr('utils.blackhole.time.sleep', lambda s: sleeps.append(s))
+        _check_rate_limit('realdebrid')
+        assert sleeps == []
+
+    def test_per_provider_isolation(self, monkeypatch):
+        """A rate-limit on RD must NOT pause adds to TB (cache_aware still works)."""
+        sleeps = []
+        monkeypatch.setattr('utils.blackhole.time.sleep', lambda s: sleeps.append(s))
+        _mark_rate_limited('realdebrid', seconds=5)
+        _check_rate_limit('torbox')
+        assert sleeps == []  # TB unaffected
+        _check_rate_limit('realdebrid')
+        assert len(sleeps) == 1  # RD waited
+
+    def test_window_expires(self, monkeypatch):
+        """An expired window doesn't cause a sleep."""
+        sleeps = []
+        monkeypatch.setattr('utils.blackhole.time.sleep', lambda s: sleeps.append(s))
+        # Mark with negative duration → already expired.
+        _mark_rate_limited('realdebrid', seconds=-1)
+        _check_rate_limit('realdebrid')
+        assert sleeps == []
+
+
 class TestSymlinkConstants:
 
     def test_media_extensions_include_common_video(self):
@@ -788,6 +869,136 @@ class TestFindOnMount:
         watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid', rclone_mount=tmp_dir)
         path, category, matched = watcher._find_on_mount('Release.Name.nfo')
         assert path is None
+        assert matched is None
+
+    def test_torbox_flat_mount(self, tmp_dir):
+        """TorBox's WebDAV mount has no category subdirs — search the bare root."""
+        # TB mount layout: /<rclone_mount>/torbox/<release_name>
+        tb_mount = os.path.join(tmp_dir, 'torbox')
+        release_dir = os.path.join(tb_mount, 'Show.S01E01.1080p-FLUX')
+        os.makedirs(release_dir)
+
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox', rclone_mount=tmp_dir)
+        path, category, matched = watcher._find_on_mount('Show.S01E01.1080p-FLUX', debrid='torbox')
+        assert path == release_dir
+        assert category == ''  # Flat layout — no category subdivision
+        assert matched == 'Show.S01E01.1080p-FLUX'
+
+    def test_torbox_strips_indexer_prefix(self, tmp_dir):
+        """TB API ``data.name`` sometimes has a leading ``[indexer.to] ``
+        prefix the actual mount folder doesn't — strip it for the lookup.
+
+        Regression: live grab of Landman S02E01 — TB API returned
+        ``[bitsearch.to] www.UIndex.org    -    Landman ...`` but mount
+        folder was ``www.UIndex.org    -    Landman ...``.
+        """
+        tb_mount = os.path.join(tmp_dir, 'torbox')
+        # Mount folder has NO indexer prefix
+        release_dir = os.path.join(
+            tb_mount,
+            'www.UIndex.org    -    Landman S02E01 Death and a Sunset 1080p AMZN WEB-DL DDP5 1 H 264-FLUX'
+        )
+        os.makedirs(release_dir)
+
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox', rclone_mount=tmp_dir)
+        # API returns name WITH the leading bracket prefix
+        api_name = '[bitsearch.to] www.UIndex.org    -    Landman S02E01 Death and a Sunset 1080p AMZN WEB-DL DDP5 1 H 264-FLUX'
+        path, category, matched = watcher._find_on_mount(api_name, debrid='torbox')
+        assert path == release_dir
+        assert category == ''
+        # matched is the actual folder name on the mount (without prefix)
+        assert matched == 'www.UIndex.org    -    Landman S02E01 Death and a Sunset 1080p AMZN WEB-DL DDP5 1 H 264-FLUX'
+
+    def test_torbox_fuzzy_listdir_fallback(self, tmp_dir):
+        """When exact + leading-bracket-strip both miss, walk the mount
+        and fuzzy-norm-match against folder names. Handles the inverse
+        case: mount has a leading bracket the API name dropped.
+        """
+        tb_mount = os.path.join(tmp_dir, 'torbox')
+        # Mount has leading [indexer] that API name dropped
+        release_dir = os.path.join(
+            tb_mount,
+            '[scraper.to] My Show S01E01 1080p WEB-DL-FLUX [TGx]'
+        )
+        os.makedirs(release_dir)
+
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox', rclone_mount=tmp_dir)
+        api_name = 'My Show S01E01 1080p WEB-DL-FLUX [TGx]'
+        path, category, matched = watcher._find_on_mount(api_name, debrid='torbox')
+        assert path == release_dir
+        assert category == ''
+        # matched is the folder name that exists on the mount
+        assert matched == '[scraper.to] My Show S01E01 1080p WEB-DL-FLUX [TGx]'
+
+    def test_torbox_not_found_when_no_match(self, tmp_dir):
+        """No match anywhere on TB mount returns (None, None, None)."""
+        tb_mount = os.path.join(tmp_dir, 'torbox')
+        os.makedirs(tb_mount)
+        os.makedirs(os.path.join(tb_mount, 'Other.Release.S01E01-NTb'))
+
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox', rclone_mount=tmp_dir)
+        path, category, matched = watcher._find_on_mount('Something.Else.S05E10-XYZ', debrid='torbox')
+        assert path is None
+        assert category is None
+        assert matched is None
+
+    def test_torbox_fuzzy_match_refuses_ambiguous(self, tmp_dir):
+        """If multiple TB mount folders fuzzy-match, refuse to guess."""
+        tb_mount = os.path.join(tmp_dir, 'torbox')
+        # Two folders that norm to the same fuzzy key after leading-bracket strip
+        os.makedirs(os.path.join(tb_mount, '[a.to] Show S01E01 GROUP'))
+        os.makedirs(os.path.join(tb_mount, '[b.to] Show S01E01 GROUP'))
+
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox', rclone_mount=tmp_dir)
+        path, category, matched = watcher._find_on_mount('Show S01E01 GROUP', debrid='torbox')
+        # Exact-path probes miss (both candidates have brackets); fuzzy
+        # finds two matches → refuses.
+        assert path is None
+        assert category is None
+        assert matched is None
+
+    @pytest.mark.parametrize('hostile', [
+        '/etc',
+        '/etc/passwd',
+        '../../etc',
+        '..',
+        '.',
+        'foo/../bar',
+        'a/b',
+        '',
+        'name\x00with\x00nul',
+    ])
+    def test_torbox_rejects_path_traversal_candidates(self, tmp_dir, hostile):
+        """Adversarial release-name candidates must NEVER escape mount_path.
+
+        ``os.path.join('/mnt/tb', '/etc')`` collapses to ``'/etc'`` because
+        the absolute right-side argument resets the join — a TB ``data.name``
+        field that an uploader chose as ``/etc`` would otherwise make
+        ``os.path.isdir`` return True for the real ``/etc`` and walk it as
+        the symlink-source tree. ``..`` segments are equally dangerous.
+        Regression guard for the CRITICAL bug-hunter finding.
+        """
+        tb_mount = os.path.join(tmp_dir, 'torbox')
+        os.makedirs(tb_mount)
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox', rclone_mount=tmp_dir)
+        path, category, matched = watcher._find_on_mount(hostile, debrid='torbox')
+        assert path is None
+        assert category is None
+        assert matched is None
+
+    @pytest.mark.parametrize('hostile', [
+        '/etc',
+        '../../etc',
+        '..',
+        'a/b',
+    ])
+    def test_rd_mount_rejects_path_traversal_candidates(self, tmp_dir, hostile):
+        """Same path-traversal guard applies to the Zurg (RD/AD) branch."""
+        os.makedirs(os.path.join(tmp_dir, 'shows'))
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid', rclone_mount=tmp_dir)
+        path, category, matched = watcher._find_on_mount(hostile)
+        assert path is None
+        assert category is None
         assert matched is None
 
 
@@ -1126,9 +1337,31 @@ class TestTorrentStatusHelpers:
         assert watcher._is_torrent_ready('Downloading') is False
 
     def test_is_torrent_ready_torbox(self):
+        """TB returns ``cached`` for instant cache hits (the dominant
+        case under plan 39 cache_aware routing — every TB-routed grab
+        is cache-positive at probe time), ``completed`` for torrents
+        that went through a full BT cycle, and ``uploading`` for the
+        post-download seeding phase.  All three indicate the file is
+        on TB storage and reachable via WebDAV, so the blackhole
+        should stop polling and proceed to symlink creation.
+
+        Pre-fix this checked only ``status == 'completed'`` — every
+        cached TB grab timed out at ``mount_poll_timeout`` (default
+        300s) and got auto-blocklisted as 'Uncached on debrid (timed
+        out)', even though the file was ready immediately."""
         watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        # Ready states — all three must be accepted.
         assert watcher._is_torrent_ready('completed') is True
+        assert watcher._is_torrent_ready('cached') is True
+        assert watcher._is_torrent_ready('uploading') is True
+        # Not-ready states — file isn't on TB storage yet.
         assert watcher._is_torrent_ready('downloading') is False
+        assert watcher._is_torrent_ready('queued') is False
+        assert watcher._is_torrent_ready('metadl') is False
+        assert watcher._is_torrent_ready('paused') is False
+        # Defensive: unknown/garbage strings don't accidentally pass.
+        assert watcher._is_torrent_ready('') is False
+        assert watcher._is_torrent_ready('something_new') is False
 
     def test_is_terminal_error_realdebrid(self):
         watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid')

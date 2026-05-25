@@ -4958,3 +4958,107 @@ class TestPhase4DiscoverTorboxMount:
                             lambda d, **kw: str(fake_mount) if d == 'torbox' else None)
         result = library.LibraryScanner._discover_torbox_mount()
         assert result == str(fake_mount)
+
+
+class TestScanMountFlatLayout:
+    """``_scan_mount(flat_layout=True)`` treats mount_path itself as the
+    release-folder parent (no shows/movies/anime/__all__ subdivision).
+
+    Regression: pre-fix, plan 39 phase 4 passed only ``source_debrid='torbox'``
+    without ``flat_layout``, so ``_scan_mount`` iterated each TB release
+    folder AS a category and looked for sub-folders inside (finding only
+    media files) — every TB show and movie except the rare ones with
+    internal subdirs got silently dropped, producing a massively under-
+    counted library view (observed: 1 movie + 1 show out of 20+ on mount).
+    """
+
+    def test_flat_layout_finds_show_episodes_in_release_folders(self, tmp_dir):
+        """A flat mount with N show-episode folders surfaces N episodes
+        grouped into a single show entry (matching the existing dedup
+        semantics of categorized scans).
+        """
+        tb_mount = os.path.join(tmp_dir, 'tb')
+        os.makedirs(tb_mount)
+        # Four releases of the same show, different episodes
+        for ep in (1, 2, 3, 4):
+            d = os.path.join(tb_mount, f'My.Show.S01E0{ep}.1080p-FLUX[TGx]')
+            os.makedirs(d)
+            with open(os.path.join(d, f'My.Show.S01E0{ep}.mkv'), 'w') as f:
+                f.write('video')
+        scanner = library.LibraryScanner()
+        movies, shows = scanner._scan_mount(
+            tb_mount, source_debrid='torbox', flat_layout=True,
+        )
+        assert len(movies) == 0
+        assert len(shows) == 1
+        assert shows[0]['title'] == 'My Show'
+        # 4 episodes from 4 distinct release folders, all S01
+        assert shows[0]['episodes'] == 4
+        assert shows[0]['source_debrid'] == 'torbox'
+
+    def test_flat_layout_finds_movies_in_release_folders(self, tmp_dir):
+        """A movie release folder under the flat mount is detected and
+        emerges as a movie entry (not a show)."""
+        tb_mount = os.path.join(tmp_dir, 'tb')
+        os.makedirs(tb_mount)
+        d = os.path.join(tb_mount, 'My.Movie.2024.1080p-FLUX')
+        os.makedirs(d)
+        with open(os.path.join(d, 'My.Movie.2024.mkv'), 'w') as f:
+            f.write('video')
+        scanner = library.LibraryScanner()
+        movies, shows = scanner._scan_mount(
+            tb_mount, source_debrid='torbox', flat_layout=True,
+        )
+        assert len(shows) == 0
+        assert len(movies) == 1
+        assert movies[0]['title'] == 'My Movie'
+        assert movies[0]['year'] == 2024
+        assert movies[0]['source_debrid'] == 'torbox'
+
+    def test_categorized_layout_still_works(self, tmp_dir):
+        """Regression guard: Zurg-style 2-level layout still scans
+        correctly when ``flat_layout=False`` (the default)."""
+        zurg_mount = os.path.join(tmp_dir, 'zurg')
+        os.makedirs(os.path.join(zurg_mount, 'shows'))
+        d = os.path.join(zurg_mount, 'shows', 'My.Show.S01E01-NTb')
+        os.makedirs(d)
+        with open(os.path.join(d, 'My.Show.S01E01.mkv'), 'w') as f:
+            f.write('video')
+        scanner = library.LibraryScanner()
+        movies, shows = scanner._scan_mount(zurg_mount, source_debrid='realdebrid')
+        assert len(shows) == 1
+        assert shows[0]['title'] == 'My Show'
+        assert shows[0]['source_debrid'] == 'realdebrid'
+
+    def test_flat_layout_with_noisy_release_names(self, tmp_dir):
+        """Real TB folder names have indexer tags, dots, and trailing
+        brackets; _parse_folder_name + _collect_episodes must still
+        extract a usable title + season-episode for each.
+        """
+        tb_mount = os.path.join(tmp_dir, 'tb')
+        os.makedirs(tb_mount)
+        noisy_names = [
+            'For All Mankind S05E07 The Sirens of Titan 1080p ATVP WEB-DL DDP5 1 H 264-NTb[EZTVx.to]',
+            'For.All.Mankind.S05E09.Sons.and.Daughters.1080p.WEB-DL-NTb[TGx]',
+            'www.UIndex.org    -    For All Mankind S04E01 Glasnost 1080p ATVP WEB-DL DDPA5 1 H 264-FLUX',
+        ]
+        for name in noisy_names:
+            d = os.path.join(tb_mount, name)
+            os.makedirs(d)
+            # Extract S##E## from the folder name for the file name
+            import re
+            m = re.search(r'S(\d{2})E(\d{2})', name)
+            ep_file = f'ep_s{m.group(1)}e{m.group(2)}.mkv' if m else 'ep.mkv'
+            with open(os.path.join(d, ep_file), 'w') as f:
+                f.write('video')
+        scanner = library.LibraryScanner()
+        movies, shows = scanner._scan_mount(
+            tb_mount, source_debrid='torbox', flat_layout=True,
+        )
+        # All three are "For All Mankind" episodes — one merged show entry
+        # with 3 episodes (S05E07, S05E09, S04E01).
+        assert len(movies) == 0
+        # Title parsing may yield slight variants; check the group
+        # produces ONE show with 3 episodes.
+        assert len(shows) == 1
+        assert shows[0]['episodes'] == 3

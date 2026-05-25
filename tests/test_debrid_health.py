@@ -1301,11 +1301,20 @@ class TestCrossRescue:
         os.symlink(original_target, sym)
         return lib_root, sym, original_target
 
+    @pytest.mark.parametrize('tb_ready_status', ['completed', 'cached', 'uploading'])
     def test_cross_rescue_short_circuits_remediation_on_success(
             self, state_path, no_sleep, rd_enabled, rescue_on, tb_cached,
-            mock_tb_client, arr_library_with_symlink, mock_remediation_deps):
+            mock_tb_client, arr_library_with_symlink, mock_remediation_deps,
+            tb_ready_status):
         """RD blocked + TB cached + TB add succeeds → rescue path fires,
-        blocklist/delete/arr re-search must NOT be called."""
+        blocklist/delete/arr re-search must NOT be called.
+
+        Parametrised across every TB ready state.  Pre-fix the poll
+        only accepted ``'completed'`` and silently timed out on every
+        ``'cached'``/``'uploading'`` response — which is the dominant
+        case for instant-cache hits (the whole point of cross-rescue).
+        """
+        mock_tb_client.torrent_status.return_value = tb_ready_status
         lib_root, sym, original_target = arr_library_with_symlink
         client = _mock_client(
             torrents=[_torrent('T1', 'AAAA0000', filename='Release.2025.mkv')],

@@ -1322,6 +1322,28 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
     status_data_ref = None
     auth_credentials = None
 
+    def handle_one_request(self):
+        """Wrap ``BaseHTTPRequestHandler.handle_one_request`` so client
+        disconnects (BrokenPipeError, ConnectionResetError) during the
+        response body write don't escape to socketserver's default
+        ``handle_error`` — which spams a multi-line Traceback per
+        disconnect into stderr/zurgarr's logs.
+
+        Common cause: polling clients (traefik health checks, watchtower,
+        a browser tab the user closed mid-fetch) close the socket before
+        the response finishes streaming.  Nothing wrong on the server
+        side; just noise.  Log at DEBUG so the cause is still
+        recoverable if an operator wants it.
+        """
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError) as e:
+            logger.debug(
+                f"[status] client {self.client_address} disconnected mid-response: {e}"
+            )
+        # Other exceptions propagate to the default handler — those are
+        # real bugs we want to see.
+
     def do_GET(self):
         # Prometheus metrics endpoint — served before auth check
         # (scrapers don't support basic auth easily)

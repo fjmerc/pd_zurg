@@ -1951,6 +1951,7 @@ class LibraryScanner:
             try:
                 tb_movies, tb_shows = self._scan_mount(
                     tb_mount, deadline, source_debrid='torbox',
+                    flat_layout=True,
                 )
                 debrid_movies, debrid_shows = self._merge_alt_debrid_items(
                     debrid_movies, debrid_shows, tb_movies, tb_shows,
@@ -3750,6 +3751,42 @@ class LibraryScanner:
         self._local_drop_alerted = False
 
         real_mount = os.path.realpath(rclone_mount)
+
+        # Per-debrid (rclone-mount, symlink-target-base) pairs.  RD/AD's
+        # pair is always first (the primary).  When TorBox is configured
+        # AND its mount is reachable, its pair is appended so episodes
+        # that landed on the TB mount get symlinks pointing at the TB
+        # target base — keeping the RD/TB split that Plex libraries
+        # depend on.  Without this, the prefix-check below silently
+        # skips every TB-source episode and only RD content ever gets
+        # symlinked into the local arr library — the load-bearing
+        # final step of plan 39 phase 4 that wasn't wired up.
+        _mount_target_pairs = [(real_mount, symlink_base)]
+        try:
+            from utils.debrid_routing import TORBOX, symlink_target_base_for_debrid as _tb_base_for
+            _tb_mount = self._discover_torbox_mount()
+            if _tb_mount:
+                _tb_real = os.path.realpath(_tb_mount)
+                _tb_symlink_base = _tb_base_for(TORBOX)
+                if _tb_symlink_base:
+                    _mount_target_pairs.append((_tb_real, _tb_symlink_base))
+        except Exception as e:
+            logger.debug(f"[library] TB symlink pair resolution failed: {e}")
+
+        def _resolve_symlink_target(real_debrid_path):
+            """Return host-side symlink target for *real_debrid_path*.
+
+            Searches per-debrid (mount, target_base) pairs in order and
+            returns ``<base> + <suffix-under-that-mount>`` for the first
+            match.  Returns ``None`` when the path is under no known
+            debrid mount — caller should skip (don't create symlinks
+            pointing at unmapped filesystems).
+            """
+            for _m, _b in _mount_target_pairs:
+                if real_debrid_path.startswith(_m + os.sep) or real_debrid_path == _m:
+                    return _b + real_debrid_path[len(_m):]
+            return None
+
         created = 0
         symlinked_shows = set()   # titles that got new symlinks
         symlinked_movies = set()  # titles that got new symlinks
@@ -3981,9 +4018,9 @@ class LibraryScanner:
                     continue
 
                 real_debrid = os.path.realpath(os.path.join(mount_dir, media_file))
-                if not real_debrid.startswith(real_mount + os.sep) and real_debrid != real_mount:
+                symlink_target = _resolve_symlink_target(real_debrid)
+                if symlink_target is None:
                     continue
-                symlink_target = symlink_base + real_debrid[len(real_mount):]
 
                 try:
                     os.makedirs(os.path.dirname(local_path), exist_ok=True)
@@ -4115,9 +4152,9 @@ class LibraryScanner:
 
                         # Translate mount path to Sonarr/arr namespace
                         real_debrid = os.path.realpath(debrid_path)
-                        if not real_debrid.startswith(real_mount + os.sep) and real_debrid != real_mount:
+                        symlink_target = _resolve_symlink_target(real_debrid)
+                        if symlink_target is None:
                             continue
-                        symlink_target = symlink_base + real_debrid[len(real_mount):]
 
                         try:
                             os.makedirs(os.path.dirname(local_path), exist_ok=True)
@@ -4401,7 +4438,7 @@ class LibraryScanner:
     # Internal Zurg directories to always skip
     _SKIP_CATEGORIES = {'__all__', '__unplayable__'}
 
-    def _scan_mount(self, mount_path, deadline=None, source_debrid=None):
+    def _scan_mount(self, mount_path, deadline=None, source_debrid=None, flat_layout=False):
         """Scan all category directories on the mount and aggregate by title.
 
         Debrid mounts have one folder per torrent, so the same show appears
@@ -4416,28 +4453,43 @@ class LibraryScanner:
         get the correct badge; pre-fix this was hard-coded to ``realdebrid``
         which mislabelled non-RD primaries).  The second pass over the alt
         mount explicitly passes ``source_debrid='torbox'``.
+
+        ``flat_layout=True`` (plan 39 phase 4 follow-up) treats *mount_path*
+        as a single category root — releases live directly under it with
+        no ``shows/movies/anime/__all__`` subdivision.  This matches TorBox's
+        WebDAV layout; Zurg-backed mounts (RD/AD) keep the categorized
+        default.  Pre-fix this method assumed 2-level structure unconditionally,
+        so TB scans iterated each release folder AS A CATEGORY and looked
+        for sub-folders inside (finding only media files) — every TB show
+        and movie except the few with internal subdirs was silently dropped.
         """
         if source_debrid is None:
             from utils.debrid_routing import resolve_primary
             source_debrid = resolve_primary() or 'realdebrid'
-        try:
-            categories = []
-            with os.scandir(mount_path) as it:
-                for entry in it:
-                    if entry.is_dir(follow_symlinks=False):
-                        categories.append(entry.name)
-        except (PermissionError, OSError) as e:
-            logger.warning(f"[library] Cannot list mount {mount_path}: {e}")
-            return [], []
 
-        non_special = [c for c in categories if c not in self._SKIP_CATEGORIES]
-        scan_dirs = non_special if non_special else [c for c in categories if c == '__all__']
+        if flat_layout:
+            # Sentinel '' so the join below evaluates to ``mount_path`` itself.
+            scan_dirs = ['']
+            logger.debug(f"[library] Scanning flat mount root: {mount_path}")
+        else:
+            try:
+                categories = []
+                with os.scandir(mount_path) as it:
+                    for entry in it:
+                        if entry.is_dir(follow_symlinks=False):
+                            categories.append(entry.name)
+            except (PermissionError, OSError) as e:
+                logger.warning(f"[library] Cannot list mount {mount_path}: {e}")
+                return [], []
 
-        if not scan_dirs:
-            logger.warning("[library] No directories found on mount")
-            return [], []
+            non_special = [c for c in categories if c not in self._SKIP_CATEGORIES]
+            scan_dirs = non_special if non_special else [c for c in categories if c == '__all__']
 
-        logger.debug(f"[library] Scanning mount categories: {scan_dirs}")
+            if not scan_dirs:
+                logger.warning("[library] No directories found on mount")
+                return [], []
+
+            logger.debug(f"[library] Scanning mount categories: {scan_dirs}")
 
         # Collect raw per-folder data
         show_groups = {}   # normalized_title -> {title, year, episodes, path}
@@ -4445,8 +4497,10 @@ class LibraryScanner:
         timed_out = False
 
         for category in scan_dirs:
-            cat_path = os.path.join(mount_path, category)
-            category_is_shows = category.lower() in self._SHOW_CATEGORIES
+            cat_path = mount_path if flat_layout else os.path.join(mount_path, category)
+            # Flat layout has no category hint; rely on per-folder episode
+            # detection.  Categorized: 'shows'/'tv'/'anime' etc. pre-classify.
+            category_is_shows = (not flat_layout) and category.lower() in self._SHOW_CATEGORIES
             try:
                 with os.scandir(cat_path) as it:
                     for entry in it:

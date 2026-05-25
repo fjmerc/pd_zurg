@@ -175,6 +175,77 @@ class RealDebridClient(DebridClientBase):
             logger.error(f"[debrid] RD delete failed for {torrent_id}: {self._sanitize_error(e)}")
             return False
 
+    def add_magnet(self, info_hash):
+        """Add a hash-only magnet to RD and select all files.
+
+        Used by the plan 39 phase 3 cross-debrid rescue path when the
+        primary debrid (typically TB) is filter-blocked and RD has the
+        content cached — symmetric with ``TorBoxClient.add_magnet`` so
+        either direction is supported.
+
+        Returns the RD torrent ID string on success, or ``None`` on
+        failure.  Errors are logged with the API key masked.
+        """
+        if not info_hash:
+            return None
+        magnet = f'magnet:?xt=urn:btih:{info_hash.upper()}'
+        try:
+            add_resp = tracked_request(
+                self._name, requests.post,
+                f'{self._BASE}/torrents/addMagnet',
+                headers=self._headers(),
+                data={'magnet': magnet},
+                timeout=_TIMEOUT,
+            )
+            if add_resp.status_code not in (200, 201):
+                logger.warning(
+                    f"[debrid] RD addMagnet failed for {info_hash[:8]}…: "
+                    f"HTTP {add_resp.status_code}"
+                )
+                return None
+            torrent_id = add_resp.json().get('id')
+            if not torrent_id:
+                return None
+        except (requests.RequestException, ValueError) as e:
+            logger.warning(
+                f"[debrid] RD addMagnet failed for {info_hash[:8]}…: "
+                f"{self._sanitize_error(e)}"
+            )
+            return None
+
+        # selectFiles must be OUTSIDE the addMagnet try-block.  If the
+        # add succeeded and the select failed, we'd otherwise return
+        # None and leak a half-added torrent in RD's UI.  Now we own
+        # the torrent_id and can clean up on failure.
+        try:
+            tracked_request(
+                self._name, requests.post,
+                f'{self._BASE}/torrents/selectFiles/{torrent_id}',
+                headers=self._headers(),
+                data={'files': 'all'},
+                timeout=_TIMEOUT,
+            )
+        except (requests.RequestException, ValueError) as e:
+            logger.warning(
+                f"[debrid] RD selectFiles failed for {torrent_id} — "
+                f"deleting half-added torrent: {self._sanitize_error(e)}"
+            )
+            try:
+                self.delete_torrent(torrent_id)
+            except Exception as cleanup_err:
+                # Surface secondary failures so an operator can clean
+                # up manually — silent ``pass`` here would leave the
+                # half-added torrent stuck on the user's account with
+                # no log breadcrumb.
+                logger.warning(
+                    f"[debrid] RD delete_torrent for half-added "
+                    f"{torrent_id} also failed: "
+                    f"{self._sanitize_error(cleanup_err)}. "
+                    f"Manual cleanup required."
+                )
+            return None
+        return str(torrent_id)
+
     def probe_file(self, torrent_id, sample_file_link=None):
         """Probe a torrent for RD-side filter blocks.
 
@@ -440,6 +511,90 @@ class TorBoxClient(DebridClientBase):
         except (requests.RequestException, ValueError) as e:
             logger.error(f"[debrid] TB delete failed for {torrent_id}: {self._sanitize_error(e)}")
             return False
+
+    def add_magnet(self, info_hash):
+        """Add a hash-only magnet to TorBox.
+
+        Used by the plan 39 phase 3 cross-debrid rescue path — when RD
+        filter-blocks a hash and TB has it cached, this method puts the
+        same hash on the user's TB account so the file is reachable via
+        the TB rclone mount.  Returns the TB torrent ID string on
+        success, or ``None`` on failure.
+
+        TB's ``/torrents/createtorrent`` accepts a magnet form-field
+        identical to the blackhole add path — there's no separate
+        "rescue" endpoint to maintain.
+        """
+        if not info_hash:
+            return None
+        magnet = f'magnet:?xt=urn:btih:{info_hash.upper()}'
+        try:
+            resp = tracked_request(
+                self._name, requests.post,
+                f'{self._BASE}/torrents/createtorrent',
+                headers=self._headers(),
+                data={'magnet': magnet},
+                timeout=_TIMEOUT,
+            )
+            if resp.status_code not in (200, 201):
+                logger.warning(
+                    f"[debrid] TB createtorrent failed for {info_hash[:8]}…: "
+                    f"HTTP {resp.status_code}"
+                )
+                return None
+            # Defensive: TB nominally returns ``{'data': {...}}`` but the
+            # endpoint has been observed to return a list, a bare string,
+            # or ``None`` under transient gateway / WAF responses.  Treat
+            # anything non-dict as an unparseable success and bail —
+            # AttributeError on .get() would surface as a noisy stacktrace.
+            body = resp.json()
+            data = body.get('data') if isinstance(body, dict) else None
+            if not isinstance(data, dict):
+                logger.warning(
+                    f"[debrid] TB createtorrent returned unparseable body "
+                    f"for {info_hash[:8]}…"
+                )
+                return None
+            tb_id = data.get('torrent_id') or data.get('id')
+            if not tb_id:
+                return None
+            return str(tb_id)
+        except (requests.RequestException, ValueError) as e:
+            logger.warning(
+                f"[debrid] TB createtorrent failed for {info_hash[:8]}…: "
+                f"{self._sanitize_error(e)}"
+            )
+            return None
+
+    def torrent_status(self, torrent_id):
+        """Return the ``download_state`` of a TB torrent (or '' on error).
+
+        Lightweight wrapper used by the phase 3 rescue path to poll for
+        'completed' after add_magnet — distinct from the heavier
+        ``list_torrents`` because we only need one torrent's state.
+        """
+        if not _SAFE_ID.match(str(torrent_id)):
+            return ''
+        try:
+            resp = tracked_request(
+                self._name, requests.get,
+                f'{self._BASE}/torrents/mylist',
+                headers=self._headers(),
+                params={'id': torrent_id, 'bypass_cache': 'true'},
+                timeout=_TIMEOUT,
+            )
+            if resp.status_code != 200:
+                return ''
+            data = resp.json().get('data')
+            if not isinstance(data, dict):
+                return ''
+            return str(data.get('download_state') or '')
+        except (requests.RequestException, ValueError) as e:
+            logger.warning(
+                f"[debrid] TB torrent_status failed for {torrent_id}: "
+                f"{self._sanitize_error(e)}"
+            )
+            return ''
 
 
 _SERVICE_CLASSES = {

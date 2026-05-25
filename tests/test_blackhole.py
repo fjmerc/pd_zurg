@@ -2900,7 +2900,9 @@ class TestPendingMonitorsWithLabel:
         captured = []
         monkeypatch.setattr(
             w, '_start_monitor',
-            lambda tid, fn, label=None: captured.append((tid, label)),
+            # **_ swallows the new `debrid` kwarg added in plan 39 phase 2
+            # — this test only cares about (tid, label) sanitisation.
+            lambda tid, fn, label=None, **_: captured.append((tid, label)),
         )
         w._resume_pending_monitors()
         by_id = dict(captured)
@@ -2924,7 +2926,8 @@ class TestPendingMonitorsWithLabel:
         captured = []
         monkeypatch.setattr(
             w, '_start_monitor',
-            lambda tid, fn, label=None: captured.append(tid),
+            # **_ swallows the new `debrid` kwarg added in plan 39 phase 2.
+            lambda tid, fn, label=None, **_: captured.append(tid),
         )
         w._resume_pending_monitors()  # must not raise
         assert captured == ['t_ok']

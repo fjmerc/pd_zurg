@@ -13,6 +13,50 @@ _RC_BASE_PORT = 5572
 # Populated at setup time: {mount_name: rc_url, ...}
 _rc_urls = {}
 
+# TorBox WebDAV endpoint — fixed by TorBox.  Exposed as a constant so tests
+# can monkeypatch a mock without touching the live URL.
+TORBOX_WEBDAV_URL = 'https://webdav.torbox.app/'
+
+
+def _torbox_mount_configured():
+    """Return True iff all three TorBox WebDAV credentials are present.
+
+    The API key alone is not sufficient — TorBox's WebDAV requires a
+    separately configured user + WebDAV-only password set in the TorBox
+    dashboard (Settings → Integrations → WebDAV).  We treat the mount as
+    unconfigured (warn, skip) rather than failing the container so the
+    user can still use the non-mount features (search/cache-check) of
+    the existing TORBOX_API_KEY integration.
+    """
+    return bool(TORBOXAPIKEY and TORBOXWEBDAVUSER and TORBOXWEBDAVPASS)
+
+
+def _write_torbox_remote(file_handle, remote_name):
+    """Emit the ``[<remote_name>]`` section for TorBox WebDAV.
+
+    Caller has already opened ``file_handle`` for write — we just append
+    the stanza.  Keeps the password obscure-encoded so the on-disk
+    rclone.config doesn't carry it in clear text (matches the existing
+    Zurg-user pattern).
+    """
+    obscured = obscure_password(TORBOXWEBDAVPASS)
+    if not obscured:
+        logger.error(
+            "[rclone] Failed to obscure TorBox WebDAV password — "
+            "TorBox mount will be skipped"
+        )
+        return False
+    file_handle.write(f"[{remote_name}]\n")
+    file_handle.write("type = webdav\n")
+    file_handle.write(f"url = {TORBOX_WEBDAV_URL}\n")
+    # vendor=other matches the Zurg remotes; TorBox's WebDAV implements
+    # the generic spec, not Nextcloud/Owncloud-specific extensions.
+    file_handle.write("vendor = other\n")
+    file_handle.write("pacer_min_sleep = 0\n")
+    file_handle.write(f"user = {TORBOXWEBDAVUSER}\n")
+    file_handle.write(f"pass = {obscured}\n")
+    return True
+
 def get_rc_url(mount_name=None):
     """Return the RC URL for a given mount, or the first one if unspecified."""
     if mount_name and mount_name in _rc_urls:
@@ -97,6 +141,12 @@ def regenerate_config():
                     f.write(f"user = {ZURGUSER}\n")
                     f.write(f"pass = {obscured_password}\n")
 
+        # TorBox co-debrid (plan 39).  Written only when fully configured;
+        # incomplete TorBox config logs a warning at setup() time and the
+        # mount is skipped.
+        if _torbox_mount_configured():
+            _write_torbox_remote(f, TORBOX_MOUNT_NAME)
+
     logger.info("Regenerated rclone.config")
 
 
@@ -155,6 +205,21 @@ def setup():
                         f.write(f"user = {ZURGUSER}\n")
                         f.write(f"pass = {obscured_password}\n")
 
+            # TorBox co-debrid (plan 39).
+            torbox_remote_written = False
+            if _torbox_mount_configured():
+                torbox_remote_written = _write_torbox_remote(f, TORBOX_MOUNT_NAME)
+            elif TORBOXAPIKEY:
+                logger.warning(
+                    "[rclone] TORBOX_API_KEY is set but TORBOX_WEBDAV_USER "
+                    "and/or TORBOX_WEBDAV_PASS is missing — TorBox mount "
+                    "will be skipped.  Generate a WebDAV-only password in "
+                    "the TorBox dashboard (Settings → Integrations → WebDAV) "
+                    "and set both env vars to enable the mount.  Non-mount "
+                    "TorBox features (cache probes, search add) still work "
+                    "with just the API key."
+                )
+
         with open("/etc/fuse.conf", "a") as f:
             f.write("user_allow_other\n")
 
@@ -163,6 +228,20 @@ def setup():
             mount_names.append(RCLONEMN_RD)
         if ADAPIKEY:
             mount_names.append(RCLONEMN_AD)
+        if torbox_remote_written:
+            # Collision check — TORBOX_MOUNT_NAME must not shadow an existing
+            # Zurg mount.  If it does, log loudly and skip — silently writing
+            # over /data/zurgarr/ with TorBox content would corrupt the
+            # symlink machinery's view of RD's catalogue.
+            if TORBOX_MOUNT_NAME in mount_names:
+                logger.error(
+                    f"[rclone] TORBOX_MOUNT_NAME ('{TORBOX_MOUNT_NAME}') "
+                    f"collides with an existing Zurg mount.  TorBox mount "
+                    f"will be skipped.  Set TORBOX_MOUNT_NAME to a unique "
+                    f"value (default is 'torbox')."
+                )
+            else:
+                mount_names.append(TORBOX_MOUNT_NAME)
 
         process_handler = ProcessHandler(logger)
 
@@ -205,13 +284,29 @@ def setup():
                 if val:
                     rclone_command.append(f'--{flag}={val}')
 
-            url = f"http://localhost:{rd_port if mn == RCLONEMN_RD else ad_port}"
-            zurg_auth = (ZURGUSER, ZURGPASS) if ZURGUSER and ZURGPASS else None
+            # Pick the URL + auth + verb to probe for readiness.  RD/AD
+            # point at a local Zurg instance and accept plain GET on
+            # /dav/.  TorBox goes direct to webdav.torbox.app and rejects
+            # GET at root with 401 but accepts PROPFIND with 207 — so the
+            # TorBox branch passes ``method='PROPFIND'`` to wait_for_url.
+            if mn == TORBOX_MOUNT_NAME and torbox_remote_written:
+                url = TORBOX_WEBDAV_URL.rstrip('/')
+                probe_endpoint = "/"
+                probe_auth = (TORBOXWEBDAVUSER, TORBOXWEBDAVPASS)
+                probe_label = f"TorBox WebDAV ({mn})"
+                probe_method = "PROPFIND"
+            else:
+                url = f"http://localhost:{rd_port if mn == RCLONEMN_RD else ad_port}"
+                probe_endpoint = "/dav/"
+                probe_auth = (ZURGUSER, ZURGPASS) if ZURGUSER and ZURGPASS else None
+                probe_label = f"Zurg WebDAV ({mn})"
+                probe_method = "GET"
             if os.path.exists(f"/healthcheck/{mn}"):
                 os.rmdir(f"/healthcheck/{mn}")
-            if wait_for_url(url, endpoint="/dav/", auth=zurg_auth, description=f"Zurg WebDAV ({mn})"):
+            if wait_for_url(url, endpoint=probe_endpoint, auth=probe_auth,
+                            description=probe_label, method=probe_method):
                 os.makedirs(f"/healthcheck/{mn}") # makdir for healthcheck. Don't like it, but it works for now...
-                logger.info(f"The Zurg WebDAV URL {url}/dav is accessible. Starting rclone for {mn} (RC on port {rc_port})")
+                logger.info(f"The {probe_label} URL {url}{probe_endpoint} is accessible. Starting rclone for {mn} (RC on port {rc_port})")
                 process_name = "rclone"
                 suppress_logging=False
                 if str(RCLONELOGLEVEL).lower()=='off':

@@ -47,6 +47,7 @@ ALL_EVENTS = {
     'arr_deleted',                # Movie/series deleted from Sonarr/Radarr
     'health_error',               # Process crash, mount failure
     'debrid_filtered',            # Debrid filter-block detected (and remediated if AUTO_REMEDIATE)
+    'debrid_rescued',             # Filter-blocked content auto-rehosted on the alt debrid (plan 39 phase 3)
     # Repair
     'symlink_repaired',           # Broken symlink repaired or re-search triggered
     # Debrid search

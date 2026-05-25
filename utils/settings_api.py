@@ -35,7 +35,7 @@ ENV_SCHEMA = [
             ('ZURG_ENABLED', 'Enable Zurg', 'boolean', True, 'Enable the Zurg WebDAV server'),
             ('RD_API_KEY', 'Real-Debrid API Key', 'secret', False, 'API key from real-debrid.com/apitoken'),
             ('AD_API_KEY', 'AllDebrid API Key', 'secret', False, 'API key from alldebrid.com'),
-            ('TORBOX_API_KEY', 'TorBox API Key', 'secret', False, 'API key from torbox.app'),
+            ('TORBOX_API_KEY', 'TorBox API Key', 'secret', False, 'API key from torbox.app. Powers cache probes, search-add, and the dual-debrid blackhole routing. For the WebDAV mount, also set TORBOX_WEBDAV_USER + TORBOX_WEBDAV_PASS (see the TorBox section).'),
             ('ZURG_VERSION', 'Zurg Version', 'string', False, 'Pin to specific version (e.g., v0.9.2-hotfix.4)'),
             ('ZURG_UPDATE', 'Auto-Update Zurg', 'boolean', False, 'Check for Zurg updates on startup'),
             ('ZURG_LOG_LEVEL', 'Zurg Log Level', 'select:DEBUG,INFO,WARNING,ERROR', False, 'Log level for Zurg process'),
@@ -61,6 +61,15 @@ ENV_SCHEMA = [
             ('RCLONE_VFS_CACHE_MAX_AGE', 'VFS Cache Max Age', 'string', False, 'Max age of VFS cache files (e.g., 1h, 24h)'),
             ('RCLONE_BUFFER_SIZE', 'Buffer Size', 'string', False, 'In-memory buffer per open file (e.g., 16M)'),
             ('RCLONE_TRANSFERS', 'Transfers', 'string', False, 'Number of parallel transfers'),
+        ],
+    },
+    {
+        'name': 'TorBox',
+        'description': 'TorBox co-debrid mount (plan 39). TORBOX_API_KEY alone enables cache probes and search-add against TorBox; the WebDAV mount additionally requires TORBOX_WEBDAV_USER + TORBOX_WEBDAV_PASS (configured in the TorBox dashboard under Settings → Integrations → WebDAV — the API key itself does NOT authenticate WebDAV).',
+        'fields': [
+            ('TORBOX_WEBDAV_USER', 'TorBox WebDAV User', 'string', False, 'TorBox account email used for WebDAV Basic auth. NOT the API key.'),
+            ('TORBOX_WEBDAV_PASS', 'TorBox WebDAV Password', 'secret', False, 'WebDAV-only password set in the TorBox dashboard (Settings → Integrations → WebDAV). Distinct from the account login password and from the API key.'),
+            ('TORBOX_MOUNT_NAME', 'TorBox Mount Name', 'string', False, 'Mount path under /data. Default "torbox" — must not collide with RCLONE_MOUNT_NAME.'),
         ],
     },
     {
@@ -111,7 +120,7 @@ ENV_SCHEMA = [
              'Comma-separated event types: startup, shutdown, download_complete, download_error, '
              'library_refresh, symlink_created, symlink_failed, debrid_unavailable, pending_warning, '
              'local_fallback_triggered, blocklist_added, arr_deleted, health_error, symlink_repaired, '
-             'daily_digest, debrid_add_success, debrid_add_failed, compromise_grabbed, debrid_filtered. '
+             'daily_digest, debrid_add_success, debrid_add_failed, compromise_grabbed, debrid_filtered, debrid_rescued. '
              'Leave empty for all events'),
             ('NOTIFICATION_LEVEL', 'Minimum Level', 'select:info,warning,error', False, 'Minimum severity to send notifications'),
             ('NOTIFICATION_DIGEST_ENABLED', 'Daily Digest', 'boolean', False, 'Send a daily summary notification'),
@@ -142,6 +151,16 @@ ENV_SCHEMA = [
             ('BLACKHOLE_DEBRID_DEDUP_ENABLED', 'Skip If Already in Debrid Account', 'boolean', False, 'Before adding, query the debrid account and skip hashes already present. Prevents duplicate torrent entries when Sonarr/Radarr re-grabs the same release after a failed import (default: ON).'),
             ('BLACKHOLE_REQUIRE_CACHED', 'Require Cached on Debrid', 'boolean', False, 'Refuse .torrent / .magnet drops whose hash is not confirmed cached on the debrid provider. Real-Debrid deprecated its cache probe in Nov 2024, so on RD this will block all adds — leave OFF for RD or switch to AllDebrid/TorBox to use this gate (default: OFF).'),
             ('BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'Delete Uncached Torrents on Timeout', 'boolean', False, 'When the blackhole gives up waiting for debrid to cache a torrent (BLACKHOLE_MOUNT_POLL_TIMEOUT — default 5 min), actively delete it from the debrid account instead of leaving it as a 0%/0-seed entry. Recommended ON for Real-Debrid users where no pre-add cache probe is available — see TROUBLESHOOTING.md "Uncached torrents pile up on my debrid account from the blackhole" (default: OFF).'),
+        ],
+    },
+    {
+        'name': 'Multi-Debrid Routing',
+        'description': 'Per-grab debrid routing for dual-debrid setups (plan 39). Inert when only one debrid is configured. The cache-aware default probes each configured debrid before adding so cached releases land on the provider that already has them; the primary wins ties.',
+        'fields': [
+            ('BLACKHOLE_DEBRID_ROUTING', 'Routing Mode', 'select:cache_aware,primary_only', False, 'cache_aware (default with two debrids): probe each provider before adding, prefer cached. primary_only: always route to the primary.  Reserved-but-unimplemented modes (tag, round_robin) are accepted with a one-shot WARNING and fall through to the default.'),
+            ('BLACKHOLE_DEBRID_PRIMARY', 'Primary Debrid', 'select:realdebrid,alldebrid,torbox', False, 'Used as the tiebreak in cache_aware mode and as the sole target in primary_only mode. Defaults to the legacy BLACKHOLE_DEBRID value, then to the first configured debrid in (RD, AD, TB) order.'),
+            ('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', 'TorBox Symlink Target Base', 'string', False, 'Host-side mount path for TorBox symlinks (e.g. /mnt/debrid_torbox).  When unset, falls back to the RD base with a "_torbox" suffix.  Must be non-empty when symlinks + TorBox are both enabled.'),
+            ('DEBRID_HEALTH_CROSS_RESCUE', 'Cross-Debrid Rescue', 'select:auto,true,false', False, 'When the RD reconciler finds a filter-blocked torrent and TB has it cached, re-host on TB and retarget arr-library symlinks. Default (auto): ON when both RD + TB API keys are set, OFF otherwise. Set false to disable rescue even with both keys (debugging the remediation path); true forces an attempt (no-op when alt is not configured).'),
         ],
     },
     {
@@ -296,6 +315,11 @@ _ENV_DEFAULTS = {
     # applies when the env var is empty; surfacing a non-empty UI default
     # would pin the value into .env on first save.
     'CONFIG_BACKUP_RETENTION': '7',
+    # TorBox mount name default — matches base/__init__.py Config.load().
+    # Listed so the Settings UI shows 'torbox' as the resolved value when
+    # TORBOX_MOUNT_NAME isn't in .env, preventing an empty-looking field
+    # that would confuse the user about what mount path will be used.
+    'TORBOX_MOUNT_NAME': 'torbox',
     # Notification digest default matches Config.load() in base/__init__.py
     # (os.getenv('NOTIFICATION_DIGEST_TIME', '08:00')). Listed so the UI
     # doesn't render an empty field while help text claims "default: 08:00".

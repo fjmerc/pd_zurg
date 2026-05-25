@@ -72,6 +72,36 @@ def validate_config():
                 "At least one debrid API key is required."
             )
 
+    # --- TorBox co-debrid (plan 39) ---
+    # The mount needs API key + WebDAV-only user + WebDAV-only password
+    # (the latter two configured in the TorBox dashboard under
+    # Settings → Integrations → WebDAV).  We accept partial config so the
+    # non-mount features (cache probes, search add) still work with just
+    # the API key — but warn loudly so the user sees that the mount won't
+    # come up until WebDAV credentials are also set.
+    torbox_key = os.environ.get('TORBOX_API_KEY', '')
+    torbox_webdav_user = os.environ.get('TORBOX_WEBDAV_USER', '')
+    torbox_webdav_pass = os.environ.get('TORBOX_WEBDAV_PASS', '')
+    if torbox_key and not (torbox_webdav_user and torbox_webdav_pass):
+        missing = []
+        if not torbox_webdav_user:
+            missing.append('TORBOX_WEBDAV_USER')
+        if not torbox_webdav_pass:
+            missing.append('TORBOX_WEBDAV_PASS')
+        result.warn(
+            f"TORBOX_API_KEY is set but {' + '.join(missing)} is missing. "
+            "TorBox WebDAV mount will be skipped (non-mount features still "
+            "work).  Generate a WebDAV-only password in the TorBox dashboard "
+            "(Settings → Integrations → WebDAV) to enable the mount."
+        )
+    torbox_mount_name = os.environ.get('TORBOX_MOUNT_NAME', 'torbox')
+    rclone_mount_name = os.environ.get('RCLONE_MOUNT_NAME', '')
+    if torbox_key and torbox_mount_name == rclone_mount_name:
+        result.error(
+            f"TORBOX_MOUNT_NAME='{torbox_mount_name}' collides with "
+            f"RCLONE_MOUNT_NAME.  Pick a unique name (default is 'torbox')."
+        )
+
     # --- URL Format Validation ---
     url_vars = {
         'PLEX_ADDRESS': PLEXADD,

@@ -287,6 +287,26 @@ def _fmt_debrid_filtered(ev, meta):
     return head + tail, head + tail
 
 
+def _fmt_debrid_rescued(ev, meta):
+    """Format a cross-debrid rescue event (plan 39 phase 3).
+
+    The source debrid filter-blocked the content; the alt debrid had it
+    cached and was used to re-host it.  ``retargeted`` is the count of
+    symlinks repointed; ``from``/``to`` are the provider names.
+    """
+    frm = (meta.get('from') or '?').upper()
+    to = (meta.get('to') or '?').upper()
+    head = f'Filter-blocked on {frm} — rescued via {to}'
+    n = meta.get('retargeted', 0)
+    if n:
+        tail = f' — {n} symlink(s) retargeted'
+    elif meta.get('rescue_outcome') == 'no_symlinks_found':
+        tail = ' — alt-debrid has cache, no in-library symlinks to retarget'
+    else:
+        tail = ' — alt-debrid has cache, file accessible via alt mount'
+    return head + tail, head + tail
+
+
 def _fmt_debrid_unavailable_marked(ev, meta):
     days = meta.get('age_days')
     attempts = meta.get('search_attempts')
@@ -437,6 +457,7 @@ _CAUSE_FORMATTERS = {
     'auto_blocklist_added': _fmt_auto_blocklist,
     'debrid_unavailable_marked': _fmt_debrid_unavailable_marked,
     'debrid_filtered': _fmt_debrid_filtered,
+    'debrid_rescued': _fmt_debrid_rescued,
     'terminal_error': _fmt_terminal_error,
     'uncached_timeout': _fmt_uncached_timeout,
     'uncached_rejected': _fmt_uncached_rejected,
@@ -606,6 +627,17 @@ FORMATTER_JS = r"""
       if (m.blocklisted) actions.push('hash blocklisted');
       if (m.researched)  actions.push('arr re-search triggered');
       return head + ' — ' + (actions.length ? actions.join(', ') : 'detection only');
+    },
+    debrid_rescued: function(ev,m){
+      var frm = (m.from || '?').toUpperCase();
+      var to  = (m.to   || '?').toUpperCase();
+      var head = 'Filter-blocked on ' + frm + ' — rescued via ' + to;
+      var n = m.retargeted || 0;
+      var tail;
+      if (n) tail = ' — ' + n + ' symlink(s) retargeted';
+      else if (m.rescue_outcome === 'no_symlinks_found') tail = ' — alt-debrid has cache, no in-library symlinks to retarget';
+      else tail = ' — alt-debrid has cache, file accessible via alt mount';
+      return head + tail;
     },
     terminal_error: function(ev,m){ return 'Failed on ' + (m.provider||'debrid') + ': ' + (m.status || m.error || 'unknown'); },
     uncached_timeout: function(ev,m){ return 'Timed out waiting for cache' + (m.deleted ? ' — removed from debrid' : ' — debrid cleanup skipped'); },

@@ -71,6 +71,19 @@ def _patch_client(client):
     return patch('utils.debrid_health.get_debrid_client', return_value=(client, 'realdebrid'))
 
 
+def _patch_clients(rd_client, tb_client):
+    """Patch get_debrid_client to dispatch by service — RD when
+    ``service='realdebrid'`` (or unspecified), TB when ``service='torbox'``.
+    Used by the plan 39 phase 3 cross-rescue tests where both providers
+    need to be reachable via the single seam.
+    """
+    def _dispatch(service=None, api_key=None):
+        if service == 'torbox':
+            return (tb_client, 'torbox')
+        return (rd_client, 'realdebrid')
+    return patch('utils.debrid_health.get_debrid_client', side_effect=_dispatch)
+
+
 def _torrent(tid, infohash, filename='Release.S01E01.mkv'):
     return {'id': tid, 'hash': infohash, 'filename': filename,
             'status': 'downloaded', 'bytes': 1_000_000}
@@ -263,10 +276,17 @@ class TestCapsAndRateLimit:
         assert result['items'] == 3
 
     def test_rate_limit_sleep_between_probes(self, state_path, no_sleep, rd_enabled, monkeypatch):
-        """Rate-limit enforcement: a 60/min cap means time.sleep(1.0)
-        between probes. Three probes → two sleeps (no sleep after the
-        last)."""
+        """Rate-limit enforcement: a 60/min cap means an interruptible
+        1.0-second wait between probes. Three probes → two waits (no wait
+        after the last).  Pre-HIGH-7-fix the loop used ``time.sleep``;
+        post-fix it uses ``_stop_event.wait`` so SIGTERM mid-sweep aborts
+        cleanly without stalling the scheduler's 15s join window."""
         monkeypatch.setattr(debrid_health, '_RATE_LIMIT_PER_MIN', 60)
+        wait_calls = []
+        def fake_wait(timeout=None):
+            wait_calls.append(timeout)
+            return False
+        monkeypatch.setattr(debrid_health._stop_event, 'wait', fake_wait)
         client = _mock_client(
             torrents=[_torrent(f'T{i}', f'HASH{i:04d}') for i in range(3)],
             probe_results={f'T{i}': {'status': 'healthy'} for i in range(3)},
@@ -274,21 +294,26 @@ class TestCapsAndRateLimit:
         with _patch_client(client):
             debrid_health.run_sweep()
 
-        # Two sleeps total — between probe 0/1 and 1/2, none after probe 2.
-        assert no_sleep.call_count == 2
-        for call in no_sleep.call_args_list:
-            assert call.args[0] == pytest.approx(1.0)
+        # Two waits total — between probe 0/1 and 1/2, none after probe 2.
+        assert len(wait_calls) == 2
+        for t in wait_calls:
+            assert t == pytest.approx(1.0)
 
-    def test_no_sleep_when_only_one_probe(self, state_path, no_sleep, rd_enabled):
+    def test_no_sleep_when_only_one_probe(self, state_path, no_sleep, rd_enabled, monkeypatch):
         """Single-probe sweep must not pay the rate-limit delay — wasted
         wall-clock time on the scheduler UI's 'running' indicator."""
+        wait_calls = []
+        def fake_wait(timeout=None):
+            wait_calls.append(timeout)
+            return False
+        monkeypatch.setattr(debrid_health._stop_event, 'wait', fake_wait)
         client = _mock_client(
             torrents=[_torrent('T1', 'AAAA0000')],
             probe_results={'T1': {'status': 'healthy'}},
         )
         with _patch_client(client):
             debrid_health.run_sweep()
-        assert no_sleep.call_count == 0
+        assert len(wait_calls) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -998,6 +1023,7 @@ class TestGetSummary:
 
     def test_no_rd_configured_returns_minimal(self, state_path, monkeypatch):
         monkeypatch.delenv('RD_API_KEY', raising=False)
+        monkeypatch.delenv('TORBOX_API_KEY', raising=False)
         # /run/secrets/rd_api_key shouldn't exist in the test env, but be
         # explicit to avoid flakiness on a developer host that happens to.
         monkeypatch.setattr(
@@ -1005,7 +1031,10 @@ class TestGetSummary:
             lambda p: False if p == '/run/secrets/rd_api_key' else os.path.isfile(p),
         )
         summary = debrid_health.get_summary()
-        assert summary == {'rd_configured': False}
+        # Plan 39 phase 5: providers[] is always present so the dual-card
+        # UI can render even when only TB is configured; rd_configured
+        # stays for back-compat with the original RD-only UI gate.
+        assert summary == {'rd_configured': False, 'providers': []}
 
     def test_empty_state_returns_zero_counts(self, state_path, rd_creds, rd_enabled):
         summary = debrid_health.get_summary()
@@ -1074,6 +1103,91 @@ class TestGetSummary:
         assert summary['rd_configured'] is True
 
 
+class TestDualDebridDashboard:
+    """Plan 39 phase 5 — System page mini-dashboard renders side-by-side
+    RD + TB cards when both providers are configured, collapses to one
+    card when only one is, and shows zero cards (with rd_configured=False
+    legacy hint) when neither is configured."""
+
+    def test_rd_only_returns_single_provider(self, state_path, monkeypatch):
+        monkeypatch.setenv('RD_API_KEY', 'rd')
+        monkeypatch.delenv('TORBOX_API_KEY', raising=False)
+        summary = debrid_health.get_summary()
+        services = [p['service'] for p in summary.get('providers', [])]
+        assert services == ['realdebrid']
+        assert summary['rd_configured'] is True
+
+    def test_both_configured_returns_two_providers(self, state_path, monkeypatch):
+        monkeypatch.setenv('RD_API_KEY', 'rd')
+        monkeypatch.setenv('TORBOX_API_KEY', 'tb')
+        summary = debrid_health.get_summary()
+        services = [p['service'] for p in summary.get('providers', [])]
+        assert services == ['realdebrid', 'torbox']
+        # Each card carries label + counts + last_probe_ts at minimum.
+        for card in summary['providers']:
+            assert 'label' in card
+            assert 'counts' in card
+            assert 'configured' in card
+
+    def test_tb_only_returns_tb_card(self, state_path, monkeypatch):
+        monkeypatch.delenv('RD_API_KEY', raising=False)
+        monkeypatch.setenv('TORBOX_API_KEY', 'tb')
+        # Capture the real isfile BEFORE patching so the lambda doesn't
+        # recurse into itself on the fallthrough branch.
+        real_isfile = os.path.isfile
+        monkeypatch.setattr(
+            'os.path.isfile',
+            lambda p: False if p == '/run/secrets/rd_api_key' else real_isfile(p),
+        )
+        summary = debrid_health.get_summary()
+        services = [p['service'] for p in summary.get('providers', [])]
+        assert services == ['torbox']
+        assert summary['rd_configured'] is False
+
+    def test_neither_configured_returns_empty(self, state_path, monkeypatch):
+        monkeypatch.delenv('RD_API_KEY', raising=False)
+        monkeypatch.delenv('TORBOX_API_KEY', raising=False)
+        real_isfile = os.path.isfile
+        monkeypatch.setattr(
+            'os.path.isfile',
+            lambda p: False if p == '/run/secrets/rd_api_key' else real_isfile(p),
+        )
+        summary = debrid_health.get_summary()
+        assert summary == {'rd_configured': False, 'providers': []}
+
+    def test_rescued_24h_separate_from_remediated_24h(
+            self, state_path, monkeypatch):
+        monkeypatch.setenv('RD_API_KEY', 'rd')
+        monkeypatch.setenv('DEBRID_HEALTH_ENABLED', 'true')
+        mock_query = MagicMock(return_value={'events': [
+            {'meta': {'cause': 'debrid_filtered'}, 'title': 'A'},
+            {'meta': {'cause': 'debrid_rescued'}, 'title': 'B'},
+            {'meta': {'cause': 'debrid_rescued'}, 'title': 'C'},
+        ]})
+        monkeypatch.setattr('utils.history.query', mock_query)
+        summary = debrid_health.get_summary()
+        assert summary['remediated_24h'] == 1
+        assert summary['rescued_24h'] == 2
+
+    def test_tb_card_surfaces_rescue_count(self, state_path, monkeypatch):
+        """TB doesn't have its own probed-state set; the card counts
+        entries from the RD state file whose ``rescued=True`` flag
+        confirms TB hosted a re-add."""
+        monkeypatch.setenv('RD_API_KEY', 'rd')
+        monkeypatch.setenv('TORBOX_API_KEY', 'tb')
+        state_path.write_text(json.dumps({
+            'version': 1,
+            'probed': {
+                'A': {'status': 'unknown', 'ts': time.time(), 'rescued': True},
+                'B': {'status': 'unknown', 'ts': time.time(), 'rescued': True},
+                'C': {'status': 'healthy', 'ts': time.time()},
+            },
+        }))
+        summary = debrid_health.get_summary()
+        tb_card = next(p for p in summary['providers'] if p['service'] == 'torbox')
+        assert tb_card['counts']['rescued'] == 2
+
+
 class TestRemediateFilenameSanitisation:
     """M2: a RD filename packed with path components (e.g. an uploader
     nested the file under ``Show/S01/ep.mkv``) MUST be reduced to the
@@ -1116,3 +1230,390 @@ class TestRemediateFilenameSanitisation:
         passed_release_name = mock_arr_research.call_args.args[0]
         assert passed_release_name == 'Show.S01E04.WEB-DL'
         assert '/' not in passed_release_name
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: cross-debrid rescue
+#
+# When RD filter-blocks a torrent and TB has it cached, the rescue path
+# adds the hash to TB, waits for it to be ready, retargets arr-library
+# symlinks from the RD base to the TB base, and skips blocklist + delete
+# + arr re-search.  Any failure in the rescue path falls through to the
+# existing remediation pipeline.
+# ---------------------------------------------------------------------------
+
+class TestCrossRescue:
+    _BLOCKED = {'status': 'blocked', 'reason': 'infringing_file', 'http': 451}
+
+    @pytest.fixture
+    def tb_configured(self, monkeypatch):
+        monkeypatch.setenv('TORBOX_API_KEY', 'tb-key')
+        monkeypatch.setenv('RD_API_KEY', 'rd-key')
+
+    @pytest.fixture
+    def rescue_on(self, monkeypatch, tb_configured):
+        # Explicit ON for clarity (would default-on with both keys set).
+        monkeypatch.setenv('DEBRID_HEALTH_CROSS_RESCUE', 'true')
+
+    @pytest.fixture
+    def mock_tb_client(self):
+        """A mock TBClient.  ``add_magnet`` returns a fake TB id;
+        ``torrent_status`` returns 'completed' so the poll loop
+        short-circuits on first iteration.  Not auto-patched — caller
+        uses ``_patch_clients(rd_client, tb)`` below so both providers
+        resolve to the right mock via the single ``get_debrid_client``
+        seam.
+        """
+        tb = MagicMock()
+        tb.configured = True
+        tb.add_magnet.return_value = 'TB_ID_123'
+        tb.torrent_status.return_value = 'completed'
+        return tb
+
+    @pytest.fixture
+    def tb_cached(self, monkeypatch):
+        """Patch utils.search.check_debrid_cache → TB returns cached=True."""
+        def fake_check(hashes, service=None, api_key=None):
+            if service == 'torbox':
+                return {h: True for h in hashes}
+            return {h: None for h in hashes}
+        monkeypatch.setattr('utils.search.check_debrid_cache', fake_check)
+
+    @pytest.fixture
+    def arr_library_with_symlink(self, tmp_path, monkeypatch):
+        """Build a fake arr movie library with one symlink pointing at the
+        RD base.  Returns (lib_root, symlink_path, original_target)."""
+        rd_base = str(tmp_path / 'debrid')
+        os.makedirs(os.path.join(rd_base, 'movies', 'Release.2025'), exist_ok=True)
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', rd_base)
+        monkeypatch.setenv(
+            'BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX',
+            str(tmp_path / 'debrid_torbox'),
+        )
+
+        lib_root = tmp_path / 'local_media' / 'movies'
+        lib_root.mkdir(parents=True)
+        monkeypatch.setenv('BLACKHOLE_LOCAL_LIBRARY_MOVIES', str(lib_root))
+
+        sym = lib_root / 'Release (2025)' / 'file.mkv'
+        sym.parent.mkdir(parents=True)
+        original_target = rd_base + '/movies/Release.2025/file.mkv'
+        os.symlink(original_target, sym)
+        return lib_root, sym, original_target
+
+    def test_cross_rescue_short_circuits_remediation_on_success(
+            self, state_path, no_sleep, rd_enabled, rescue_on, tb_cached,
+            mock_tb_client, arr_library_with_symlink, mock_remediation_deps):
+        """RD blocked + TB cached + TB add succeeds → rescue path fires,
+        blocklist/delete/arr re-search must NOT be called."""
+        lib_root, sym, original_target = arr_library_with_symlink
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000', filename='Release.2025.mkv')],
+            probe_results={'T1': self._BLOCKED},
+        )
+        with _patch_clients(client, mock_tb_client):
+            debrid_health.run_sweep()
+
+        # TB add was called with the hash
+        mock_tb_client.add_magnet.assert_called_once_with('AAAA0000')
+        # Symlink retargeted
+        new_target = os.readlink(str(sym))
+        assert 'debrid_torbox' in new_target
+        assert new_target.endswith('/movies/Release.2025/file.mkv')
+        # Existing remediation pipeline NOT triggered
+        assert mock_remediation_deps['blocklist_add'].call_count == 0
+        assert client.delete_torrent.call_count == 0
+        assert mock_remediation_deps['arr_research'].call_count == 0
+        # History event with the rescue cause
+        from utils import history as _h
+        log_calls = mock_remediation_deps['log_event'].call_args_list
+        assert any(
+            c.kwargs.get('meta', {}).get('cause') == _h.CAUSE_DEBRID_RESCUED
+            for c in log_calls
+        )
+
+    def test_tb_not_cached_falls_through_to_remediation(
+            self, state_path, no_sleep, rd_enabled, rescue_on,
+            mock_tb_client, monkeypatch, mock_remediation_deps):
+        """TB cache probe returns False → rescue declines → existing
+        remediation runs unchanged."""
+        # Enable AUTO_REMEDIATE so we can observe the fallthrough path
+        monkeypatch.setenv('DEBRID_HEALTH_AUTO_REMEDIATE', 'true')
+
+        def fake_check(hashes, service=None, **kw):
+            return {h: False for h in hashes}
+        monkeypatch.setattr('utils.search.check_debrid_cache', fake_check)
+
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000')],
+            probe_results={'T1': self._BLOCKED},
+        )
+        client.delete_torrent.return_value = True
+        with _patch_clients(client, mock_tb_client):
+            debrid_health.run_sweep()
+
+        # Rescue helper saw TB miss → fell through
+        mock_tb_client.add_magnet.assert_not_called()
+        # Remediation pipeline ran instead
+        assert mock_remediation_deps['blocklist_add'].call_count == 1
+        client.delete_torrent.assert_called_once_with('T1')
+
+    def test_tb_add_failure_falls_through_to_remediation(
+            self, state_path, no_sleep, rd_enabled, rescue_on, tb_cached,
+            mock_tb_client, monkeypatch, mock_remediation_deps):
+        """TB cache hit but add_magnet returns None → fall through."""
+        monkeypatch.setenv('DEBRID_HEALTH_AUTO_REMEDIATE', 'true')
+        mock_tb_client.add_magnet.return_value = None
+
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000')],
+            probe_results={'T1': self._BLOCKED},
+        )
+        client.delete_torrent.return_value = True
+        with _patch_clients(client, mock_tb_client):
+            debrid_health.run_sweep()
+
+        mock_tb_client.add_magnet.assert_called_once()
+        assert mock_remediation_deps['blocklist_add'].call_count == 1
+        client.delete_torrent.assert_called_once_with('T1')
+
+    def test_tb_never_ready_cleans_up_and_falls_through(
+            self, state_path, no_sleep, rd_enabled, rescue_on, tb_cached,
+            mock_tb_client, monkeypatch, mock_remediation_deps):
+        """TB add succeeds but status never reaches 'completed' →
+        rescue helper deletes the TB entry and falls through to
+        the existing remediate path."""
+        monkeypatch.setenv('DEBRID_HEALTH_AUTO_REMEDIATE', 'true')
+        mock_tb_client.torrent_status.return_value = 'downloading'  # never 'completed'
+
+        # Squeeze the rescue poll deadline so the test finishes fast.
+        # Patching the constants is cleaner than patching ``time.time``
+        # globally — the latter breaks pytest's own timing infrastructure
+        # and causes the test session to spin.
+        monkeypatch.setattr(debrid_health, '_RESCUE_READY_TIMEOUT', 0.01)
+        monkeypatch.setattr(debrid_health, '_RESCUE_POLL_INTERVAL', 0.001)
+
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000')],
+            probe_results={'T1': self._BLOCKED},
+        )
+        client.delete_torrent.return_value = True
+        with _patch_clients(client, mock_tb_client):
+            debrid_health.run_sweep()
+
+        # TB add was called, then TB delete (cleanup), then remediation ran
+        mock_tb_client.add_magnet.assert_called_once()
+        mock_tb_client.delete_torrent.assert_called_once_with('TB_ID_123')
+        assert mock_remediation_deps['blocklist_add'].call_count == 1
+
+    def test_rescue_off_skips_rescue_path(
+            self, state_path, no_sleep, rd_enabled, monkeypatch,
+            mock_tb_client, mock_remediation_deps):
+        """DEBRID_HEALTH_CROSS_RESCUE=false → no TB probe, no rescue, only
+        the existing remediation runs if enabled."""
+        monkeypatch.setenv('RD_API_KEY', 'rd-key')
+        monkeypatch.setenv('TORBOX_API_KEY', 'tb-key')
+        monkeypatch.setenv('DEBRID_HEALTH_CROSS_RESCUE', 'false')
+        monkeypatch.setenv('DEBRID_HEALTH_AUTO_REMEDIATE', 'true')
+
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000')],
+            probe_results={'T1': self._BLOCKED},
+        )
+        client.delete_torrent.return_value = True
+        with _patch_clients(client, mock_tb_client):
+            debrid_health.run_sweep()
+
+        mock_tb_client.add_magnet.assert_not_called()
+        # Existing remediation still fires
+        assert mock_remediation_deps['blocklist_add'].call_count == 1
+
+    def test_no_symlinks_found_still_counts_as_rescue(
+            self, state_path, no_sleep, rd_enabled, rescue_on, tb_cached,
+            mock_tb_client, monkeypatch, mock_remediation_deps):
+        """Content not yet imported by the arr → no symlinks to retarget,
+        but the file is still accessible via TB now.  Rescue is recorded
+        (not a failure) and existing remediation is skipped."""
+        # No arr library configured → zero symlinks scanned, zero retargeted
+        monkeypatch.setenv('BLACKHOLE_LOCAL_LIBRARY_TV', '')
+        monkeypatch.setenv('BLACKHOLE_LOCAL_LIBRARY_MOVIES', '')
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000')],
+            probe_results={'T1': self._BLOCKED},
+        )
+        with _patch_clients(client, mock_tb_client):
+            debrid_health.run_sweep()
+
+        mock_tb_client.add_magnet.assert_called_once()
+        # Remediation skipped
+        assert mock_remediation_deps['blocklist_add'].call_count == 0
+        # History event still emitted with the rescue cause and outcome
+        from utils import history as _h
+        log_meta = [
+            c.kwargs.get('meta', {})
+            for c in mock_remediation_deps['log_event'].call_args_list
+        ]
+        rescue_metas = [m for m in log_meta
+                        if m.get('cause') == _h.CAUSE_DEBRID_RESCUED]
+        assert len(rescue_metas) == 1
+        assert rescue_metas[0]['rescue_outcome'] == 'no_symlinks_found'
+
+    def test_symlink_unrelated_to_blocked_torrent_not_retargeted(
+            self, state_path, no_sleep, rd_enabled, rescue_on, tb_cached,
+            mock_tb_client, tmp_path, monkeypatch, mock_remediation_deps):
+        """Symlinks pointing OUTSIDE the RD base must not be touched
+        (e.g. a local-disc symlink, or a symlink to a different mount
+        the user manually configured)."""
+        rd_base = str(tmp_path / 'debrid')
+        os.makedirs(os.path.join(rd_base, 'movies'), exist_ok=True)
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', rd_base)
+        monkeypatch.setenv(
+            'BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX',
+            str(tmp_path / 'debrid_torbox'),
+        )
+
+        lib_root = tmp_path / 'local_media' / 'movies'
+        lib_root.mkdir(parents=True)
+        monkeypatch.setenv('BLACKHOLE_LOCAL_LIBRARY_MOVIES', str(lib_root))
+
+        # Symlink pointing somewhere else entirely
+        unrelated = lib_root / 'Local.Disc' / 'file.mkv'
+        unrelated.parent.mkdir(parents=True)
+        external_target = str(tmp_path / 'local_disc' / 'file.mkv')
+        os.symlink(external_target, unrelated)
+
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000')],
+            probe_results={'T1': self._BLOCKED},
+        )
+        with _patch_clients(client, mock_tb_client):
+            debrid_health.run_sweep()
+
+        # Unrelated symlink target unchanged
+        assert os.readlink(str(unrelated)) == external_target
+
+    def test_rescue_deferred_when_plex_actively_streams(
+            self, state_path, no_sleep, rd_enabled, rescue_on, tb_cached,
+            mock_tb_client, arr_library_with_symlink, monkeypatch,
+            mock_remediation_deps):
+        """HIGH-8 regression: a rescue MUST NOT retarget a symlink that's
+        currently being streamed by Plex.  Swapping it mid-stream can
+        leave new seeks broken (FUSE FD cache covers the in-flight read
+        but not future range requests).  Pre-fix the rescue path had no
+        Plex guard at all; post-fix it skips the retarget and cleans up
+        the alt-debrid add so a future sweep can try again."""
+        lib_root, sym, original_target = arr_library_with_symlink
+
+        # Pretend Plex reports an active session for this release.
+        monkeypatch.setattr(
+            debrid_health, '_plex_session_active_for_release',
+            lambda release_name: release_name == 'Release.2025',
+        )
+
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000', filename='Release.2025.mkv')],
+            probe_results={'T1': self._BLOCKED},
+        )
+        with _patch_clients(client, mock_tb_client):
+            debrid_health.run_sweep()
+
+        # TB add was still attempted (rescue helper has to make the call to
+        # know the file is reachable) — but the TB delete fires to clean
+        # up since we're deferring.
+        mock_tb_client.add_magnet.assert_called_once()
+        mock_tb_client.delete_torrent.assert_called_once_with('TB_ID_123')
+        # Symlink left untouched
+        assert os.readlink(str(sym)) == original_target
+
+    def test_run_sweep_aborts_on_stop_event_during_rate_limit(
+            self, state_path, rd_enabled, monkeypatch):
+        """HIGH-7: a stop signal received between probes must short-
+        circuit the per-probe rate-limit pause.  Pre-fix the loop used
+        plain ``time.sleep(60/_RATE_LIMIT_PER_MIN)`` which is
+        non-interruptible.  Post-fix it waits on ``_stop_event``."""
+        monkeypatch.setattr(debrid_health, '_RATE_LIMIT_PER_MIN', 60)
+
+        # Sleep-aware sleep replacement that sets the stop event after
+        # the first invocation so the SECOND probe never happens.
+        wait_calls = []
+        real_wait = debrid_health._stop_event.wait
+        def fake_wait(timeout=None):
+            wait_calls.append(timeout)
+            if len(wait_calls) == 1:
+                debrid_health._stop_event.set()
+            return real_wait(timeout=0.0)  # don't actually sleep in tests
+        monkeypatch.setattr(debrid_health._stop_event, 'wait', fake_wait)
+
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000'),
+                      _torrent('T2', 'BBBB1111'),
+                      _torrent('T3', 'CCCC2222')],
+            probe_results={
+                'T1': {'status': 'healthy'},
+                'T2': {'status': 'healthy'},
+                'T3': {'status': 'healthy'},
+            },
+        )
+        with _patch_client(client):
+            result = debrid_health.run_sweep()
+
+        # First probe completed, then sleep was interruptible and aborted
+        # before probes 2 and 3.
+        assert client.probe_file.call_count == 1
+        assert result['items'] == 1
+
+    def test_unrelated_rd_symlink_not_retargeted(
+            self, state_path, no_sleep, rd_enabled, rescue_on, tb_cached,
+            mock_tb_client, tmp_path, monkeypatch, mock_remediation_deps):
+        """CRITICAL-1 regression: a rescue for torrent A MUST NOT retarget
+        symlinks that belong to OTHER RD torrents.  Pre-fix the helper
+        walked every symlink under the RD base prefix and rewrote them all,
+        which silently broke the whole RD library on first rescue (only
+        the rescued torrent's content exists on TB).  Filter must be
+        per-release: retarget only symlinks whose target path contains
+        ``/<release_name>/`` (matching blackhole's torrent-folder layout)."""
+        rd_base = str(tmp_path / 'debrid')
+        tb_base = str(tmp_path / 'debrid_torbox')
+        # Pre-create both release dirs on RD so islink/readlink work.
+        os.makedirs(os.path.join(rd_base, 'movies', 'Release.2025'), exist_ok=True)
+        os.makedirs(os.path.join(rd_base, 'movies', 'Unrelated.2024'), exist_ok=True)
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', rd_base)
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', tb_base)
+
+        lib_root = tmp_path / 'local_media' / 'movies'
+        lib_root.mkdir(parents=True)
+        monkeypatch.setenv('BLACKHOLE_LOCAL_LIBRARY_MOVIES', str(lib_root))
+
+        # Symlink for the rescued release — should be retargeted to TB.
+        rescued_link = lib_root / 'Release (2025)' / 'file.mkv'
+        rescued_link.parent.mkdir(parents=True)
+        rescued_target = rd_base + '/movies/Release.2025/file.mkv'
+        os.symlink(rescued_target, rescued_link)
+
+        # Symlink for an UNRELATED RD release — must stay pointing at RD,
+        # because that content is NOT cached on TB.  Pre-fix this got
+        # rewritten to point at /debrid_torbox/... and became broken.
+        unrelated_link = lib_root / 'Unrelated (2024)' / 'film.mkv'
+        unrelated_link.parent.mkdir(parents=True)
+        unrelated_target = rd_base + '/movies/Unrelated.2024/film.mkv'
+        os.symlink(unrelated_target, unrelated_link)
+
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000', filename='Release.2025.mkv')],
+            probe_results={'T1': self._BLOCKED},
+        )
+        with _patch_clients(client, mock_tb_client):
+            debrid_health.run_sweep()
+
+        # Rescued symlink: target swapped to TB
+        new_target = os.readlink(str(rescued_link))
+        assert new_target.startswith(tb_base + '/'), (
+            f"rescued link not retargeted to TB: {new_target}"
+        )
+        # Unrelated symlink: target MUST still point at RD
+        assert os.readlink(str(unrelated_link)) == unrelated_target, (
+            f"unrelated RD symlink was incorrectly retargeted: "
+            f"{os.readlink(str(unrelated_link))}"
+        )

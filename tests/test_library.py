@@ -4762,3 +4762,199 @@ class TestLibraryCachePersistence:
         key, val = mutation
         env['cache'][key] = val
         assert library._deserialize_cache_state(env) is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: dual-debrid library view
+# ---------------------------------------------------------------------------
+
+class TestPhase4DualDebridMerge:
+    """The library scanner enumerates both the RD mount (existing) and
+    the TB mount (new in plan 39 phase 4).  Items unique to TB are
+    appended; items present on both get ``has_alt_source=True`` so the
+    UI can render a pair-badge."""
+
+    def test_alt_unique_items_appended(self):
+        """A movie only on TB joins the primary list with source_debrid=torbox."""
+        primary_movies = [
+            {'title': 'On RD Only', 'year': 2020,
+             'source': 'debrid', 'source_debrid': 'realdebrid',
+             'type': 'movie'},
+        ]
+        alt_movies = [
+            {'title': 'TB Exclusive', 'year': 2021,
+             'source': 'debrid', 'source_debrid': 'torbox',
+             'type': 'movie'},
+        ]
+        m, s = library.LibraryScanner._merge_alt_debrid_items(
+            primary_movies, [], alt_movies, [],
+        )
+        titles = sorted(x['title'] for x in m)
+        assert titles == ['On RD Only', 'TB Exclusive']
+        tb = next(x for x in m if x['title'] == 'TB Exclusive')
+        assert tb['source_debrid'] == 'torbox'
+        # No has_alt_source flag on uniques
+        assert 'has_alt_source' not in tb
+        assert 'has_alt_source' not in next(x for x in m if x['title'] == 'On RD Only')
+
+    def test_movie_on_both_flagged_with_alt_source(self):
+        """Same movie on both → keep ONE entry, flag with alt-source."""
+        primary_movies = [
+            {'title': 'Dune', 'year': 2021,
+             'source': 'debrid', 'source_debrid': 'realdebrid',
+             'type': 'movie'},
+        ]
+        alt_movies = [
+            {'title': 'Dune', 'year': 2021,
+             'source': 'debrid', 'source_debrid': 'torbox',
+             'type': 'movie'},
+        ]
+        m, s = library.LibraryScanner._merge_alt_debrid_items(
+            primary_movies, [], alt_movies, [],
+        )
+        assert len(m) == 1
+        assert m[0]['source_debrid'] == 'realdebrid'  # primary wins
+        assert m[0]['has_alt_source'] is True
+        assert m[0]['alt_source_debrid'] == 'torbox'
+
+    def test_shows_merge_episode_sets(self):
+        """Show on both mounts: episodes from both should union, increasing
+        the seasons + episodes counts."""
+        primary_shows = [
+            {'title': 'Show', 'year': 2020,
+             'source': 'debrid', 'source_debrid': 'realdebrid', 'type': 'show',
+             '_episodes': [(1, 1), (1, 2)],
+             'seasons': 1, 'episodes': 2, 'path': '/data/zurgarr/shows/Show'},
+        ]
+        alt_shows = [
+            {'title': 'Show', 'year': 2020,
+             'source': 'debrid', 'source_debrid': 'torbox', 'type': 'show',
+             '_episodes': [(1, 2), (2, 1)],   # S01E02 dup + new S02E01
+             'seasons': 1, 'episodes': 2, 'path': '/data/torbox/shows/Show'},
+        ]
+        _, s = library.LibraryScanner._merge_alt_debrid_items(
+            [], primary_shows, [], alt_shows,
+        )
+        assert len(s) == 1
+        merged = s[0]
+        assert merged['has_alt_source'] is True
+        assert merged['alt_source_debrid'] == 'torbox'
+        # S01E01 (RD), S01E02 (both, dedup'd), S02E01 (TB)
+        eps = {tuple(e) if isinstance(e, list) else e for e in merged['_episodes']}
+        assert eps == {(1, 1), (1, 2), (2, 1)}
+        assert merged['seasons'] == 2
+        assert merged['episodes'] == 3
+
+    def test_no_alt_items_is_noop(self):
+        """Empty alt lists → primary returned unchanged."""
+        primary_movies = [
+            {'title': 'X', 'year': 2020, 'source_debrid': 'realdebrid'},
+        ]
+        m, s = library.LibraryScanner._merge_alt_debrid_items(
+            primary_movies, [], [], [],
+        )
+        assert m == primary_movies
+        assert s == []
+        # And no has_alt_source was injected
+        assert 'has_alt_source' not in m[0]
+
+    def test_missing_title_does_not_crash(self):
+        """An item with an empty title (parsed-folder failure upstream)
+        must not match other empty-title items.  Defensive: real data
+        rarely has this but we don't want a TB-side parse failure to
+        silently merge into an RD-side parse failure."""
+        primary_movies = [{'title': '', 'source_debrid': 'realdebrid'}]
+        alt_movies = [{'title': '', 'source_debrid': 'torbox'}]
+        m, _ = library.LibraryScanner._merge_alt_debrid_items(
+            primary_movies, [], alt_movies, [],
+        )
+        # Empty-title items are kept as-is, not merged.
+        assert len(m) == 2
+
+    def test_shows_merge_episode_dicts_from_scan_mount(self):
+        """CRITICAL-2 regression: ``_scan_mount`` produces ``_episodes`` as
+        a DICT keyed by ``(season, ep)`` (library.py:4543 ``'_episodes': eps``
+        where eps comes from ``_collect_episodes``'s dict output).  Pre-fix
+        the merge did ``p_eps + a_eps`` which raises TypeError on dict+dict.
+        The except-Exception at library.py:1926 then swallowed the error
+        and discarded the ENTIRE TB scan silently.
+
+        The merge must accept dict-form ``_episodes`` and produce a merged
+        dict preserving episode-info values from both sources (not just the
+        key tuples).  Sibling test ``test_shows_merge_episode_sets`` uses
+        tuple-list inputs so it doesn't catch the dict path."""
+        primary_shows = [
+            {'title': 'Show', 'year': 2020,
+             'source': 'debrid', 'source_debrid': 'realdebrid', 'type': 'show',
+             '_episodes': {
+                 (1, 1): {'file': 'S01E01.mkv', 'path': '/data/zurgarr/shows/Show/S01E01.mkv',
+                          'size_bytes': 100, 'folder': 'Show'},
+                 (1, 2): {'file': 'S01E02.mkv', 'path': '/data/zurgarr/shows/Show/S01E02.mkv',
+                          'size_bytes': 200, 'folder': 'Show'},
+             },
+             'seasons': 1, 'episodes': 2, 'path': '/data/zurgarr/shows/Show'},
+        ]
+        alt_shows = [
+            {'title': 'Show', 'year': 2020,
+             'source': 'debrid', 'source_debrid': 'torbox', 'type': 'show',
+             '_episodes': {
+                 (1, 2): {'file': 'S01E02.mkv', 'path': '/data/torbox/shows/Show/S01E02.mkv',
+                          'size_bytes': 200, 'folder': 'Show'},
+                 (2, 1): {'file': 'S02E01.mkv', 'path': '/data/torbox/shows/Show/S02E01.mkv',
+                          'size_bytes': 300, 'folder': 'Show'},
+             },
+             'seasons': 2, 'episodes': 2, 'path': '/data/torbox/shows/Show'},
+        ]
+        # Pre-fix this raised TypeError: unsupported operand type(s) for +: 'dict' and 'dict'.
+        _, s = library.LibraryScanner._merge_alt_debrid_items(
+            [], primary_shows, [], alt_shows,
+        )
+        assert len(s) == 1
+        merged = s[0]
+        assert merged['has_alt_source'] is True
+        assert merged['alt_source_debrid'] == 'torbox'
+
+        eps = merged['_episodes']
+        # Must remain dict-shaped so downstream consumers
+        # (library.py:1839, library.py:2103) keep working.
+        assert isinstance(eps, dict)
+        assert set(eps.keys()) == {(1, 1), (1, 2), (2, 1)}
+        # Episode-info values preserved (primary wins on dupes — its path
+        # is the canonical one for the source_debrid badge).
+        assert eps[(1, 1)]['file'] == 'S01E01.mkv'
+        assert eps[(2, 1)]['file'] == 'S02E01.mkv'
+        # Counts reflect the union.
+        assert merged['seasons'] == 2
+        assert merged['episodes'] == 3
+
+
+class TestPhase4DiscoverTorboxMount:
+    """``_discover_torbox_mount`` returns the TB mount path when the
+    provider is configured AND the mount exists; None otherwise."""
+
+    def test_returns_none_without_api_key(self, monkeypatch):
+        monkeypatch.delenv('TORBOX_API_KEY', raising=False)
+        assert library.LibraryScanner._discover_torbox_mount() is None
+
+    def test_returns_none_when_mount_absent(self, monkeypatch, tmp_path):
+        # Set the key but the mount path doesn't exist
+        monkeypatch.setenv('TORBOX_API_KEY', 'tb-key')
+        monkeypatch.setenv('TORBOX_MOUNT_NAME', 'torbox')
+        # Don't create the mount directory
+        assert library.LibraryScanner._discover_torbox_mount() is None
+
+    def test_returns_path_when_mount_exists(self, monkeypatch, tmp_path):
+        """Mount discovery uses utils.debrid_routing.mount_for_debrid
+        which returns ``/data/<TORBOX_MOUNT_NAME>``.  We can't mock
+        ``/data/torbox`` in pytest cleanly without root, so this test
+        asserts the predicate logic via a temp dir that we explicitly
+        configure as the TB mount via monkeypatching the helper."""
+        monkeypatch.setenv('TORBOX_API_KEY', 'tb-key')
+        monkeypatch.setenv('TORBOX_MOUNT_NAME', 'torbox')
+        fake_mount = tmp_path / 'torbox_mount'
+        fake_mount.mkdir()
+        from utils import debrid_routing as _dr
+        monkeypatch.setattr(_dr, 'mount_for_debrid',
+                            lambda d, **kw: str(fake_mount) if d == 'torbox' else None)
+        result = library.LibraryScanner._discover_torbox_mount()
+        assert result == str(fake_mount)

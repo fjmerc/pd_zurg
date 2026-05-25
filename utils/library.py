@@ -1674,6 +1674,137 @@ class LibraryScanner:
         return missing
 
     @staticmethod
+    def _discover_torbox_mount():
+        """Return the TorBox rclone-mount path inside the container, or
+        ``None`` when TB isn't configured / hasn't come up yet.
+
+        Plan 39 phase 4 — defers to ``utils.debrid_routing.mount_for_debrid``
+        for the path computation so the per-debrid mount contract lives in
+        one place (also used by blackhole.py and debrid_health.py).  The
+        ``isdir`` check protects against the partial-config case where
+        ``TORBOX_API_KEY`` is set but ``TORBOX_WEBDAV_USER/PASS`` is not
+        — the mount doesn't come up, so scanning would just walk an empty
+        bind-only dir.  Returning None there avoids logging confusing
+        "no items on TB mount" messages.
+        """
+        if not os.environ.get('TORBOX_API_KEY'):
+            return None
+        try:
+            from utils.debrid_routing import mount_for_debrid, TORBOX
+        except Exception:
+            return None
+        path = mount_for_debrid(TORBOX)
+        # Must be both a directory AND have at least one entry to be a
+        # real mount (an empty bind dir would have no entries; a live
+        # FUSE mount surfaces TB's category folders even when the
+        # account has zero torrents — they appear as empty dirs).
+        if not path or not os.path.isdir(path):
+            return None
+        try:
+            # Accept the mount if listdir succeeds (even if empty).  We
+            # don't require content — an empty TB account is a valid
+            # state, just yields zero library items.
+            os.listdir(path)
+        except OSError:
+            return None
+        return path
+
+    @staticmethod
+    def _normalize_episodes_for_merge(eps):
+        """Coerce an ``_episodes`` value into the dict-of-info-dicts shape.
+
+        ``_scan_mount`` emits the dict shape (see library.py:4543).  The
+        WebDAV path omits the field, and a few legacy tests still feed a
+        list of ``(season, ep)`` tuples — both must merge cleanly into
+        the dict-form output that downstream consumers expect.
+        """
+        if isinstance(eps, dict):
+            return dict(eps)
+        if not eps:
+            return {}
+        out = {}
+        for e in eps:
+            key = tuple(e) if isinstance(e, list) else e
+            if isinstance(key, tuple) and len(key) == 2:
+                out[key] = {}
+        return out
+
+    @staticmethod
+    def _merge_alt_debrid_items(primary_movies, primary_shows,
+                                alt_movies, alt_shows):
+        """Merge alt-debrid items into the primary lists.
+
+        Plan 39 phase 4 — items unique to the alt debrid are appended.
+        Items present on BOTH debrids (matched by normalized title) keep
+        the primary entry but gain ``has_alt_source=True`` and
+        ``alt_source_debrid=<alt name>`` so the UI can render a
+        "RD + TB" pair-badge instead of two cards.
+
+        Match is by ``_normalize_title`` only — the same key the rest of
+        the merge pipeline uses.  Year-aware tie-break could land later;
+        for the MVP, same-title-different-year (e.g. ``Dune (1984)`` vs
+        ``Dune (2021)``) collapses into one card if both mounts have
+        both.  That's a known limitation; in practice the cache rarely
+        holds two films of the same title on the same provider.
+        """
+        if not (alt_movies or alt_shows):
+            return primary_movies, primary_shows
+
+        def _key(item):
+            return _normalize_title(item.get('title', ''))
+
+        primary_movie_keys = {_key(m): m for m in primary_movies}
+        primary_show_keys = {_key(s): s for s in primary_shows}
+
+        for it in alt_movies:
+            k = _key(it)
+            if k and k in primary_movie_keys:
+                primary_movie_keys[k]['has_alt_source'] = True
+                primary_movie_keys[k]['alt_source_debrid'] = it.get('source_debrid')
+            else:
+                primary_movies.append(it)
+                if k:
+                    primary_movie_keys[k] = it
+
+        for it in alt_shows:
+            k = _key(it)
+            if k and k in primary_show_keys:
+                primary_show_keys[k]['has_alt_source'] = True
+                primary_show_keys[k]['alt_source_debrid'] = it.get('source_debrid')
+                # Merge episode sets so the season/episode counts reflect
+                # the union — TB might have episodes RD doesn't.
+                #
+                # ``_scan_mount`` (library.py:4543) produces ``_episodes``
+                # as a dict keyed by ``(season, ep)`` with episode-info
+                # dict values; the WebDAV scan path leaves the field
+                # absent.  We also defensively handle the legacy
+                # list-of-tuples shape that earlier tests pinned, so a
+                # mixed-shape merge (one side dict, one side list) still
+                # works — but always emit the dict shape, since the rest
+                # of the pipeline (e.g. ``_dedup_by_tmdb``,
+                # episode-level cross-ref) expects dict keys + info
+                # values.  Primary wins on dupes so the canonical path /
+                # source-debrid badge stays consistent.
+                p_eps = primary_show_keys[k].get('_episodes')
+                a_eps = it.get('_episodes')
+
+                merged_eps = LibraryScanner._normalize_episodes_for_merge(p_eps)
+                a_norm = LibraryScanner._normalize_episodes_for_merge(a_eps)
+                if a_norm:
+                    for ek, ev in a_norm.items():
+                        merged_eps.setdefault(ek, ev)
+                    primary_show_keys[k]['_episodes'] = merged_eps
+                    unique_seasons = {s for s, _e in merged_eps} if merged_eps else set()
+                    primary_show_keys[k]['seasons'] = len(unique_seasons)
+                    primary_show_keys[k]['episodes'] = len(merged_eps)
+            else:
+                primary_shows.append(it)
+                if k:
+                    primary_show_keys[k] = it
+
+        return primary_movies, primary_shows
+
+    @staticmethod
     def _dedup_by_tmdb(items, aliases):
         """Merge items that share a TMDB ID but have different normalized titles.
 
@@ -1781,6 +1912,16 @@ class LibraryScanner:
             # Try WebDAV PROPFIND directly to Zurg (bypasses FUSE/rclone)
             try:
                 debrid_movies, debrid_shows = self._webdav_scan_mount(deadline)
+                # Source-tag every item so the UI badge logic below can
+                # distinguish RD/AD content from TB content.  WebDAV scan
+                # paths don't go through _scan_mount, so the tagging
+                # needs to happen here too.  Resolve the primary debrid
+                # for the badge rather than hard-coding 'realdebrid' —
+                # AD-only or TB-only setups need the correct provider tag.
+                from utils.debrid_routing import resolve_primary
+                primary_badge = resolve_primary() or 'realdebrid'
+                for it in debrid_movies + debrid_shows:
+                    it.setdefault('source_debrid', primary_badge)
                 logger.debug("[library] WebDAV scan succeeded")
             except Exception as e:
                 # Quiet down the recurring "using FUSE" log once the
@@ -1800,6 +1941,26 @@ class LibraryScanner:
                 except Exception:
                     pass
                 debrid_movies, debrid_shows = self._scan_mount(self._mount_path, deadline)
+
+        # Plan 39 phase 4 — second-pass scan against the TorBox mount.
+        # Adds items that live on TB only AND flags items present on
+        # both mounts with ``has_alt_source=True`` so the UI can render
+        # "available on RD + TB" without duplicating the card.
+        tb_mount = self._discover_torbox_mount()
+        if tb_mount:
+            try:
+                tb_movies, tb_shows = self._scan_mount(
+                    tb_mount, deadline, source_debrid='torbox',
+                )
+                debrid_movies, debrid_shows = self._merge_alt_debrid_items(
+                    debrid_movies, debrid_shows, tb_movies, tb_shows,
+                )
+                logger.debug(
+                    f"[library] TB scan: {len(tb_movies)} movies, "
+                    f"{len(tb_shows)} shows from {tb_mount}"
+                )
+            except Exception as e:
+                logger.warning(f"[library] TB mount scan failed: {e}")
 
         # TMDB-based alias maps: when different sources (or different
         # torrents) use different names for the same title (e.g. "Star
@@ -4240,15 +4401,25 @@ class LibraryScanner:
     # Internal Zurg directories to always skip
     _SKIP_CATEGORIES = {'__all__', '__unplayable__'}
 
-    def _scan_mount(self, mount_path, deadline=None):
+    def _scan_mount(self, mount_path, deadline=None, source_debrid=None):
         """Scan all category directories on the mount and aggregate by title.
 
         Debrid mounts have one folder per torrent, so the same show appears
         many times (one per grabbed episode/season pack). This method collects
         episode IDs from every folder, then groups by normalized title so each
-        show becomes a single entry with correct season/episode counts.
+        show becomes a single entry with correct source_debrid badge.
         Movies are also deduplicated by title.
+
+        ``source_debrid`` (plan 39 phase 4) tags every returned item with
+        the provider name so the UI can distinguish RD from TB content.
+        Defaults to the resolved primary debrid (AD-only and TB-only setups
+        get the correct badge; pre-fix this was hard-coded to ``realdebrid``
+        which mislabelled non-RD primaries).  The second pass over the alt
+        mount explicitly passes ``source_debrid='torbox'``.
         """
+        if source_debrid is None:
+            from utils.debrid_routing import resolve_primary
+            source_debrid = resolve_primary() or 'realdebrid'
         try:
             categories = []
             with os.scandir(mount_path) as it:
@@ -4387,6 +4558,7 @@ class LibraryScanner:
                 'title': g['title'],
                 'year': g['year'],
                 'source': 'debrid',
+                'source_debrid': source_debrid,
                 'type': 'movie',
                 'seasons': 0,
                 'episodes': 0,
@@ -4404,6 +4576,7 @@ class LibraryScanner:
                 'title': g['title'],
                 'year': g['year'],
                 'source': 'debrid',
+                'source_debrid': source_debrid,
                 'type': 'show',
                 'seasons': len(unique_seasons),
                 'episodes': len(eps),

@@ -10,6 +10,7 @@ isn't here, open a [GitHub issue](https://github.com/fjmerc/zurgarr/issues).
 - [Duplicate torrents in my debrid account](#duplicate-torrents-in-my-debrid-account)
 - [Sonarr/Radarr keeps re-grabbing the same failed torrent](#sonarrradarr-keeps-re-grabbing-the-same-failed-torrent)
 - [Mount not available / empty `/data` directory](#mount-not-available--empty-data-directory)
+- [TorBox mount fails to authenticate / 401 Invalid credentials](#torbox-mount-fails-to-authenticate--401-invalid-credentials)
 - [Docker Desktop: mount propagation error](#docker-desktop-mount-propagation-error)
 - [Plex not seeing debrid content](#plex-not-seeing-debrid-content)
 - [Blackhole: symlinks created but broken](#blackhole-symlinks-created-but-broken)
@@ -129,6 +130,33 @@ import failures — check your arr's Activity → Queue tab for stuck items.
   ```
 - Check rclone logs: `docker logs zurgarr 2>&1 | grep rclone`
 - Verify your debrid API key is valid and the account is active.
+
+## TorBox mount fails to authenticate / 401 Invalid credentials
+
+You set `TORBOX_API_KEY` and your container logs show
+`401 Invalid credentials` or `Auth failed` against `webdav.torbox.app`,
+and `/data/torbox/` stays empty.
+
+The TorBox API key does **not** authenticate WebDAV. TorBox treats the
+WebDAV endpoint as a separately authenticated service with its own
+user + password. Setup:
+
+1. Log in at https://torbox.app
+2. Go to **Settings → Integrations → WebDAV**
+3. Generate (or copy) the **WebDAV password** — this is a per-account
+   credential distinct from your login password and the API key.
+4. In your `.env`, set:
+   ```
+   TORBOX_WEBDAV_USER=your-account@email
+   TORBOX_WEBDAV_PASS=the-webdav-password-from-step-3
+   ```
+5. While you're in TorBox's WebDAV settings, **disable WebDAV flatten**
+   — the rclone mount expects the `Classic` (category-folder) layout.
+6. `docker compose up -d` to apply.
+
+Without `TORBOX_WEBDAV_USER` and `TORBOX_WEBDAV_PASS`, the WebDAV mount
+is skipped (logged as a startup warning) but the API-key-only features
+— cache probes, search-add, blackhole routing — continue to work.
 
 ## Docker Desktop: mount propagation error
 

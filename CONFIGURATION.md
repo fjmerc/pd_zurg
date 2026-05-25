@@ -36,7 +36,7 @@ Everything else has a sensible default or is opt-in.
 | `ZURG_ENABLED` | Enable Zurg | `false` |
 | `RD_API_KEY` | [Real-Debrid API key](https://real-debrid.com/apitoken) | |
 | `AD_API_KEY` | [AllDebrid API key](https://alldebrid.com/apikeys/) | |
-| `TORBOX_API_KEY` | [TorBox API key](https://torbox.app/settings) | |
+| `TORBOX_API_KEY` | [TorBox API key](https://torbox.app/settings). Powers cache probes, search-add, and dual-debrid blackhole routing. For the WebDAV mount, see [TorBox co-debrid](#torbox-co-debrid-mount-plan-39). | |
 | `RCLONE_MOUNT_NAME` | Name for the rclone mount | |
 | `RCLONE_LOG_LEVEL` | [rclone log level](https://rclone.org/docs/#log-level-level). `OFF` to suppress | `NOTICE` |
 | `RCLONE_DIR_CACHE_TIME` | [Directory cache duration](https://rclone.org/commands/rclone_mount/#vfs-directory-cache) | `10s` |
@@ -56,6 +56,27 @@ Everything else has a sensible default or is opt-in.
 | `ZURG_PORT` | WebDAV port. Set a fixed value if exposing to other machines | random |
 | `NFS_ENABLED` | Enable rclone NFS server (does NOT create a local mount — use FUSE if Plex is on the same host) | `false` |
 | `NFS_PORT` | NFS server port | random |
+
+---
+
+## TorBox co-debrid mount (plan 39)
+
+TorBox runs as an *additive* co-debrid alongside Real-Debrid (or AllDebrid).
+Zurg can't proxy TorBox, so the mount goes through rclone's native webdav
+remote against `https://webdav.torbox.app/`. Setting `TORBOX_API_KEY` alone
+enables cache probes / search-add / blackhole routing. To get the WebDAV
+mount you need the two `TORBOX_WEBDAV_*` vars as well.
+
+| Variable | Description | Default |
+|---|---|---|
+| `TORBOX_API_KEY` | TorBox API key (cache probes, search, blackhole) | |
+| `TORBOX_WEBDAV_USER` | TorBox account email used for WebDAV Basic auth | |
+| `TORBOX_WEBDAV_PASS` | WebDAV-only password from the TorBox dashboard → Settings → Integrations → WebDAV. **Not** the account password, **not** the API key. | |
+| `TORBOX_MOUNT_NAME` | Mount path under `/data` (must not collide with `RCLONE_MOUNT_NAME`) | `torbox` |
+
+> **Note**: plex_debrid (`PD_ENABLED=true`) speaks directly to RD via its
+> own client and bypasses pd_zurg's blackhole entirely — multi-debrid
+> routing therefore does not apply to plex_debrid-driven grabs.
 
 ---
 
@@ -105,7 +126,10 @@ See the [Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md) for full setup.
 | `BLACKHOLE_ENABLED` | Enable blackhole watch folder | `false` |
 | `BLACKHOLE_DIR` | Watch dir for `.torrent`/`.magnet`. Supports per-arr label subdirs (`sonarr/`, `radarr/`) — see the [Blackhole Guide](BLACKHOLE_SYMLINK_GUIDE.md) | `/watch` |
 | `BLACKHOLE_POLL_INTERVAL` | Seconds between folder scans | `5` |
-| `BLACKHOLE_DEBRID` | Debrid service: `realdebrid`, `alldebrid`, `torbox`. Auto-detected if unset | auto |
+| `BLACKHOLE_DEBRID` | Legacy: single debrid for all grabs (`realdebrid`/`alldebrid`/`torbox`). Auto-detected if unset. Superseded by `BLACKHOLE_DEBRID_PRIMARY` when both are set. | auto |
+| `BLACKHOLE_DEBRID_ROUTING` | Per-grab routing (plan 39): `cache_aware` (probe both, prefer cached side) or `primary_only` (ignore cache, always use primary). When unset: `cache_aware` if two or more debrids configured, `primary_only` otherwise. | auto |
+| `BLACKHOLE_DEBRID_PRIMARY` | Primary debrid for fallback / tiebreak in cache_aware mode. Defaults to first-configured-of `realdebrid`, `alldebrid`, `torbox`. | auto |
+| `BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX` | Host path for TorBox-routed symlinks. Distinct from `BLACKHOLE_SYMLINK_TARGET_BASE` so Plex sees TorBox content as a separate library (plan 39 Q1). Defaults to `<BLACKHOLE_SYMLINK_TARGET_BASE>_torbox`. | auto |
 | `BLACKHOLE_SYMLINK_ENABLED` | Enable symlink creation after download | `false` |
 | `BLACKHOLE_COMPLETED_DIR` | Staging directory for completed symlinks. Under per-arr label layout, symlinks are nested (`.../sonarr/`, `.../radarr/`). Flat layout works when no label subdirs | `/completed` |
 | `BLACKHOLE_RCLONE_MOUNT` | rclone mount path inside the container. Append mount name (e.g. `/data/zurgarr`) | `/data` |
@@ -178,6 +202,7 @@ Background sweep that probes each Real-Debrid torrent for the **May 2026 keyword
 |---|---|---|
 | `DEBRID_HEALTH_ENABLED` | Master kill switch for the periodic probe sweep. Turn OFF only if RD's API drifts and the prober misbehaves, or to silence background API calls entirely | `true` |
 | `DEBRID_HEALTH_AUTO_REMEDIATE` | When a probe confirms a torrent is filter-blocked: blocklist the hash, delete from RD, trigger Sonarr/Radarr re-search. OFF by default because this mutates your RD account state. Hard-capped at 100 remediations per sweep so first-run enable cannot mass-delete | `false` |
+| `DEBRID_HEALTH_CROSS_RESCUE` | Plan 39 phase 3: when RD filter-blocks a torrent that TorBox has cached, auto-rehost on TB (no blocklist, no RD delete, no arr re-search) and retarget arr-library symlinks to the TB mount. Skipped silently when TB doesn't have it cached or the add never reaches `completed` (60 s budget) — the existing remediation pipeline then runs as if rescue wasn't configured. Defaults to ON when both RD and TB API keys are configured; OFF when only one. Set explicit `true`/`false` to override. | auto |
 
 Sweep cadence (`DEBRID_HEALTH_INTERVAL`, default 12h) is a power-user override read directly from env and not surfaced in the Settings UI. Per-torrent re-probe TTL (7 d for healthy), rate limit (60/min, well under RD's 250/min user quota), sweep cap (2000 probes per run), and remediation cap (100 deletes per run) are intentionally hardcoded module constants to keep the env surface minimal — open a feature request if you actually need to tune one.
 

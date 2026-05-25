@@ -36,6 +36,8 @@ _PROBE_TTL = 7 * 24 * 3600              # don't re-probe healthy torrents for 7d
 _RATE_LIMIT_PER_MIN = 60                # under RD's 250/min user quota
 _MAX_PER_SWEEP = 2000                   # probe cap per sweep
 _REMEDIATE_MAX_PER_SWEEP = 100          # delete cap per sweep — defense against mass-delete on first auto-remediate enable
+_RESCUE_READY_TIMEOUT = 60              # max wall-clock seconds to wait for a TB rescue add to reach 'completed'
+_RESCUE_POLL_INTERVAL = 3               # seconds between TB status polls during rescue
 _PERSIST_EVERY = 25                     # incremental save every N probes
 _VALID_STATUSES = ('healthy', 'blocked', 'unknown')
 
@@ -51,6 +53,23 @@ _FUTURE_TOLERANCE = 86400
 _lock = threading.Lock()
 _state = None
 
+# Shutdown coordination: rescue polling and per-probe rate-limit sleeps
+# wait on this event so a SIGTERM / scheduler.stop() doesn't get stalled
+# behind a 60s × N-rescue blocking sleep loop.  Set by ``request_stop()``
+# (called from main.py's shutdown handler) and consumed by ``run_sweep``.
+_stop_event = threading.Event()
+
+
+def request_stop():
+    """Signal an in-flight sweep to abort early.
+
+    Called from the process-level shutdown path so SIGTERM doesn't get
+    stalled behind rescue-polling.  Safe to call repeatedly; safe to
+    call when no sweep is running.  Cleared automatically at the start
+    of the next ``run_sweep`` so subsequent sweeps aren't muzzled.
+    """
+    _stop_event.set()
+
 
 def _enabled():
     """Master toggle. Honours runtime env-var changes (SIGHUP / UI edits)
@@ -64,6 +83,34 @@ def _auto_remediate_enabled():
     arr re-search. Off by default — mutating debrid state is opt-in.
     Honours runtime env-var changes for the same reason as ``_enabled``."""
     return str(os.environ.get('DEBRID_HEALTH_AUTO_REMEDIATE', 'false')).lower() == 'true'
+
+
+_TRUTHY_VALUES = ('true', '1', 'yes')
+_FALSY_VALUES = ('false', '0', 'no')
+
+
+def _cross_rescue_enabled():
+    """Whether to attempt cross-debrid rescue (plan 39 phase 3) when RD
+    filter-blocks a torrent that TorBox has cached.
+
+    Default-resolved: ON when both ``RD_API_KEY`` and ``TORBOX_API_KEY``
+    are set, OFF otherwise.  Explicit ``DEBRID_HEALTH_CROSS_RESCUE``
+    env var overrides the default — set to a truthy value
+    (``true``/``1``/``yes``) to force-attempt rescue when only one is
+    set (no-op in practice — the rescue helper short-circuits when the
+    alt isn't configured), or a falsy value (``false``/``0``/``no``)
+    to disable rescue even with both keys present (e.g. while
+    debugging the remediation path).  Same vocabulary as
+    config_validator._is_truthy so operator muscle-memory carries
+    across env vars.
+    """
+    explicit = (os.environ.get('DEBRID_HEALTH_CROSS_RESCUE') or '').lower()
+    if explicit in _TRUTHY_VALUES:
+        return True
+    if explicit in _FALSY_VALUES:
+        return False
+    return bool(os.environ.get('RD_API_KEY')
+                and os.environ.get('TORBOX_API_KEY'))
 
 
 def _empty_state():
@@ -176,8 +223,8 @@ def get_summary():
     """Snapshot of reconciler state for the System page UI.
 
     Returns a dict with:
-      - ``rd_configured``: bool — false when no RD credential is present;
-        the UI hides the card in that case (no signal to show).
+      - ``rd_configured``: bool — false when no RD credential is present.
+        Legacy compat for the original single-card UI.
       - ``enabled``: bool — current ``DEBRID_HEALTH_ENABLED`` value.
       - ``auto_remediate``: bool — current ``DEBRID_HEALTH_AUTO_REMEDIATE``.
       - ``last_sweep_ts``: epoch seconds of the most recent probe in
@@ -187,17 +234,39 @@ def get_summary():
       - ``counts``: {healthy, blocked, unknown, total}.
       - ``remediated_24h``: count of ``debrid_filtered`` history events
         in the last 24 h. Best-effort — silently 0 on any history error.
+      - ``providers``: per-debrid block — list of card dicts with
+        {service, configured, label, counts}.  Plan 39 phase 5: the UI
+        renders two cards side-by-side when both RD + TB are configured,
+        collapses to one when only one is.
 
-    No state file schema change. ``last_sweep_ts`` is computed on-the-fly
-    from per-entry timestamps so existing state files don't need a
-    migration.
+    No state file schema change.  TB-side counts are derived from the
+    TB rescue-cache section of the state file, NOT a separate state file.
+    Per-provider ``last_probe_age`` is computed on-the-fly from per-entry
+    timestamps so existing state files don't need a migration.
     """
     rd_configured = bool(
         os.environ.get('RD_API_KEY')
         or os.path.isfile('/run/secrets/rd_api_key')
     )
+    tb_configured = bool(os.environ.get('TORBOX_API_KEY'))
+
+    # Plan 39 phase 5: per-provider snapshots so the UI can render side-
+    # by-side cards.  Computed from the same state file; the reconciler
+    # itself is still RD-side only (plan 38 scope) but the dashboard
+    # surfaces TB cache-rescue + configured-vs-not signals so users see
+    # both providers' status at a glance.
+    providers = []
+    if rd_configured:
+        providers.append(_provider_card('realdebrid'))
+    if tb_configured:
+        providers.append(_provider_card('torbox'))
+
     if not rd_configured:
-        return {'rd_configured': False}
+        # Preserve the original empty response so the existing UI's
+        # ``!s.rd_configured → hide`` check stays valid.  ``providers``
+        # is exposed unconditionally so the dual-card view works even
+        # when only TB is configured.
+        return {'rd_configured': False, 'providers': providers}
 
     counts = {'healthy': 0, 'blocked': 0, 'unknown': 0, 'total': 0}
     last_sweep_ts = None
@@ -216,6 +285,7 @@ def get_summary():
                     last_sweep_ts = ts
 
     remediated_24h = 0
+    rescued_24h = 0
     try:
         from datetime import datetime, timedelta, timezone
         from utils import history as _history
@@ -223,11 +293,14 @@ def get_summary():
         # type='debrid' is the only event type the reconciler emits;
         # filter by cause client-side because history.query has no
         # native meta-filter parameter.
-        result = _history.query(type='debrid', start=start, limit=200)
+        result = _history.query(type='debrid', start=start, limit=500)
         for ev in result.get('events', []):
             meta = ev.get('meta') or {}
-            if meta.get('cause') == 'debrid_filtered':
+            cause = meta.get('cause')
+            if cause == 'debrid_filtered':
                 remediated_24h += 1
+            elif cause == 'debrid_rescued':
+                rescued_24h += 1
     except Exception as e:
         logger.debug(f"[debrid_health] summary history query failed: {e}")
 
@@ -235,9 +308,76 @@ def get_summary():
         'rd_configured': True,
         'enabled': _enabled(),
         'auto_remediate': _auto_remediate_enabled(),
+        'cross_rescue': _cross_rescue_enabled(),
         'last_sweep_ts': last_sweep_ts,
         'counts': counts,
         'remediated_24h': remediated_24h,
+        'rescued_24h': rescued_24h,
+        'providers': providers,
+    }
+
+
+_PROVIDER_LABELS = {
+    'realdebrid': 'Real-Debrid',
+    'alldebrid': 'AllDebrid',
+    'torbox': 'TorBox',
+}
+
+
+def _provider_card(service):
+    """Per-provider card data for the dashboard.
+
+    Today only RD has a real probed-state set; TB's card reflects the
+    rescue-side state (entries in the state file flagged
+    ``rescued=True`` for the TB side) plus the configured signal.
+    AD support is structurally present but reports an empty counts
+    block until a probe path lands.
+    """
+    label = _PROVIDER_LABELS.get(service, service)
+    if service == 'realdebrid':
+        counts = {'healthy': 0, 'blocked': 0, 'unknown': 0, 'total': 0}
+        last_probe = None
+        state = _get_state()
+        with _lock:
+            for entry in state['probed'].values():
+                if not isinstance(entry, dict):
+                    continue
+                status = entry.get('status')
+                if status in counts:
+                    counts[status] += 1
+                counts['total'] += 1
+                ts = entry.get('ts')
+                if isinstance(ts, (int, float)):
+                    if last_probe is None or ts > last_probe:
+                        last_probe = ts
+        return {
+            'service': service, 'label': label, 'configured': True,
+            'counts': counts, 'last_probe_ts': last_probe,
+        }
+    if service == 'torbox':
+        # TB doesn't have a probed-state set yet — surface the rescue
+        # cache count (entries written to RD state with rescued=True).
+        rescued = 0
+        last_probe = None
+        state = _get_state()
+        with _lock:
+            for entry in state['probed'].values():
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get('rescued') is True:
+                    rescued += 1
+                    ts = entry.get('ts')
+                    if isinstance(ts, (int, float)):
+                        if last_probe is None or ts > last_probe:
+                            last_probe = ts
+        return {
+            'service': service, 'label': label, 'configured': True,
+            'counts': {'rescued': rescued},
+            'last_probe_ts': last_probe,
+        }
+    return {
+        'service': service, 'label': label, 'configured': True,
+        'counts': {}, 'last_probe_ts': None,
     }
 
 
@@ -254,6 +394,312 @@ def _should_skip(torrent_hash, state, now):
         return False
     ts = entry.get('ts', 0)
     return isinstance(ts, (int, float)) and (now - ts) < _PROBE_TTL
+
+
+def _attempt_cross_rescue(torrent_hash, filename, source_debrid='realdebrid'):
+    """Try to re-host a filter-blocked torrent on the alt debrid.
+
+    Plan 39 phase 3 — short-circuit the existing blocklist+delete+research
+    pipeline when the alt debrid (typically TorBox when source is RD) has
+    the same content cached.  Symlinks in the arr library are retargeted
+    to the alt mount so the file plays without an arr re-import.
+
+    Returns a dict describing the rescue outcome:
+
+        {'rescued': True,  'to': 'torbox', 'tb_torrent_id': '...',
+         'retargeted': N, 'outcome': 'symlinks_retargeted' | 'no_symlinks_found'}
+        {'rescued': False, 'reason': 'not_cached_on_alt' | 'add_failed'
+                                    | 'never_ready' | 'no_alt_configured'
+                                    | 'no_alt_mount' | 'error'}
+
+    On rescued=False the caller falls through to the existing
+    ``_remediate`` pipeline.  On rescued=True the caller skips
+    blocklist+delete+research and emits the ``debrid_rescued`` history
+    event with this dict's meta fields.
+
+    Failure modes are all soft — never raises, never partially mutates.
+    """
+    # Today's only rescue direction is RD → TB.  AD → TB or TB → RD will
+    # come later if the user enables those combinations; for now keep
+    # the check explicit so future combinations land as code additions,
+    # not silent fallthroughs.
+    if source_debrid != 'realdebrid':
+        return {'rescued': False, 'reason': 'unsupported_source'}
+
+    alt = 'torbox'
+    alt_key = os.environ.get('TORBOX_API_KEY')
+    if not alt_key:
+        return {'rescued': False, 'reason': 'no_alt_configured'}
+
+    # Cache-check first — adding an uncached hash would start a TB
+    # download we don't want.  Rescue is a HIT-CACHED operation.
+    try:
+        from utils.search import check_debrid_cache
+        cache_map = check_debrid_cache(
+            [torrent_hash.lower()], service=alt, api_key=alt_key,
+        )
+        cached = cache_map.get(torrent_hash.lower())
+    except Exception as e:
+        logger.warning(
+            f"[debrid_health] rescue cache probe failed for "
+            f"{torrent_hash[:8]}…: {type(e).__name__}"
+        )
+        return {'rescued': False, 'reason': 'cache_probe_error'}
+
+    if cached is not True:
+        return {'rescued': False, 'reason': 'not_cached_on_alt'}
+
+    # Add to the alt debrid.  TB accepts a hash-only magnet via the
+    # standard /torrents/createtorrent endpoint we already use for the
+    # blackhole add path.
+    alt_client, _svc = get_debrid_client(service=alt, api_key=alt_key)
+    if alt_client is None or not alt_client.configured:
+        return {'rescued': False, 'reason': 'no_alt_client'}
+
+    try:
+        alt_tid = alt_client.add_magnet(torrent_hash)
+    except Exception as e:
+        logger.warning(
+            f"[debrid_health] rescue add_magnet failed for "
+            f"{torrent_hash[:8]}…: {type(e).__name__}"
+        )
+        return {'rescued': False, 'reason': 'add_error'}
+    if not alt_tid:
+        return {'rescued': False, 'reason': 'add_failed'}
+
+    # Honour a stop signal received between ``add_magnet`` and the poll
+    # loop — don't burn an outbound API call we know we'll discard.
+    # Clean up the in-flight TB add so we don't leave a stale entry.
+    if _stop_event.is_set():
+        try:
+            alt_client.delete_torrent(alt_tid)
+        except Exception:
+            pass
+        return {'rescued': False, 'reason': 'stop_requested',
+                'tb_torrent_id': alt_tid}
+
+    # Poll for ready.  TB caches resolve in seconds for hit-cached adds
+    # — the ``_RESCUE_READY_TIMEOUT`` module constant is the upper bound
+    # covering the slowest observed case during plan 39 smoke testing.
+    # Uncached on alt (post-add) is treated as miss; we don't want to
+    # leave a stale "downloading on TB" entry around if the cache probe
+    # lied.  Tests monkeypatch the constants directly to avoid touching
+    # ``time.time`` globally (which would break pytest's own timing).
+    #
+    # The interval sleep uses ``_stop_event.wait()`` (not ``time.sleep()``)
+    # so a SIGTERM mid-rescue aborts within one poll interval rather than
+    # stalling the scheduler's 15s join window.
+    deadline = time.time() + _RESCUE_READY_TIMEOUT
+    is_ready = False
+    while time.time() < deadline:
+        if _stop_event.is_set():
+            break
+        try:
+            state_str = alt_client.torrent_status(alt_tid)
+        except Exception:
+            state_str = ''
+        # Strip + lower in case the provider returns whitespace or
+        # capital-cased status strings (TB docs are inconsistent across
+        # endpoints; defensive normalisation).
+        if (state_str or '').strip().lower() == 'completed':
+            is_ready = True
+            break
+        if _stop_event.wait(_RESCUE_POLL_INTERVAL):
+            break
+
+    if not is_ready:
+        # The hash was reportedly cached on TB but the add didn't reach
+        # 'completed' within budget.  Clean up the TB entry so a future
+        # rescue attempt can re-add cleanly.
+        try:
+            alt_client.delete_torrent(alt_tid)
+        except Exception:
+            pass
+        return {'rescued': False, 'reason': 'never_ready',
+                'tb_torrent_id': alt_tid}
+
+    # Plex active-session guard — never swap a symlink that's mid-stream.
+    # FUSE caches the open file descriptor so playback usually continues
+    # from the original target, but new seeks fail after the rewrite.
+    # Defer this rescue to the next sweep when Plex is actively playing
+    # the file.  Same posture as duplicate_cleanup's read-only guard.
+    release_name_guard = os.path.splitext(os.path.basename(filename or ''))[0]
+    if release_name_guard and _plex_session_active_for_release(release_name_guard):
+        logger.info(
+            f"[debrid_health] rescue deferred — Plex is actively streaming "
+            f"{release_name_guard!r}; will retry next sweep"
+        )
+        # Clean up the TB add so we don't accumulate dead entries on the
+        # alt debrid while we wait for Plex to stop streaming.
+        try:
+            alt_client.delete_torrent(alt_tid)
+        except Exception:
+            pass
+        return {'rescued': False, 'reason': 'plex_session_active',
+                'tb_torrent_id': alt_tid}
+
+    # File is now accessible via the alt mount.  Retarget any existing
+    # in-library symlinks pointing at the RD base so they resolve to
+    # the alt base instead.  Zero symlinks found ≠ failure — newly
+    # blocked content might not have been imported by the arr yet, and
+    # the rescue still made the file accessible going forward.
+    retargeted = _retarget_symlinks_to_alt(torrent_hash, filename)
+
+    return {
+        'rescued': True,
+        'to': alt,
+        'tb_torrent_id': alt_tid,
+        'retargeted': retargeted,
+        'outcome': 'symlinks_retargeted' if retargeted else 'no_symlinks_found',
+    }
+
+
+def _plex_session_active_for_release(release_name):
+    """Return True if Plex reports any active playback whose file path
+    contains ``/<release_name>/`` — i.e. the symlink we'd retarget is
+    currently being streamed.
+
+    Best-effort: any error talking to Plex (no creds, network down,
+    plexapi missing, parsing failure) returns False — better to risk
+    a retarget collision than to defer rescues indefinitely because
+    Plex is offline.  Result is NOT cached; callers gate one rescue
+    per call so the cost is at most one /status/sessions request per
+    rescue (cheap; runs every 12h by default).
+    """
+    if not release_name:
+        return False
+    try:
+        plex_addr = os.environ.get('PLEX_ADDRESS') or os.environ.get('PLEXADD')
+        plex_token = os.environ.get('PLEX_TOKEN') or os.environ.get('PLEXTOKEN')
+        if not (plex_addr and plex_token):
+            return False
+        from plexapi.server import PlexServer
+        server = PlexServer(plex_addr, plex_token, timeout=5)
+        needle = '/' + release_name + '/'
+        for session in server.sessions() or ():
+            try:
+                for media in getattr(session, 'media', None) or ():
+                    for part in getattr(media, 'parts', None) or ():
+                        file_path = getattr(part, 'file', '') or ''
+                        if needle in file_path:
+                            return True
+            except Exception:
+                continue
+        return False
+    except Exception as e:
+        logger.debug(f"[debrid_health] Plex sessions probe failed: {type(e).__name__} — assuming no active stream")
+        return False
+
+
+def _retarget_symlinks_to_alt(torrent_hash, filename, src_debrid='realdebrid', dst_debrid='torbox'):
+    """Find symlinks in the arr libraries pointing at the source debrid's
+    mount FOR THIS SPECIFIC RELEASE, and atomic-retarget each one to the
+    equivalent path under the alt debrid's mount.
+
+    Returns the number of symlinks retargeted.  Errors per-symlink are
+    logged and counted as skipped — never raise; rescue is best-effort.
+
+    Strategy: walk ``BLACKHOLE_LOCAL_LIBRARY_TV`` and
+    ``BLACKHOLE_LOCAL_LIBRARY_MOVIES`` (the arr-side library roots), and
+    for each symlink whose target points into the source debrid's
+    ``BLACKHOLE_SYMLINK_TARGET_BASE`` **AND** belongs to the rescued
+    release (matched by the ``/<release_name>/`` segment that
+    blackhole.py uses as the torrent-folder name), swap the path prefix
+    to the alt debrid's base and replace the symlink atomically via
+    ``os.symlink + os.replace``.
+
+    The release-name filter is what keeps rescue scoped to ONE torrent:
+    without it, the walker would rewrite every RD symlink to TB on the
+    first rescue, silently breaking the entire library since the alt
+    debrid only has THIS torrent's content cached.
+    """
+    from utils.debrid_routing import symlink_target_base_for_debrid
+
+    src_base = (symlink_target_base_for_debrid(src_debrid) or '').rstrip('/')
+    dst_base = (symlink_target_base_for_debrid(dst_debrid) or '').rstrip('/')
+    if not src_base or not dst_base:
+        logger.debug(
+            f"[debrid_health] rescue retarget skipped — src_base={src_base!r}, "
+            f"dst_base={dst_base!r}"
+        )
+        return 0
+
+    # Release name = filename without media extension.  Matches how
+    # blackhole.py names the torrent folder under the rclone mount and
+    # therefore the ``/<release_name>/`` segment of every symlink target
+    # for this torrent.  Without a non-empty release filter we'd
+    # mass-retarget every RD symlink on a single rescue.
+    release_name = os.path.splitext(os.path.basename(filename or ''))[0]
+    if not release_name:
+        logger.warning(
+            f"[debrid_health] rescue retarget skipped — empty release name "
+            f"for hash {torrent_hash[:8]}…"
+        )
+        return 0
+    release_segment = '/' + release_name + '/'
+
+    library_roots = [
+        r for r in (
+            os.environ.get('BLACKHOLE_LOCAL_LIBRARY_TV'),
+            os.environ.get('BLACKHOLE_LOCAL_LIBRARY_MOVIES'),
+        ) if r and os.path.isdir(r)
+    ]
+    if not library_roots:
+        return 0
+
+    src_prefix = src_base + '/'
+    count = 0
+    for root in library_roots:
+        for dirpath, _dirs, files in os.walk(root, followlinks=False):
+            for name in files:
+                path = os.path.join(dirpath, name)
+                if not os.path.islink(path):
+                    continue
+                try:
+                    current_target = os.readlink(path)
+                except OSError:
+                    continue
+                if not current_target.startswith(src_prefix):
+                    continue
+                # Per-release filter — only rewrite symlinks that
+                # belong to THIS rescued torrent (matched by the
+                # ``/<release_name>/`` path segment).  Symlinks for
+                # other RD torrents stay untouched; the alt debrid
+                # doesn't have their content cached.
+                if release_segment not in current_target:
+                    continue
+                new_target = dst_base + '/' + current_target[len(src_prefix):]
+                try:
+                    # Atomic-replace: write the new symlink at a temp
+                    # path in the same directory, then ``os.replace``
+                    # it over the old one.  No window where the symlink
+                    # is missing — important because Plex might be
+                    # mid-stat at this exact moment.
+                    tmp = path + '.rescue-tmp'
+                    try:
+                        os.remove(tmp)
+                    except FileNotFoundError:
+                        pass
+                    os.symlink(new_target, tmp)
+                    os.replace(tmp, path)
+                    count += 1
+                    logger.info(
+                        f"[debrid_health] rescue retargeted: {path} "
+                        f"→ {new_target}"
+                    )
+                except OSError as e:
+                    logger.warning(
+                        f"[debrid_health] rescue retarget failed for {path}: "
+                        f"{e}"
+                    )
+                    # Best-effort: clean up the temp if it survives a partial
+                    # failure so the next rescue isn't blocked by orphan files.
+                    try:
+                        os.remove(path + '.rescue-tmp')
+                    except FileNotFoundError:
+                        pass
+
+    return count
 
 
 def _remediate(client, torrent_id, torrent_hash, filename, probe_result):
@@ -367,6 +813,10 @@ def run_sweep():
         logger.debug("[debrid_health] disabled, skipping sweep")
         return {'status': 'success', 'message': 'disabled', 'items': 0}
 
+    # Clear any stale stop signal from a prior aborted run so this
+    # invocation isn't muzzled before it starts.
+    _stop_event.clear()
+
     client, _ = get_debrid_client(service='realdebrid')
     if client is None or not client.configured:
         logger.debug("[debrid_health] RD not configured, skipping sweep")
@@ -381,8 +831,9 @@ def run_sweep():
     state = _get_state()
     now = time.time()
     counts = {'probed': 0, 'healthy': 0, 'blocked': 0,
-              'unknown': 0, 'skipped': 0, 'remediated': 0}
+              'unknown': 0, 'skipped': 0, 'remediated': 0, 'rescued': 0}
     remediate_on = _auto_remediate_enabled()
+    rescue_on = _cross_rescue_enabled()
 
     # Two-pass: filter eligibility first so the rate-limit accounting
     # below knows the true probe count (skipped torrents don't consume
@@ -404,6 +855,9 @@ def run_sweep():
     sleep_seconds = 60.0 / _RATE_LIMIT_PER_MIN
 
     for i, (tid, torrent_hash, filename) in enumerate(capped):
+        if _stop_event.is_set():
+            logger.info("[debrid_health] stop signal received — aborting sweep early")
+            break
         result = client.probe_file(tid)
         status = result.get('status', 'unknown')
         if status not in _VALID_STATUSES:
@@ -419,6 +873,75 @@ def run_sweep():
             'torrent_id': tid,
             'filename': filename,
         }
+
+        # Plan 39 phase 3: cross-debrid rescue BEFORE the existing
+        # remediation pipeline.  When RD filter-blocks a torrent and TB
+        # has it cached, re-host on TB and retarget arr-library
+        # symlinks — no blocklist, no RD delete, no arr re-search.  On
+        # any rescue failure (TB not cached / add failed / never ready),
+        # fall through to the existing remediate path.
+        if status == 'blocked' and rescue_on:
+            rescue = _attempt_cross_rescue(torrent_hash, filename,
+                                           source_debrid='realdebrid')
+            if rescue.get('rescued'):
+                entry['rescued'] = True
+                entry['rescue_meta'] = {
+                    'to': rescue.get('to'),
+                    'tb_torrent_id': rescue.get('tb_torrent_id'),
+                    'retargeted': rescue.get('retargeted', 0),
+                    'outcome': rescue.get('outcome'),
+                }
+                counts['rescued'] += 1
+                # History event — replaces the debrid_filtered event the
+                # remediate path would have emitted.  Same filename /
+                # source so the UI groups them correctly; distinct cause
+                # so the user sees the recovery story rather than a
+                # delete + re-search loop.
+                try:
+                    from utils import history as _history
+                    _history.log_event(
+                        type='debrid',
+                        title=filename or tid,
+                        source='debrid_health',
+                        detail='Filter-blocked on RD — rescued via TorBox',
+                        meta={
+                            'cause': _history.CAUSE_DEBRID_RESCUED,
+                            'from': 'realdebrid',
+                            'to': rescue.get('to'),
+                            'info_hash': torrent_hash,
+                            'torrent_id': tid,
+                            'tb_torrent_id': rescue.get('tb_torrent_id'),
+                            'retargeted': rescue.get('retargeted', 0),
+                            'rescue_outcome': rescue.get('outcome'),
+                            'reason': result.get('reason') or 'infringing_file',
+                            'http': result.get('http'),
+                        },
+                    )
+                except Exception as e:
+                    logger.debug(f"[debrid_health] rescue history log failed: {e}")
+                try:
+                    from utils.notifications import notify as _notify_fn
+                    _notify_fn(
+                        'debrid_rescued',
+                        f'Debrid rescue: {filename[:60]}',
+                        f'RD filter-blocked, rescued via TorBox '
+                        f'({rescue.get("retargeted", 0)} symlink(s) retargeted)',
+                    )
+                except Exception as e:
+                    logger.debug(f"[debrid_health] rescue notify failed: {e}")
+                # Update probe-cache entry so the rescued torrent doesn't
+                # immediately re-trigger on the next sweep.  Treat as
+                # 'unknown' rather than 'healthy' — the RD-side block is
+                # still real; we just have an alt source for the file.
+                entry['status'] = 'unknown'
+                entry['reason'] = 'rescued_via_alt_debrid'
+                with _lock:
+                    state['probed'][torrent_hash] = entry
+                # Skip the rest of the per-torrent loop — rescued, no
+                # further action needed.  No sleep between rescue and the
+                # next eligible iteration because rescue is rate-limited
+                # by add_magnet's own latency.
+                continue
 
         # Auto-remediate the blocked entry if enabled and under the
         # per-sweep cap. Cap exists separately from _MAX_PER_SWEEP so
@@ -442,8 +965,12 @@ def run_sweep():
 
         # No sleep after the last probe — wasted wall time on the
         # scheduled-task UI's "currently running" indicator.
+        # ``_stop_event.wait`` (instead of plain ``time.sleep``) lets a
+        # SIGTERM mid-sweep interrupt the rate-limit pause cleanly.
         if i < len(capped) - 1:
-            time.sleep(sleep_seconds)
+            if _stop_event.wait(sleep_seconds):
+                logger.info("[debrid_health] stop signal received during rate-limit pause — aborting")
+                break
 
     with _lock:
         _save_state(state)
@@ -455,6 +982,8 @@ def run_sweep():
         f"unknown {counts['unknown']}",
         f"skipped {counts['skipped']}",
     ]
+    if rescue_on and counts['rescued']:
+        msg_parts.append(f"rescued {counts['rescued']}")
     if remediate_on:
         msg_parts.append(f"remediated {counts['remediated']}")
     msg = ', '.join(msg_parts)
@@ -492,3 +1021,4 @@ def _reset_for_testing():
     global _state
     with _lock:
         _state = None
+    _stop_event.clear()

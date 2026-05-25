@@ -961,10 +961,21 @@ class BlackholeWatcher:
                  poll_interval=5, symlink_enabled=False, completed_dir='/completed',
                  rclone_mount='/data', symlink_target_base='', mount_poll_timeout=300,
                  mount_poll_interval=10, symlink_max_age=72,
-                 dedup_enabled=False, local_library_tv='', local_library_movies=''):
+                 dedup_enabled=False, local_library_tv='', local_library_movies='',
+                 debrid_api_keys=None):
         self.watch_dir = watch_dir
         self.debrid_api_key = debrid_api_key
         self.debrid_service = debrid_service
+        # Per-grab routing (plan 39 phase 2).  When ``debrid_api_keys`` is
+        # provided (typically by the factory at startup_blackhole_watcher),
+        # the watcher knows about *all* configured debrids and routes each
+        # grab independently.  When None (legacy callers / single-debrid
+        # tests), falls back to the single ``debrid_service``+``debrid_api_key``
+        # pair — behavior matches pre-plan-39 pd_zurg exactly.
+        if debrid_api_keys:
+            self.debrid_api_keys = dict(debrid_api_keys)
+        else:
+            self.debrid_api_keys = {debrid_service: debrid_api_key} if debrid_api_key else {}
         self.poll_interval = poll_interval
         self._stop_event = threading.Event()
 
@@ -999,12 +1010,146 @@ class BlackholeWatcher:
             self._pending_file = os.path.join(watch_dir, 'pending_monitors.json')
         self._last_cleanup = 0
 
+    # ── Per-debrid resolution helpers (plan 39 phase 2) ───────────────
+
+    def _api_key_for(self, debrid):
+        """Return the API key for ``debrid``, falling back to instance default.
+
+        Multi-debrid setups populate ``self.debrid_api_keys``; single-debrid
+        setups fall through to ``self.debrid_api_key``.  Callers MUST pass
+        the resolved key to every provider method instead of touching
+        ``self.debrid_api_key`` directly — that's how the single-instance
+        watcher manages to host concurrent grabs against different debrids.
+
+        ``getattr(self, 'debrid_api_keys', None)`` is defensive: some tests
+        bypass ``__init__`` via ``__new__`` and set only the legacy
+        single-debrid attributes, so the new dict may be absent.
+        """
+        keys = getattr(self, 'debrid_api_keys', None)
+        if keys and debrid in keys:
+            return keys[debrid]
+        # Legacy fallback — only safe when debrid == self.debrid_service.
+        if debrid == self.debrid_service:
+            return self.debrid_api_key
+        return None
+
+    def _mount_for(self, debrid):
+        """Return the rclone mount path for ``debrid``.
+
+        Defers to ``utils.debrid_routing.mount_for_debrid`` so the per-debrid
+        path contract is in one place (used here, by debrid_health.py
+        phase 3, and library.py phase 4).  Falls back to the instance-level
+        ``self.rclone_mount`` only when the helper can't resolve a path
+        (e.g. RCLONE_MOUNT_NAME unset in a unit test) — that preserves the
+        pre-plan-39 contract that the watcher always has a usable mount.
+        """
+        from utils.debrid_routing import mount_for_debrid
+        # ``self.rclone_mount`` can be the bare parent (``/data`` —
+        # default; tests set this way) OR the auto-detected leaf
+        # (``/data/zurgarr`` — production once RCLONE_MOUNT_NAME +
+        # __all__ are present).  ``mount_for_debrid`` wants the PARENT
+        # so it can append the per-debrid mount name (torbox / RD/AD
+        # suffixed leaves).  Trim the leaf when ``self.rclone_mount``
+        # ends with the configured RCLONE_MOUNT_NAME; otherwise use
+        # it directly.  Without the trim, TB would land at
+        # ``/data/zurgarr/torbox`` — a phantom subdir under the RD
+        # mount instead of its own top-level mount.
+        base = self.rclone_mount.rstrip('/')
+        rclonemn = os.environ.get('RCLONE_MOUNT_NAME') or ''
+        if rclonemn and os.path.basename(base) == rclonemn:
+            parent = os.path.dirname(base)
+            if parent:
+                base = parent
+        resolved = mount_for_debrid(debrid, rclone_mount_base=base)
+        return resolved or self.rclone_mount
+
+    def _symlink_target_base_for(self, debrid):
+        """Return the host-side symlink target base for ``debrid``."""
+        from utils.debrid_routing import symlink_target_base_for_debrid
+        base = symlink_target_base_for_debrid(debrid)
+        # Legacy fallback for tests / single-debrid setups where the helper
+        # returns '' (e.g. RD only, env vars not loaded).
+        return base or self.symlink_target_base
+
+    # 60s TTL on (svc, hash) cache-probe results.  Heavy blackhole
+    # traffic (e.g. a Sonarr backfill drop) can otherwise burn through
+    # TB's rate budget by re-probing the same hash for every
+    # back-to-back grab from the same indexer push.  Mirrors the
+    # ``_existing_hashes_cache`` TTL pattern in search.py.
+    _PROBE_CACHE_TTL = 60.0
+
+    def _ensure_probe_cache(self):
+        """Lazy-init the per-instance probe cache.  Instance-scoped (not
+        class-scoped) so test cases and multi-watcher scenarios don't
+        bleed cached results across each other.
+        """
+        if not hasattr(self, '_probe_cache'):
+            self._probe_cache = {}
+            self._probe_cache_lock = threading.Lock()
+
+    def _route_grab(self, info_hash):
+        """Pick the debrid service to host this grab.
+
+        Defers to ``utils.debrid_routing.pick_debrid_for_grab``.  In
+        ``cache_aware`` mode, probes each configured debrid via
+        ``utils.search.check_debrid_cache`` and prefers a confirmed cache
+        hit; single-debrid setups always return that one debrid.  The
+        helper handles fallback to the primary when probes are unavailable
+        or inconclusive.
+
+        Returns the chosen debrid service name.  Defaults to
+        ``self.debrid_service`` when routing yields nothing (defensive —
+        ``pick_debrid_for_grab`` returns ``None`` only when no debrid is
+        configured at all, which is a startup error elsewhere).
+        """
+        from utils.debrid_routing import pick_debrid_for_grab
+
+        self._ensure_probe_cache()
+
+        def _probe(svc, h):
+            key = self._api_key_for(svc)
+            if not key:
+                return None
+            cache_key = (svc, h.lower())
+            now = time.time()
+            with self._probe_cache_lock:
+                hit = self._probe_cache.get(cache_key)
+                if hit and hit[0] > now:
+                    return hit[1]
+            try:
+                from utils.search import check_debrid_cache
+                # Use the per-debrid api_key — passing the wrong one would
+                # silently return None (auth failure) and bias the routing
+                # toward the primary, masking the cache lookup.
+                result = check_debrid_cache([h.lower()], service=svc, api_key=key)
+                outcome = result.get(h.lower()) if isinstance(result, dict) else None
+            except Exception:
+                outcome = None
+            with self._probe_cache_lock:
+                # Opportunistic prune to keep the cache bounded — drop any
+                # entries that have expired alongside our insert.  At one
+                # probe per grab this stays well under 1000 entries.
+                self._probe_cache = {
+                    k: v for k, v in self._probe_cache.items() if v[0] > now
+                }
+                self._probe_cache[cache_key] = (now + self._PROBE_CACHE_TTL, outcome)
+            return outcome
+
+        chosen = pick_debrid_for_grab(info_hash, cache_probe=_probe)
+        return chosen or self.debrid_service
+
     # ── Debrid submission methods ────────────────────────────────────
 
-    def _add_to_realdebrid(self, file_path):
-        """Add a torrent/magnet to Real-Debrid."""
+    def _add_to_realdebrid(self, file_path, api_key=None):
+        """Add a torrent/magnet to Real-Debrid.
+
+        ``api_key`` defaults to ``self.debrid_api_key`` for back-compat
+        with single-debrid callers; phase-2 multi-debrid callers pass the
+        resolved per-debrid key explicitly via ``self._api_key_for('realdebrid')``.
+        """
+        api_key = api_key or self.debrid_api_key
         ext = os.path.splitext(file_path)[1].lower()
-        headers = {'Authorization': f'Bearer {self.debrid_api_key}'}
+        headers = {'Authorization': f'Bearer {api_key}'}
 
         if ext == '.magnet':
             with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
@@ -1032,10 +1177,11 @@ class BlackholeWatcher:
         else:
             return False, response.text[:200]
 
-    def _add_to_alldebrid(self, file_path):
+    def _add_to_alldebrid(self, file_path, api_key=None):
         """Add a torrent/magnet to AllDebrid."""
+        api_key = api_key or self.debrid_api_key
         ext = os.path.splitext(file_path)[1].lower()
-        params = {'agent': 'zurgarr', 'apikey': self.debrid_api_key}
+        params = {'agent': 'zurgarr', 'apikey': api_key}
 
         if ext == '.magnet':
             with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
@@ -1054,10 +1200,11 @@ class BlackholeWatcher:
         else:
             return False, response.text[:200]
 
-    def _add_to_torbox(self, file_path):
+    def _add_to_torbox(self, file_path, api_key=None):
         """Add a torrent/magnet to TorBox."""
+        api_key = api_key or self.debrid_api_key
         ext = os.path.splitext(file_path)[1].lower()
-        headers = {'Authorization': f'Bearer {self.debrid_api_key}'}
+        headers = {'Authorization': f'Bearer {api_key}'}
         url = 'https://api.torbox.app/v1/api/torrents/createtorrent'
 
         if ext == '.magnet':
@@ -1077,25 +1224,32 @@ class BlackholeWatcher:
 
     # ── Torrent ID extraction ────────────────────────────────────────
 
-    def _extract_torrent_id(self, result):
-        """Extract a normalized torrent ID string from the debrid submission result."""
+    def _extract_torrent_id(self, result, debrid=None):
+        """Extract a normalized torrent ID string from the debrid submission result.
+
+        ``debrid`` defaults to ``self.debrid_service`` for back-compat; phase-2
+        multi-debrid callers pass the chosen service explicitly so the parsing
+        path matches the provider that actually accepted the add.
+        """
+        debrid = debrid or self.debrid_service
         try:
-            if self.debrid_service == 'realdebrid':
+            if debrid == 'realdebrid':
                 return str(result)
-            elif self.debrid_service == 'alldebrid':
+            elif debrid == 'alldebrid':
                 return str(result['data']['magnets'][0]['id'])
-            elif self.debrid_service == 'torbox':
+            elif debrid == 'torbox':
                 data = result.get('data', {})
                 return str(data.get('torrent_id') or data.get('id', ''))
         except (KeyError, IndexError, TypeError) as e:
-            logger.warning(f"[blackhole] Could not extract torrent ID from {self.debrid_service} response: {e}")
+            logger.warning(f"[blackhole] Could not extract torrent ID from {debrid} response: {e}")
         return None
 
     # ── Debrid status check methods ──────────────────────────────────
 
-    def _check_realdebrid_status(self, torrent_id):
+    def _check_realdebrid_status(self, torrent_id, api_key=None):
         """Check torrent status on Real-Debrid. Returns (status, info_dict)."""
-        headers = {'Authorization': f'Bearer {self.debrid_api_key}'}
+        api_key = api_key or self.debrid_api_key
+        headers = {'Authorization': f'Bearer {api_key}'}
         url = f'https://api.real-debrid.com/rest/1.0/torrents/info/{torrent_id}'
         response = tracked_request('realdebrid', requests.get, url, headers=headers, timeout=30)
         if response.status_code == 200:
@@ -1107,9 +1261,10 @@ class BlackholeWatcher:
         logger.warning(f"[blackhole] RD status check failed for {torrent_id}: HTTP {response.status_code}")
         return 'api_error', {}
 
-    def _check_alldebrid_status(self, torrent_id):
+    def _check_alldebrid_status(self, torrent_id, api_key=None):
         """Check torrent status on AllDebrid. Returns (status, info_dict)."""
-        params = {'agent': 'zurgarr', 'apikey': self.debrid_api_key, 'id': torrent_id}
+        api_key = api_key or self.debrid_api_key
+        params = {'agent': 'zurgarr', 'apikey': api_key, 'id': torrent_id}
         url = 'https://api.alldebrid.com/v4/magnet/status'
         response = tracked_request('alldebrid', requests.get, url, params=params, timeout=30)
         if response.status_code == 200:
@@ -1127,9 +1282,10 @@ class BlackholeWatcher:
         logger.warning(f"[blackhole] AD status check failed for {torrent_id}: HTTP {response.status_code}")
         return 'api_error', {}
 
-    def _check_torbox_status(self, torrent_id):
+    def _check_torbox_status(self, torrent_id, api_key=None):
         """Check torrent status on TorBox. Returns (status, info_dict)."""
-        headers = {'Authorization': f'Bearer {self.debrid_api_key}'}
+        api_key = api_key or self.debrid_api_key
+        headers = {'Authorization': f'Bearer {api_key}'}
         url = 'https://api.torbox.app/v1/api/torrents/mylist'
         params = {'id': torrent_id}
         response = tracked_request('torbox', requests.get, url, headers=headers, params=params, timeout=30)
@@ -1142,53 +1298,57 @@ class BlackholeWatcher:
         logger.warning(f"[blackhole] TorBox status check failed for {torrent_id}: HTTP {response.status_code}")
         return 'api_error', {}
 
-    def _is_torrent_ready(self, status):
+    def _is_torrent_ready(self, status, debrid=None):
         """Check if the debrid status indicates the torrent is fully downloaded."""
-        if self.debrid_service == 'realdebrid':
+        debrid = debrid or self.debrid_service
+        if debrid == 'realdebrid':
             return status == 'downloaded'
-        elif self.debrid_service == 'alldebrid':
+        elif debrid == 'alldebrid':
             return status == 'Ready'
-        elif self.debrid_service == 'torbox':
+        elif debrid == 'torbox':
             return status == 'completed'
         return False
 
-    def _is_terminal_error(self, status):
+    def _is_terminal_error(self, status, debrid=None):
         """Check if the debrid status indicates a terminal (unrecoverable) error."""
-        if self.debrid_service == 'realdebrid':
+        debrid = debrid or self.debrid_service
+        if debrid == 'realdebrid':
             return status in RD_TERMINAL_ERRORS
-        elif self.debrid_service == 'alldebrid':
+        elif debrid == 'alldebrid':
             return status in AD_TERMINAL_ERRORS
-        elif self.debrid_service == 'torbox':
+        elif debrid == 'torbox':
             return status in TB_TERMINAL_ERRORS
         return False
 
-    def _extract_release_name(self, info):
+    def _extract_release_name(self, info, debrid=None):
         """Extract the release/folder name from the debrid torrent info response."""
+        debrid = debrid or self.debrid_service
         try:
-            if self.debrid_service == 'realdebrid':
+            if debrid == 'realdebrid':
                 return info.get('filename', '')
-            elif self.debrid_service == 'alldebrid':
+            elif debrid == 'alldebrid':
                 return info['data']['magnets'].get('filename', '')
-            elif self.debrid_service == 'torbox':
+            elif debrid == 'torbox':
                 return info['data'].get('name', '')
         except (KeyError, TypeError):
             pass
         return ''
 
-    def _extract_hash_from_info(self, info):
+    def _extract_hash_from_info(self, info, debrid=None):
         """Extract the info hash from a debrid torrent info response."""
+        debrid = debrid or self.debrid_service
         try:
-            if self.debrid_service == 'realdebrid':
+            if debrid == 'realdebrid':
                 return (info.get('hash') or '').upper()
-            elif self.debrid_service == 'alldebrid':
+            elif debrid == 'alldebrid':
                 return (info['data']['magnets'].get('hash') or '').upper()
-            elif self.debrid_service == 'torbox':
+            elif debrid == 'torbox':
                 return (info['data'].get('hash') or '').upper()
         except (KeyError, TypeError):
             pass
         return ''
 
-    def _has_usable_media_files(self, info):
+    def _has_usable_media_files(self, info, debrid=None):
         """Check if the debrid torrent contains any files with recognized media extensions.
 
         Returns True if at least one file matches MEDIA_EXTENSIONS.
@@ -1196,7 +1356,7 @@ class BlackholeWatcher:
         what we can't verify.
         """
         try:
-            filenames = self._extract_filenames_from_info(info)
+            filenames = self._extract_filenames_from_info(info, debrid=debrid)
         except Exception:
             return True  # Can't verify — assume usable
         if not filenames:
@@ -1206,12 +1366,13 @@ class BlackholeWatcher:
             for f in filenames
         )
 
-    def _extract_filenames_from_info(self, info):
+    def _extract_filenames_from_info(self, info, debrid=None):
         """Extract flat list of filenames from a debrid torrent info response.
 
         Provider-specific extraction; returns empty list if structure is unexpected.
         """
-        if self.debrid_service == 'realdebrid':
+        debrid = debrid or self.debrid_service
+        if debrid == 'realdebrid':
             files = info.get('files')
             if not isinstance(files, list):
                 return []
@@ -1220,7 +1381,7 @@ class BlackholeWatcher:
                 for f in files
                 if f.get('selected') == 1 and f.get('path')
             ]
-        elif self.debrid_service == 'alldebrid':
+        elif debrid == 'alldebrid':
             try:
                 files = info['data']['magnets']['files']
             except (KeyError, TypeError):
@@ -1240,7 +1401,7 @@ class BlackholeWatcher:
                 elif node.get('n'):
                     result.append(node['n'])
             return result
-        elif self.debrid_service == 'torbox':
+        elif debrid == 'torbox':
             try:
                 files = info['data']['files']
             except (KeyError, TypeError):
@@ -1252,14 +1413,21 @@ class BlackholeWatcher:
 
     # ── Mount scanning ───────────────────────────────────────────────
 
-    def _find_on_mount(self, release_name):
+    def _find_on_mount(self, release_name, debrid=None):
         """Search the rclone mount for a release folder.
 
         Returns (full_path, category, matched_name) or (None, None, None) if not found.
         Checks categorized directories first, then __all__ as fallback.
         Also tries stripping video file extensions since Zurg strips them
         from single-file torrent folder names.
+
+        ``debrid`` (plan 39 phase 2) selects which mount to search.  Defaults
+        to ``self.debrid_service`` for back-compat with single-debrid callers.
+        TorBox content lives at the TB mount; RD/AD content lives at the
+        Zurg mount.  The two are NEVER cross-searched — if a torrent was
+        added to TB, only the TB mount can possibly have it.
         """
+        mount_path = self._mount_for(debrid or self.debrid_service)
         # Try both the original name and with video extension stripped
         candidates = [release_name]
         base, ext = os.path.splitext(release_name)
@@ -1268,11 +1436,11 @@ class BlackholeWatcher:
 
         for name in candidates:
             for category in MOUNT_CATEGORIES:
-                path = os.path.join(self.rclone_mount, category, name)
+                path = os.path.join(mount_path, category, name)
                 if os.path.isdir(path):
                     return path, category, name
             # Fallback to __all__
-            path = os.path.join(self.rclone_mount, '__all__', name)
+            path = os.path.join(mount_path, '__all__', name)
             if os.path.isdir(path):
                 return path, '__all__', name
         return None, None, None
@@ -1303,11 +1471,14 @@ class BlackholeWatcher:
             return os.path.join(base, label)
         return base
 
-    def _create_symlinks(self, release_name, category, mount_path, label=None):
+    def _create_symlinks(self, release_name, category, mount_path, label=None, debrid=None):
         """Create symlinks in the completed directory for media files.
 
-        Symlink targets use BLACKHOLE_SYMLINK_TARGET_BASE so they resolve
-        correctly on the Sonarr/Radarr host.
+        Symlink targets use the per-debrid base resolved via
+        ``_symlink_target_base_for`` so RD content points at
+        ``BLACKHOLE_SYMLINK_TARGET_BASE`` and TorBox content points at
+        ``BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX`` — Plex sees them as
+        separate libraries (plan 39 Q1).
 
         For multi-season packs, splits files into per-season directories
         with constructed release names that Sonarr can parse individually.
@@ -1317,10 +1488,11 @@ class BlackholeWatcher:
 
         Returns the number of symlinks created.
         """
+        debrid = debrid or self.debrid_service
         is_multi, _, _ = _is_multi_season_pack(release_name)
 
         if is_multi:
-            split_count = self._create_split_season_symlinks(release_name, category, mount_path, label=label)
+            split_count = self._create_split_season_symlinks(release_name, category, mount_path, label=label, debrid=debrid)
             if split_count is not None:
                 return split_count
             logger.debug(f"[blackhole] Could not split {release_name} by season, using single dir")
@@ -1329,6 +1501,7 @@ class BlackholeWatcher:
         completed_base = self._completed_base(label)
         completed_release_dir = os.path.join(completed_base, release_name)
         os.makedirs(completed_release_dir, exist_ok=True)
+        symlink_target_base = self._symlink_target_base_for(debrid)
         count = 0
 
         for root, _dirs, files in os.walk(mount_path):
@@ -1341,7 +1514,7 @@ class BlackholeWatcher:
 
                 rel = os.path.relpath(os.path.join(root, f), mount_path)
                 symlink_path = os.path.normpath(os.path.join(completed_release_dir, rel))
-                target = os.path.join(self.symlink_target_base, category, release_name, rel)
+                target = os.path.join(symlink_target_base, category, release_name, rel)
 
                 # Guard against path traversal from adversarial release names
                 if not symlink_path.startswith(completed_release_dir + os.sep):
@@ -1363,7 +1536,7 @@ class BlackholeWatcher:
 
         return count
 
-    def _create_split_season_symlinks(self, release_name, category, mount_path, label=None):
+    def _create_split_season_symlinks(self, release_name, category, mount_path, label=None, debrid=None):
         """Split a multi-season pack into per-season symlink directories.
 
         Groups media files by season, creates a separate completed directory
@@ -1372,7 +1545,10 @@ class BlackholeWatcher:
         are detected (caller should fall back to single-dir).
 
         When *label* is set, season dirs are nested under ``completed_dir/<label>/``.
+        ``debrid`` (plan 39 phase 2) selects the symlink target base.
         """
+        debrid = debrid or self.debrid_service
+        symlink_target_base = self._symlink_target_base_for(debrid)
         season_files = {}
 
         for root, _dirs, files in os.walk(mount_path):
@@ -1412,7 +1588,7 @@ class BlackholeWatcher:
 
             for rel in rel_list:
                 symlink_path = os.path.normpath(os.path.join(season_dir, rel))
-                target = os.path.join(self.symlink_target_base, category, release_name, rel)
+                target = os.path.join(symlink_target_base, category, release_name, rel)
 
                 if not symlink_path.startswith(season_dir + os.sep):
                     logger.warning(f"[blackhole] Skipping path traversal attempt: {rel}")
@@ -1594,6 +1770,15 @@ class BlackholeWatcher:
         Empty label dirs left behind after all their releases are cleaned up
         are removed as well, but the top-level ``completed_dir`` itself is
         never removed.
+
+        Multi-debrid (plan 39 phase 2): symlinks for TB-routed grabs point
+        at a different ``BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX`` and resolve
+        through a different rclone mount.  The translation table is built
+        from every configured debrid; without it, a TB-target symlink
+        would skip the prefix match and fall through to the raw-path
+        ``os.path.exists`` check (which always succeeds inside the
+        container — the host's TB mount isn't bound to the pd_zurg
+        container), so broken TB symlinks would accumulate as ghosts.
         """
         if not self.symlink_enabled or not self.completed_dir:
             return
@@ -1603,11 +1788,51 @@ class BlackholeWatcher:
         now = time.time()
         max_age_secs = self.symlink_max_age * 3600
 
-        # Pre-compute once — both are stable across the loop
-        rclone_real = os.path.realpath(self.rclone_mount)
-        target_base_real = ''
-        if self.symlink_target_base:
-            target_base_real = os.path.realpath(self.symlink_target_base) + '/'
+        # Build (target_base_real, rclone_real) translation table for
+        # every configured debrid.  Each iteration of the loop tries
+        # the prefix match in order; first hit wins.  Falls back to the
+        # instance defaults when the routing helpers don't surface a
+        # path (unit tests / single-debrid setups).
+        translations = []  # [(target_base_real_with_slash, rclone_real)]
+        try:
+            seen_bases = set()
+            # ``debrid_api_keys`` is always a dict (set in __init__); empty
+            # is normal for symlink-disabled tests and the for-loop handles
+            # that fine — the instance-default pair below is the safety net.
+            for svc in self.debrid_api_keys:
+                base = self._symlink_target_base_for(svc)
+                if not base or base in seen_bases:
+                    continue
+                seen_bases.add(base)
+                try:
+                    base_real = os.path.realpath(base) + '/'
+                    mount = self._mount_for(svc)
+                    mount_real = os.path.realpath(mount) if mount else os.path.realpath(self.rclone_mount)
+                except OSError:
+                    continue
+                translations.append((base_real, mount_real))
+            # Always include the instance-default pair as a fallback so
+            # legacy single-debrid callers (no debrid_api_keys populated)
+            # still match.
+            if self.symlink_target_base:
+                try:
+                    default_base_real = os.path.realpath(self.symlink_target_base) + '/'
+                    default_mount_real = os.path.realpath(self.rclone_mount)
+                    if default_base_real not in {t[0] for t in translations}:
+                        translations.append((default_base_real, default_mount_real))
+                except OSError:
+                    pass
+        except Exception as e:
+            logger.debug(f"[blackhole] cleanup translation table failed: {e}")
+            translations = []
+            if self.symlink_target_base:
+                try:
+                    translations.append((
+                        os.path.realpath(self.symlink_target_base) + '/',
+                        os.path.realpath(self.rclone_mount),
+                    ))
+                except OSError:
+                    pass
 
         cleaned_label_parents = set()
 
@@ -1625,8 +1850,10 @@ class BlackholeWatcher:
                         if not os.path.isabs(target):
                             target = os.path.realpath(os.path.join(os.path.dirname(fp), target))
                         check_target = fp
-                        if target_base_real and target.startswith(target_base_real):
-                            check_target = rclone_real + '/' + target[len(target_base_real):]
+                        for base_real, mount_real in translations:
+                            if target.startswith(base_real):
+                                check_target = mount_real + '/' + target[len(base_real):]
+                                break
                         if not os.path.exists(check_target):
                             try:
                                 os.unlink(fp)
@@ -1686,7 +1913,7 @@ class BlackholeWatcher:
         except (IOError, OSError) as e:
             logger.debug(f"[blackhole] Could not write pending monitors: {e}")
 
-    def _add_pending(self, torrent_id, filename, label=None, compromise=None):
+    def _add_pending(self, torrent_id, filename, label=None, compromise=None, debrid=None):
         """Add a torrent to the pending monitors file.
 
         *compromise* is an optional dict annotating this grab as a
@@ -1694,15 +1921,24 @@ class BlackholeWatcher:
         reason, strategy}`` where strategy is ``'tier_drop'`` or
         ``'season_pack'``.  Legacy entries without this field load as
         uncompromised per the plan-33 schema additions.
+
+        *debrid* (plan 39 phase 2) records which debrid hosts this
+        torrent so the resume path on restart can re-bind the monitor
+        to the correct provider + mount.  Defaults to the instance
+        debrid for legacy callers; multi-debrid grabs pass it explicitly.
+        Legacy on-disk entries without a ``debrid`` key load as
+        ``realdebrid`` (the only pre-plan-39 option for new grabs).
         """
         with self._monitors_lock:
             entries = self._load_pending()
             if any(e['torrent_id'] == torrent_id for e in entries):
                 return
+            entry_debrid = debrid or self.debrid_service
             entry = {
                 'torrent_id': torrent_id,
                 'filename': filename,
-                'service': self.debrid_service,
+                'service': entry_debrid,
+                'debrid': entry_debrid,
                 'timestamp': time.time(),
             }
             # Persist label alongside the torrent so restart/resume keeps routing
@@ -1727,43 +1963,56 @@ class BlackholeWatcher:
 
     # ── Monitor orchestration ────────────────────────────────────────
 
-    def _start_monitor(self, torrent_id, filename, label=None, compromise=None):
+    def _start_monitor(self, torrent_id, filename, label=None, compromise=None, debrid=None):
         """Spawn a background thread to monitor a torrent and create symlinks.
 
         *compromise* is an optional dict forwarded to ``_add_pending`` so
         the on-disk pending entry records the compromise lineage; see
         ``_add_pending`` for the expected keys.
+
+        *debrid* (plan 39 phase 2) binds the monitor thread to a specific
+        provider for its lifetime.  Defaults to the instance debrid for
+        single-debrid setups + legacy callers.
         """
+        debrid = debrid or self.debrid_service
         with self._monitors_lock:
             if torrent_id in self._active_monitors:
                 logger.debug(f"[blackhole] Already monitoring torrent {torrent_id}")
                 return
             self._active_monitors.add(torrent_id)
 
-        self._add_pending(torrent_id, filename, label=label, compromise=compromise)
+        self._add_pending(torrent_id, filename, label=label, compromise=compromise, debrid=debrid)
         t = threading.Thread(
             target=self._monitor_and_symlink,
-            args=(torrent_id, filename, label),
+            args=(torrent_id, filename, label, debrid),
             daemon=True,
         )
         t.start()
         tag = f" [label={label}]" if label else ""
-        logger.info(f"[blackhole] Monitoring torrent {torrent_id} for {filename}{tag}")
+        provider_tag = f" via {debrid}" if debrid != self.debrid_service else ""
+        logger.info(f"[blackhole] Monitoring torrent {torrent_id} for {filename}{tag}{provider_tag}")
 
-    def _monitor_and_symlink(self, torrent_id, filename, label=None):
+    def _monitor_and_symlink(self, torrent_id, filename, label=None, debrid=None):
         """Background thread: poll debrid status, wait for mount, create symlinks.
 
         This method runs in its own thread and must not block the main scan loop.
         *label* is the per-arr routing label (e.g. "sonarr"); None means flat mode.
+
+        *debrid* (plan 39 phase 2) binds the thread to a specific provider for
+        its lifetime — used by every status check, info extraction, and
+        symlink-creation call below.  Defaults to the instance debrid for
+        single-debrid setups and legacy callers.
         """
+        debrid = debrid or self.debrid_service
+        api_key = self._api_key_for(debrid)
         status_dispatch = {
             'realdebrid': self._check_realdebrid_status,
             'alldebrid': self._check_alldebrid_status,
             'torbox': self._check_torbox_status,
         }
-        check_status = status_dispatch.get(self.debrid_service)
+        check_status = status_dispatch.get(debrid)
         if not check_status:
-            logger.error(f"[blackhole] No status checker for {self.debrid_service}")
+            logger.error(f"[blackhole] No status checker for {debrid}")
             self._remove_pending(torrent_id)
             return
 
@@ -1792,25 +2041,25 @@ class BlackholeWatcher:
                                        'false')).lower() == 'true':
                     try:
                         from utils.debrid_client import get_debrid_client
-                        # Route through the watcher's bound service — NOT the
-                        # priority default — so an AD/TB torrent ID never
-                        # leaks into an RD client (shared-hex ID collision
-                        # would silently delete an unrelated torrent).
+                        # Route through the grab's debrid — NOT the priority
+                        # default — so an AD/TB torrent ID never leaks into an
+                        # RD client (shared-hex ID collision would silently
+                        # delete an unrelated torrent).
                         client, _svc = get_debrid_client(
-                            service=self.debrid_service,
-                            api_key=self.debrid_api_key,
+                            service=debrid,
+                            api_key=api_key,
                         )
                         if client:
                             client.delete_torrent(str(torrent_id))
                             deleted_from_debrid = True
                             logger.info(
                                 f"[blackhole] Deleted uncached torrent {torrent_id} "
-                                f"from debrid on timeout ({filename})"
+                                f"from debrid ({debrid}) on timeout ({filename})"
                             )
                     except Exception as e:
                         msg = str(e)
-                        if self.debrid_api_key and self.debrid_api_key in msg:
-                            msg = msg.replace(self.debrid_api_key, '***')
+                        if api_key and api_key in msg:
+                            msg = msg.replace(api_key, '***')
                         logger.debug(
                             f"[blackhole] Failed to delete timed-out torrent "
                             f"{torrent_id} from debrid: {msg}"
@@ -1833,7 +2082,7 @@ class BlackholeWatcher:
                         meta={'cause': 'uncached_timeout',
                               'torrent_id': str(torrent_id),
                               'deleted': deleted_from_debrid,
-                              'provider': self.debrid_service},
+                              'provider': debrid},
                         media_title=_mt,
                     )
                 # Auto-blocklist the hash so the same dead-swarm release
@@ -1843,7 +2092,7 @@ class BlackholeWatcher:
                 # recent successful check_status; empty hash (every poll
                 # raised before timeout) silently skips the add.
                 if _blocklist and str(os.environ.get('BLOCKLIST_AUTO_ADD', 'true')).lower() == 'true':
-                    bl_hash = self._extract_hash_from_info(info)
+                    bl_hash = self._extract_hash_from_info(info, debrid=debrid)
                     if bl_hash:
                         _blocklist.add(bl_hash, filename,
                                        reason='Uncached on debrid (timed out)',
@@ -1864,22 +2113,22 @@ class BlackholeWatcher:
                 return
 
             try:
-                status, info = check_status(torrent_id)
+                status, info = check_status(torrent_id, api_key=api_key)
             except Exception as e:
                 logger.warning(f"[blackhole] Error checking status for {torrent_id}: {e}")
                 self._stop_event.wait(self.mount_poll_interval)
                 continue
 
-            if self._is_torrent_ready(status):
-                release_name = self._extract_release_name(info)
-                logger.info(f"[blackhole] Torrent ready: {filename} (release: {release_name})")
+            if self._is_torrent_ready(status, debrid=debrid):
+                release_name = self._extract_release_name(info, debrid=debrid)
+                logger.info(f"[blackhole] Torrent ready: {filename} (release: {release_name}, via {debrid})")
                 # Disc rip detection: check debrid file list before mount wait
-                if not self._has_usable_media_files(info):
+                if not self._has_usable_media_files(info, debrid=debrid):
                     logger.warning(f"[blackhole] No recognized media files in {filename} — "
                                    f"auto-blocklisting and removing from debrid.")
                     _mt, _ep = _enrich_for_history(filename) if _history else (None, None)
                     if _blocklist and str(os.environ.get('BLOCKLIST_AUTO_ADD', 'true')).lower() == 'true':
-                        bl_hash = self._extract_hash_from_info(info)
+                        bl_hash = self._extract_hash_from_info(info, debrid=debrid)
                         if bl_hash:
                             _blocklist.add(bl_hash, filename, reason='disc rip (no usable media files)', source='auto')
                             if _history:
@@ -1891,25 +2140,25 @@ class BlackholeWatcher:
                                                    media_title=_mt)
                     try:
                         from utils.debrid_client import get_debrid_client
-                        # Route through the watcher's bound service — see the
+                        # Route through the grab's debrid — see the
                         # timeout-delete block above for the cross-provider
                         # hazard this avoids.
                         client, _svc = get_debrid_client(
-                            service=self.debrid_service,
-                            api_key=self.debrid_api_key,
+                            service=debrid,
+                            api_key=api_key,
                         )
                         if client:
                             client.delete_torrent(str(torrent_id))
                     except Exception as e:
                         msg = str(e)
-                        if self.debrid_api_key and self.debrid_api_key in msg:
-                            msg = msg.replace(self.debrid_api_key, '***')
+                        if api_key and api_key in msg:
+                            msg = msg.replace(api_key, '***')
                         logger.debug(f"[blackhole] Failed to delete disc rip from debrid: {msg}")
                     if _history:
                         _history.log_event('failed', filename, episode=_ep, source='blackhole',
                                            detail='Rejected: no usable media files',
                                            meta={'cause': 'disc_rip_rejected',
-                                                 'provider': self.debrid_service,
+                                                 'provider': debrid,
                                                  'torrent_id': torrent_id},
                                            media_title=_mt)
                     try:
@@ -1927,14 +2176,14 @@ class BlackholeWatcher:
                 if _history:
                     _mt, _ep = _enrich_for_history(filename)
                     _history.log_event('cached', filename, episode=_ep, source='blackhole',
-                                       detail=f'Ready on {self.debrid_service}',
+                                       detail=f'Ready on {debrid}',
                                        meta={'cause': 'blackhole_cache_hit',
-                                             'provider': self.debrid_service,
+                                             'provider': debrid,
                                              'torrent_id': torrent_id},
                                        media_title=_mt)
                 break
 
-            if self._is_terminal_error(status):
+            if self._is_terminal_error(status, debrid=debrid):
                 logger.error(f"[blackhole] Torrent {torrent_id} hit terminal error: {status}")
                 _mt, _ep = _enrich_for_history(filename) if _history else (None, None)
                 if _history:
@@ -1948,12 +2197,12 @@ class BlackholeWatcher:
                                        detail=f'Terminal error: {_status_safe}',
                                        meta={'cause': 'terminal_error',
                                              'status': _status_safe,
-                                             'provider': self.debrid_service,
+                                             'provider': debrid,
                                              'torrent_id': torrent_id},
                                        media_title=_mt)
                 # Auto-blocklist on terminal failure
                 if _blocklist and str(os.environ.get('BLOCKLIST_AUTO_ADD', 'true')).lower() == 'true':
-                    bl_hash = self._extract_hash_from_info(info)
+                    bl_hash = self._extract_hash_from_info(info, debrid=debrid)
                     if bl_hash:
                         _blocklist.add(bl_hash, filename, reason=f'Terminal error: {status}', source='auto')
                         if _history:
@@ -2019,7 +2268,7 @@ class BlackholeWatcher:
                 self._remove_pending(torrent_id)
                 return
 
-            mount_path, category, matched_name = self._find_on_mount(release_name)
+            mount_path, category, matched_name = self._find_on_mount(release_name, debrid=debrid)
             if mount_path:
                 logger.info(f"[blackhole] Found on mount: {mount_path} (category: {category})")
                 break
@@ -2032,7 +2281,7 @@ class BlackholeWatcher:
 
         # Phase 3: Create symlinks
         try:
-            count = self._create_symlinks(matched_name, category, mount_path, label=label)
+            count = self._create_symlinks(matched_name, category, mount_path, label=label, debrid=debrid)
             if count > 0:
                 logger.info(f"[blackhole] Created {count} symlink(s) for {release_name}")
                 if _history:
@@ -2040,7 +2289,7 @@ class BlackholeWatcher:
                     _history.log_event('symlink_created', filename, episode=_ep, source='blackhole',
                                        detail=f'{count} symlink(s) for {release_name}',
                                        meta={'cause': 'blackhole_new_import',
-                                             'provider': self.debrid_service,
+                                             'provider': debrid,
                                              'count': count,
                                              'release': release_name},
                                        media_title=_mt)
@@ -2107,8 +2356,20 @@ class BlackholeWatcher:
                         f"[blackhole] Dropping invalid label on pending entry {torrent_id!r}: {label!r}"
                     )
                     label = None
+                # Per-grab debrid (plan 39 phase 2).  Pre-plan-39 entries
+                # don't carry a 'debrid' key; the only possible origin
+                # back then was the instance debrid_service, so default
+                # to that.  Validate against the known set so a tampered
+                # entry can't redirect API calls to an unknown provider.
+                entry_debrid = entry.get('debrid') or entry.get('service') or self.debrid_service
+                if entry_debrid not in ('realdebrid', 'alldebrid', 'torbox'):
+                    logger.warning(
+                        f"[blackhole] Dropping invalid debrid on pending entry "
+                        f"{torrent_id!r}: {entry_debrid!r}"
+                    )
+                    entry_debrid = self.debrid_service
                 if torrent_id:
-                    self._start_monitor(torrent_id, filename, label=label)
+                    self._start_monitor(torrent_id, filename, label=label, debrid=entry_debrid)
             except Exception as e:
                 logger.warning(f"[blackhole] Skipping bad pending entry {entry!r}: {e}")
 
@@ -2896,6 +3157,16 @@ class BlackholeWatcher:
                 logger.warning(f"[blackhole] Could not remove blocklisted file {filename}: {e}")
             return
 
+        # Decide which debrid this grab routes to (plan 39 phase 2).
+        # Cache-aware mode probes both configured debrids and picks
+        # whichever has the hash cached; primary_only always returns
+        # the configured primary.  Single-debrid setups collapse to
+        # the only configured debrid.  The chosen ``debrid`` value then
+        # threads through every downstream call (dedup, cache, add,
+        # monitor, symlink) so a TB-routed grab never touches RD state.
+        debrid = self._route_grab(info_hash)
+        api_key = self._api_key_for(debrid)
+
         # Debrid-account dedup — skip hashes already on the debrid account.
         # Without this, Sonarr/Radarr re-grabs of the same release after a
         # failed import produce duplicate torrent entries the user has to
@@ -2909,9 +3180,9 @@ class BlackholeWatcher:
         # misconfiguration, not "provider says uncached" — leave the file
         # alone so the user sees the problem and the drop survives once
         # they fix the key.
-        if require_cached and not self.debrid_api_key:
+        if require_cached and not api_key:
             logger.error(
-                f"[blackhole] BLACKHOLE_REQUIRE_CACHED is on but {self.debrid_service} "
+                f"[blackhole] BLACKHOLE_REQUIRE_CACHED is on but {debrid} "
                 f"API key is missing — leaving {filename} in watch dir"
             )
             return
@@ -2932,7 +3203,7 @@ class BlackholeWatcher:
                 _history.log_event('uncached_rejected', filename, episode=_ep, source='blackhole',
                                    detail='Refused — info hash unavailable under strict mode',
                                    meta={'cause': 'uncached_rejected',
-                                         'provider': self.debrid_service,
+                                         'provider': debrid,
                                          'reason': 'info_hash_unavailable'},
                                    media_title=_mt)
             try:
@@ -2955,16 +3226,16 @@ class BlackholeWatcher:
             lowered = info_hash.lower()
 
             if debrid_dedup_enabled:
-                existing = _existing_hashes(self.debrid_service, self.debrid_api_key)
+                existing = _existing_hashes(debrid, api_key)
                 if existing is not None and lowered in existing:
-                    logger.info(f"[blackhole] Skipping duplicate: {filename} already in {self.debrid_service} account")
+                    logger.info(f"[blackhole] Skipping duplicate: {filename} already in {debrid} account")
                     if _history:
                         _mt, _ep = _enrich_for_history(filename)
                         _history.log_event('duplicate', filename, episode=_ep, source='blackhole',
-                                           detail=f'Skipped — already in {self.debrid_service}',
+                                           detail=f'Skipped — already in {debrid}',
                                            meta={'cause': 'duplicate_skipped',
                                                  'info_hash': info_hash,
-                                                 'provider': self.debrid_service},
+                                                 'provider': debrid},
                                            media_title=_mt)
                     try:
                         os.remove(file_path)
@@ -2978,21 +3249,21 @@ class BlackholeWatcher:
                     return
 
             if require_cached:
-                cache_map = check_debrid_cache([lowered], service=self.debrid_service,
-                                               api_key=self.debrid_api_key)
+                cache_map = check_debrid_cache([lowered], service=debrid,
+                                               api_key=api_key)
                 cached = cache_map.get(lowered)
                 if cached is False:
                     # Provider confirmed uncached — safe to delete; nothing
                     # to wait for.
                     cache_label = 'uncached'
-                    logger.info(f"[blackhole] Skipping {cache_label}: {filename} on {self.debrid_service}")
+                    logger.info(f"[blackhole] Skipping {cache_label}: {filename} on {debrid}")
                     if _history:
                         _mt, _ep = _enrich_for_history(filename)
                         _history.log_event('uncached_rejected', filename, episode=_ep, source='blackhole',
-                                           detail=f'Skipped — {cache_label} on {self.debrid_service}',
+                                           detail=f'Skipped — {cache_label} on {debrid}',
                                            meta={'cause': 'uncached_rejected',
                                                  'info_hash': info_hash,
-                                                 'provider': self.debrid_service},
+                                                 'provider': debrid},
                                            media_title=_mt)
                     try:
                         os.remove(file_path)
@@ -3012,7 +3283,7 @@ class BlackholeWatcher:
                     # silently eat every in-flight drop.
                     logger.warning(
                         f"[blackhole] Deferring {filename}: cache status unknown on "
-                        f"{self.debrid_service} (API unavailable?) — leaving in watch dir"
+                        f"{debrid} (API unavailable?) — leaving in watch dir"
                     )
                     try:
                         from utils.metrics import metrics
@@ -3027,15 +3298,15 @@ class BlackholeWatcher:
             'torbox': self._add_to_torbox,
         }
 
-        handler = dispatch.get(self.debrid_service)
+        handler = dispatch.get(debrid)
         if not handler:
-            logger.error(f"[blackhole] Unsupported debrid service: {self.debrid_service}")
+            logger.error(f"[blackhole] Unsupported debrid service: {debrid}")
             return
 
         try:
-            success, result = handler(file_path)
+            success, result = handler(file_path, api_key=api_key)
             if success:
-                logger.info(f"[blackhole] Added to {self.debrid_service}: {filename}")
+                logger.info(f"[blackhole] Added to {debrid}: {filename}")
 
                 # Prime the dedup cache so a re-drop of the same .magnet before
                 # TTL expiry is caught even if the debrid account list hasn't
@@ -3043,7 +3314,7 @@ class BlackholeWatcher:
                 if info_hash:
                     try:
                         from utils.search import remember_added_hash
-                        remember_added_hash(self.debrid_service, info_hash)
+                        remember_added_hash(debrid, info_hash)
                     except ImportError:
                         pass
 
@@ -3051,10 +3322,10 @@ class BlackholeWatcher:
                 # we crash before reaching file cleanup or notifications.
                 # Guarded so a monitor failure doesn't block file cleanup.
                 if self.symlink_enabled:
-                    torrent_id = self._extract_torrent_id(result)
+                    torrent_id = self._extract_torrent_id(result, debrid=debrid)
                     if torrent_id:
                         try:
-                            self._start_monitor(torrent_id, filename, label=label)
+                            self._start_monitor(torrent_id, filename, label=label, debrid=debrid)
                         except Exception as e:
                             logger.error(f"[blackhole] Failed to start monitor for {filename}: {e}")
                     else:
@@ -3063,9 +3334,9 @@ class BlackholeWatcher:
                 if _history:
                     _mt, _ep = _enrich_for_history(filename)
                     _history.log_event('grabbed', filename, episode=_ep, source='blackhole',
-                                       detail=f'Submitted to {self.debrid_service}',
+                                       detail=f'Submitted to {debrid}',
                                        meta={'cause': 'blackhole_grab_submitted',
-                                             'provider': self.debrid_service},
+                                             'provider': debrid},
                                        media_title=_mt)
                 try:
                     os.remove(file_path)
@@ -3080,10 +3351,10 @@ class BlackholeWatcher:
                 if _notify:
                     if self.symlink_enabled:
                         _notify('download_complete', 'Blackhole: Torrent Submitted',
-                                f'{filename} submitted to {self.debrid_service}, monitoring for symlinks')
+                                f'{filename} submitted to {debrid}, monitoring for symlinks')
                     else:
                         _notify('download_complete', 'Blackhole: Torrent Added',
-                                f'{filename} added to {self.debrid_service}')
+                                f'{filename} added to {debrid}')
             else:
                 logger.error(f"[blackhole] Failed to add {filename}: {result}")
 
@@ -3387,36 +3658,60 @@ def setup():
         logger.warning("[blackhole] Invalid BLACKHOLE_POLL_INTERVAL, defaulting to 5s")
         poll_interval = 5
 
-    debrid_service = os.environ.get('BLACKHOLE_DEBRID', '').lower()
-    debrid_api_key = None
+    # Plan 39 phase 2 — collect ALL configured debrid keys so the watcher
+    # can route each grab independently.  ``debrid_service`` and
+    # ``debrid_api_key`` below resolve to the *primary* (legacy single-
+    # value fields kept for back-compat with the per-method default-
+    # argument path).
+    from utils.debrid_routing import (
+        resolve_primary, resolve_routing_mode, configured_debrids,
+        VALID_DEBRIDS,
+    )
+    tb_key = os.environ.get('TORBOX_API_KEY')
+    debrid_api_keys = {}
+    if RDAPIKEY:
+        debrid_api_keys['realdebrid'] = RDAPIKEY
+    if ADAPIKEY:
+        debrid_api_keys['alldebrid'] = ADAPIKEY
+    if tb_key:
+        debrid_api_keys['torbox'] = tb_key
 
-    if not debrid_service:
-        if RDAPIKEY:
-            debrid_service = 'realdebrid'
-            debrid_api_key = RDAPIKEY
-        elif ADAPIKEY:
-            debrid_service = 'alldebrid'
-            debrid_api_key = ADAPIKEY
-        else:
-            torbox_key = os.environ.get('TORBOX_API_KEY')
-            if torbox_key:
-                debrid_service = 'torbox'
-                debrid_api_key = torbox_key
-    else:
-        valid_services = {'realdebrid', 'alldebrid', 'torbox'}
-        if debrid_service not in valid_services:
-            logger.error(f"[blackhole] Unknown BLACKHOLE_DEBRID '{debrid_service}'. Valid: {', '.join(sorted(valid_services))}")
-            return None
-        key_map = {
-            'realdebrid': RDAPIKEY,
-            'alldebrid': ADAPIKEY,
-            'torbox': os.environ.get('TORBOX_API_KEY'),
-        }
-        debrid_api_key = key_map.get(debrid_service)
-
-    if not debrid_api_key:
+    if not debrid_api_keys:
         logger.error("[blackhole] No debrid API key found. Blackhole disabled.")
         return None
+
+    # Validate BLACKHOLE_DEBRID / BLACKHOLE_DEBRID_PRIMARY when set.
+    legacy = (os.environ.get('BLACKHOLE_DEBRID') or '').lower()
+    if legacy and legacy not in VALID_DEBRIDS:
+        logger.error(
+            f"[blackhole] Unknown BLACKHOLE_DEBRID {legacy!r}. "
+            f"Valid: {', '.join(sorted(VALID_DEBRIDS))}"
+        )
+        return None
+    explicit_primary = (os.environ.get('BLACKHOLE_DEBRID_PRIMARY') or '').lower()
+    if explicit_primary and explicit_primary not in VALID_DEBRIDS:
+        logger.error(
+            f"[blackhole] Unknown BLACKHOLE_DEBRID_PRIMARY {explicit_primary!r}. "
+            f"Valid: {', '.join(sorted(VALID_DEBRIDS))}"
+        )
+        return None
+
+    debrid_service = resolve_primary() or next(iter(debrid_api_keys))
+    if debrid_service not in debrid_api_keys:
+        logger.error(
+            f"[blackhole] Primary debrid {debrid_service!r} has no API key configured. "
+            f"Configured: {list(debrid_api_keys)}"
+        )
+        return None
+    debrid_api_key = debrid_api_keys[debrid_service]
+
+    routing_mode = resolve_routing_mode()
+    if len(debrid_api_keys) >= 2:
+        logger.info(
+            f"[blackhole] Multi-debrid routing active — providers: "
+            f"{sorted(debrid_api_keys)}, primary: {debrid_service}, "
+            f"mode: {routing_mode}"
+        )
 
     os.makedirs(watch_dir, exist_ok=True)
 
@@ -3452,6 +3747,30 @@ def setup():
         symlink_max_age = 72
 
     if symlink_enabled:
+        # Per-debrid target base validation (plan 39 phase 2).  Each
+        # configured debrid needs its own ``symlink_target_base_for_debrid``
+        # to resolve to a non-empty path — without it, TB-routed grabs
+        # would create relative-path symlinks under the completed dir
+        # (because ``_symlink_target_base_for`` falls back to the bare
+        # instance default).  Catch this at startup rather than 12h later
+        # when a TB grab actually lands.
+        from utils.debrid_routing import symlink_target_base_for_debrid as _stb_for
+        missing_bases = []
+        for svc in debrid_api_keys.keys():
+            if not _stb_for(svc):
+                missing_bases.append(svc)
+        if missing_bases:
+            for svc in missing_bases:
+                env_hint = (
+                    'BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX' if svc == 'torbox'
+                    else 'BLACKHOLE_SYMLINK_TARGET_BASE'
+                )
+                logger.error(
+                    f"[blackhole] Symlink target base missing for debrid "
+                    f"{svc!r}. Set {env_hint} (or the RD base so the "
+                    f"TB-suffix fallback can derive it)."
+                )
+            return None
         if not symlink_target_base:
             logger.error("[blackhole] BLACKHOLE_SYMLINK_TARGET_BASE is required when symlinks are enabled")
             return None
@@ -3476,6 +3795,7 @@ def setup():
         dedup_enabled=dedup_enabled,
         local_library_tv=local_library_tv,
         local_library_movies=local_library_movies,
+        debrid_api_keys=debrid_api_keys,
     )
     thread = threading.Thread(target=_watcher.run, daemon=True)
     thread.start()

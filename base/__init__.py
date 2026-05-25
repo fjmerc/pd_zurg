@@ -45,7 +45,9 @@ __all__ = [
     'Config', 'config',
     # Config variables
     'PLEXDEBRID', 'PDLOGLEVEL', 'PLEXUSER', 'PLEXTOKEN',
-    'JFADD', 'JFAPIKEY', 'RDAPIKEY', 'ADAPIKEY', 'GHTOKEN',
+    'JFADD', 'JFAPIKEY', 'RDAPIKEY', 'ADAPIKEY',
+    'TORBOXAPIKEY', 'TORBOXWEBDAVUSER', 'TORBOXWEBDAVPASS', 'TORBOX_MOUNT_NAME',
+    'GHTOKEN',
     'SEERRAPIKEY', 'SEERRADD', 'PLEXADD', 'ZURGUSER', 'ZURGPASS',
     'SHOWMENU', 'LOGFILE', 'PDUPDATE', 'PDREPO',
     'DUPECLEAN', 'CLEANUPINT', 'DUPECLEANKEEP', 'RCLONEMN', 'RCLONELOGLEVEL',
@@ -54,8 +56,10 @@ __all__ = [
     'TRAKTCLIENTID', 'TRAKTCLIENTSECRET',
     'NOTIFICATION_URL', 'NOTIFICATION_EVENTS', 'NOTIFICATION_LEVEL',
     'BLACKHOLE_ENABLED', 'BLACKHOLE_DIR', 'BLACKHOLE_POLL_INTERVAL', 'BLACKHOLE_DEBRID',
+    'BLACKHOLE_DEBRID_ROUTING', 'BLACKHOLE_DEBRID_PRIMARY',
     'BLACKHOLE_SYMLINK_ENABLED', 'BLACKHOLE_COMPLETED_DIR', 'BLACKHOLE_RCLONE_MOUNT',
-    'BLACKHOLE_SYMLINK_TARGET_BASE', 'BLACKHOLE_MOUNT_POLL_TIMEOUT',
+    'BLACKHOLE_SYMLINK_TARGET_BASE', 'BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX',
+    'BLACKHOLE_MOUNT_POLL_TIMEOUT',
     'BLACKHOLE_MOUNT_POLL_INTERVAL', 'BLACKHOLE_SYMLINK_MAX_AGE',
     'STATUS_UI_ENABLED', 'STATUS_UI_PORT', 'STATUS_UI_AUTH',
     'SONARR_URL', 'SONARR_API_KEY', 'RADARR_URL', 'RADARR_API_KEY',
@@ -74,6 +78,7 @@ __all__ = [
     'SYMLINK_REPAIR_AUTO_SEARCH',
     # Debrid health reconciler (plan 38)
     'DEBRID_HEALTH_ENABLED', 'DEBRID_HEALTH_AUTO_REMEDIATE',
+    'DEBRID_HEALTH_CROSS_RESCUE',
     # Routing audit
     'ROUTING_AUTO_TAG_UNTAGGED',
     # Gap-fill reconcile
@@ -160,6 +165,20 @@ class Config:
         self.JFAPIKEY = load_secret_or_env('jf_api_key')
         self.RDAPIKEY = load_secret_or_env('rd_api_key')
         self.ADAPIKEY = load_secret_or_env('ad_api_key')
+        # TorBox co-debrid (plan 39).  Zurg can't proxy TorBox, so the mount
+        # goes through rclone's native webdav remote against
+        # https://webdav.torbox.app/ — auth is HTTP Basic with the account
+        # email and a *separately configured* WebDAV-only password (set in
+        # TorBox dashboard → Settings → Integrations → WebDAV).  The API key
+        # alone does NOT authenticate the mount; it's the credential used by
+        # the existing search.py / blackhole.py / debrid_client.py code paths.
+        self.TORBOXAPIKEY = load_secret_or_env('torbox_api_key')
+        self.TORBOXWEBDAVUSER = load_secret_or_env('torbox_webdav_user')
+        self.TORBOXWEBDAVPASS = load_secret_or_env('torbox_webdav_pass')
+        # Attr name matches env var name (with underscores) so the
+        # _ENV_DEFAULTS drift guard in tests/test_settings_api.py
+        # ::test_env_defaults_stays_in_sync_with_config can verify it.
+        self.TORBOX_MOUNT_NAME = os.getenv('TORBOX_MOUNT_NAME', 'torbox')
         self.GHTOKEN = load_secret_or_env('GITHUB_TOKEN')
         self.SEERRAPIKEY = load_secret_or_env('seerr_api_key')
         self.SEERRADD = load_secret_or_env('seerr_address')
@@ -193,10 +212,22 @@ class Config:
         self.BLACKHOLE_DIR = os.getenv('BLACKHOLE_DIR')
         self.BLACKHOLE_POLL_INTERVAL = os.getenv('BLACKHOLE_POLL_INTERVAL')
         self.BLACKHOLE_DEBRID = os.getenv('BLACKHOLE_DEBRID')
+        # Per-grab debrid routing (plan 39 phase 2).  Both vars resolve
+        # to runtime defaults in utils/debrid_routing.py when left empty:
+        # routing mode defaults to ``cache_aware`` when two or more
+        # debrids are configured, ``primary_only`` otherwise; primary
+        # defaults to the first-configured of RD, AD, TB.
+        self.BLACKHOLE_DEBRID_ROUTING = os.getenv('BLACKHOLE_DEBRID_ROUTING')
+        self.BLACKHOLE_DEBRID_PRIMARY = os.getenv('BLACKHOLE_DEBRID_PRIMARY')
         self.BLACKHOLE_SYMLINK_ENABLED = os.getenv('BLACKHOLE_SYMLINK_ENABLED')
         self.BLACKHOLE_COMPLETED_DIR = os.getenv('BLACKHOLE_COMPLETED_DIR')
         self.BLACKHOLE_RCLONE_MOUNT = os.getenv('BLACKHOLE_RCLONE_MOUNT')
         self.BLACKHOLE_SYMLINK_TARGET_BASE = os.getenv('BLACKHOLE_SYMLINK_TARGET_BASE')
+        # TorBox symlink target base (plan 39 phase 2) — host-side path
+        # for TB-routed symlinks.  When unset and the RD base is set,
+        # debrid_routing.symlink_target_base_for_debrid() falls back to
+        # ``<RD base>_torbox`` so most users get a sensible default.
+        self.BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX = os.getenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX')
         self.BLACKHOLE_MOUNT_POLL_TIMEOUT = os.getenv('BLACKHOLE_MOUNT_POLL_TIMEOUT')
         self.BLACKHOLE_MOUNT_POLL_INTERVAL = os.getenv('BLACKHOLE_MOUNT_POLL_INTERVAL')
         self.BLACKHOLE_SYMLINK_MAX_AGE = os.getenv('BLACKHOLE_SYMLINK_MAX_AGE')
@@ -234,6 +265,14 @@ class Config:
         # account state (deletes torrents) and triggers arr searches.
         self.DEBRID_HEALTH_ENABLED = os.getenv('DEBRID_HEALTH_ENABLED', 'true')
         self.DEBRID_HEALTH_AUTO_REMEDIATE = os.getenv('DEBRID_HEALTH_AUTO_REMEDIATE', 'false')
+        # Cross-debrid rescue (plan 39 phase 3) — when RD filter-blocks
+        # a torrent and TB has it cached, re-host on TB instead of just
+        # deleting + asking the arr to find a different release (which
+        # loops on the same filter).  Default-resolved at runtime in
+        # ``utils.debrid_health._cross_rescue_enabled``: on when both
+        # RD_API_KEY and TORBOX_API_KEY are set, off otherwise.  Explicit
+        # ``true``/``false`` overrides the default.
+        self.DEBRID_HEALTH_CROSS_RESCUE = os.getenv('DEBRID_HEALTH_CROSS_RESCUE')
         # Routing audit (auto-tag untagged monitored series/movies with debrid tag)
         self.ROUTING_AUTO_TAG_UNTAGGED = os.getenv('ROUTING_AUTO_TAG_UNTAGGED', 'true')
         # Gap-fill reconcile — unconditional missing-episode search across
@@ -300,6 +339,10 @@ JFADD = config.JFADD
 JFAPIKEY = config.JFAPIKEY
 RDAPIKEY = config.RDAPIKEY
 ADAPIKEY = config.ADAPIKEY
+TORBOXAPIKEY = config.TORBOXAPIKEY
+TORBOXWEBDAVUSER = config.TORBOXWEBDAVUSER
+TORBOXWEBDAVPASS = config.TORBOXWEBDAVPASS
+TORBOX_MOUNT_NAME = config.TORBOX_MOUNT_NAME
 GHTOKEN = config.GHTOKEN
 SEERRAPIKEY = config.SEERRAPIKEY
 SEERRADD = config.SEERRADD
@@ -333,10 +376,13 @@ BLACKHOLE_ENABLED = config.BLACKHOLE_ENABLED
 BLACKHOLE_DIR = config.BLACKHOLE_DIR
 BLACKHOLE_POLL_INTERVAL = config.BLACKHOLE_POLL_INTERVAL
 BLACKHOLE_DEBRID = config.BLACKHOLE_DEBRID
+BLACKHOLE_DEBRID_ROUTING = config.BLACKHOLE_DEBRID_ROUTING
+BLACKHOLE_DEBRID_PRIMARY = config.BLACKHOLE_DEBRID_PRIMARY
 BLACKHOLE_SYMLINK_ENABLED = config.BLACKHOLE_SYMLINK_ENABLED
 BLACKHOLE_COMPLETED_DIR = config.BLACKHOLE_COMPLETED_DIR
 BLACKHOLE_RCLONE_MOUNT = config.BLACKHOLE_RCLONE_MOUNT
 BLACKHOLE_SYMLINK_TARGET_BASE = config.BLACKHOLE_SYMLINK_TARGET_BASE
+BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX = config.BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX
 BLACKHOLE_MOUNT_POLL_TIMEOUT = config.BLACKHOLE_MOUNT_POLL_TIMEOUT
 BLACKHOLE_MOUNT_POLL_INTERVAL = config.BLACKHOLE_MOUNT_POLL_INTERVAL
 BLACKHOLE_SYMLINK_MAX_AGE = config.BLACKHOLE_SYMLINK_MAX_AGE
@@ -364,6 +410,7 @@ BLOCKLIST_EXPIRY_DAYS = config.BLOCKLIST_EXPIRY_DAYS
 SYMLINK_REPAIR_AUTO_SEARCH = config.SYMLINK_REPAIR_AUTO_SEARCH
 DEBRID_HEALTH_ENABLED = config.DEBRID_HEALTH_ENABLED
 DEBRID_HEALTH_AUTO_REMEDIATE = config.DEBRID_HEALTH_AUTO_REMEDIATE
+DEBRID_HEALTH_CROSS_RESCUE = config.DEBRID_HEALTH_CROSS_RESCUE
 ROUTING_AUTO_TAG_UNTAGGED = config.ROUTING_AUTO_TAG_UNTAGGED
 GAP_FILL_ENABLED = config.GAP_FILL_ENABLED
 TORRENTIO_URL = config.TORRENTIO_URL

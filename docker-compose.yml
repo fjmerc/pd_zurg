@@ -34,6 +34,10 @@ services:
       - RD_API_KEY=${RD_API_KEY:-}
       - AD_API_KEY=${AD_API_KEY:-}
       - TORBOX_API_KEY=${TORBOX_API_KEY:-}
+      ## TorBox WebDAV mount (plan 39 — optional add-on to TORBOX_API_KEY)
+      - TORBOX_WEBDAV_USER=${TORBOX_WEBDAV_USER:-}
+      - TORBOX_WEBDAV_PASS=${TORBOX_WEBDAV_PASS:-}
+      - TORBOX_MOUNT_NAME=${TORBOX_MOUNT_NAME:-torbox}
       - ZURG_VERSION=${ZURG_VERSION:-}
       - ZURG_UPDATE=${ZURG_UPDATE:-}
       - ZURG_LOG_LEVEL=${ZURG_LOG_LEVEL:-}

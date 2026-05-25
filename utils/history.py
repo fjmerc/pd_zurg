@@ -68,6 +68,11 @@ CAUSE_LOCAL_FALLBACK_GRAB = 'local_fallback_grab'
 # Management
 CAUSE_PREFERENCE_SOURCE_SWITCH = 'preference_source_switch'
 CAUSE_DEBRID_FILTERED = 'debrid_filtered'
+# Plan 39 phase 3: filter-blocked content was auto-rehosted on the alt
+# debrid (TB when source was RD).  Distinct from CAUSE_DEBRID_FILTERED
+# because the user-visible outcome is different (file still plays, no
+# arr re-search fired, no blocklist add).
+CAUSE_DEBRID_RESCUED = 'debrid_rescued'
 CAUSE_ROUTING_REPAIRED = 'routing_repaired'
 CAUSE_ARR_DELETED_USER = 'arr_deleted_user'
 CAUSE_ARR_DELETED_CLEANUP = 'arr_deleted_cleanup'

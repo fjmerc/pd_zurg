@@ -68,24 +68,11 @@ __NAV_HTML__
 
 <!-- Tasks Tab -->
 <div class="tab-panel" id="panel-tasks">
-  <!-- Debrid Health mini-dashboard (plan 38 phase 5). Hidden when RD
-       is not configured (the reconciler task isn't even registered in
-       that case, so there's nothing to surface). -->
-  <div id="dh-card" class="dh-card" style="display:none">
-    <div class="dh-card-head">
-      <span class="dh-card-title">Debrid Health</span>
-      <span id="dh-card-auto" class="dh-pill"></span>
-    </div>
-    <div class="dh-card-body">
-      <div class="dh-row"><span class="dh-label">Last sweep:</span><span id="dh-last-sweep">—</span></div>
-      <div class="dh-row"><span class="dh-label">Probed:</span><span id="dh-counts">—</span></div>
-      <div class="dh-row"><span class="dh-label">Remediated (24h):</span><span id="dh-24h">—</span></div>
-    </div>
-    <div class="dh-card-actions">
-      <button id="dh-run-btn" class="btn btn-ghost btn-sm" onclick="runDebridHealth(this)">Run sweep now</button>
-      <a class="btn btn-ghost btn-sm" href="/activity?type=debrid">View activity &rarr;</a>
-    </div>
-  </div>
+  <!-- Debrid Health mini-dashboard (plan 38 phase 5, expanded for
+       plan 39 phase 5 to render side-by-side RD + TB cards when both
+       providers are configured; collapses to one card when only one is.
+       Hidden entirely when no provider is configured. -->
+  <div id="dh-providers" class="dh-providers" style="display:none"></div>
   <div style="margin-bottom:8px">
     <button class="btn btn-ghost btn-sm" data-kb="refresh" onclick="updateTasks()">Refresh</button>
   </div>
@@ -312,29 +299,76 @@ function fmtAge(epoch){
   if(s<86400)return Math.floor(s/3600)+'h ago';
   return Math.floor(s/86400)+'d ago';
 }
+function _dhRenderRdBody(s,card){
+  var c=card.counts||{};
+  var parts=[];
+  parts.push((c.total||0)+' total');
+  parts.push((c.healthy||0)+' healthy');
+  var blockedPart=(c.blocked||0)+' blocked';
+  if(c.blocked)blockedPart='<span class="dh-bad">'+blockedPart+'</span>';
+  parts.push(blockedPart);
+  if(c.unknown)parts.push((c.unknown||0)+' unknown');
+  return ''
+    +'<div class="dh-row"><span class="dh-label">Last probe:</span><span>'+esc(fmtAge(card.last_probe_ts))+'</span></div>'
+    +'<div class="dh-row"><span class="dh-label">Torrents:</span><span>'+parts.join(' · ')+'</span></div>'
+    +'<div class="dh-row"><span class="dh-label">Remediated (24h):</span><span>'+esc(String(s.remediated_24h||0))+'</span></div>';
+}
+function _dhRenderTbBody(s,card){
+  var rescued=(card.counts||{}).rescued||0;
+  return ''
+    +'<div class="dh-row"><span class="dh-label">WebDAV mount:</span><span>'+(card.configured?'configured':'not configured')+'</span></div>'
+    +'<div class="dh-row"><span class="dh-label">Rescued from RD:</span><span>'+esc(String(rescued))+'</span></div>'
+    +'<div class="dh-row"><span class="dh-label">Rescued (24h):</span><span>'+esc(String(s.rescued_24h||0))+'</span></div>';
+}
+function _dhRenderCardHtml(s,card){
+  var bodyHtml=card.service==='torbox'?_dhRenderTbBody(s,card):_dhRenderRdBody(s,card);
+  var pills=[];
+  pills.push('<span class="dh-pill '+(card.service==='torbox'?'dh-pill-tb':'dh-pill-rd')+'">'+esc(card.label)+'</span>');
+  if(card.service==='realdebrid'){
+    if(!s.enabled){
+      pills.push('<span class="dh-pill dh-pill-off">Disabled</span>');
+    }else{
+      pills.push('<span class="dh-pill '+(s.auto_remediate?'dh-pill-on':'dh-pill-off')+'">Auto-remediate: '+(s.auto_remediate?'ON':'OFF')+'</span>');
+      if(s.cross_rescue){
+        pills.push('<span class="dh-pill dh-pill-on">Cross-rescue: ON</span>');
+      }
+    }
+  }
+  var actionsHtml='';
+  if(card.service==='realdebrid'){
+    actionsHtml=''
+      +'<button class="btn btn-ghost btn-sm" onclick="runDebridHealth(this)">Run sweep now</button>'
+      +'<a class="btn btn-ghost btn-sm" href="/activity?type=debrid">View activity &rarr;</a>';
+  }else{
+    actionsHtml='<a class="btn btn-ghost btn-sm" href="/activity?type=debrid">View activity &rarr;</a>';
+  }
+  return ''
+    +'<div class="dh-card">'
+    +'<div class="dh-card-head">'
+    +'<span class="dh-card-title">Debrid Health</span>'
+    +'<span class="dh-card-pills">'+pills.join('')+'</span>'
+    +'</div>'
+    +'<div class="dh-card-body">'+bodyHtml+'</div>'
+    +'<div class="dh-card-actions">'+actionsHtml+'</div>'
+    +'</div>';
+}
 function updateDebridHealth(){
   fetch('/api/debrid_health/summary').then(function(r){return r.json()}).then(function(s){
-    var card=document.getElementById('dh-card');
-    if(!s||!s.rd_configured){card.style.display='none';return;}
-    card.style.display='';
-    var auto=document.getElementById('dh-card-auto');
-    auto.textContent='Auto-remediate: '+(s.auto_remediate?'ON':'OFF');
-    auto.className='dh-pill '+(s.auto_remediate?'dh-pill-on':'dh-pill-off');
-    if(!s.enabled){
-      auto.textContent='Disabled';
-      auto.className='dh-pill dh-pill-off';
+    var container=document.getElementById('dh-providers');
+    if(!s){container.style.display='none';return;}
+    var providers=s.providers||[];
+    if(!providers.length){
+      // Back-compat fallback: synthesize a card from the legacy
+      // top-level fields when the server isn't on the plan-39 schema yet.
+      if(s.rd_configured){
+        providers=[{service:'realdebrid',label:'Real-Debrid',configured:true,counts:s.counts||{},last_probe_ts:s.last_sweep_ts}];
+      }else{
+        container.style.display='none';return;
+      }
     }
-    document.getElementById('dh-last-sweep').textContent=fmtAge(s.last_sweep_ts);
-    var c=s.counts||{};
-    var parts=[];
-    parts.push((c.total||0)+' total');
-    parts.push((c.healthy||0)+' healthy');
-    var blockedPart=(c.blocked||0)+' blocked';
-    if(c.blocked)blockedPart='<span class="dh-bad">'+blockedPart+'</span>';
-    parts.push(blockedPart);
-    if(c.unknown)parts.push((c.unknown||0)+' unknown');
-    document.getElementById('dh-counts').innerHTML=parts.join(' · ');
-    document.getElementById('dh-24h').textContent=(s.remediated_24h||0);
+    container.style.display='';
+    container.className='dh-providers'+(providers.length>=2?' dh-providers-pair':'');
+    container.innerHTML=providers.map(function(p){return _dhRenderCardHtml(s,p);}).join('');
   }).catch(function(){});
 }
 function runDebridHealth(btn){
@@ -383,12 +417,17 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .log-line.error{color:var(--red)}.log-line.warning{color:var(--yellow)}.log-line.debug{color:var(--text3)}
 #log-search:focus{border-color:var(--input-focus)}
 .task-ok{color:var(--green)}.task-err{color:var(--red)}.task-running{color:var(--blue)}
-.dh-card{border:1px solid var(--border2);border-radius:6px;padding:12px 14px;margin-bottom:12px;background:var(--bg)}
-.dh-card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.dh-providers{display:grid;grid-template-columns:1fr;gap:12px;margin-bottom:12px}
+@media(min-width:720px){.dh-providers.dh-providers-pair{grid-template-columns:1fr 1fr}}
+.dh-card{border:1px solid var(--border2);border-radius:6px;padding:12px 14px;background:var(--bg)}
+.dh-card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:8px;flex-wrap:wrap}
 .dh-card-title{font-weight:600;font-size:.85em;color:var(--text)}
-.dh-pill{font-size:.7em;padding:2px 8px;border-radius:10px;border:1px solid var(--border2);color:var(--text2);text-transform:uppercase;letter-spacing:.04em}
+.dh-card-pills{display:flex;gap:6px;flex-wrap:wrap}
+.dh-pill{font-size:.7em;padding:2px 8px;border-radius:10px;border:1px solid var(--border2);color:var(--text2);text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
 .dh-pill-on{color:var(--green);border-color:var(--green)}
 .dh-pill-off{color:var(--text3)}
+.dh-pill-rd{color:var(--yellow);border-color:var(--yellow)}
+.dh-pill-tb{color:var(--blue);border-color:var(--blue)}
 .dh-card-body{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}
 .dh-row{display:flex;gap:8px;font-size:.8em;color:var(--text)}
 .dh-label{color:var(--text2);min-width:130px}

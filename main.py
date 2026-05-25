@@ -22,6 +22,15 @@ def shutdown(signum, frame):
     logger = get_logger()
     logger.info("Shutdown signal received. Cleaning up...")
 
+    # Signal any in-flight debrid_health rescue poll loop to abort BEFORE
+    # asking the scheduler to stop — otherwise scheduler.stop()'s 15s join
+    # window can race a 60s × N-rescue blocking sweep.
+    try:
+        from utils.debrid_health import request_stop as _dh_stop
+        _dh_stop()
+    except Exception:
+        pass
+
     scheduler.stop()
     shutdown_all_processes(logger)
 

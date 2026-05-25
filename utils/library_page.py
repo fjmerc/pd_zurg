@@ -160,6 +160,21 @@ __NAV_HTML__
 [data-theme="light"] .badge-local{background:#1a7f371a;border-color:#1a7f3740}
 [data-theme="light"] .badge-debrid{background:#7c3aed1a;border-color:#7c3aed40;color:#7c3aed}
 
+/* Plan 39 phase 4: per-debrid provider badges (RD / TB / AD). */
+.badge-provider{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;vertical-align:middle;margin-left:4px}
+.badge-provider .badge-full{display:inline}
+.badge-provider .badge-mini{display:none}
+.badge-provider-rd{background:#3fb9500f;color:#3fb950;border:1px solid #3fb95033}
+.badge-provider-tb{background:#58a6ff0f;color:var(--blue);border:1px solid #58a6ff33}
+.badge-provider-ad{background:#db6d280f;color:var(--orange);border:1px solid #db6d2833}
+[data-theme="light"] .badge-provider-rd{background:#1a7f371a;border-color:#1a7f3740}
+[data-theme="light"] .badge-provider-tb{background:#0969da1a;border-color:#0969da40;color:#0969da}
+[data-theme="light"] .badge-provider-ad{background:#bc4c001a;border-color:#bc4c0040;color:#bc4c00}
+@media(max-width:640px){
+  .badge-provider .badge-full{display:none}
+  .badge-provider .badge-mini{display:inline}
+}
+
 .btn-ghost.btn-switch:hover:not(:disabled):not(.confirming){border-color:#2dd4bf;color:#2dd4bf}
 
 /* Quality badges */
@@ -1035,17 +1050,49 @@ function switchTab(name) {
 // ---------------------------------------------------------------------------
 // Filtering & rendering
 // ---------------------------------------------------------------------------
-function buildBadges(source) {
+function buildBadges(source, item) {
+  // Base location badge (Local / Debrid / Both / Wanted)
+  var html;
   if (source === 'both') {
-    return '<span class="badge-local"><span class="badge-full">Local</span><span class="badge-mini">L</span></span><span class="badge-debrid"><span class="badge-full">Debrid</span><span class="badge-mini">D</span></span>';
+    html = '<span class="badge-local"><span class="badge-full">Local</span><span class="badge-mini">L</span></span><span class="badge-debrid"><span class="badge-full">Debrid</span><span class="badge-mini">D</span></span>';
+  } else if (source === 'local') {
+    html = '<span class="badge-local"><span class="badge-full">Local</span><span class="badge-mini">L</span></span>';
+  } else if (source === 'debrid') {
+    html = '<span class="badge-debrid"><span class="badge-full">Debrid</span><span class="badge-mini">D</span></span>';
+  } else if (source === 'wanted') {
+    // Ghost entries from Radarr (monitored but no file). Reuse the red
+    // .badge-missing styling that episode-level missing entries use.
+    html = '<span class="badge-missing"><span class="badge-full">Wanted</span><span class="badge-mini">W</span></span>';
+  } else {
+    html = '<span class="badge-debrid"><span class="badge-full">' + esc(source) + '</span><span class="badge-mini">?</span></span>';
   }
-  if (source === 'local') return '<span class="badge-local"><span class="badge-full">Local</span><span class="badge-mini">L</span></span>';
-  if (source === 'debrid') return '<span class="badge-debrid"><span class="badge-full">Debrid</span><span class="badge-mini">D</span></span>';
-  // source='wanted': ghost entries from Radarr (monitored but no file).
-  // Reuse the red .badge-missing styling that episode-level missing
-  // entries already use.
-  if (source === 'wanted') return '<span class="badge-missing"><span class="badge-full">Wanted</span><span class="badge-mini">W</span></span>';
-  return '<span class="badge-debrid"><span class="badge-full">' + esc(source) + '</span><span class="badge-mini">?</span></span>';
+
+  // Plan 39 phase 4: per-debrid provider badge (RD / TB) — only relevant
+  // for debrid-sourced items (source='debrid' or 'both').  Single-debrid
+  // users see no extra badge because source_debrid will always be the
+  // same provider; the rendering keeps the badge in that case too as a
+  // small visual cue but it's the same color across all items.
+  if (item && (source === 'debrid' || source === 'both')) {
+    var sd = item.source_debrid;
+    var alt = item.alt_source_debrid;
+    if (sd === 'realdebrid') {
+      html += '<span class="badge-provider badge-provider-rd" title="On Real-Debrid"><span class="badge-full">RD</span><span class="badge-mini">RD</span></span>';
+    } else if (sd === 'torbox') {
+      html += '<span class="badge-provider badge-provider-tb" title="On TorBox"><span class="badge-full">TB</span><span class="badge-mini">TB</span></span>';
+    } else if (sd === 'alldebrid') {
+      html += '<span class="badge-provider badge-provider-ad" title="On AllDebrid"><span class="badge-full">AD</span><span class="badge-mini">AD</span></span>';
+    }
+    if (item.has_alt_source) {
+      if (alt === 'torbox') {
+        html += '<span class="badge-provider badge-provider-tb" title="Also on TorBox"><span class="badge-full">+TB</span><span class="badge-mini">+TB</span></span>';
+      } else if (alt === 'realdebrid') {
+        html += '<span class="badge-provider badge-provider-rd" title="Also on Real-Debrid"><span class="badge-full">+RD</span><span class="badge-mini">+RD</span></span>';
+      } else if (alt === 'alldebrid') {
+        html += '<span class="badge-provider badge-provider-ad" title="Also on AllDebrid"><span class="badge-full">+AD</span><span class="badge-mini">+AD</span></span>';
+      }
+    }
+  }
+  return html;
 }
 
 function _qualityBadge(quality) {
@@ -1217,7 +1264,7 @@ function buildCard(item, index) {
     pendingBadge = pendingBadge.replace('class="badge-pending"',
       'class="badge-pending has-error" title="' + escAttr(errTooltip) + '"');
   }
-  var sourceBadges = buildBadges(item.source);
+  var sourceBadges = buildBadges(item.source, item);
   var statusLine = '';
   if (pendingBadge || metaLine) {
     statusLine = '<div class="card-status">' + pendingBadge + metaLine + '</div>';
@@ -2415,7 +2462,7 @@ function _renderMovieDetail(movie, meta) {
   var moviePe = _pending[moviePnk];
   var moviePeDir = moviePe ? (moviePe.direction || '') : '';
   html += '<div class="card-badges">';
-  html += buildBadges(movie.source);
+  html += buildBadges(movie.source, movie);
   if (moviePeDir === 'debrid-unavailable') {
     html += ' <span class="badge-unavailable">Debrid N/A</span>';
   } else if (moviePeDir === 'to-local-fallback') {
@@ -2656,7 +2703,7 @@ function _renderSeasonEpisodes(season, si) {
       html += '<span class="badge-fallback"><span class="badge-full">Local Fallback</span><span class="badge-mini">\u21B3</span></span>';
     } else if (isMigrating) {
       // Episode is available — show source badge + subtle upgrade indicator
-      html += buildBadges(ep.source);
+      html += buildBadges(ep.source, ep);
       html += '<span class="badge-migrating"><span class="badge-full">Migrating</span><span class="badge-mini">\u2197</span></span>';
     } else if (isPending) {
       // Episode is missing — actively searching
@@ -2677,7 +2724,7 @@ function _renderSeasonEpisodes(season, si) {
         }
       }
     } else {
-      html += buildBadges(ep.source);
+      html += buildBadges(ep.source, ep);
     }
     html += '</td>';
     html += '<td class="ep-quality">';
@@ -2810,7 +2857,7 @@ function _renderShowDetail(show, meta) {
   if (show.year) html += ' <span class="card-year">(' + esc(String(show.year)) + ')</span>';
   if (meta && meta.status) html += '<span class="detail-status">' + esc(meta.status) + '</span>';
   html += '</h2>';
-  html += '<div class="card-badges">' + buildBadges(show.source) + ' <span id="compromise-badge-slot"></span></div>';
+  html += '<div class="card-badges">' + buildBadges(show.source, show) + ' <span id="compromise-badge-slot"></span></div>';
   var showPe = _pending[nk];
   var showPeDir = showPe ? (showPe.direction || '') : '';
   var showErrText = (showPeDir === 'to-debrid' || showPeDir === 'to-local') ? formatPendingDetail(showPe) : '';

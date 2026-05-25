@@ -2762,10 +2762,15 @@ class TestGetWantedCounts:
         counts = get_wanted_counts(data)
         assert counts['missing'] == 0
 
-    def test_movie_with_missing_episodes(self):
+    def test_movie_ghost_entry_counted_as_missing(self):
+        """Phase: Radarr-wanted-movies. Ghost entries injected by
+        ``_apply_radarr_wanted_movies`` carry ``missing=True`` and MUST
+        be counted under the 'missing' bucket. Prior to the Option B
+        fix this code-path looked at ``missing_episodes`` (a shows-only
+        field), so movies were silently excluded from the Wanted view."""
         data = {'shows': [], 'movies': [
-            {'title': 'Missing Movie', 'missing_episodes': 1},
-            {'title': 'Available Movie', 'missing_episodes': 0},
+            {'title': 'Missing Movie', 'source': 'wanted', 'missing': True},
+            {'title': 'Real Movie', 'source': 'debrid'},
         ]}
         counts = get_wanted_counts(data)
         assert counts['missing'] == 1
@@ -2795,16 +2800,30 @@ class TestGetWantedCounts:
         counts = get_wanted_counts(data)
         assert counts['missing'] == 2
 
-    def test_movie_with_none_missing_episodes_not_counted(self):
+    def test_real_movie_without_missing_field_not_counted(self):
+        """Regular library-discovered movies don't carry ``missing``;
+        only ghost entries do. A movie that is on disk MUST NOT be
+        counted as missing regardless of its other fields."""
         data = {'shows': [], 'movies': [
-            {'title': 'Unenriched Movie', 'missing_episodes': None},
+            {'title': 'Real Movie', 'source': 'debrid'},
+            {'title': 'Real Movie 2', 'source': 'local'},
+            {'title': 'Real Movie 3', 'source': 'both'},
         ]}
         counts = get_wanted_counts(data)
         assert counts['missing'] == 0
 
+    def test_multiple_ghost_movies_counted(self):
+        data = {'shows': [], 'movies': [
+            {'title': 'Wanted 1', 'source': 'wanted', 'missing': True},
+            {'title': 'Wanted 2', 'source': 'wanted', 'missing': True},
+            {'title': 'On Disk', 'source': 'debrid'},
+        ]}
+        counts = get_wanted_counts(data)
+        assert counts['missing'] == 2
+
     def test_movie_pending_directions(self):
         data = {'shows': [], 'movies': [
-            {'title': 'Movie A', 'missing_episodes': 0},
+            {'title': 'Movie A', 'source': 'debrid'},
         ]}
         pending = {
             'movie a': {'direction': 'to-local-fallback'},
@@ -2871,6 +2890,28 @@ class TestComputeLibraryStats:
         stats = compute_library_stats(data)
         assert stats['movies']['by_source']['debrid'] == 1
         assert stats['movies']['size_by_source']['debrid'] == 100
+
+    def test_wanted_source_excluded_from_buckets(self):
+        """Ghost entries from ``_apply_radarr_wanted_movies`` carry
+        ``source='wanted'`` and represent monitored-but-not-downloaded
+        movies. They MUST NOT inflate the on-disk composition stats —
+        the Library Composition card would lie about total library size
+        if a 100-movie wanted list bucketed into 'debrid' via the
+        unknown-source fallback."""
+        data = {
+            'movies': [
+                {'source': 'debrid', 'size_bytes': 1000},
+                {'source': 'wanted', 'size_bytes': 0,
+                 'missing': True, 'title': 'Wanted 1'},
+                {'source': 'wanted', 'size_bytes': 0,
+                 'missing': True, 'title': 'Wanted 2'},
+            ],
+            'shows': [],
+        }
+        stats = compute_library_stats(data)
+        assert stats['movies']['total'] == 1
+        assert stats['movies']['by_source'] == {'local': 0, 'debrid': 1, 'both': 0}
+        assert stats['movies']['size_bytes'] == 1000
 
     def test_invalid_size_treated_as_zero(self):
         data = {
@@ -3408,6 +3449,252 @@ class TestApplySonarrMonitoredFilter:
         with _fake_sonarr(series):
             _apply_sonarr_monitored_filter(shows)
         assert shows[0]['missing_episodes'] == 2
+
+
+@pytest.fixture(autouse=True)
+def _reset_radarr_movies_cache():
+    """Mirror the Sonarr cache reset so Radarr-list tests can't leak
+    mocked movie lists into each other."""
+    import utils.library as _lib
+    _lib._radarr_movies_cache['data'] = None
+    _lib._radarr_movies_cache['ts'] = 0.0
+
+
+def _fake_radarr(movie_list):
+    """Patch ``get_download_service('movie')`` to return a MagicMock
+    Radarr client whose ``get_all_movies`` yields *movie_list*."""
+    client = MagicMock()
+    client.get_all_movies.return_value = movie_list
+    return patch('utils.arr_client.get_download_service',
+                 return_value=(client, 'radarr'))
+
+
+class TestApplyRadarrWantedMovies:
+    """Inject Radarr-monitored-but-not-downloaded movies as ghost
+    entries so the Wanted view surfaces them.
+
+    The library scanner reads from disk; a movie you've requested but
+    haven't downloaded is invisible to the rest of the pipeline. This
+    helper closes that gap. Behavior parallels
+    ``_apply_sonarr_monitored_filter`` but with one structural
+    difference: it INJECTS entries into the movies list rather than
+    refining counts on existing entries.
+    """
+
+    def test_injects_ghost_for_monitored_no_file_movie(self):
+        from utils.library import _apply_radarr_wanted_movies
+        movies = []
+        radarr_movies = [
+            {'id': 1, 'tmdbId': 100, 'title': 'Wanted Movie',
+             'year': 2023, 'monitored': True, 'hasFile': False},
+        ]
+        with _fake_radarr(radarr_movies):
+            count = _apply_radarr_wanted_movies(movies)
+        assert count == 1
+        assert len(movies) == 1
+        ghost = movies[0]
+        assert ghost['title'] == 'Wanted Movie'
+        assert ghost['year'] == 2023
+        assert ghost['source'] == 'wanted'
+        assert ghost['missing'] is True
+        assert ghost['size_bytes'] == 0
+        assert ghost['_radarr_id'] == 1
+        assert ghost['_radarr_tmdb_id'] == 100
+
+    def test_skips_monitored_with_file(self):
+        """A monitored movie that DOES have a file is already on disk,
+        will appear in the library through the scanner, and must not
+        get a ghost entry (would double-count)."""
+        from utils.library import _apply_radarr_wanted_movies
+        movies = []
+        radarr_movies = [
+            {'id': 1, 'tmdbId': 100, 'title': 'Has File',
+             'year': 2023, 'monitored': True, 'hasFile': True},
+        ]
+        with _fake_radarr(radarr_movies):
+            count = _apply_radarr_wanted_movies(movies)
+        assert count == 0
+        assert movies == []
+
+    def test_skips_unmonitored(self):
+        """Unmonitored movies aren't wanted — Radarr knows about them
+        but isn't searching. Don't inflate the Wanted view with them."""
+        from utils.library import _apply_radarr_wanted_movies
+        movies = []
+        radarr_movies = [
+            {'id': 1, 'tmdbId': 100, 'title': 'Unmonitored',
+             'year': 2023, 'monitored': False, 'hasFile': False},
+        ]
+        with _fake_radarr(radarr_movies):
+            count = _apply_radarr_wanted_movies(movies)
+        assert count == 0
+        assert movies == []
+
+    def test_dedup_by_tmdb_id(self):
+        """A Radarr wanted movie whose tmdbId matches an existing
+        library entry is suppressed (the real entry wins, even if its
+        title or year is slightly off)."""
+        from utils.library import _apply_radarr_wanted_movies
+        movies = [{'title': 'Existing Movie (Different Spelling)',
+                   'year': 2023, 'source': 'debrid', 'tmdb_id': 100}]
+        radarr_movies = [
+            {'id': 1, 'tmdbId': 100, 'title': 'Existing Movie',
+             'year': 2023, 'monitored': True, 'hasFile': False},
+        ]
+        with _fake_radarr(radarr_movies):
+            count = _apply_radarr_wanted_movies(movies)
+        assert count == 0
+        assert len(movies) == 1
+        assert movies[0]['source'] == 'debrid'
+
+    def test_dedup_by_normalized_title_year(self):
+        """When an existing entry has no tmdb_id, fall back to
+        (normalized_title, year) matching so hand-imported libraries
+        still dedup correctly."""
+        from utils.library import _apply_radarr_wanted_movies
+        movies = [{'title': 'Inception', 'year': 2010,
+                   'source': 'local'}]
+        radarr_movies = [
+            {'id': 1, 'tmdbId': 27205, 'title': 'Inception',
+             'year': 2010, 'monitored': True, 'hasFile': False},
+        ]
+        with _fake_radarr(radarr_movies):
+            count = _apply_radarr_wanted_movies(movies)
+        assert count == 0
+        assert len(movies) == 1
+
+    def test_year_mismatch_does_not_dedup(self):
+        """Same title, different year (festival vs wide release, or
+        actual different films like Dune 1984 vs 2021) — these are
+        DIFFERENT movies, ghost MUST inject."""
+        from utils.library import _apply_radarr_wanted_movies
+        movies = [{'title': 'Dune', 'year': 1984, 'source': 'local'}]
+        radarr_movies = [
+            {'id': 1, 'tmdbId': 438631, 'title': 'Dune',
+             'year': 2021, 'monitored': True, 'hasFile': False},
+        ]
+        with _fake_radarr(radarr_movies):
+            count = _apply_radarr_wanted_movies(movies)
+        assert count == 1
+        assert len(movies) == 2
+
+    def test_pending_movie_suppressed(self):
+        """A movie currently being downloaded shows up in the 'pending'
+        Wanted bucket via the pending_monitors mechanism. Don't ALSO
+        inject it as a 'missing' ghost — would double-count and
+        confuse the user about its actual state."""
+        from utils.library import _apply_radarr_wanted_movies
+        movies = []
+        radarr_movies = [
+            {'id': 1, 'tmdbId': 100, 'title': 'Pending Movie',
+             'year': 2023, 'monitored': True, 'hasFile': False},
+        ]
+        pending = {'pending movie': {'direction': 'to-debrid'}}
+        with _fake_radarr(radarr_movies):
+            count = _apply_radarr_wanted_movies(movies, pending=pending)
+        assert count == 0
+        assert movies == []
+
+    def test_radarr_unavailable_no_op(self):
+        """If get_download_service returns no Radarr client (Radarr not
+        configured, or Overseerr is the fallback), the function silently
+        returns 0 without injecting anything. Scan must continue."""
+        from utils.library import _apply_radarr_wanted_movies
+        movies = []
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(None, None)):
+            count = _apply_radarr_wanted_movies(movies)
+        assert count == 0
+        assert movies == []
+
+    def test_overseerr_fallback_ignored(self):
+        """When Radarr is unconfigured but Overseerr is, the function
+        gets the Overseerr client back from get_download_service.
+        It MUST detect the non-radarr svc and skip — otherwise it would
+        call get_all_movies on an Overseerr client which doesn't have it."""
+        from utils.library import _apply_radarr_wanted_movies
+        movies = []
+        overseerr_client = MagicMock()
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(overseerr_client, 'overseerr')):
+            count = _apply_radarr_wanted_movies(movies)
+        assert count == 0
+        assert overseerr_client.get_all_movies.call_count == 0
+
+    def test_fetch_failure_graceful(self):
+        """A Radarr API error during get_all_movies must not crash the
+        scan. Empty injection, scan continues with real movies only."""
+        from utils.library import _apply_radarr_wanted_movies
+        movies = [{'title': 'Real', 'year': 2020, 'source': 'debrid'}]
+        client = MagicMock()
+        client.get_all_movies.side_effect = RuntimeError('radarr down')
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(client, 'radarr')):
+            count = _apply_radarr_wanted_movies(movies)
+        assert count == 0
+        assert len(movies) == 1  # real movie untouched
+
+    def test_empty_radarr_no_op(self):
+        from utils.library import _apply_radarr_wanted_movies
+        movies = []
+        with _fake_radarr([]):
+            count = _apply_radarr_wanted_movies(movies)
+        assert count == 0
+
+    def test_multiple_ghosts_injected(self):
+        from utils.library import _apply_radarr_wanted_movies
+        movies = []
+        radarr_movies = [
+            {'id': 1, 'tmdbId': 100, 'title': 'A',
+             'year': 2020, 'monitored': True, 'hasFile': False},
+            {'id': 2, 'tmdbId': 200, 'title': 'B',
+             'year': 2021, 'monitored': True, 'hasFile': False},
+            {'id': 3, 'tmdbId': 300, 'title': 'C',
+             'year': 2022, 'monitored': False, 'hasFile': False},
+            {'id': 4, 'tmdbId': 400, 'title': 'D',
+             'year': 2023, 'monitored': True, 'hasFile': True},
+        ]
+        with _fake_radarr(radarr_movies):
+            count = _apply_radarr_wanted_movies(movies)
+        assert count == 2
+        injected_titles = sorted(m['title'] for m in movies)
+        assert injected_titles == ['A', 'B']
+
+
+class TestGetRadarrMoviesList:
+    """TTL cache for the Radarr movie list."""
+
+    def test_cached_within_ttl(self):
+        from utils.library import _get_radarr_movies_list
+        client = MagicMock()
+        client.get_all_movies.side_effect = [
+            [{'id': 1, 'title': 'A'}],
+            [{'id': 2, 'title': 'B'}],
+        ]
+        first = _get_radarr_movies_list(client)
+        second = _get_radarr_movies_list(client)
+        assert first == [{'id': 1, 'title': 'A'}]
+        assert second == first
+        assert client.get_all_movies.call_count == 1
+
+    def test_force_refresh_bypasses_cache(self):
+        from utils.library import _get_radarr_movies_list
+        client = MagicMock()
+        client.get_all_movies.side_effect = [
+            [{'id': 1, 'title': 'A'}],
+            [{'id': 2, 'title': 'B'}],
+        ]
+        _get_radarr_movies_list(client)
+        refreshed = _get_radarr_movies_list(client, force_refresh=True)
+        assert refreshed == [{'id': 2, 'title': 'B'}]
+        assert client.get_all_movies.call_count == 2
+
+    def test_fetch_failure_returns_none(self):
+        from utils.library import _get_radarr_movies_list
+        client = MagicMock()
+        client.get_all_movies.side_effect = RuntimeError('boom')
+        result = _get_radarr_movies_list(client)
+        assert result is None
 
 
 class TestGetSonarrSeriesList:

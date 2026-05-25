@@ -1020,37 +1020,173 @@ def _check_local_library_health():
             _local_library_alerted[label] = False
 
 
+# Mount-probe thresholds.  Surfaced as module constants so the test
+# suite can monkeypatch them and so a future operator can tune via
+# code review rather than spelunking through magic numbers.
+_SLOW_MOUNT_THRESHOLD_SEC = 5      # listdir slower than this → log WARN
+_LISTDIR_TIMEOUT_SEC = 15          # hard cap on listdir before we give up
+                                    # (a wedged FUSE that responds-but-slow
+                                    # would otherwise hang the scheduler
+                                    # thread forever; this is the only
+                                    # tier of defense)
+
+
+def _listdir_with_timeout(path, timeout):
+    """``os.listdir(path)`` with a wall-clock timeout.
+
+    A wedged FUSE driver (rclone busy with vfs-refresh, blocked on a
+    debrid 5xx, or genuinely stuck) doesn't raise — it just never
+    returns.  ``signal.alarm`` only works from the main thread, and the
+    scheduler runs in a worker, so we use a daemon thread with a
+    bounded join.  On timeout the worker is *leaked* (no portable way
+    to cancel a blocking syscall in another thread) but the caller is
+    no longer wedged, and the daemon flag keeps the leak from
+    preventing interpreter shutdown.
+
+    Returns the listing on success.  Raises ``TimeoutError`` on
+    timeout — the caller maps that to ``'error'``.  Raises the
+    underlying ``OSError`` if the worker raised.
+    """
+    import threading
+    result = {}
+
+    def _run():
+        try:
+            result['entries'] = os.listdir(path)
+        except BaseException as exc:  # noqa: BLE001 - propagate to caller
+            result['exc'] = exc
+
+    t = threading.Thread(target=_run, name=f'mount-probe-{os.path.basename(path)}', daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise TimeoutError(f'listdir({path!r}) did not return within {timeout}s')
+    if 'exc' in result:
+        raise result['exc']
+    return result['entries']
+
+
+def _probe_mount(mount_path):
+    """Probe a single FUSE mount.
+
+    Returns ``(status, message, items)`` where status is one of
+    ``'success'`` / ``'error'`` / ``'absent'``.  ``'absent'`` signals
+    the path is not a mount at all (caller decides whether that's a
+    real error or just "this mount isn't configured").  Distinguishing
+    error vs absent matters for the dual-mount summary: a missing TB
+    mount on a single-debrid install shouldn't degrade RD-only health.
+
+    A wedged-but-not-erroring FUSE (rclone hung mid-operation) is
+    bounded to ``_LISTDIR_TIMEOUT_SEC`` so one stuck mount can't block
+    the entire scheduler thread (which also runs verify_symlinks,
+    library_scan, debrid_health sweeps, etc).
+    """
+    if not os.path.isdir(mount_path):
+        return 'absent', f'Mount path does not exist: {mount_path}', 0
+    if not os.path.ismount(mount_path):
+        return 'absent', f'Not a mount point: {mount_path}', 0
+    try:
+        start = time.time()
+        entries = _listdir_with_timeout(mount_path, _LISTDIR_TIMEOUT_SEC)
+        elapsed = time.time() - start
+        if elapsed > _SLOW_MOUNT_THRESHOLD_SEC:
+            logger.warning(f"[scheduler] Mount {mount_path} is slow: listdir took {elapsed:.1f}s")
+            return 'success', f'Mount responsive but slow ({elapsed:.1f}s)', len(entries)
+        return 'success', f'{len(entries)} entries, {elapsed:.2f}s', len(entries)
+    except TimeoutError as e:
+        logger.error(f"[scheduler] Mount {mount_path} hung past {_LISTDIR_TIMEOUT_SEC}s: {e}")
+        return 'error', f'Mount hung: {e}', 0
+    except Exception as e:  # noqa: BLE001 — FUSE bindings raise non-OSError too
+        # Half-stuck FUSE (mount table entry persists, rclone process
+        # died) returns ENOTCONN here — the canonical failure mode this
+        # probe needs to surface to operators.  Widened beyond OSError
+        # because libfuse bindings can surface decode/parse errors on
+        # corrupted dentry blocks too.
+        logger.error(f"[scheduler] Mount {mount_path} is unresponsive: {e}")
+        return 'error', f'Mount unresponsive: {e}', 0
+
+
 def mount_liveness_probe():
-    """Verify rclone FUSE mount and local library mounts are healthy."""
+    """Verify rclone FUSE mounts (RD/AD + TB) and local library mounts are healthy.
+
+    Probes the primary mount (``BLACKHOLE_RCLONE_MOUNT``) and the TB
+    mount when configured.  Either being dead degrades the overall
+    status — neither mount being silently dead is the failure mode this
+    probe was added to catch.  Plan 39 dual-debrid: pre-fix this only
+    probed the RD mount, so a dead TB mount left the System page green
+    while every TB grab silently timed out at 300s.
+    """
     rclone_mount = os.environ.get('BLACKHOLE_RCLONE_MOUNT', '/data')
 
-    # Check rclone FUSE mount first — this is the primary health signal
-    # and must not be blocked by a stale NFS mount on the local library.
-    if not os.path.isdir(rclone_mount):
-        result = {'status': 'error', 'message': f'Mount path does not exist: {rclone_mount}'}
-    elif not os.path.ismount(rclone_mount):
-        result = {'status': 'error', 'message': f'Not a mount point: {rclone_mount}'}
-    else:
+    # Primary (RD/AD) — always checked.  This is the load-bearing mount;
+    # an absent or unresponsive primary is always an error.
+    primary_status, primary_msg, primary_items = _probe_mount(rclone_mount)
+    if primary_status == 'absent':
+        # Primary missing is a real error (existing behavior).
+        primary_status = 'error'
+
+    # Optional TB mount.  Gated on the same three env vars
+    # ``rclone/rclone.py::_torbox_mount_configured`` checks, so we don't
+    # waste a probe on TB-unconfigured installs.  ``mount_for_debrid(TORBOX)``
+    # always synthesises a path even without credentials (it falls back
+    # to ``/data/torbox``), so a pure-discovery probe would falsely
+    # report 'absent' on every RD-only install — which would be a
+    # constant 'not a mount point' / 'path does not exist' message in
+    # the System UI for users who never enabled TB.  Worse, if a future
+    # change made ``BLACKHOLE_RCLONE_MOUNT`` point to ``/data/torbox``
+    # (an unusual but valid config), the bare-discovery code would
+    # probe the same mount twice.  Env-gate keeps the probe scoped.
+    tb_configured = bool(
+        os.environ.get('TORBOX_API_KEY')
+        and os.environ.get('TORBOX_WEBDAV_USER')
+        and os.environ.get('TORBOX_WEBDAV_PASS')
+    )
+    tb_mount_path = None
+    tb_status, tb_msg, tb_items = None, None, 0
+    if tb_configured:
         try:
-            start = time.time()
-            entries = os.listdir(rclone_mount)
-            elapsed = time.time() - start
-            if elapsed > 5:
-                logger.warning(f"[scheduler] Mount {rclone_mount} is slow: listdir took {elapsed:.1f}s")
-                result = {
-                    'status': 'success',
-                    'message': f'Mount responsive but slow ({elapsed:.1f}s)',
-                    'items': len(entries),
-                }
-            else:
-                result = {
-                    'status': 'success',
-                    'message': f'{len(entries)} entries, {elapsed:.2f}s',
-                    'items': len(entries),
-                }
-        except OSError as e:
-            logger.error(f"[scheduler] Mount {rclone_mount} is unresponsive: {e}")
-            result = {'status': 'error', 'message': f'Mount unresponsive: {e}'}
+            from utils.debrid_routing import TORBOX, mount_for_debrid
+            # ``mount_for_debrid`` needs the parent of the per-debrid mount-name
+            # suffix — same convention as BlackholeWatcher._mount_for and
+            # verify_symlinks.
+            rclonemn = os.environ.get('RCLONE_MOUNT_NAME') or ''
+            base = rclone_mount.rstrip('/')
+            if rclonemn and os.path.basename(base) == rclonemn:
+                parent = os.path.dirname(base)
+                if parent:
+                    base = parent
+            tb_mount_path = mount_for_debrid(TORBOX, rclone_mount_base=base)
+        except Exception as e:
+            logger.debug(f"[scheduler] TB mount discovery failed: {e}")
+
+    if tb_mount_path:
+        tb_status, tb_msg, tb_items = _probe_mount(tb_mount_path)
+
+    # Combine.  TB 'absent' means TB not configured — don't degrade.
+    # TB 'error' means TB configured but dead — degrade to error.
+    if primary_status == 'error':
+        overall = 'error'
+        message = f'RD: {primary_msg}'
+        if tb_status:
+            message += f' | TB ({tb_mount_path}): {tb_msg}'
+    elif tb_status == 'error':
+        overall = 'error'
+        message = f'TB ({tb_mount_path}): {tb_msg} | RD: {primary_msg}'
+    else:
+        overall = 'success'
+        message = primary_msg
+        if tb_status == 'success':
+            message += f' | TB: {tb_msg}'
+
+    result = {
+        'status': overall,
+        'message': message,
+        'items': primary_items,
+    }
+    if tb_status is not None:
+        result['tb_items'] = tb_items
+        result['tb_mount'] = tb_mount_path
+        result['tb_status'] = tb_status
 
     # Check local library paths for real files (detects NFS/SMB mount drops).
     # Runs after the rclone check so a stale NFS mount doesn't block

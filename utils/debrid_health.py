@@ -861,6 +861,13 @@ def run_sweep():
     capped = eligible[:_MAX_PER_SWEEP]
     sleep_seconds = 60.0 / _RATE_LIMIT_PER_MIN
 
+    # Reasons we've already WARNed about in this sweep — keeps the
+    # unhandled-reason logger from spamming when an RD response-shape
+    # drift hits N torrents in the same sweep.  Per-sweep scope (not
+    # module-level) so a future sweep can re-surface the same drift if
+    # nothing's been fixed.
+    unhandled_reasons_seen = set()
+
     for i, (tid, torrent_hash, filename) in enumerate(capped):
         if _stop_event.is_set():
             logger.info("[debrid_health] stop signal received — aborting sweep early")
@@ -881,13 +888,46 @@ def run_sweep():
             'filename': filename,
         }
 
+        # Only act on confirmed filter-blocks ('infringing_file', the
+        # RD May-2026 keyword filter return).  HTTP 404 from
+        # /unrestrict/link is also mapped to status='blocked' with
+        # reason='not_found' — a transient CDN miss, a file being
+        # re-processed by RD, or a stale link from /torrents/info.
+        # Triggering rescue or destructive remediation on a transient
+        # 404 would mass-delete healthy torrents and pollute TB with
+        # speculative adds for files that may reappear on RD a sweep
+        # later.  Re-probe on next sweep; don't touch state.
+        is_filter_block = (
+            status == 'blocked'
+            and (result.get('reason') or '') == 'infringing_file'
+        )
+        # Fail-closed defense: if RD ever ships a new blocked-reason
+        # (e.g. 'dmca_takedown', 'regional_restriction'), the gate
+        # above won't recognise it and no action will run.  Counts
+        # accumulate silently on the dashboard.  Surface drift via a
+        # WARN log so an operator notices before the counts get large.
+        # Throttled per-reason-per-sweep so a 1000-torrent sweep with
+        # the same new reason logs once, not 1000 times.
+        if status == 'blocked' and not is_filter_block:
+            reason = result.get('reason') or '<missing>'
+            if reason != 'not_found' and reason not in unhandled_reasons_seen:
+                # 'not_found' is the documented transient (HTTP 404);
+                # any other unknown reason is RD response-shape drift.
+                logger.warning(
+                    f"[debrid_health] blocked torrent {tid} has "
+                    f"unhandled reason={reason!r} — no action taken. "
+                    f"If RD's response shape has changed, update "
+                    f"probe_file + is_filter_block gate."
+                )
+                unhandled_reasons_seen.add(reason)
+
         # Plan 39 phase 3: cross-debrid rescue BEFORE the existing
         # remediation pipeline.  When RD filter-blocks a torrent and TB
         # has it cached, re-host on TB and retarget arr-library
         # symlinks — no blocklist, no RD delete, no arr re-search.  On
         # any rescue failure (TB not cached / add failed / never ready),
         # fall through to the existing remediate path.
-        if status == 'blocked' and rescue_on:
+        if is_filter_block and rescue_on:
             rescue = _attempt_cross_rescue(torrent_hash, filename,
                                            source_debrid='realdebrid')
             if rescue.get('rescued'):
@@ -954,8 +994,11 @@ def run_sweep():
         # per-sweep cap. Cap exists separately from _MAX_PER_SWEEP so
         # a first-run enable of AUTO_REMEDIATE on a large library can't
         # mass-delete in one shot — remaining blocked entries stay
-        # flagged and remediate on subsequent sweeps.
-        if (status == 'blocked'
+        # flagged and remediate on subsequent sweeps.  Gated on
+        # ``is_filter_block`` (NOT plain ``status == 'blocked'``) so
+        # transient 404 'not_found' responses don't trigger destructive
+        # blocklist + delete + arr re-search.
+        if (is_filter_block
                 and remediate_on
                 and counts['remediated'] < _REMEDIATE_MAX_PER_SWEEP):
             actions = _remediate(client, tid, torrent_hash, filename, result)

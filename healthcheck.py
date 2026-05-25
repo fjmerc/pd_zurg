@@ -34,6 +34,10 @@ try:
         or bool(os.getenv('JF_API_KEY', '').strip())
     )
 
+    # TorBox mount is set up by rclone/rclone.py iff API key + WebDAV
+    # creds are all present — must match _torbox_mount_configured() there.
+    torbox_mount_configured = bool(TORBOXAPIKEY and TORBOXWEBDAVUSER and TORBOXWEBDAVPASS)
+
     process_info = {
         "zurg_rd": {
             "regex": re.compile(r'/zurg/RD/zurg', re.IGNORECASE),
@@ -59,6 +63,11 @@ try:
             "regex": re.compile(rf'rclone {mount_type} {re.escape(RCLONEMN_AD)}:'),
             "error_message": f"The Rclone AD process for {RCLONEMN_AD} is not running.",
             "should_run": str(ZURG).lower() == 'true' and ADAPIKEY and os.path.exists(f'/healthcheck/{RCLONEMN_AD}')
+        },
+        "rclonemn_torbox": {
+            "regex": re.compile(rf'rclone {mount_type} {re.escape(TORBOX_MOUNT_NAME)}:'),
+            "error_message": f"The Rclone TorBox process for {TORBOX_MOUNT_NAME} is not running.",
+            "should_run": torbox_mount_configured and os.path.exists(f'/healthcheck/{TORBOX_MOUNT_NAME}')
         }
     }
 
@@ -68,16 +77,43 @@ try:
         if info["should_run"] and not process_status[process_name]:
             error_messages.append(info["error_message"])
 
-    # Mount liveness — verify FUSE mount is active, not just rclone process
+    # Mount liveness — verify FUSE mount is active, not just rclone process.
+    # ``os.path.ismount`` catches an unmounted dir; ``os.listdir`` inside a
+    # try/except catches a half-stuck FUSE (mount table entry persists,
+    # rclone process dead → every traversal returns ENOTCONN).  Without the
+    # listdir probe a dead FUSE looks healthy because the kernel still
+    # reports the mount in /proc/self/mountinfo.  Exception catch is
+    # broader than ``OSError`` because libfuse bindings can also surface
+    # decode/parse errors on corrupted dentry blocks — any failure here
+    # is a real mount problem the operator needs to see.
+    def _mount_alive(mount_path):
+        if not os.path.ismount(mount_path):
+            return False, "not a mount point"
+        try:
+            os.listdir(mount_path)
+        except Exception as exc:  # noqa: BLE001 — any failure means mount is unusable
+            return False, f"{type(exc).__name__}: {exc}"
+        return True, ""
+
     if str(ZURG).lower() == 'true':
         if RDAPIKEY and os.path.exists(f'/healthcheck/{RCLONEMN_RD}'):
-            mount_path = f'/data/{RCLONEMN_RD}'
-            if not os.path.ismount(mount_path):
-                error_messages.append(f"Rclone mount {mount_path} is not active.")
+            mp = f'/data/{RCLONEMN_RD}'
+            alive, why = _mount_alive(mp)
+            if not alive:
+                error_messages.append(f"Rclone mount {mp} is not active ({why}).")
         if ADAPIKEY and os.path.exists(f'/healthcheck/{RCLONEMN_AD}'):
-            mount_path = f'/data/{RCLONEMN_AD}'
-            if not os.path.ismount(mount_path):
-                error_messages.append(f"Rclone mount {mount_path} is not active.")
+            mp = f'/data/{RCLONEMN_AD}'
+            alive, why = _mount_alive(mp)
+            if not alive:
+                error_messages.append(f"Rclone mount {mp} is not active ({why}).")
+    # TB mount is NOT under the ZURG guard: TorBox uses its own WebDAV
+    # endpoint (webdav.torbox.app) and does not require Zurg to be
+    # enabled.  A TB-only setup with ZURG=false is supported.
+    if torbox_mount_configured and os.path.exists(f'/healthcheck/{TORBOX_MOUNT_NAME}'):
+        mp = f'/data/{TORBOX_MOUNT_NAME}'
+        alive, why = _mount_alive(mp)
+        if not alive:
+            error_messages.append(f"Rclone mount {mp} is not active ({why}).")
 
     # Status server responsiveness (non-fatal — log warning but don't fail healthcheck)
     try:

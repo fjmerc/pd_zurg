@@ -736,6 +736,78 @@ class TestRemediation:
         meta = mock_remediation_deps['log_event'].call_args.kwargs['meta']
         assert meta['info_hash'] == 'CCCC2222'
 
+    def test_blocked_unknown_reason_warns_but_takes_no_action(
+            self, state_path, no_sleep, rd_enabled, auto_remediate_on,
+            mock_remediation_deps, caplog):
+        """Future-proofing: if RD ships a new blocked-reason
+        (``dmca_takedown``, ``regional_restriction``, ...), the gate
+        won't recognise it and no action runs (safe fail-closed).  But
+        the operator must see a WARN so the silent drift gets noticed
+        before counts grow.  Throttled per-reason-per-sweep so a 1000-
+        torrent sweep doesn't log 1000 times."""
+        mystery = {'status': 'blocked', 'reason': 'dmca_takedown', 'http': 451}
+        client = _mock_client(
+            torrents=[
+                _torrent('T1', 'AAAA0000', filename='ToBeDmcad.mkv'),
+                _torrent('T2', 'BBBB1111', filename='AlsoDmcad.mkv'),
+            ],
+            probe_results={'T1': mystery, 'T2': mystery},
+        )
+        client.delete_torrent.return_value = True
+
+        with caplog.at_level('WARNING'):
+            with _patch_client(client):
+                debrid_health.run_sweep()
+
+        # No destructive action.
+        assert client.delete_torrent.call_count == 0
+        assert mock_remediation_deps['blocklist_add'].call_count == 0
+        # WARN fired exactly once for the unknown reason — second
+        # torrent with the same reason is throttled.
+        warn_lines = [
+            r.message for r in caplog.records
+            if r.levelname == 'WARNING' and 'dmca_takedown' in r.message
+        ]
+        assert len(warn_lines) == 1
+
+    def test_blocked_not_found_does_not_trigger_remediation(
+            self, state_path, no_sleep, rd_enabled, auto_remediate_on,
+            mock_remediation_deps):
+        """HTTP 404 from /unrestrict/link maps to ``{status:'blocked',
+        reason:'not_found'}`` — a transient CDN miss, file being re-
+        processed by RD, or stale link from /torrents/info. Pre-fix this
+        triggered the full destructive pipeline (blocklist + delete +
+        arr re-search) on every transient 404. Remediation must gate on
+        ``reason == 'infringing_file'``, not raw status."""
+        not_found = {'status': 'blocked', 'reason': 'not_found', 'http': 404}
+        client = _mock_client(
+            torrents=[
+                _torrent('T1', 'AAAA0000', filename='Transient.mkv'),
+                _torrent('T2', 'BBBB1111', filename='RealBlock.mkv'),
+            ],
+            probe_results={
+                'T1': not_found,
+                'T2': self._BLOCKED,
+            },
+        )
+        client.delete_torrent.return_value = True
+
+        with _patch_client(client):
+            debrid_health.run_sweep()
+
+        # Only the confirmed filter-block triggers destructive remediation.
+        client.delete_torrent.assert_called_once_with('T2')
+        assert mock_remediation_deps['blocklist_add'].call_count == 1
+        assert mock_remediation_deps['blocklist_add'].call_args.args[0] == 'BBBB1111'
+        assert mock_remediation_deps['arr_research'].call_count == 1
+        # State for the 404 torrent IS still persisted (so the dashboard
+        # can show "blocked: 1") but no destructive action runs.
+        with open(state_path) as f:
+            saved = json.load(f)
+        assert saved['probed']['AAAA0000']['status'] == 'blocked'
+        assert saved['probed']['AAAA0000']['reason'] == 'not_found'
+        assert 'remediated' not in saved['probed']['AAAA0000']
+
 
 # ---------------------------------------------------------------------------
 # Phase 4.1: force_episodes — TV re-search must fire even when Sonarr still
@@ -1340,6 +1412,40 @@ class TestCrossRescue:
             c.kwargs.get('meta', {}).get('cause') == _h.CAUSE_DEBRID_RESCUED
             for c in log_calls
         )
+
+    def test_blocked_not_found_does_not_trigger_rescue(
+            self, state_path, no_sleep, rd_enabled, rescue_on, tb_cached,
+            mock_tb_client, arr_library_with_symlink, mock_remediation_deps):
+        """A 404 from /unrestrict/link maps to ``{status:'blocked',
+        reason:'not_found'}`` — a transient CDN miss, file mid re-process,
+        or stale link. Pre-fix this triggered a speculative TB add (waste +
+        ghost-torrent risk) AND symlink retarget (silently broke playback
+        when RD recovered a sweep later). Rescue must gate on
+        ``reason == 'infringing_file'``."""
+        not_found = {'status': 'blocked', 'reason': 'not_found', 'http': 404}
+        lib_root, sym, original_target = arr_library_with_symlink
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000', filename='Release.2025.mkv')],
+            probe_results={'T1': not_found},
+        )
+        with _patch_clients(client, mock_tb_client):
+            debrid_health.run_sweep()
+
+        # TB add must NOT have been called.
+        mock_tb_client.add_magnet.assert_not_called()
+        # Symlink must NOT have been retargeted.
+        assert os.readlink(str(sym)) == original_target
+        # Existing remediation pipeline also NOT triggered (rescue gate
+        # is upstream of remediate gate, both keyed on same reason).
+        assert mock_remediation_deps['blocklist_add'].call_count == 0
+        assert client.delete_torrent.call_count == 0
+        assert mock_remediation_deps['arr_research'].call_count == 0
+        # State persists for dashboard visibility but with no rescue flag.
+        with open(state_path) as f:
+            saved = json.load(f)
+        assert saved['probed']['AAAA0000']['status'] == 'blocked'
+        assert saved['probed']['AAAA0000']['reason'] == 'not_found'
+        assert 'rescued' not in saved['probed']['AAAA0000']
 
     def test_tb_not_cached_falls_through_to_remediation(
             self, state_path, no_sleep, rd_enabled, rescue_on,

@@ -951,7 +951,10 @@ function bulkSearchMissing() {
           })(item, season.number, missingEps);
         }
       }
-    } else if (item.type === 'movie' && item.missing_episodes > 0) {
+    } else if (item.type === 'movie' && (item.missing === true || item.missing_episodes > 0)) {
+      // item.missing===true is the Radarr-monitored-no-file ghost flag.
+      // item.missing_episodes is the legacy shows-only field (always
+      // None for real movies) kept for defensive parity.
       tasks.push({item: item, season: null, episodes: []});
     }
   }
@@ -1757,7 +1760,10 @@ function _resolveMissingTasks(items, callback) {
   var showsToResolve = [];
   for (var i = 0; i < items.length; i++) {
     var item = items[i];
-    if (item.type === 'movie' && item.missing_episodes > 0) {
+    if (item.type === 'movie' && (item.missing === true || item.missing_episodes > 0)) {
+      // Same dual-field gate as the selection-mode task builder —
+      // accept the Radarr-ghost flag (item.missing === true) alongside
+      // the legacy shows-only field for defensive parity.
       movieTasks.push({item: item, season: null, episodes: []});
     } else if (item.type === 'show' && item.missing_episodes > 0) {
       showsToResolve.push(item);
@@ -3570,7 +3576,14 @@ function _confirmBlock() {
 function deleteItem(mediaType) {
   if (!_detailItem) return;
   var svc = mediaType === 'movie' ? 'Radarr' : 'Sonarr';
-  if (!_detailMeta || !_detailMeta.tmdb_id) {
+  // Ghost entries (Radarr-monitored-no-file) carry _radarr_tmdb_id even
+  // when the TMDB cache lookup that populates _detailMeta hasn't fired
+  // yet (e.g. recently-monitored movie not yet in the local cache). Use
+  // that as a fallback so Delete works on ghost movies.
+  var tmdbId = (_detailMeta && _detailMeta.tmdb_id)
+    || (_detailItem && _detailItem._radarr_tmdb_id)
+    || null;
+  if (!tmdbId) {
     _showMsg('Waiting for metadata to load — please try again in a moment.', 'error');
     return;
   }
@@ -3581,7 +3594,7 @@ function deleteItem(mediaType) {
   fetch('/api/library/delete', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({title: titleCopy, type: mediaType, tmdb_id: _detailMeta.tmdb_id, delete_debrid: true, year: _detailItem.year || null})
+    body: JSON.stringify({title: titleCopy, type: mediaType, tmdb_id: tmdbId, delete_debrid: true, year: _detailItem.year || null})
   }).then(function(r) {
     return r.json().then(function(d) { return {ok: r.ok, d: d}; });
   }).then(function(res) {

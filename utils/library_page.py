@@ -576,6 +576,11 @@ let _searchEnabled = false;
 let _searchTimer = null;
 let _refreshTimer = null;
 let _activeWantedPreset = null;
+// One-shot guard: when a Wanted preset is active and the user lands
+// on the page, auto-route to whichever tab has more wanted matches.
+// After the first decision (or any manual tab click), this flag stays
+// true so subsequent library refreshes don't fight the user.
+let _wantedTabAutoLanded = false;
 let _wantedInFlight = false;
 
 function _syncSearchClear() {
@@ -1011,10 +1016,13 @@ function bulkSearchMissing() {
 function switchTab(name) {
   _activeTab = name;
   _lastCheckedIndex = -1;
-  _activeWantedPreset = null;
-  var url = new URL(window.location);
-  url.searchParams.delete('filter');
-  history.replaceState(null, '', url);
+  // Mark auto-land as resolved so subsequent fetches don't override
+  // the user's explicit tab choice. Keep _activeWantedPreset intact
+  // so clicking a tab while in Wanted mode just switches the type
+  // (Movies-wanted ↔ Shows-wanted) instead of exiting Wanted view —
+  // the user reported the old "click tab clears preset" behavior as
+  // friction when ghost-movies started populating the Movies side.
+  _wantedTabAutoLanded = true;
   document.querySelectorAll('.tab').forEach(function(t) {
     const active = t.getAttribute('aria-controls') === 'tab-' + name;
     t.classList.toggle('active', active);
@@ -1622,6 +1630,26 @@ function updateBadges(filteredCount) {
   const yearRange = document.getElementById('year-filter').value;
   const isFiltered = query || source || status || yearRange || _activeWantedPreset;
 
+  // Wanted-preset mode: show each tab's WANTED count on its own badge,
+  // independent of which tab is active. Without this, a user clicking
+  // "Wanted" lands on one tab and has no signal that the other tab
+  // also has wanted items waiting — the user-reported bug after the
+  // ghost-movies fix where Movies and Shows each contain wanted
+  // entries but only one tab is visible at a time.
+  if (_activeWantedPreset) {
+    var movieCount = 0;
+    for (var i = 0; i < _allMovies.length; i++) {
+      if (_matchesWantedPreset(_allMovies[i], _activeWantedPreset)) movieCount++;
+    }
+    var showCount = 0;
+    for (var j = 0; j < _allShows.length; j++) {
+      if (_matchesWantedPreset(_allShows[j], _activeWantedPreset)) showCount++;
+    }
+    document.getElementById('badge-movies').textContent = String(movieCount);
+    document.getElementById('badge-shows').textContent = String(showCount);
+    return;
+  }
+
   if (isFiltered) {
     document.getElementById('badge-movies').textContent =
       _activeTab === 'movies' ? String(filteredCount) : String(_allMovies.length);
@@ -1906,22 +1934,49 @@ function _applyLibraryData(data, opts) {
     _setRefreshButtonDisabled(_scanning);
   }
 
-  // Auto-switch tab if wanted preset has no matches in current tab but other tab does
+  // Wanted-preset landing logic. Two concerns:
+  //   1. First fetch with a wanted preset active: land on whichever
+  //      tab has MORE matches so the user doesn't see the lighter
+  //      side first and miss the heavier one. Only fires once via
+  //      _wantedTabAutoLanded; manual tab clicks also set the flag
+  //      so subsequent fetches don't override the user.
+  //   2. Subsequent fetches: if the active tab has zero matches and
+  //      the other tab has some, switch — keeps the auto-route
+  //      behavior for users who arrive with one tab empty.
   if (!_inDetailView && _activeWantedPreset && _activeWantedPreset !== 'recent') {
-    var _curData = _activeTab === 'movies' ? _allMovies : _allShows;
-    var _othData = _activeTab === 'movies' ? _allShows : _allMovies;
-    var _othTab  = _activeTab === 'movies' ? 'shows' : 'movies';
-    var _hasCur = _curData.some(function(item) { return _matchesWantedPreset(item, _activeWantedPreset); });
-    if (!_hasCur) {
-      var _hasOth = _othData.some(function(item) { return _matchesWantedPreset(item, _activeWantedPreset); });
-      if (_hasOth) {
-        _activeTab = _othTab;
-        document.querySelectorAll('.tab').forEach(function(t) {
-          var active = t.getAttribute('aria-controls') === 'tab-' + _othTab;
-          t.classList.toggle('active', active);
-          t.setAttribute('aria-selected', active ? 'true' : 'false');
-        });
+    var _movieMatches = 0;
+    for (var _mi = 0; _mi < _allMovies.length; _mi++) {
+      if (_matchesWantedPreset(_allMovies[_mi], _activeWantedPreset)) _movieMatches++;
+    }
+    var _showMatches = 0;
+    for (var _si = 0; _si < _allShows.length; _si++) {
+      if (_matchesWantedPreset(_allShows[_si], _activeWantedPreset)) _showMatches++;
+    }
+
+    var _targetTab = null;
+    if (!_wantedTabAutoLanded) {
+      // First land: pick the tab with more wanted matches. Ties go
+      // to the user's current tab (no movement on tie).
+      if (_showMatches > _movieMatches) _targetTab = 'shows';
+      else if (_movieMatches > _showMatches) _targetTab = 'movies';
+      _wantedTabAutoLanded = true;
+    } else {
+      // Subsequent fetch: only switch if current tab is empty AND
+      // the other has matches.
+      var _curEmpty = (_activeTab === 'movies' ? _movieMatches : _showMatches) === 0;
+      var _othHas = (_activeTab === 'movies' ? _showMatches : _movieMatches) > 0;
+      if (_curEmpty && _othHas) {
+        _targetTab = _activeTab === 'movies' ? 'shows' : 'movies';
       }
+    }
+
+    if (_targetTab && _targetTab !== _activeTab) {
+      _activeTab = _targetTab;
+      document.querySelectorAll('.tab').forEach(function(t) {
+        var active = t.getAttribute('aria-controls') === 'tab-' + _targetTab;
+        t.classList.toggle('active', active);
+        t.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
     }
   }
 

@@ -1030,6 +1030,10 @@ function buildBadges(source) {
   }
   if (source === 'local') return '<span class="badge-local"><span class="badge-full">Local</span><span class="badge-mini">L</span></span>';
   if (source === 'debrid') return '<span class="badge-debrid"><span class="badge-full">Debrid</span><span class="badge-mini">D</span></span>';
+  // source='wanted': ghost entries from Radarr (monitored but no file).
+  // Reuse the red .badge-missing styling that episode-level missing
+  // entries already use.
+  if (source === 'wanted') return '<span class="badge-missing"><span class="badge-full">Wanted</span><span class="badge-mini">W</span></span>';
   return '<span class="badge-debrid"><span class="badge-full">' + esc(source) + '</span><span class="badge-mini">?</span></span>';
 }
 
@@ -1077,6 +1081,14 @@ function computeProgress(item) {
   var nk = normTitle(item.title);
   var isPending = !!_pending[nk];
   if (item.type === 'movie') {
+    // Ghost entries (source='wanted', missing=true) from Radarr's
+    // monitored-but-no-file list: render a 0% red bar so the card
+    // clearly signals "not on disk" rather than the misleading 100%
+    // green "Available" that real movies show.
+    if (item.missing === true || item.source === 'wanted') {
+      return {width:'0%', color:'#f85149',
+              tooltip:'Wanted — not yet downloaded'};
+    }
     return {width:'100%', color: isPending ? '#7a43b6' : '#27c24c',
             tooltip: isPending ? 'Switching source' : 'Available'};
   }
@@ -1622,10 +1634,15 @@ function updateBadges(filteredCount) {
 // Wanted preset filters
 // ---------------------------------------------------------------------------
 function _countAiredMissing(item) {
-  // missing_episodes is computed by TMDB cache enrichment (total - have).
-  // season_data from the API only contains episodes WITH files, so we
-  // cannot iterate it for source==='missing' — those entries only exist
-  // after detail-view TMDB metadata merge.
+  // Two sources of "missing" status:
+  //  - Shows: missing_episodes is computed by TMDB cache enrichment
+  //    (total - have). season_data from the API only contains episodes
+  //    WITH files, so we cannot iterate it for source==='missing' —
+  //    those entries only exist after detail-view TMDB metadata merge.
+  //  - Movies: item.missing is set by _apply_radarr_wanted_movies for
+  //    Radarr-monitored entries that have no file yet (ghost entries
+  //    injected by the scanner). Counts as one missing.
+  if (item.missing === true) return 1;
   return (item.missing_episodes || 0) > 0 ? 1 : 0;
 }
 

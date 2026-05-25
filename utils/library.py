@@ -744,6 +744,40 @@ _SONARR_SERIES_TTL = 120
 _sonarr_series_cache = {'data': None, 'ts': 0.0}
 _sonarr_series_lock = threading.Lock()
 
+# Radarr full-movie-list cache, mirroring the Sonarr posture above. Used
+# by _apply_radarr_wanted_movies to inject monitored-but-no-file movies
+# into the library data as "ghost" entries so they surface in the Wanted
+# view. Same TTL — short enough that a manual rescan picks up changes,
+# long enough to span a single scan_read pass without re-hitting Radarr.
+_RADARR_MOVIES_TTL = 120
+_radarr_movies_cache = {'data': None, 'ts': 0.0}
+_radarr_movies_lock = threading.Lock()
+
+
+def _get_radarr_movies_list(client, force_refresh=False):
+    """Fetch Radarr's full movie list with a short TTL cache.
+
+    Returns the raw movie list on success, ``None`` on fetch failure, or
+    ``[]`` when Radarr returns an empty library. Mirrors
+    ``_get_sonarr_series_list``.
+    """
+    now = time.monotonic()
+    with _radarr_movies_lock:
+        if not force_refresh:
+            cached = _radarr_movies_cache.get('data')
+            ts = _radarr_movies_cache.get('ts', 0.0)
+            if cached is not None and (now - ts) < _RADARR_MOVIES_TTL:
+                return cached
+    try:
+        movie_list = client.get_all_movies() or []
+    except Exception as e:
+        logger.warning(f"[library] Could not fetch Radarr movies: {e}")
+        return None
+    with _radarr_movies_lock:
+        _radarr_movies_cache['data'] = movie_list
+        _radarr_movies_cache['ts'] = now
+    return movie_list
+
 
 def _get_sonarr_series_list(client, force_refresh=False):
     """Fetch Sonarr's full series list with a short TTL cache.
@@ -942,6 +976,128 @@ def _apply_sonarr_monitored_filter(shows):
         # to the TMDB total and doesn't draw a divide-by-zero bar.
         if monitored_total > 0:
             show['monitored_episodes'] = monitored_total
+
+
+def _apply_radarr_wanted_movies(movies, pending=None):
+    """Inject Radarr-monitored movies with no file into the movie list as
+    "ghost" entries so they surface in the Wanted view.
+
+    The library scanner reads from disk (mount + local), so a movie that
+    Radarr knows you want but hasn't downloaded yet is invisible to the
+    rest of the pipeline. Without this function, the Wanted filter only
+    works for shows (where ``missing_episodes > 0`` flags shows whose
+    library entries exist but lack some episodes). This adds the missing
+    half of that experience for movies.
+
+    Ghost entry shape::
+
+        {'title', 'year', 'source': 'wanted', 'size_bytes': 0,
+         'path': '', 'missing': True,
+         '_radarr_id': <int>, '_radarr_tmdb_id': <int>}
+
+    Source is set to a new ``'wanted'`` label that is intentionally
+    outside the ``('local', 'debrid', 'both')`` set used by everywhere
+    else in the codebase. Existing source-conditional code paths
+    (preference enforcement, symlink work, library stats bucketing) all
+    use ``src in ('local', 'debrid', 'both')`` checks that naturally
+    skip ghost entries — no defensive changes required at those sites.
+
+    Dedup: a Radarr movie is suppressed when an existing library entry
+    matches it via either the Radarr-supplied ``tmdbId`` OR the
+    normalized title + year pair. TMDB ID is the unambiguous path;
+    title+year fallback handles legacy library entries that pre-date
+    TMDB enrichment.
+
+    Pending suppression: a Radarr movie currently being downloaded is
+    already counted under the 'pending' bucket via the existing
+    ``pending_monitors`` mechanism; we skip the ghost so it doesn't
+    double-count.
+
+    Radarr-unavailable or movie-list-fetch-fails posture: log a debug
+    note and return without injecting. The scan continues with whatever
+    real movies it discovered.
+
+    Returns the count of ghost entries injected (for caller logging).
+    """
+    pending = pending or {}
+    try:
+        from utils.arr_client import get_download_service
+        client, svc = get_download_service('movie')
+    except Exception as e:
+        logger.debug(f"[library] Radarr unavailable for wanted-movies: {e}")
+        return 0
+    if not client or svc != 'radarr':
+        return 0
+
+    radarr_movies = _get_radarr_movies_list(client)
+    if not radarr_movies:
+        return 0
+
+    # Build dedup keys from the existing movies list. TMDB ID set is
+    # authoritative; the (norm_title, year) fallback catches entries
+    # without a tmdb_id (e.g. hand-imported libraries).
+    existing_tmdb_ids = set()
+    existing_keys = set()
+    for m in movies:
+        tid = m.get('tmdb_id')
+        if tid:
+            existing_tmdb_ids.add(tid)
+        norm = _normalize_title(m.get('title') or '')
+        if norm:
+            existing_keys.add((norm, m.get('year')))
+
+    injected = 0
+    for rm in radarr_movies:
+        if not isinstance(rm, dict):
+            continue
+        if not rm.get('monitored'):
+            continue
+        if rm.get('hasFile'):
+            continue
+        title = rm.get('title') or ''
+        if not title:
+            continue
+        year = rm.get('year')
+        tmdb_id = rm.get('tmdbId')
+
+        if tmdb_id and tmdb_id in existing_tmdb_ids:
+            continue
+        norm = _normalize_title(title)
+        if (norm, year) in existing_keys:
+            continue
+
+        # Pending state suppression: if this title (or any alias) is in
+        # the pending dict, the existing pending/unavailable buckets
+        # already account for it.
+        if pending:
+            pe = pending.get(norm)
+            if not pe and _scanner is not None:
+                for alias in _scanner.aliases_for(norm):
+                    pe = pending.get(alias)
+                    if pe:
+                        break
+            if pe:
+                continue
+
+        ghost = {
+            'title': title,
+            'year': year,
+            'source': 'wanted',
+            'size_bytes': 0,
+            'path': '',
+            'missing': True,
+            '_radarr_id': rm.get('id'),
+            '_radarr_tmdb_id': tmdb_id,
+        }
+        movies.append(ghost)
+        injected += 1
+        # Update dedup keys so a duplicate Radarr entry (rare but
+        # possible across reboots / data bugs) doesn't double-inject.
+        if tmdb_id:
+            existing_tmdb_ids.add(tmdb_id)
+        existing_keys.add((norm, year))
+
+    return injected
 
 
 def _normalize_title(title):
@@ -1729,6 +1885,20 @@ class LibraryScanner:
             key = _normalize_title(lm['title'])
             if key not in debrid_movie_keys and key not in merged_local_movie_keys:
                 movies.append(lm)
+
+        # Inject ghost entries for Radarr-monitored movies that have no
+        # file yet, so they surface in the Wanted view. Done after the
+        # debrid+local merge so dedup keys see the full real-movie set,
+        # and before TMDB enrichment so ghost entries also pick up
+        # posters/imdb_ids. Silently no-ops when Radarr is unavailable.
+        try:
+            from utils.library_prefs import get_all_pending as _gap
+            _pending_snapshot = _gap() or {}
+        except Exception:
+            _pending_snapshot = {}
+        ghosts_added = _apply_radarr_wanted_movies(movies, pending=_pending_snapshot)
+        if ghosts_added:
+            logger.debug(f"[library] Injected {ghosts_added} Radarr wanted movie(s) as ghost entries")
 
         # Merge debrid + local shows with episode-level cross-referencing
         local_show_map = {_normalize_title(ls['title']): ls for ls in local_shows}
@@ -5027,7 +5197,14 @@ def compute_library_stats(data):
     episodes_size_by_src = {s: 0 for s in sources}
 
     for movie in data.get('movies', []) or []:
+        # Ghost entries from _apply_radarr_wanted_movies (source='wanted')
+        # are Radarr-monitored-but-not-downloaded items. They aren't part
+        # of the on-disk library, so they MUST NOT count toward local /
+        # debrid / both buckets — otherwise the Library Composition card
+        # would inflate the totals with content that doesn't exist yet.
         src = movie.get('source') or 'debrid'
+        if src == 'wanted':
+            continue
         if src not in movies_by_src:
             src = 'debrid'
         movies_by_src[src] += 1
@@ -5132,8 +5309,13 @@ def get_wanted_counts(data, pending=None):
             counts['fallback'] += 1
 
     for movie in data.get('movies', []):
-        me = movie.get('missing_episodes')
-        if me is not None and me > 0:
+        # Ghost entries from _apply_radarr_wanted_movies carry
+        # ``missing=True``; real entries don't have this key. The old
+        # ``missing_episodes`` check here was always False for movies
+        # (the field is only assigned by show enrichment), so the
+        # 'missing' bucket effectively excluded movies entirely until
+        # this fix landed.
+        if movie.get('missing'):
             counts['missing'] += 1
 
         pe = _pending_for(movie.get('title', ''))

@@ -209,6 +209,8 @@ ENV_SCHEMA = [
             ('DEBRID_UNAVAILABLE_THRESHOLD_DAYS', 'Debrid Unavailable After (days)', 'number:1-30', False, 'Days of failed searches before marking content as debrid-unavailable (default: 3)'),
             ('PENDING_WARNING_HOURS', 'Pending Warning After (hours)', 'number:0-168', False, 'Hours before sending a warning notification for stuck pending items (default: 24, 0 to disable)'),
             ('GAP_FILL_ENABLED', 'Gap-Fill Missing Episodes', 'boolean', False, 'Reconcile every monitored show against TMDB and search Sonarr/Radarr for aired episodes missing from both debrid and local, regardless of source preference. Also auto-enables re-search for broken symlinks during verify_symlinks. Set OFF to opt out (default: true)'),
+            ('LIBRARY_RESCAN_NFS_DELAY', 'NFS Rescan Delay (seconds)', 'number:0-300', False,
+             'Sleep this many seconds between creating new debrid symlinks and firing Sonarr/Radarr rescans. Default 0 (no delay) — bump to 30 if Sonarr/Radarr reads the symlink directory over NFS and you see "hasFile=false" right after a scan that later imports cleanly on its own. The arr-side kernel attribute cache (default 30-60s TTL on most NFS mounts) hides freshly-created symlinks from the rescan walk; this delay lets the cache expire first. Clamped to [0, 300] (default: 0).'),
         ],
     },
     {
@@ -619,6 +621,11 @@ def validate_env_values(values):
         'BLACKHOLE_MOUNT_POLL_TIMEOUT': (30, 3600),
         'BLACKHOLE_MOUNT_POLL_INTERVAL': (5, 120),
         'BLACKHOLE_SYMLINK_MAX_AGE': (0, 720),
+        # Plan 41 phase B.2 — NFS attribute-cache delay before arr rescans.
+        # Runtime ``_resolve_nfs_rescan_delay`` clamps to [0, 300]; the
+        # validation here surfaces an out-of-range value to the user
+        # rather than silently clamping behind their back.
+        'LIBRARY_RESCAN_NFS_DELAY': (0, 300),
         # Quality compromise (plan 33) — integer fields
         'QUALITY_COMPROMISE_DWELL_DAYS': (1, 30),
         'QUALITY_COMPROMISE_MIN_SEEDERS': (0, 1000),

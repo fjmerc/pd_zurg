@@ -5062,3 +5062,390 @@ class TestScanMountFlatLayout:
         # produces ONE show with 3 episodes.
         assert len(shows) == 1
         assert shows[0]['episodes'] == 3
+
+
+class TestResolveNfsRescanDelay:
+    """Plan 41 phase B.2 — NFS attribute-cache delay between symlink
+    creation and arr rescan trigger."""
+
+    def test_unset_returns_zero(self, monkeypatch):
+        from utils.library import _resolve_nfs_rescan_delay
+        monkeypatch.delenv('LIBRARY_RESCAN_NFS_DELAY', raising=False)
+        assert _resolve_nfs_rescan_delay() == 0
+
+    def test_empty_string_returns_zero(self, monkeypatch):
+        from utils.library import _resolve_nfs_rescan_delay
+        monkeypatch.setenv('LIBRARY_RESCAN_NFS_DELAY', '')
+        assert _resolve_nfs_rescan_delay() == 0
+
+    def test_valid_value_honoured(self, monkeypatch):
+        from utils.library import _resolve_nfs_rescan_delay
+        monkeypatch.setenv('LIBRARY_RESCAN_NFS_DELAY', '30')
+        assert _resolve_nfs_rescan_delay() == 30
+
+    def test_value_at_max_boundary(self, monkeypatch):
+        from utils.library import _resolve_nfs_rescan_delay
+        monkeypatch.setenv('LIBRARY_RESCAN_NFS_DELAY', '300')
+        assert _resolve_nfs_rescan_delay() == 300
+
+    def test_value_clamped_above_max(self, monkeypatch):
+        """A typo (`9999`, `3600` etc.) cannot stall the scan loop indefinitely."""
+        from utils.library import _resolve_nfs_rescan_delay
+        monkeypatch.setenv('LIBRARY_RESCAN_NFS_DELAY', '9999')
+        assert _resolve_nfs_rescan_delay() == 300
+
+    def test_negative_clamped_to_zero(self, monkeypatch):
+        from utils.library import _resolve_nfs_rescan_delay
+        monkeypatch.setenv('LIBRARY_RESCAN_NFS_DELAY', '-5')
+        assert _resolve_nfs_rescan_delay() == 0
+
+    def test_non_integer_falls_back_to_zero(self, monkeypatch):
+        """A typo shouldn't crash the scanner — disable the mitigation."""
+        from utils.library import _resolve_nfs_rescan_delay
+        monkeypatch.setenv('LIBRARY_RESCAN_NFS_DELAY', 'abc')
+        assert _resolve_nfs_rescan_delay() == 0
+
+    def test_float_string_falls_back_to_zero(self, monkeypatch):
+        """``int('30.5')`` raises ValueError — caller treats as misconfigured."""
+        from utils.library import _resolve_nfs_rescan_delay
+        monkeypatch.setenv('LIBRARY_RESCAN_NFS_DELAY', '30.5')
+        assert _resolve_nfs_rescan_delay() == 0
+
+
+class TestDetectTvMarker:
+    """Plan 41 phase B.1 — folder-name TV-marker recognition that
+    rescues TB flat-layout season packs from being mis-bucketed as
+    movies.  Pure-function tests against the helper; the integration
+    with ``_scan_mount`` is covered by the existing flat-layout tests
+    (TestPhase4DualDebridMerge) once the synthetic content is dropped
+    on a tmp dir.
+    """
+
+    def test_canonical_episode_marker(self):
+        from utils.library import _detect_tv_marker
+        # The case _collect_episodes already handles — must still True.
+        assert _detect_tv_marker('Andor.S02E01.1080p.WEB-DL') is True
+
+    def test_season_only_pack(self):
+        """The headline regression — S22.COMPLETE has no episode marker."""
+        from utils.library import _detect_tv_marker
+        assert _detect_tv_marker('Greys.Anatomy.S22.COMPLETE.1080p.WEB.H264-AMB3R') is True
+
+    def test_season_only_with_quality_tag(self):
+        from utils.library import _detect_tv_marker
+        assert _detect_tv_marker('Show.Name.S03.1080p.ATVP.WEB-DL') is True
+
+    def test_multi_season_range(self):
+        """For.All.Mankind.S01-S04 pattern."""
+        from utils.library import _detect_tv_marker
+        assert _detect_tv_marker('For.All.Mankind.S01-S04.COMPLETE') is True
+
+    def test_multi_season_range_alt_form(self):
+        """S01-04 form (no second S) and en-dash form."""
+        from utils.library import _detect_tv_marker
+        assert _detect_tv_marker('Show.Name.S01-04.1080p') is True
+        assert _detect_tv_marker('Show.Name.S01–S04.1080p') is True
+
+    def test_season_word_form(self):
+        from utils.library import _detect_tv_marker
+        assert _detect_tv_marker('Show.Name.Season.3.1080p.WEB-DL') is True
+        assert _detect_tv_marker('Show.Name.Season 3.1080p') is True
+        assert _detect_tv_marker('Show.Name.Seasons.1.Complete') is True
+
+    def test_real_movie_returns_false(self):
+        from utils.library import _detect_tv_marker
+        # No TV markers — should bucket as movie.
+        assert _detect_tv_marker('Dune.Part.Two.2024.1080p.WEB-DL.DDP5.1.x264-NTb') is False
+        assert _detect_tv_marker('Gattaca.1997.1080p.BluRay.x264') is False
+
+    def test_year_only_not_misclassified_as_season(self):
+        """``2024`` mustn't accidentally match — the season-only regex is
+        anchored to ``S`` prefix so a 4-digit year doesn't trigger."""
+        from utils.library import _detect_tv_marker
+        assert _detect_tv_marker('Documentary.2024.1080p.WEB-DL') is False
+
+    def test_empty_string(self):
+        from utils.library import _detect_tv_marker
+        assert _detect_tv_marker('') is False
+        assert _detect_tv_marker(None) is False
+
+    def test_sxxexx_inside_movie_name_still_tv(self):
+        """If a folder name has ``S01E01`` anywhere, classify as TV even
+        if the rest looks movie-ish."""
+        from utils.library import _detect_tv_marker
+        assert _detect_tv_marker('Some.Title.2024.S01E01.1080p') is True
+
+    def test_season_only_in_middle_of_name(self):
+        """``Show.S22.Title`` (season tag not at end) still matches."""
+        from utils.library import _detect_tv_marker
+        assert _detect_tv_marker('Greys.S22.Anatomy.WEB-DL') is True
+
+
+class TestScanMountTvMarkerFallback:
+    """Plan 41 phase B.1 integration: ``_scan_mount`` correctly buckets
+    a season-pack folder as TV even when ``_collect_episodes`` returns
+    empty (no SxxExx files inside the folder).
+    """
+
+    def _make_scanner(self, mount_path, monkeypatch):
+        monkeypatch.delenv("BLACKHOLE_LOCAL_LIBRARY_MOVIES", raising=False)
+        monkeypatch.delenv("BLACKHOLE_LOCAL_LIBRARY_TV", raising=False)
+        library._scanner = None
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._mount_path = mount_path
+        scanner._local_movies_path = None
+        scanner._local_tv_path = None
+        scanner._cache = None
+        scanner._cache_time = 0
+        scanner._ttl = 600
+        scanner._lock = threading.Lock()
+        scanner._scanning = False
+        scanner._effects_running = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
+        scanner._capabilities_path = '/dev/null/library_capabilities.json'
+        return scanner
+
+    def test_season_pack_no_episode_files_classified_as_show(self, tmp_dir, monkeypatch):
+        """The headline regression: TB flat-layout season pack folder
+        without SxxExx-tagged media inside is now a show, not a movie."""
+        # Folder name with S22 marker but EMPTY contents (TB caching).
+        pack_dir = os.path.join(tmp_dir, 'Greys.Anatomy.S22.COMPLETE.1080p.WEB.H264-AMB3R')
+        os.makedirs(pack_dir)
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        movies, shows = scanner._scan_mount(tmp_dir, flat_layout=True)
+
+        # Must be in shows, not movies.
+        show_titles = {s['title'] for s in shows}
+        movie_titles = {m['title'] for m in movies}
+        assert any('grey' in t.lower() or 'anatomy' in t.lower() for t in show_titles), \
+            f"expected Grey's Anatomy in shows; shows={show_titles}, movies={movie_titles}"
+        assert not any('grey' in t.lower() or 'anatomy' in t.lower() for t in movie_titles), \
+            f"Grey's Anatomy should not appear in movies; movies={movie_titles}"
+
+    def test_multi_season_pack_classified_as_show(self, tmp_dir, monkeypatch):
+        pack_dir = os.path.join(tmp_dir, 'For.All.Mankind.S01-S04.COMPLETE.1080p')
+        os.makedirs(pack_dir)
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        movies, shows = scanner._scan_mount(tmp_dir, flat_layout=True)
+
+        show_titles = {s['title'].lower() for s in shows}
+        assert any('mankind' in t for t in show_titles), \
+            f"expected For All Mankind in shows; got {show_titles}"
+
+    def test_real_movie_still_classified_as_movie(self, tmp_dir, monkeypatch):
+        """Regression-guard: a folder with no TV markers stays a movie."""
+        movie_dir = os.path.join(tmp_dir, 'Dune.Part.Two.2024.1080p.WEB-DL.x264-NTb')
+        os.makedirs(movie_dir)
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        movies, shows = scanner._scan_mount(tmp_dir, flat_layout=True)
+
+        movie_titles = {m['title'].lower() for m in movies}
+        show_titles = {s['title'].lower() for s in shows}
+        assert any('dune' in t for t in movie_titles), \
+            f"expected Dune in movies; movies={movie_titles}, shows={show_titles}"
+        assert not any('dune' in t for t in show_titles)
+
+
+class TestScanMountPathSwapOnHeavierFolder:
+    """Plan 41 phase B bug-hunter LOW #3 fix: when the same show is
+    encountered first as an empty-marker entry (B.1 TV-marker fallback,
+    season pack with no SxxExx files cached yet) and later in the same
+    scan as a populated entry, the show's ``path`` field must point at
+    the populated folder so downstream ``date_added``/symlink-target
+    consumers stat a populated dir.
+    """
+
+    def _make_scanner(self, mount_path, monkeypatch):
+        monkeypatch.delenv("BLACKHOLE_LOCAL_LIBRARY_MOVIES", raising=False)
+        monkeypatch.delenv("BLACKHOLE_LOCAL_LIBRARY_TV", raising=False)
+        library._scanner = None
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._mount_path = mount_path
+        scanner._local_movies_path = None
+        scanner._local_tv_path = None
+        scanner._cache = None
+        scanner._cache_time = 0
+        scanner._ttl = 600
+        scanner._lock = threading.Lock()
+        scanner._scanning = False
+        scanner._effects_running = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
+        scanner._capabilities_path = '/dev/null/library_capabilities.json'
+        return scanner
+
+    def test_populated_folder_wins_over_empty_marker(self, tmp_dir, monkeypatch):
+        """Empty-marker folder seen first, populated folder second —
+        show entry's ``path`` ends up on the populated folder."""
+        empty_dir = os.path.join(tmp_dir, 'Greys.Anatomy.S22.COMPLETE.1080p')
+        os.makedirs(empty_dir)  # zero files inside
+
+        # Same normalised title (Grey's Anatomy → 'greys anatomy') with
+        # SxxExx files inside.  Name AFTER the empty one alphabetically
+        # so os.scandir likely returns empty first.  Both folders share
+        # the same normalised title key.
+        populated_dir = os.path.join(tmp_dir, 'Greys.Anatomy.S22E01.1080p.WEB-DL')
+        os.makedirs(populated_dir)
+        with open(os.path.join(populated_dir, 'Greys.Anatomy.S22E01.mkv'), 'w') as f:
+            f.write('x')
+        with open(os.path.join(populated_dir, 'Greys.Anatomy.S22E02.mkv'), 'w') as f:
+            f.write('x')
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        movies, shows = scanner._scan_mount(tmp_dir, flat_layout=True)
+
+        # Find the Grey's Anatomy show entry.
+        candidates = [s for s in shows if 'grey' in s['title'].lower() or 'anatomy' in s['title'].lower()]
+        assert len(candidates) == 1, \
+            f"expected 1 Grey's Anatomy entry, got {len(candidates)}: {[s['title'] for s in shows]}"
+        show = candidates[0]
+
+        # The show entry's path must point at the populated folder, NOT
+        # the empty marker.  Pre-fix path stayed on whichever os.scandir
+        # returned first — typically the empty one.
+        assert show['path'] == populated_dir, \
+            f"path should be populated folder; got {show['path']} (empty={empty_dir})"
+        assert show['episodes'] == 2
+
+
+class TestMergeShowGroup:
+    """Plan 41 phase B second-pass reviewer fix-up: ``_merge_show_group``
+    is the single source of truth for show-group merging used by both
+    ``_scan_mount`` (FUSE) and ``_webdav_scan_mount`` (WebDAV).  Pin
+    the semantics here so the two scan paths can't drift again.
+    """
+
+    def test_inserts_fresh_entry(self):
+        from utils.library import _merge_show_group
+        groups = {}
+        eps = {(1, 1): {'file': 'ep1.mkv'}}
+        _merge_show_group(groups, 'show1', 'Show One', 2024, eps, '/mnt/show1')
+        assert groups == {
+            'show1': {
+                'title': 'Show One',
+                'year': 2024,
+                'episodes': {(1, 1): {'file': 'ep1.mkv'}},
+                'path': '/mnt/show1',
+            },
+        }
+
+    def test_merge_adds_new_episodes(self):
+        from utils.library import _merge_show_group
+        groups = {
+            'show1': {
+                'title': 'Show One',
+                'year': 2024,
+                'episodes': {(1, 1): {'file': 'ep1.mkv'}},
+                'path': '/mnt/folder_a',
+            },
+        }
+        eps = {(1, 2): {'file': 'ep2.mkv'}}
+        _merge_show_group(groups, 'show1', 'Show One', 2024, eps, '/mnt/folder_b')
+        # Both episodes present.
+        assert set(groups['show1']['episodes'].keys()) == {(1, 1), (1, 2)}
+
+    def test_path_swap_when_new_has_more_episodes(self):
+        """The headline B.1 fix — empty-marker folder seen first loses
+        to populated folder for the same show."""
+        from utils.library import _merge_show_group
+        groups = {
+            'show1': {
+                'title': 'Show One',
+                'year': None,
+                'episodes': {},  # empty marker
+                'path': '/mnt/empty_marker',
+            },
+        }
+        eps = {(1, n): {'file': f'ep{n}.mkv'} for n in range(1, 6)}
+        _merge_show_group(groups, 'show1', 'Show One', 2024, eps, '/mnt/populated')
+        assert groups['show1']['path'] == '/mnt/populated', \
+            "populated folder must win over empty marker"
+
+    def test_path_stays_when_existing_has_more(self):
+        from utils.library import _merge_show_group
+        groups = {
+            'show1': {
+                'title': 'Show One',
+                'year': 2024,
+                'episodes': {(1, n): {'file': f'ep{n}.mkv'} for n in range(1, 11)},
+                'path': '/mnt/heavy',
+            },
+        }
+        eps = {(2, 1): {'file': 'ep21.mkv'}, (2, 2): {'file': 'ep22.mkv'}}
+        _merge_show_group(groups, 'show1', 'Show One', 2024, eps, '/mnt/light')
+        # 2 < 10 — heavy folder stays.
+        assert groups['show1']['path'] == '/mnt/heavy'
+
+    def test_path_stays_on_equal_count(self):
+        """Equal counts keep the first-seen path for stability."""
+        from utils.library import _merge_show_group
+        groups = {
+            'show1': {
+                'title': 'Show One',
+                'year': 2024,
+                'episodes': {(1, 1): {'file': 'ep1.mkv'}, (1, 2): {'file': 'ep2.mkv'}},
+                'path': '/mnt/first',
+            },
+        }
+        # Two new episodes; matches stored count — no swap.
+        eps = {(2, 1): {'file': 'ep21.mkv'}, (2, 2): {'file': 'ep22.mkv'}}
+        _merge_show_group(groups, 'show1', 'Show One', 2024, eps, '/mnt/second')
+        assert groups['show1']['path'] == '/mnt/first'
+
+    def test_year_propagated_when_existing_has_none(self):
+        from utils.library import _merge_show_group
+        groups = {
+            'show1': {
+                'title': 'show one',  # lowercased
+                'year': None,
+                'episodes': {},
+                'path': '/mnt/old',
+            },
+        }
+        _merge_show_group(groups, 'show1', 'Show One', 2024, {}, '/mnt/new')
+        # Year propagated.
+        assert groups['show1']['year'] == 2024
+        # Title swapped to the year-bearing one.
+        assert groups['show1']['title'] == 'Show One'
+
+    def test_per_season_episode_count_preference(self):
+        """Higher per-season count wins on key collision."""
+        from utils.library import _merge_show_group
+        groups = {
+            'show1': {
+                'title': 'Show',
+                'year': 2024,
+                'episodes': {
+                    (1, 1): {'file': 'low_quality.mkv', '_folder_ep_count': 1},
+                },
+                'path': '/mnt/old',
+            },
+        }
+        eps = {
+            (1, 1): {'file': 'high_quality.mkv', '_folder_ep_count': 10},
+        }
+        _merge_show_group(groups, 'show1', 'Show', 2024, eps, '/mnt/new')
+        # Season-pack version wins.
+        assert groups['show1']['episodes'][(1, 1)]['file'] == 'high_quality.mkv'

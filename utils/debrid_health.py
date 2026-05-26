@@ -418,118 +418,79 @@ def _attempt_cross_rescue(torrent_hash, filename, source_debrid='realdebrid'):
     event with this dict's meta fields.
 
     Failure modes are all soft — never raises, never partially mutates.
-    """
-    # Today's only rescue direction is RD → TB.  AD → TB or TB → RD will
-    # come later if the user enables those combinations; for now keep
-    # the check explicit so future combinations land as code additions,
-    # not silent fallthroughs.
-    if source_debrid != 'realdebrid':
-        return {'rescued': False, 'reason': 'unsupported_source'}
 
-    alt = 'torbox'
-    alt_key = os.environ.get('TORBOX_API_KEY')
+    Plan 41 phase A — the cache-probe + add + wait-for-ready core is
+    delegated to ``utils.debrid_routing.attempt_add_rescue`` so the
+    sweep-driven and blackhole-add-time rescues share one implementation.
+    Plex-active-session guard and symlink retargeting stay inline since
+    they are debrid_health-specific (add-time rescues have no existing
+    symlinks to disrupt).
+    """
+    from utils.debrid_routing import attempt_add_rescue, pick_alt_debrid
+    from utils.blackhole import TB_READY_STATES
+
+    # Pre-resolve the alt-debrid client in debrid_health's namespace so
+    # ``get_debrid_client`` is the locally-imported symbol — that's the
+    # one the rescue test suite patches via ``_patch_clients``.  Passing
+    # the resolved client into the shared helper avoids the helper
+    # re-importing get_debrid_client from a namespace tests don't patch.
+    alt = pick_alt_debrid(source_debrid)
+    if not alt:
+        # Distinguish unsupported source from "user only has one debrid"
+        # to match the pre-refactor reason vocabulary.
+        from utils.debrid_routing import configured_debrids
+        configured = configured_debrids()
+        reason = 'unsupported_source' if source_debrid not in configured else 'no_alt_configured'
+        return {'rescued': False, 'reason': reason}
+
+    alt_key = os.environ.get(f'{alt.upper()}_API_KEY')
     if not alt_key:
         return {'rescued': False, 'reason': 'no_alt_configured'}
 
-    # Cache-check first — adding an uncached hash would start a TB
-    # download we don't want.  Rescue is a HIT-CACHED operation.
     try:
-        from utils.search import check_debrid_cache
-        cache_map = check_debrid_cache(
-            [torrent_hash.lower()], service=alt, api_key=alt_key,
-        )
-        cached = cache_map.get(torrent_hash.lower())
+        alt_client, _svc = get_debrid_client(service=alt, api_key=alt_key)
     except Exception as e:
         logger.warning(
-            f"[debrid_health] rescue cache probe failed for "
-            f"{torrent_hash[:8]}…: {type(e).__name__}"
+            f"[debrid_health] rescue get_debrid_client failed: "
+            f"{type(e).__name__}"
         )
-        return {'rescued': False, 'reason': 'cache_probe_error'}
-
-    if cached is not True:
-        return {'rescued': False, 'reason': 'not_cached_on_alt'}
-
-    # Add to the alt debrid.  TB accepts a hash-only magnet via the
-    # standard /torrents/createtorrent endpoint we already use for the
-    # blackhole add path.
-    alt_client, _svc = get_debrid_client(service=alt, api_key=alt_key)
-    if alt_client is None or not alt_client.configured:
+        return {'rescued': False, 'reason': 'no_alt_client'}
+    if alt_client is None or not getattr(alt_client, 'configured', False):
         return {'rescued': False, 'reason': 'no_alt_client'}
 
-    try:
-        alt_tid = alt_client.add_magnet(torrent_hash)
-    except Exception as e:
-        logger.warning(
-            f"[debrid_health] rescue add_magnet failed for "
-            f"{torrent_hash[:8]}…: {type(e).__name__}"
-        )
-        return {'rescued': False, 'reason': 'add_error'}
-    if not alt_tid:
-        return {'rescued': False, 'reason': 'add_failed'}
+    core = attempt_add_rescue(
+        torrent_hash, source_debrid,
+        alt_debrid=alt,
+        alt_client=alt_client,
+        ready_states=TB_READY_STATES,
+        stop_event=_stop_event,
+        ready_timeout=_RESCUE_READY_TIMEOUT,
+        poll_interval=_RESCUE_POLL_INTERVAL,
+        logger_prefix='debrid_health',
+    )
+    if not core.get('rescued'):
+        # Pass through the failure reason.  Tests + callers read
+        # ``tb_torrent_id`` (the legacy field name) for cleanup hints
+        # when the rescue allocated an alt entry but couldn't reach
+        # ready — rename for back-compat.
+        result = {'rescued': False, 'reason': core.get('reason', 'error')}
+        if core.get('alt_torrent_id'):
+            result['tb_torrent_id'] = core['alt_torrent_id']
+        return result
 
-    # Honour a stop signal received between ``add_magnet`` and the poll
-    # loop — don't burn an outbound API call we know we'll discard.
-    # Clean up the in-flight TB add so we don't leave a stale entry.
-    if _stop_event.is_set():
-        try:
-            alt_client.delete_torrent(alt_tid)
-        except Exception:
-            pass
-        return {'rescued': False, 'reason': 'stop_requested',
-                'tb_torrent_id': alt_tid}
-
-    # Poll for ready.  TB caches resolve in seconds for hit-cached adds
-    # — the ``_RESCUE_READY_TIMEOUT`` module constant is the upper bound
-    # covering the slowest observed case during plan 39 smoke testing.
-    # Uncached on alt (post-add) is treated as miss; we don't want to
-    # leave a stale "downloading on TB" entry around if the cache probe
-    # lied.  Tests monkeypatch the constants directly to avoid touching
-    # ``time.time`` globally (which would break pytest's own timing).
-    #
-    # The interval sleep uses ``_stop_event.wait()`` (not ``time.sleep()``)
-    # so a SIGTERM mid-rescue aborts within one poll interval rather than
-    # stalling the scheduler's 15s join window.
-    deadline = time.time() + _RESCUE_READY_TIMEOUT
-    is_ready = False
-    while time.time() < deadline:
-        if _stop_event.is_set():
-            break
-        try:
-            state_str = alt_client.torrent_status(alt_tid)
-        except Exception:
-            state_str = ''
-        # Strip + lower in case the provider returns whitespace or
-        # capital-cased status strings (TB docs are inconsistent across
-        # endpoints; defensive normalisation).  Accept TB's full ready
-        # set: ``cached`` (instant cache hit — the dominant rescue case
-        # since cross-rescue is gated on TB-cached cache probe), plus
-        # ``completed`` / ``uploading`` for full-BT-cycle torrents.
-        # Imported from blackhole's TB_READY_STATES so both code paths
-        # stay in lock-step — pre-fix this checked only 'completed' and
-        # silently timed out on every cached-hit rescue.
-        from utils.blackhole import TB_READY_STATES
-        if (state_str or '').strip().lower() in TB_READY_STATES:
-            is_ready = True
-            break
-        if _stop_event.wait(_RESCUE_POLL_INTERVAL):
-            break
-
-    if not is_ready:
-        # The hash was reportedly cached on TB but the add didn't reach
-        # a ready state (cached / completed / uploading) within budget.
-        # Clean up the TB entry so a future rescue attempt can re-add cleanly.
-        try:
-            alt_client.delete_torrent(alt_tid)
-        except Exception:
-            pass
-        return {'rescued': False, 'reason': 'never_ready',
-                'tb_torrent_id': alt_tid}
+    alt = core['to']
+    alt_tid = core['alt_torrent_id']
+    alt_client = core['alt_client']
 
     # Plex active-session guard — never swap a symlink that's mid-stream.
     # FUSE caches the open file descriptor so playback usually continues
     # from the original target, but new seeks fail after the rewrite.
     # Defer this rescue to the next sweep when Plex is actively playing
     # the file.  Same posture as duplicate_cleanup's read-only guard.
+    #
+    # Lives in debrid_health (not the shared helper) because add-time
+    # rescues have no existing symlinks to disrupt — Plex can't be
+    # mid-stream on a file the arr hasn't imported yet.
     release_name_guard = os.path.splitext(os.path.basename(filename or ''))[0]
     if release_name_guard and _plex_session_active_for_release(release_name_guard):
         logger.info(
@@ -897,9 +858,15 @@ def run_sweep():
         # 404 would mass-delete healthy torrents and pollute TB with
         # speculative adds for files that may reappear on RD a sweep
         # later.  Re-probe on next sweep; don't touch state.
+        #
+        # Reason-predicate lives in ``utils.debrid_routing`` so the
+        # filter-block vocabulary is shared with the blackhole add-time
+        # rescue gate (plan 41 phase A) — a future RD return-string
+        # change updates both sites at once.
+        from utils.debrid_routing import is_filter_block_reason
         is_filter_block = (
             status == 'blocked'
-            and (result.get('reason') or '') == 'infringing_file'
+            and is_filter_block_reason(result.get('reason'))
         )
         # Fail-closed defense: if RD ever ships a new blocked-reason
         # (e.g. 'dmca_takedown', 'regional_restriction'), the gate
@@ -953,6 +920,7 @@ def run_sweep():
                         detail='Filter-blocked on RD — rescued via TorBox',
                         meta={
                             'cause': _history.CAUSE_DEBRID_RESCUED,
+                            'rescue_stage': 'sweep',
                             'from': 'realdebrid',
                             'to': rescue.get('to'),
                             'info_hash': torrent_hash,

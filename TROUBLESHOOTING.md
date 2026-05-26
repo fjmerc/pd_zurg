@@ -176,6 +176,32 @@ needs. Options:
 - Try `PLEX_REFRESH=true` with `PLEX_MOUNT_DIR` set to the mount path
   **as Plex sees it** (not the path inside the Zurgarr container).
 
+## Sonarr says `hasFile=false` right after a scan but imports correctly a minute later
+
+Symptom: a fresh grab lands, the library scanner creates the symlink in
+`/local_media/tv/<show>/Season XX/...` (or the Radarr equivalent), and
+zurgarr's logs show `Triggered Sonarr rescan for <title>`. Sonarr's own
+log shows `Scanning <show>` followed by `Completed scanning disk` with
+zero imports. A few minutes later — or if you click "Refresh & Scan"
+manually — Sonarr imports the file cleanly.
+
+Cause: when the symlink target lives on an NFS share that Sonarr/Radarr
+reads (typical when the arr container is on a different host from the
+debrid mount), the arr-side kernel attribute cache hides the just-created
+symlinks for ~30-60 seconds. The rescan walk runs *before* the cache
+refreshes, sees nothing new, and completes successfully — Sonarr then
+won't re-scan that show until the next library_scan cycle (default 1h)
+re-triggers it.
+
+Fix: set `LIBRARY_RESCAN_NFS_DELAY=30` (or whatever your NFS attribute-
+cache TTL is — `actimeo=` on the mount, default usually 30-60s). The
+library scanner will sleep that many seconds between symlink creation
+and the arr rescan trigger, giving the cache time to invalidate.
+
+Local-filesystem arr-side libraries don't need this (the file is visible
+immediately) — keep the default `0`. Clamped to `[0, 300]` so a typo
+can't stall the scan loop indefinitely.
+
 ## Blackhole: symlinks created but broken
 
 The symlinks are absolute paths rooted at `BLACKHOLE_SYMLINK_TARGET_BASE`.

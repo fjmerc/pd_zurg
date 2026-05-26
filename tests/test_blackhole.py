@@ -3409,3 +3409,680 @@ class TestCleanupSymlinksLabeled:
         watcher._cleanup_symlinks()
         # Empty label dir must survive cleanup (the user created it for a reason)
         assert os.path.isdir(sonarr_dir)
+
+
+# ---------------------------------------------------------------------------
+# Plan 41 phase A — add-time filter-block cross-rescue
+# ---------------------------------------------------------------------------
+
+class TestAddTimeFilterBlockRescue:
+    """When RD returns infringing_file on a magnet add and TB is configured,
+    the same hash is routed to TB before the file is failed.  Data-loss
+    bug — regression here means popular Disney/HBO/Apple titles silently
+    vanish into /watch/.alt_pending/ instead of landing on TB.
+    """
+
+    _HASH = 'A' * 40  # canonical magnet info-hash
+    _MAGNET_CONTENT = f'magnet:?xt=urn:btih:{_HASH}&dn=Andor.S02E01'
+    _FILENAME = 'Andor.S02E01.1080p.DSNP.WEB-DL.DDP5.1.Atmos.H.264-FLUX.magnet'
+
+    def _make_watcher(self, tmp_dir, monkeypatch, with_tb=True):
+        """BlackholeWatcher with both RD and TB configured."""
+        watch_dir = os.path.join(tmp_dir, 'watch')
+        completed_dir = os.path.join(tmp_dir, 'completed')
+        os.makedirs(watch_dir)
+        os.makedirs(completed_dir)
+
+        monkeypatch.setenv('RD_API_KEY', 'rd-key')
+        if with_tb:
+            monkeypatch.setenv('TORBOX_API_KEY', 'tb-key')
+        else:
+            monkeypatch.delenv('TORBOX_API_KEY', raising=False)
+
+        watcher = BlackholeWatcher(
+            watch_dir, 'rd-key', 'realdebrid',
+            symlink_enabled=True,
+            completed_dir=completed_dir,
+            debrid_api_keys={'realdebrid': 'rd-key', 'torbox': 'tb-key'} if with_tb else {'realdebrid': 'rd-key'},
+        )
+        return watcher, watch_dir
+
+    def _drop_magnet(self, watch_dir):
+        path = os.path.join(watch_dir, self._FILENAME)
+        with open(path, 'w') as f:
+            f.write(self._MAGNET_CONTENT)
+        os.utime(path, (time.time() - 10, time.time() - 10))
+        return path
+
+    class _FakeTbClient:
+        """Stub TB client matching the surface attempt_add_rescue uses."""
+
+        def __init__(self, configured=True):
+            self.configured = configured
+            self.delete_calls = []
+
+        def add_magnet(self, h):
+            # Should NOT be called — blackhole uses _add_to_torbox instead.
+            raise AssertionError('add_magnet should not be called from blackhole rescue')
+
+        def torrent_status(self, tid):
+            return 'cached'
+
+        def delete_torrent(self, tid):
+            self.delete_calls.append(tid)
+            return True
+
+    def test_rescues_to_tb_on_rd_filter_block(self, tmp_dir, monkeypatch):
+        watcher, watch_dir = self._make_watcher(tmp_dir, monkeypatch)
+        magnet_path = self._drop_magnet(watch_dir)
+
+        # RD says filter-block.  TB cache says yes (probed via search.check_debrid_cache).
+        # TB add succeeds.
+        rd_calls = []
+
+        def fake_rd_add(file_path, api_key=None):
+            rd_calls.append(file_path)
+            return False, '{"error":"infringing_file","error_code":35}'
+
+        tb_calls = []
+
+        def fake_tb_add(file_path, api_key=None):
+            tb_calls.append(file_path)
+            return True, {'data': {'torrent_id': 'tb-123'}}
+
+        monkeypatch.setattr(watcher, '_add_to_realdebrid', fake_rd_add)
+        monkeypatch.setattr(watcher, '_add_to_torbox', fake_tb_add)
+
+        def fake_cache(hashes, service=None, api_key=None):
+            # Both providers report cached — but RD's filter still hits
+            # at the add stage (the cache check is informational, the add
+            # is where the filter actually fires).
+            return {h.lower(): True for h in hashes}
+
+        monkeypatch.setattr('utils.search.check_debrid_cache', fake_cache)
+        # Stub the existing-hashes dedup check to avoid hitting RD's
+        # /torrents endpoint during the route decision.
+        monkeypatch.setattr('utils.search._existing_hashes', lambda *a, **kw: set())
+
+        fake_tb_client = self._FakeTbClient()
+        monkeypatch.setattr(
+            'utils.debrid_client.get_debrid_client',
+            lambda service=None, api_key=None: (fake_tb_client, service),
+        )
+
+        # Force routing to RD as primary so the rescue direction is RD→TB
+        # even though the cache probe lies and says both are cached.
+        monkeypatch.setenv('BLACKHOLE_DEBRID_PRIMARY', 'realdebrid')
+
+        # Capture history events
+        history_events = []
+        import utils.history as history_mod
+        original_log = history_mod.log_event
+
+        def capture_log(*args, **kwargs):
+            history_events.append((args, kwargs))
+            return original_log(*args, **kwargs)
+
+        monkeypatch.setattr(history_mod, 'log_event', capture_log)
+
+        # Capture monitor starts
+        monitor_calls = []
+        monkeypatch.setattr(
+            watcher, '_start_monitor',
+            lambda tid, fn, label=None, debrid=None, **kw: monitor_calls.append((tid, fn, debrid)),
+        )
+
+        watcher._process_file(magnet_path)
+
+        # The watch-dir file should be gone (rescued — moved to staged
+        # path during rescue, then removed after success).
+        assert not os.path.exists(magnet_path), \
+            f"magnet should be removed after rescue, still at {magnet_path}"
+        # The unique staged path should also be cleaned up post-rescue.
+        staging_dir = os.path.join(watch_dir, '.alt_pending')
+        if os.path.exists(staging_dir):
+            staged_entries = [e for e in os.listdir(staging_dir) if e.startswith('.rescue-')]
+            assert staged_entries == [], \
+                f"staged rescue file should be removed after success, found: {staged_entries}"
+        # TB add was called once via _add_to_torbox.  Plan-41-phase-A
+        # rev-2 stages the file under .alt_pending/.rescue-<uuid8>-<name>
+        # BEFORE the rescue wait_ready loop to protect against Sonarr
+        # re-grab clobbering file_path during a 60s wait — so the TB
+        # add now reads from the staged path, not the original.
+        assert len(tb_calls) == 1, f"expected exactly one TB add call, got {tb_calls}"
+        assert os.path.basename(tb_calls[0]).startswith('.rescue-'), \
+            f"TB add should target the rescue-staged file; got {tb_calls[0]}"
+        assert os.path.basename(tb_calls[0]).endswith(self._FILENAME), \
+            f"staged filename should preserve original suffix; got {tb_calls[0]}"
+        # Monitor entry started on TB
+        assert len(monitor_calls) == 1
+        tid, fn, debrid = monitor_calls[0]
+        assert tid == 'tb-123'
+        assert debrid == 'torbox'
+        # History event emitted with rescue_stage='add_time'
+        rescue_events = [
+            (a, kw) for a, kw in history_events
+            if kw.get('meta', {}).get('cause') == 'debrid_rescued'
+        ]
+        assert len(rescue_events) == 1, f"expected 1 debrid_rescued event, got {len(rescue_events)}"
+        _args, kw = rescue_events[0]
+        meta = kw['meta']
+        assert meta['rescue_stage'] == 'add_time'
+        assert meta['from'] == 'realdebrid'
+        assert meta['to'] == 'torbox'
+
+    def test_no_tb_configured_falls_through_to_alt_release(self, tmp_dir, monkeypatch):
+        """When only RD is configured, the rescue helper short-circuits and
+        the existing alt-release search path runs."""
+        watcher, watch_dir = self._make_watcher(tmp_dir, monkeypatch, with_tb=False)
+        magnet_path = self._drop_magnet(watch_dir)
+
+        def fake_rd_add(file_path, api_key=None):
+            return False, '{"error":"infringing_file","error_code":35}'
+
+        monkeypatch.setattr(watcher, '_add_to_realdebrid', fake_rd_add)
+        monkeypatch.setattr('utils.search.check_debrid_cache', lambda *a, **kw: {})
+        monkeypatch.setattr('utils.search._existing_hashes', lambda *a, **kw: set())
+
+        # Track whether the alt-release thread was kicked off (it's the
+        # fallback path when cross-rescue isn't available).
+        import threading as _threading
+        alt_thread_started = []
+        original_thread = _threading.Thread
+
+        class _CapturingThread(original_thread):
+            def __init__(self, *a, **kw):
+                if 'alt-retry' in kw.get('name', ''):
+                    alt_thread_started.append(True)
+                super().__init__(*a, **kw)
+
+            def start(self):
+                pass  # Don't actually run the alt-release search
+
+        monkeypatch.setattr('utils.blackhole.threading.Thread', _CapturingThread)
+
+        watcher._process_file(magnet_path)
+
+        assert alt_thread_started == [True], \
+            "alt-release thread should fire when cross-rescue isn't available"
+
+    def test_tb_also_filter_blocks_blocklists_hash(self, tmp_dir, monkeypatch):
+        """If TB also returns infringing_file, the hash is filter-blocked on
+        BOTH debrids — annotate the blocklist so future re-grabs short-circuit."""
+        watcher, watch_dir = self._make_watcher(tmp_dir, monkeypatch)
+        magnet_path = self._drop_magnet(watch_dir)
+
+        def fake_rd_add(file_path, api_key=None):
+            return False, '{"error":"infringing_file","error_code":35}'
+
+        def fake_tb_add(file_path, api_key=None):
+            return False, '{"error":"infringing_file","error_code":35}'
+
+        monkeypatch.setattr(watcher, '_add_to_realdebrid', fake_rd_add)
+        monkeypatch.setattr(watcher, '_add_to_torbox', fake_tb_add)
+        monkeypatch.setattr('utils.search.check_debrid_cache',
+                            lambda h, service=None, api_key=None: {x.lower(): True for x in h})
+        monkeypatch.setattr('utils.search._existing_hashes', lambda *a, **kw: set())
+
+        monkeypatch.setattr(
+            'utils.debrid_client.get_debrid_client',
+            lambda service=None, api_key=None: (self._FakeTbClient(), service),
+        )
+        monkeypatch.setenv('BLACKHOLE_DEBRID_PRIMARY', 'realdebrid')
+
+        # Mock the blocklist
+        blocklist_adds = []
+        import utils.blocklist as bl_mod
+
+        class _FakeBlocklist:
+            def add(self, h, fn, reason='', source=''):
+                blocklist_adds.append((h, fn, reason, source))
+                return 'entry-1'
+
+            def is_blocked(self, h):
+                return False
+
+        monkeypatch.setattr('utils.blackhole._blocklist', _FakeBlocklist())
+
+        # Disable alt-release fallback (we're testing the blocklist annotation)
+        monkeypatch.setattr(watcher, '_alt_exhausted', lambda fp: True)
+
+        watcher._process_file(magnet_path)
+
+        # Blocklist should have the "filter_blocked_everywhere" annotation.
+        # One entry from rescue (the add-time double-block) — alt-release
+        # was disabled via _alt_exhausted so no second entry from that path.
+        rescue_entries = [
+            e for e in blocklist_adds if 'filter_blocked_everywhere' in e[2]
+        ]
+        assert len(rescue_entries) >= 1, \
+            f"expected filter_blocked_everywhere blocklist entry, got {blocklist_adds!r}"
+
+    def test_unsupported_source_does_not_rescue(self, tmp_dir, monkeypatch):
+        """ALLDEBRID has no rescue partner — _attempt_add_time_rescue
+        returns False quickly without contacting the network."""
+        watcher, watch_dir = self._make_watcher(tmp_dir, monkeypatch)
+        magnet_path = self._drop_magnet(watch_dir)
+
+        cache_calls = []
+
+        def fake_cache(*args, **kwargs):
+            cache_calls.append(args)
+            return {}
+
+        monkeypatch.setattr('utils.search.check_debrid_cache', fake_cache)
+
+        result = watcher._attempt_add_time_rescue(
+            magnet_path, self._FILENAME, self._HASH,
+            'alldebrid', label=None, dispatch={'alldebrid': lambda *a, **kw: (True, {})},
+        )
+        assert result is False
+        # No cache probe was issued — short-circuit before hitting the network
+        assert cache_calls == []
+
+    def test_invalid_torrent_does_not_trigger_rescue(self, tmp_dir, monkeypatch):
+        """RD code 30 (torrent_file_invalid) is a permanent rejection
+        for the hash — cross-rescue would just hit the same wall on TB.
+        The _process_file gate compares classify_add_failure(result) ==
+        'filter_block' so invalid_torrent falls through to alt-release
+        search WITHOUT touching the TB pipeline at all.  Regression
+        guard for the code-reviewer's missing-integration-test gap."""
+        watcher, watch_dir = self._make_watcher(tmp_dir, monkeypatch)
+        magnet_path = self._drop_magnet(watch_dir)
+
+        def fake_rd_add(file_path, api_key=None):
+            return False, '{"error":"torrent_file_invalid","error_code":30}'
+
+        tb_calls = []
+
+        def fake_tb_add(file_path, api_key=None):
+            tb_calls.append(file_path)
+            return True, {'data': {'torrent_id': 'tb-shouldnt-be-called'}}
+
+        monkeypatch.setattr(watcher, '_add_to_realdebrid', fake_rd_add)
+        monkeypatch.setattr(watcher, '_add_to_torbox', fake_tb_add)
+        monkeypatch.setattr('utils.search.check_debrid_cache',
+                            lambda h, service=None, api_key=None: {x.lower(): True for x in h})
+        monkeypatch.setattr('utils.search._existing_hashes', lambda *a, **kw: set())
+
+        # Stub the alt-release thread so it doesn't fire real work
+        import threading as _threading
+        original_thread = _threading.Thread
+
+        class _NoOpThread(original_thread):
+            def start(self):
+                pass
+
+        monkeypatch.setattr('utils.blackhole.threading.Thread', _NoOpThread)
+
+        watcher._process_file(magnet_path)
+
+        # TB add must NOT have been called — invalid_torrent isn't a
+        # filter_block, so the rescue gate never opens.
+        assert tb_calls == [], \
+            f"invalid_torrent must not trigger TB rescue; tb_calls={tb_calls}"
+
+    def test_torrent_file_path_routes_through_rescue(self, tmp_dir, monkeypatch):
+        """`.torrent` files (bencoded) should rescue identically to
+        `.magnet` files — _add_to_torbox handles both by extension, and
+        the rescue closure passes the staged file path through opaquely.
+        Regression guard for the code-reviewer's missing-test gap."""
+        watcher, watch_dir = self._make_watcher(tmp_dir, monkeypatch)
+
+        # Drop a synthetic .torrent file (content doesn't need to be
+        # valid bencoding — _add_to_torbox is mocked).
+        torrent_path = os.path.join(watch_dir, 'Andor.S02E01.torrent')
+        with open(torrent_path, 'wb') as f:
+            f.write(b'd4:infod4:name20:Andor.S02E01.WEB-DL5:filesle4:type5:hashee')
+        os.utime(torrent_path, (time.time() - 10, time.time() - 10))
+
+        # Patch the info-hash extractor so we get a deterministic hash
+        # without depending on .torrent bencoding.
+        monkeypatch.setattr(watcher, '_extract_info_hash_from_file',
+                            lambda fp: self._HASH)
+
+        def fake_rd_add(file_path, api_key=None):
+            return False, '{"error":"infringing_file","error_code":35}'
+
+        tb_calls = []
+
+        def fake_tb_add(file_path, api_key=None):
+            tb_calls.append(file_path)
+            return True, {'data': {'torrent_id': 'tb-456'}}
+
+        monkeypatch.setattr(watcher, '_add_to_realdebrid', fake_rd_add)
+        monkeypatch.setattr(watcher, '_add_to_torbox', fake_tb_add)
+        monkeypatch.setattr('utils.search.check_debrid_cache',
+                            lambda h, service=None, api_key=None: {x.lower(): True for x in h})
+        monkeypatch.setattr('utils.search._existing_hashes', lambda *a, **kw: set())
+        monkeypatch.setattr(
+            'utils.debrid_client.get_debrid_client',
+            lambda service=None, api_key=None: (self._FakeTbClient(), service),
+        )
+        monkeypatch.setenv('BLACKHOLE_DEBRID_PRIMARY', 'realdebrid')
+
+        monitor_calls = []
+        monkeypatch.setattr(
+            watcher, '_start_monitor',
+            lambda tid, fn, label=None, debrid=None, **kw: monitor_calls.append((tid, fn, debrid)),
+        )
+
+        watcher._process_file(torrent_path)
+
+        assert not os.path.exists(torrent_path), \
+            f".torrent should be removed after rescue, still at {torrent_path}"
+        assert len(tb_calls) == 1
+        # Staging preserves the extension so _add_to_torbox's ext branch
+        # picks the .torrent code path.
+        assert tb_calls[0].endswith('.torrent'), \
+            f"staged path should end with .torrent; got {tb_calls[0]}"
+        assert monitor_calls == [('tb-456', 'Andor.S02E01.torrent', 'torbox')]
+
+
+class TestRescueOrphanRecovery:
+    """Plan 41 phase A second-pass reviewer fix-up: rescue orphans
+    (files staged under ``.alt_pending/.rescue-<uuid8>-<filename>``
+    when the container died mid-rescue) must be recovered to ``failed/``
+    under their ORIGINAL filename so Sonarr/Radarr's blackhole import
+    recognises them on the next retry cycle.  Pre-fix the recovery
+    moved them with the ``.rescue-`` prefix intact and they rotted
+    silently."""
+
+    def test_restore_basename_strips_prefix(self):
+        """Pure-function pin on the prefix-strip regex."""
+        from utils.blackhole import _restore_rescue_basename
+        assert _restore_rescue_basename(
+            '.rescue-deadbeef-Show.Name.S01E01.1080p.WEB-DL.magnet'
+        ) == 'Show.Name.S01E01.1080p.WEB-DL.magnet'
+
+    def test_restore_basename_passes_through_non_prefixed(self):
+        """Files staged by the older alt-release path have no prefix —
+        must be returned unchanged."""
+        from utils.blackhole import _restore_rescue_basename
+        assert _restore_rescue_basename('Show.Name.S01E01.torrent') == 'Show.Name.S01E01.torrent'
+
+    def test_restore_basename_only_matches_8_hex_chars(self):
+        """The regex is anchored to 8 hex chars exactly — a file that
+        coincidentally starts with ``.rescue-`` but has a non-hex segment
+        (or different length) is NOT treated as a rescue orphan."""
+        from utils.blackhole import _restore_rescue_basename
+        # 7 hex chars — too short, regex misses, name unchanged.
+        assert _restore_rescue_basename('.rescue-deadbee-name') == '.rescue-deadbee-name'
+        # 9 hex chars — too long, regex anchors on 8, but then the next
+        # char is hex not '-', so the regex doesn't match. Unchanged.
+        assert _restore_rescue_basename('.rescue-deadbeef9-name') == '.rescue-deadbeef9-name'
+        # Non-hex chars in the uuid slot — must NOT match.
+        assert _restore_rescue_basename('.rescue-xyzzy123-name') == '.rescue-xyzzy123-name'
+
+    def test_restore_basename_empty(self):
+        from utils.blackhole import _restore_rescue_basename
+        assert _restore_rescue_basename('') == ''
+        assert _restore_rescue_basename(None) is None
+
+    def test_recover_alt_pending_strips_rescue_prefix(self, tmp_dir):
+        """Integration: a rescue orphan in .alt_pending/ gets moved to
+        failed/ under its ORIGINAL filename so Sonarr/Radarr's
+        blackhole import can recognise it on the next retry."""
+        watch_dir = os.path.join(tmp_dir, 'watch')
+        alt_pending = os.path.join(watch_dir, '.alt_pending')
+        os.makedirs(alt_pending)
+
+        # Simulate a rescue orphan — file staged with the .rescue-<uuid8>- prefix.
+        orphan_path = os.path.join(alt_pending, '.rescue-deadbeef-Andor.S02E01.magnet')
+        with open(orphan_path, 'w') as f:
+            f.write('magnet:?xt=urn:btih:abc')
+
+        watcher = BlackholeWatcher(watch_dir, 'rd-key', 'realdebrid')
+        watcher._recover_alt_pending()
+
+        # The rescue orphan must now be in failed/ as ``Andor.S02E01.magnet``
+        # (the prefix stripped), NOT ``.rescue-deadbeef-Andor.S02E01.magnet``.
+        failed_dir = os.path.join(watch_dir, 'failed')
+        assert os.path.isdir(failed_dir)
+        recovered = os.path.join(failed_dir, 'Andor.S02E01.magnet')
+        assert os.path.isfile(recovered), \
+            f"orphan not recovered under original name; failed/ contents: {os.listdir(failed_dir)}"
+        # Mangled name must NOT be present.
+        mangled = os.path.join(failed_dir, '.rescue-deadbeef-Andor.S02E01.magnet')
+        assert not os.path.exists(mangled), \
+            f"orphan recovered with prefix intact — Sonarr would not recognise this"
+
+    def test_recover_alt_pending_with_label(self, tmp_dir):
+        """Labeled rescue orphan recovered under the matching failed/label/."""
+        watch_dir = os.path.join(tmp_dir, 'watch')
+        alt_pending_sonarr = os.path.join(watch_dir, '.alt_pending', 'sonarr')
+        os.makedirs(alt_pending_sonarr)
+
+        orphan_path = os.path.join(alt_pending_sonarr, '.rescue-cafebabe-Yellowjackets.S02E09.magnet')
+        with open(orphan_path, 'w') as f:
+            f.write('magnet:?xt=urn:btih:def')
+
+        watcher = BlackholeWatcher(watch_dir, 'rd-key', 'realdebrid')
+        watcher._recover_alt_pending()
+
+        recovered = os.path.join(watch_dir, 'failed', 'sonarr', 'Yellowjackets.S02E09.magnet')
+        assert os.path.isfile(recovered), \
+            f"labeled orphan not recovered correctly; failed/sonarr/ contents: " \
+            f"{os.listdir(os.path.join(watch_dir, 'failed', 'sonarr')) if os.path.isdir(os.path.join(watch_dir, 'failed', 'sonarr')) else 'missing'}"
+
+    def test_recover_alt_pending_legacy_no_prefix_unchanged(self, tmp_dir):
+        """Alt-release-path orphans (no .rescue- prefix) keep their
+        original behaviour — moved to failed/ with the same name."""
+        watch_dir = os.path.join(tmp_dir, 'watch')
+        alt_pending = os.path.join(watch_dir, '.alt_pending')
+        os.makedirs(alt_pending)
+
+        # No prefix — pre-plan-41 alt-release staging.
+        orphan_path = os.path.join(alt_pending, 'Old.Style.Release.torrent')
+        with open(orphan_path, 'w') as f:
+            f.write('d4:infod4:name3:Olde')
+
+        watcher = BlackholeWatcher(watch_dir, 'rd-key', 'realdebrid')
+        watcher._recover_alt_pending()
+
+        recovered = os.path.join(watch_dir, 'failed', 'Old.Style.Release.torrent')
+        assert os.path.isfile(recovered), \
+            f"non-prefixed orphan should recover unchanged; failed/ contents: " \
+            f"{os.listdir(os.path.join(watch_dir, 'failed'))}"
+
+
+class TestRescueStagingFilenameLength:
+    """Plan 41 phase A second-pass reviewer fix-up: long multi-byte
+    filenames (Russian-tracker releases with Cyrillic in the .torrent
+    name) can push the staged basename over POSIX NAME_MAX (255
+    bytes).  Truncation in the staging path keeps ``os.rename`` from
+    raising ENAMETOOLONG and silently dropping the rescue.
+    """
+
+    _HASH = 'A' * 40
+
+    def _make_watcher(self, tmp_dir, monkeypatch):
+        watch_dir = os.path.join(tmp_dir, 'watch')
+        completed_dir = os.path.join(tmp_dir, 'completed')
+        os.makedirs(watch_dir)
+        os.makedirs(completed_dir)
+        monkeypatch.setenv('RD_API_KEY', 'rd-key')
+        monkeypatch.setenv('TORBOX_API_KEY', 'tb-key')
+        return BlackholeWatcher(
+            watch_dir, 'rd-key', 'realdebrid',
+            symlink_enabled=True,
+            completed_dir=completed_dir,
+            debrid_api_keys={'realdebrid': 'rd-key', 'torbox': 'tb-key'},
+        ), watch_dir
+
+    def test_long_filename_staged_under_name_max(self, tmp_dir, monkeypatch):
+        """A 240-byte filename + .rescue-<uuid8>- prefix would exceed
+        NAME_MAX without truncation.  Verify the staged basename is
+        capped so ``os.rename`` succeeds."""
+        watcher, watch_dir = self._make_watcher(tmp_dir, monkeypatch)
+        # 240-char filename — plus the 17-byte prefix overhead would
+        # push past 255 if not truncated.
+        long_filename = 'A' * 240 + '.magnet'
+        magnet_path = os.path.join(watch_dir, long_filename)
+        with open(magnet_path, 'w') as f:
+            f.write(f'magnet:?xt=urn:btih:{self._HASH}')
+        os.utime(magnet_path, (time.time() - 10, time.time() - 10))
+
+        def fake_rd_add(file_path, api_key=None):
+            return False, '{"error":"infringing_file","error_code":35}'
+
+        tb_calls = []
+
+        def fake_tb_add(file_path, api_key=None):
+            tb_calls.append(file_path)
+            return True, {'data': {'torrent_id': 'tb-long-1'}}
+
+        monkeypatch.setattr(watcher, '_add_to_realdebrid', fake_rd_add)
+        monkeypatch.setattr(watcher, '_add_to_torbox', fake_tb_add)
+        monkeypatch.setattr('utils.search.check_debrid_cache',
+                            lambda h, service=None, api_key=None: {x.lower(): True for x in h})
+        monkeypatch.setattr('utils.search._existing_hashes', lambda *a, **kw: set())
+
+        class _FakeTbClient:
+            configured = True
+
+            def add_magnet(self, h):
+                raise AssertionError('should not be called')
+
+            def torrent_status(self, tid):
+                return 'cached'
+
+            def delete_torrent(self, tid):
+                return True
+
+        monkeypatch.setattr(
+            'utils.debrid_client.get_debrid_client',
+            lambda service=None, api_key=None: (_FakeTbClient(), service),
+        )
+        monkeypatch.setenv('BLACKHOLE_DEBRID_PRIMARY', 'realdebrid')
+        monkeypatch.setattr(watcher, '_start_monitor', lambda *a, **kw: None)
+
+        # Should not raise (used to raise ENAMETOOLONG inside the staging
+        # os.rename before the truncation fix).
+        watcher._process_file(magnet_path)
+
+        # Rescue should have run successfully.
+        assert len(tb_calls) == 1
+        # The staged basename used for the TB add must fit under NAME_MAX.
+        assert len(os.path.basename(tb_calls[0]).encode('utf-8')) <= 255, \
+            f"staged basename exceeds NAME_MAX: {os.path.basename(tb_calls[0])!r}"
+
+
+class TestRescueRestoreAtomicity:
+    """Plan 41 phase A second-pass reviewer fix-up: the rescue-failure
+    restore path uses ``os.link`` + ``os.unlink`` instead of a
+    check-then-rename sequence so a fresh Sonarr drop landing at
+    ``file_path`` during the rescue wait cannot be silently
+    overwritten by the staged file.
+    """
+
+    _HASH = 'A' * 40
+
+    def _make_watcher(self, tmp_dir, monkeypatch, with_tb=True):
+        watch_dir = os.path.join(tmp_dir, 'watch')
+        completed_dir = os.path.join(tmp_dir, 'completed')
+        os.makedirs(watch_dir)
+        os.makedirs(completed_dir)
+        monkeypatch.setenv('RD_API_KEY', 'rd-key')
+        if with_tb:
+            monkeypatch.setenv('TORBOX_API_KEY', 'tb-key')
+        return BlackholeWatcher(
+            watch_dir, 'rd-key', 'realdebrid',
+            symlink_enabled=True,
+            completed_dir=completed_dir,
+            debrid_api_keys={'realdebrid': 'rd-key', 'torbox': 'tb-key'} if with_tb else {'realdebrid': 'rd-key'},
+        ), watch_dir
+
+    def test_fresh_drop_during_rescue_wait_preserves_both_files(self, tmp_dir, monkeypatch):
+        """Simulate Sonarr re-grabbing the same filename while our rescue
+        is in flight: the fresh drop at file_path survives, AND the
+        rescue's staged content survives under its unique name."""
+        watcher, watch_dir = self._make_watcher(tmp_dir, monkeypatch)
+        filename = 'Andor.S02E01.magnet'
+        original_path = os.path.join(watch_dir, filename)
+        with open(original_path, 'w') as f:
+            f.write('magnet:?xt=urn:btih:' + self._HASH + '&n=original')
+        os.utime(original_path, (time.time() - 10, time.time() - 10))
+
+        def fake_rd_add(file_path, api_key=None):
+            return False, '{"error":"infringing_file","error_code":35}'
+
+        # Closure: during the alt_add_fn call, simulate Sonarr dropping
+        # a new file at the ORIGINAL file_path while we're "waiting"
+        # for the alt add to complete.  The rescue's restore path
+        # should then leave the original at the staged path.
+        def fake_tb_add(file_path, api_key=None):
+            # Fresh Sonarr drop arrives mid-rescue, before we've decided
+            # success/failure.
+            with open(original_path, 'w') as f:
+                f.write('magnet:?xt=urn:btih:' + self._HASH + '&n=fresh-drop')
+            # Then we return a failure so the rescue tries to restore.
+            return False, '{"error":"rate limit exceeded"}'
+
+        monkeypatch.setattr(watcher, '_add_to_realdebrid', fake_rd_add)
+        monkeypatch.setattr(watcher, '_add_to_torbox', fake_tb_add)
+        monkeypatch.setattr('utils.search.check_debrid_cache',
+                            lambda h, service=None, api_key=None: {x.lower(): True for x in h})
+        monkeypatch.setattr('utils.search._existing_hashes', lambda *a, **kw: set())
+
+        class _FakeTbClient:
+            configured = True
+
+            def add_magnet(self, h):
+                raise AssertionError('unreached')
+
+            def torrent_status(self, tid):
+                return ''
+
+            def delete_torrent(self, tid):
+                return True
+
+        monkeypatch.setattr(
+            'utils.debrid_client.get_debrid_client',
+            lambda service=None, api_key=None: (_FakeTbClient(), service),
+        )
+        monkeypatch.setenv('BLACKHOLE_DEBRID_PRIMARY', 'realdebrid')
+
+        # Disable the existing alt-release fallback so we can observe
+        # the rescue-restore behaviour in isolation.
+        import threading as _threading
+
+        class _NoOpThread(_threading.Thread):
+            def start(self):
+                pass
+
+        monkeypatch.setattr('utils.blackhole.threading.Thread', _NoOpThread)
+
+        watcher._process_file(original_path)
+
+        # After _process_file: fresh drop has been processed by the
+        # post-rescue rejection-handling path (alt-release staging or
+        # failed-dir move).  We don't care WHICH happened — both are
+        # legitimate outcomes for an ``infringing_file``-shaped failure
+        # after rescue couldn't recover.  We DO care that:
+        #   (a) the fresh-drop content survived rather than being
+        #       overwritten by the older staged file, and
+        #   (b) the rescue's staged file remained at its unique
+        #       .rescue-* name for manual recovery.
+        # Walk the watch-dir tree looking for the content markers.
+        fresh_drop_survived = False
+        rescue_orphan_survived = False
+        for dp, _dn, files in os.walk(watch_dir):
+            for fn in files:
+                fpath = os.path.join(dp, fn)
+                try:
+                    with open(fpath) as f:
+                        body = f.read()
+                except OSError:
+                    continue
+                if 'fresh-drop' in body:
+                    fresh_drop_survived = True
+                if 'n=original' in body and fn.startswith('.rescue-'):
+                    rescue_orphan_survived = True
+
+        assert fresh_drop_survived, \
+            "Fresh Sonarr drop must survive the rescue-restore path " \
+            "(silently overwritten = data loss)"
+        assert rescue_orphan_survived, \
+            "Rescue's staged file must remain under its unique .rescue-* " \
+            "name for manual recovery — collision-with-fresh-drop case"

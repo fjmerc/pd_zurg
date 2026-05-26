@@ -20,6 +20,7 @@ stub the debrid-cache lookup without monkeypatching ``utils.search``.
 """
 
 import os
+import re
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -280,3 +281,477 @@ def pick_debrid_for_grab(info_hash, *, routing_mode=None, primary=None,
         f"using primary ({primary})"
     )
     return primary
+
+
+# ---------------------------------------------------------------------------
+# Add-time error classification (plan 41 phase A)
+# ---------------------------------------------------------------------------
+#
+# Three sites need to ask "is this debrid response a filter block?" — the
+# blackhole alt-release fallback (``blackhole._is_debrid_rejection``), the
+# sweep-driven cross-rescue gate (``debrid_health.is_filter_block``), and
+# the new add-time rescue (this module).  Centralising the classification
+# keeps the three sites in lockstep when a new error code/keyword surfaces
+# and gives plan-40's ``DebridProvider.classify_error()`` a single seed
+# function to absorb.
+
+# RD's documented refusal-for-this-hash error codes.  35 = infringing_file
+# (the May-2026 keyword filter), 30 = torrent_file_invalid (the file is
+# rejected outright — bad bencode / unknown extension / disabled file
+# type).  Both signal "try another release," but only 35/infringing_file
+# is a true filter-block that cross-rescue can fix; invalid_torrent is
+# permanent for that hash regardless of debrid.
+_FILTER_BLOCK_CODES = {35}
+_FILTER_BLOCK_KEYWORDS = {'infringing_file'}
+_INVALID_TORRENT_CODES = {30}
+_INVALID_TORRENT_KEYWORDS = {'torrent_file_invalid'}
+
+# Precompiled regex for ``"error_code"`` extraction.  Anchored so the
+# match terminates at a non-digit — naive substring matching (e.g.
+# ``'"error_code": 35' in rt``) would false-match ``error_code: 350``
+# or ``error_code: 35099`` as code 35 (filter_block), triggering a
+# spurious cross-rescue + ``filter_blocked_everywhere`` blocklist
+# annotation when RD adds a new code in the 35X range.
+_ERROR_CODE_RE = re.compile(r'"error_code"\s*:\s*(\d+)\b')
+
+
+def classify_add_failure(result_text):
+    """Classify a debrid add-magnet/add-torrent failure response.
+
+    Returns one of:
+      - ``'filter_block'`` — the debrid recognises the hash but refuses
+        to unrestrict (RD's May-2026 keyword filter).  Cross-rescue to an
+        alt debrid may recover the content.
+      - ``'invalid_torrent'`` — the debrid refuses the file outright
+        (corruption, disallowed file type).  Alt-release search is the
+        right next step; cross-rescue would just hit the same wall.
+      - ``None`` — not a recognised rejection.  Caller should treat as
+        a generic add failure (network, auth, rate-limit, etc.).
+
+    Accepts any string-shaped error payload.  Matching is case-insensitive
+    keyword search + JSON ``error_code`` extraction so both RD's raw JSON
+    (``{"error":"infringing_file","error_code":35}``) and a pre-flattened
+    error message survive.  Non-string inputs return ``None``.
+    """
+    if not isinstance(result_text, str):
+        return None
+    rt = result_text.lower()
+    # Keyword first — cheapest, also catches non-JSON formatted errors.
+    if any(kw in rt for kw in _FILTER_BLOCK_KEYWORDS):
+        return 'filter_block'
+    if any(kw in rt for kw in _INVALID_TORRENT_KEYWORDS):
+        return 'invalid_torrent'
+    # Numeric error_code fallback — covers cases where RD changes the
+    # human-readable string but keeps the numeric code stable.  The
+    # regex is digit-boundary-anchored (see ``_ERROR_CODE_RE`` docstring)
+    # so a future code like 350 doesn't false-match 35.
+    for m in _ERROR_CODE_RE.finditer(rt):
+        code = int(m.group(1))
+        if code in _FILTER_BLOCK_CODES:
+            return 'filter_block'
+        if code in _INVALID_TORRENT_CODES:
+            return 'invalid_torrent'
+    return None
+
+
+def is_debrid_rejection(result_text):
+    """Backward-compat shim for the old ``_is_debrid_rejection`` predicate.
+
+    Returns ``True`` when the response represents either a filter_block
+    or an invalid_torrent — the original predicate's union semantics.
+    Prefer ``classify_add_failure`` in new code so the caller can branch
+    on which kind of rejection it is.
+    """
+    return classify_add_failure(result_text) is not None
+
+
+# ---------------------------------------------------------------------------
+# TorBox mount-lookup candidate builder (plan 41 phase B.3)
+# ---------------------------------------------------------------------------
+
+# Pre-compiled regex shared by ``strip_indexer_prefix`` and any future
+# consumer needing the same "drop leading ``[indexer.to]`` block" rule.
+# Originally lived in ``utils.blackhole`` and was re-imported here as a
+# private name; moved during the phase-B reviewer fix-up so the cross-
+# module dependency is on a public API, not an underscore-prefixed
+# helper that could silently rename out from under us.
+_INDEXER_PREFIX_RE = re.compile(r'^\[[^\]]+\]\s*')
+
+
+def strip_indexer_prefix(name):
+    """Strip a leading ``[indexer.to] `` block from a release name.
+
+    Returns the stripped name, or *name* unchanged if no leading
+    bracket-block was present.  Used by:
+
+      - ``BlackholeWatcher._find_on_torbox_mount`` — drops the indexer
+        tag the scraper adds to TB's ``data.name`` so the mount-search
+        fuzzy match can hit the bare folder name TB stores.
+      - ``build_tb_lookup_candidates`` (below) — same purpose, building
+        the candidate list before ``_find_on_torbox_mount`` runs.
+    """
+    if not name:
+        return name
+    return _INDEXER_PREFIX_RE.sub('', name, count=1)
+
+
+def build_tb_lookup_candidates(release_name, file_names=None):
+    """Return an ordered list of folder-name candidates to probe on the
+    TorBox WebDAV mount.
+
+    TB's API ``data.name`` field returns the indexer's *display* title.
+    For non-English trackers (Russian/Italian/etc) that title is in the
+    native language, while the actual folder TB writes to its WebDAV
+    layout uses the ``.torrent``'s ``info.name`` (typically the English
+    release-group form).  The API name → WebDAV folder mismatch caused
+    every grab from non-English trackers to time out on the 300s
+    mount-poll before this fix.
+
+    Concrete case observed 2026-05-25 (For All Mankind S03 from a
+    Russian tracker):
+        API name: ``Ради всего человечества  For All Mankind  Сезон 3 ...``
+        TB folder: ``For.All.Mankind.S03.1080p.ATVP.WEB-DL.DDP5.1.H.264-EniaHD``
+
+    Candidate order (deduped, original order preserved):
+      1. ``release_name`` (API name) — common case, exact match.
+      2. ``release_name`` with media extension stripped (single-file
+         releases where the API echoes the file name).
+      3. ``release_name`` with leading ``[indexer.to]`` prefix stripped.
+      4. (3) with media extension stripped.
+      5. First path segment of each entry in ``file_names``.  TB's
+         ``data.files[].name`` is the actual on-WebDAV path, so the
+         segment before the first ``/`` is the folder name TB used.
+         This is the candidate that bridges the language gap.
+
+    ``file_names`` may be ``None`` (no TB API data available — caller
+    didn't extract); the function then returns only the API-derived
+    candidates.
+    """
+    # Keep lazy: utils.blackhole ↔ utils.debrid_routing form a cycle if
+    # either imports the other at module level.  MEDIA_EXTENSIONS is
+    # duplicated across utils.{library,blackhole,scheduled_tasks} (the
+    # 3-file rule per CLAUDE.md) so we import from blackhole here for
+    # consistency — the value must match.  ``strip_indexer_prefix``
+    # lives in this module (moved during phase-B reviewer fix-up to
+    # eliminate the cross-module private-name dependency).
+    from utils.blackhole import MEDIA_EXTENSIONS
+
+    if not release_name:
+        return []
+
+    candidates = []
+    seen = set()
+
+    def _add(name):
+        if name and name not in seen:
+            candidates.append(name)
+            seen.add(name)
+
+    _add(release_name)
+    base, ext = os.path.splitext(release_name)
+    if ext.lower() in MEDIA_EXTENSIONS and base:
+        _add(base)
+
+    stripped = strip_indexer_prefix(release_name)
+    if stripped and stripped != release_name:
+        _add(stripped)
+        s_base, s_ext = os.path.splitext(stripped)
+        if s_ext.lower() in MEDIA_EXTENSIONS and s_base:
+            _add(s_base)
+
+    # Files-derived candidates — only fired when ``file_names`` is
+    # populated.  Each path may use either '/' (POSIX, TB default) or
+    # '\' (Windows-uploaded torrents) as separator — handle both.
+    if file_names:
+        for fn in file_names:
+            if not isinstance(fn, str) or not fn:
+                continue
+            # Take the first path segment regardless of separator.
+            head = fn.split('/', 1)[0].split('\\', 1)[0]
+            if head:
+                _add(head)
+
+    return candidates
+
+
+def is_filter_block_reason(reason):
+    """Predicate: does ``reason`` represent a filter block?
+
+    Operates on the structured ``reason`` field returned by
+    ``debrid_client.probe_file()`` (used by the sweep-driven
+    cross-rescue gate in ``debrid_health.py``).  Distinct surface from
+    ``classify_add_failure`` (which parses a raw add-response payload)
+    but shares the same ``_FILTER_BLOCK_KEYWORDS`` vocabulary so a future
+    RD return-string change updates both sites at once.
+    """
+    return (reason or '').lower() in _FILTER_BLOCK_KEYWORDS
+
+
+# ---------------------------------------------------------------------------
+# Cross-debrid rescue core (plan 41 phase A)
+# ---------------------------------------------------------------------------
+#
+# Two sites need to "add a hash to the alt debrid and wait until it's
+# ready": the sweep-driven cross-rescue in ``debrid_health`` (post-block
+# rescue with symlink retarget) and the add-time rescue in
+# ``blackhole._process_file`` (RD's add returned filter_block; try TB
+# before giving up).  The shared core is cache-probe → add → wait-ready;
+# the post-ready actions differ per caller (retarget existing symlinks
+# vs. start a new monitor entry).
+#
+# The add primitive and ready-state vocabulary are dependency-injected
+# to avoid an import cycle with ``utils.blackhole`` (which already
+# imports from this module).
+
+_DEFAULT_RESCUE_READY_TIMEOUT = 60
+_DEFAULT_RESCUE_POLL_INTERVAL = 3
+
+
+def pick_alt_debrid(source_debrid, configured=None):
+    """Return the cross-rescue target for a torrent currently on ``source_debrid``.
+
+    Today's only supported direction is RD ⇄ TB; future combinations
+    (AD ⇄ TB, AD ⇄ RD) land here as explicit additions rather than
+    silent fallthroughs.  Returns ``None`` when no valid alt is
+    configured.
+    """
+    if configured is None:
+        configured = configured_debrids()
+    if source_debrid not in configured:
+        return None
+    # RD and TB rescue each other; AD has no cross-rescue partner yet.
+    if source_debrid == REALDEBRID and TORBOX in configured:
+        return TORBOX
+    if source_debrid == TORBOX and REALDEBRID in configured:
+        return REALDEBRID
+    return None
+
+
+def attempt_add_rescue(info_hash, source_debrid, *,
+                       alt_debrid=None,
+                       cache_probe=None,
+                       alt_client=None,
+                       alt_add_fn=None,
+                       status_fn=None,
+                       ready_states=None,
+                       stop_event=None,
+                       ready_timeout=None,
+                       poll_interval=None,
+                       logger_prefix='rescue'):
+    """Probe alt-debrid cache, add the hash, and wait for a ready state.
+
+    Shared core between the sweep-driven cross-rescue (post-block,
+    debrid_health phase 3) and the add-time rescue (blackhole phase A
+    of plan 41).  Caller is responsible for any post-ready action
+    (symlink retargeting, monitor start, etc.).
+
+    Arguments:
+
+      info_hash: torrent info hash (case-insensitive; cache probe is
+        responsible for normalisation).
+      source_debrid: the provider the hash came from.  Used by
+        ``pick_alt_debrid`` to select the cross-rescue target when
+        ``alt_debrid`` is not specified.
+      alt_debrid: override the auto-picked alt.  Default = ``pick_alt_debrid(source)``.
+      cache_probe: callable ``(debrid, info_hash) -> Optional[bool]``
+        for checking whether the alt has the hash cached.  Defaults to
+        ``utils.search.check_debrid_cache``.  Rescue is a HIT-CACHED
+        operation; uncached → fail with ``not_cached_on_alt``.
+      alt_client: pre-resolved alt debrid client (matches the type
+        produced by ``utils.debrid_client.get_debrid_client``).  When
+        ``None``, the helper resolves one.  Pass in when the caller
+        already has a configured client to save a redundant lookup.
+      alt_add_fn: callable ``(alt_client, info_hash) -> Optional[str]``
+        performing the add and returning the alt-side torrent id.
+        Defaults to ``alt_client.add_magnet(info_hash)``.  Blackhole
+        callers pass a closure that calls ``_add_to_torbox`` against an
+        existing watch-dir file so ``.torrent`` files (not just magnets)
+        are handled.
+      status_fn: callable ``(alt_client, alt_torrent_id) -> str`` returning
+        the torrent's current status string.  Defaults to
+        ``alt_client.torrent_status(alt_torrent_id)``.
+      ready_states: iterable of lowercase status strings that count as
+        "ready" (e.g. ``{'cached', 'completed', 'uploading'}`` for TB).
+        REQUIRED — no safe default since vocabularies differ per provider.
+      stop_event: optional ``threading.Event``.  When set during the
+        poll loop, the helper aborts and cleans up the alt entry.
+      ready_timeout / poll_interval: override the module defaults
+        (60s / 3s).  Per-caller tests monkeypatch these to keep
+        tests fast.
+      logger_prefix: tag prepended to all log lines.  Defaults to
+        ``'rescue'``; callers should pass a more specific prefix like
+        ``'[debrid_health] rescue'`` or ``'[blackhole] rescue'``.
+
+    Returns a dict.  On success:
+
+        {'rescued': True, 'to': <alt>, 'alt_torrent_id': <id>, 'alt_client': obj}
+
+    On failure:
+
+        {'rescued': False, 'reason': <slug>, 'alt_torrent_id': <id>|None}
+
+    Failure ``reason`` slugs:
+      - ``no_alt_configured``: no alt debrid is available for rescue.
+      - ``unsupported_source``: source_debrid not in the rescue graph.
+      - ``cache_probe_error``: cache lookup raised.
+      - ``not_cached_on_alt``: alt does not have the hash cached.
+      - ``no_alt_client``: alt client couldn't be constructed.
+      - ``add_error``: alt's add raised (network, auth, malformed).
+      - ``add_failed``: alt's add returned an empty torrent id.
+      - ``stop_requested``: stop_event fired mid-rescue; alt entry cleaned.
+      - ``never_ready``: alt accepted the add but didn't reach a ready
+        state within ``ready_timeout``; alt entry cleaned.
+      - ``misconfigured``: ``ready_states`` was omitted (developer error,
+        not a runtime condition — see argument docs above).
+
+    Never raises.  All alt-side allocations are best-effort cleaned up
+    on failure (callers see an ``alt_torrent_id`` key only when cleanup
+    may have failed — useful for follow-up debugging).
+    """
+    import time
+
+    if ready_states is None:
+        return {'rescued': False, 'reason': 'misconfigured',
+                'alt_torrent_id': None,
+                'detail': 'ready_states required'}
+    ready_states = {s.lower() for s in ready_states}
+    ready_timeout = ready_timeout if ready_timeout is not None else _DEFAULT_RESCUE_READY_TIMEOUT
+    poll_interval = poll_interval if poll_interval is not None else _DEFAULT_RESCUE_POLL_INTERVAL
+
+    # 1. Resolve alt debrid
+    alt = alt_debrid or pick_alt_debrid(source_debrid)
+    if not alt:
+        # Distinguish "source isn't in our rescue graph" (config bug)
+        # from "user only has one debrid configured" (expected for
+        # single-debrid setups).
+        configured = configured_debrids()
+        if source_debrid not in configured:
+            return {'rescued': False, 'reason': 'unsupported_source',
+                    'alt_torrent_id': None}
+        return {'rescued': False, 'reason': 'no_alt_configured',
+                'alt_torrent_id': None}
+
+    # 2. Cache probe on alt
+    if cache_probe is None:
+        # Lazy-import the default probe so unit tests can stub it via
+        # ``cache_probe=`` without monkeypatching ``utils.search``.
+        try:
+            from utils.search import check_debrid_cache
+        except Exception as e:
+            logger.warning(
+                f"[{logger_prefix}] cache probe import failed: {type(e).__name__}"
+            )
+            return {'rescued': False, 'reason': 'cache_probe_error',
+                    'alt_torrent_id': None}
+
+        alt_key = os.environ.get(f'{alt.upper()}_API_KEY') if alt != REALDEBRID else os.environ.get('RD_API_KEY')
+
+        def _default_probe(svc, h):
+            cache_map = check_debrid_cache([h.lower()], service=svc, api_key=alt_key)
+            return cache_map.get(h.lower())
+
+        cache_probe = _default_probe
+
+    try:
+        cached = cache_probe(alt, info_hash)
+    except Exception as e:
+        logger.warning(
+            f"[{logger_prefix}] cache probe failed for {info_hash[:8]}…: "
+            f"{type(e).__name__}"
+        )
+        return {'rescued': False, 'reason': 'cache_probe_error',
+                'alt_torrent_id': None}
+
+    if cached is not True:
+        return {'rescued': False, 'reason': 'not_cached_on_alt',
+                'alt_torrent_id': None}
+
+    # 3. Resolve alt client (caller may have pre-resolved)
+    if alt_client is None:
+        try:
+            from utils.debrid_client import get_debrid_client
+        except Exception as e:
+            logger.warning(
+                f"[{logger_prefix}] debrid_client import failed: {type(e).__name__}"
+            )
+            return {'rescued': False, 'reason': 'no_alt_client',
+                    'alt_torrent_id': None}
+        alt_key = os.environ.get(f'{alt.upper()}_API_KEY')
+        try:
+            alt_client, _svc = get_debrid_client(service=alt, api_key=alt_key)
+        except Exception as e:
+            logger.warning(
+                f"[{logger_prefix}] get_debrid_client failed: {type(e).__name__}"
+            )
+            return {'rescued': False, 'reason': 'no_alt_client',
+                    'alt_torrent_id': None}
+        if alt_client is None or not getattr(alt_client, 'configured', False):
+            return {'rescued': False, 'reason': 'no_alt_client',
+                    'alt_torrent_id': None}
+
+    # 4. Add to alt
+    if alt_add_fn is None:
+        def alt_add_fn(client, h):
+            return client.add_magnet(h)
+
+    try:
+        alt_tid = alt_add_fn(alt_client, info_hash)
+    except Exception as e:
+        logger.warning(
+            f"[{logger_prefix}] alt add failed for {info_hash[:8]}…: "
+            f"{type(e).__name__}"
+        )
+        return {'rescued': False, 'reason': 'add_error',
+                'alt_torrent_id': None}
+    if not alt_tid:
+        return {'rescued': False, 'reason': 'add_failed',
+                'alt_torrent_id': None}
+    alt_tid = str(alt_tid)
+
+    # 5. Stop-event short-circuit between add and poll loop
+    if stop_event is not None and stop_event.is_set():
+        try:
+            alt_client.delete_torrent(alt_tid)
+        except Exception:
+            pass
+        return {'rescued': False, 'reason': 'stop_requested',
+                'alt_torrent_id': alt_tid}
+
+    # 6. Poll for ready
+    if status_fn is None:
+        def status_fn(client, tid):
+            return client.torrent_status(tid)
+
+    deadline = time.time() + ready_timeout
+    is_ready = False
+    while time.time() < deadline:
+        if stop_event is not None and stop_event.is_set():
+            break
+        try:
+            state_str = status_fn(alt_client, alt_tid)
+        except Exception:
+            state_str = ''
+        if (state_str or '').strip().lower() in ready_states:
+            is_ready = True
+            break
+        # Use stop_event.wait() instead of time.sleep so SIGTERM aborts
+        # within one poll interval rather than stalling on a 3s sleep.
+        if stop_event is not None:
+            if stop_event.wait(poll_interval):
+                break
+        else:
+            time.sleep(poll_interval)
+
+    if not is_ready:
+        try:
+            alt_client.delete_torrent(alt_tid)
+        except Exception:
+            pass
+        # Honour stop-event observed mid-poll loop so the caller can
+        # distinguish a SIGTERM-driven abort from a genuine timeout.
+        reason = 'stop_requested' if (stop_event is not None and stop_event.is_set()) else 'never_ready'
+        return {'rescued': False, 'reason': reason,
+                'alt_torrent_id': alt_tid}
+
+    return {'rescued': True, 'to': alt,
+            'alt_torrent_id': alt_tid, 'alt_client': alt_client}

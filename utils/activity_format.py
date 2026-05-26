@@ -288,22 +288,40 @@ def _fmt_debrid_filtered(ev, meta):
 
 
 def _fmt_debrid_rescued(ev, meta):
-    """Format a cross-debrid rescue event (plan 39 phase 3).
+    """Format a cross-debrid rescue event.
 
-    The source debrid filter-blocked the content; the alt debrid had it
-    cached and was used to re-host it.  ``retargeted`` is the count of
-    symlinks repointed; ``from``/``to`` are the provider names.
+    Two rescue stages produce this event with slightly different shapes:
+
+      - ``rescue_stage='sweep'`` (plan 39 phase 3, ``debrid_health``):
+        a previously-grabbed torrent went filter-blocked between syncs;
+        cross-rescue re-hosted it on the alt and retargeted existing
+        in-library symlinks.  ``retargeted`` is the symlink count.
+
+      - ``rescue_stage='add_time'`` (plan 41 phase A, ``blackhole``):
+        a fresh Sonarr/Radarr grab hit the filter at magnet-add;
+        cross-rescue routed the same hash to the alt before the watch-dir
+        file was failed.  No symlinks exist yet — the alt-side monitor
+        takes over from here.
+
+    Pre-plan-41 events lack the ``rescue_stage`` field; default to
+    ``sweep`` semantics for back-compat with events still inside the
+    30-day retention window.
     """
     frm = (meta.get('from') or '?').upper()
     to = (meta.get('to') or '?').upper()
     head = f'Filter-blocked on {frm} — rescued via {to}'
-    n = meta.get('retargeted', 0)
-    if n:
-        tail = f' — {n} symlink(s) retargeted'
-    elif meta.get('rescue_outcome') == 'no_symlinks_found':
-        tail = ' — alt-debrid has cache, no in-library symlinks to retarget'
+    stage = meta.get('rescue_stage') or 'sweep'
+
+    if stage == 'add_time':
+        tail = ' — routed to alt at add time, alt monitor took over'
     else:
-        tail = ' — alt-debrid has cache, file accessible via alt mount'
+        n = meta.get('retargeted', 0)
+        if n:
+            tail = f' — {n} symlink(s) retargeted'
+        elif meta.get('rescue_outcome') == 'no_symlinks_found':
+            tail = ' — alt-debrid has cache, no in-library symlinks to retarget'
+        else:
+            tail = ' — alt-debrid has cache, file accessible via alt mount'
     return head + tail, head + tail
 
 
@@ -632,11 +650,16 @@ FORMATTER_JS = r"""
       var frm = (m.from || '?').toUpperCase();
       var to  = (m.to   || '?').toUpperCase();
       var head = 'Filter-blocked on ' + frm + ' — rescued via ' + to;
-      var n = m.retargeted || 0;
+      var stage = m.rescue_stage || 'sweep';
       var tail;
-      if (n) tail = ' — ' + n + ' symlink(s) retargeted';
-      else if (m.rescue_outcome === 'no_symlinks_found') tail = ' — alt-debrid has cache, no in-library symlinks to retarget';
-      else tail = ' — alt-debrid has cache, file accessible via alt mount';
+      if (stage === 'add_time') {
+        tail = ' — routed to alt at add time, alt monitor took over';
+      } else {
+        var n = m.retargeted || 0;
+        if (n) tail = ' — ' + n + ' symlink(s) retargeted';
+        else if (m.rescue_outcome === 'no_symlinks_found') tail = ' — alt-debrid has cache, no in-library symlinks to retarget';
+        else tail = ' — alt-debrid has cache, file accessible via alt mount';
+      }
       return head + tail;
     },
     terminal_error: function(ev,m){ return 'Failed on ' + (m.provider||'debrid') + ': ' + (m.status || m.error || 'unknown'); },

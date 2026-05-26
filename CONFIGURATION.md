@@ -272,6 +272,7 @@ homelab-scale installs — most users don't need to touch these.
 | `ROUTING_AUDIT_INTERVAL` | Minutes between Sonarr/Radarr routing audits (debrid-tag self-heal) | `360` (6h) |
 | `QUEUE_CLEANUP_INTERVAL` | Minutes between Sonarr/Radarr queue cleanup passes | `60` |
 | `LIBRARY_SCAN_INTERVAL` | Minutes between library scans | `60` |
+| `LIBRARY_RESCAN_NFS_DELAY` | Seconds to sleep between symlink creation and the immediate Sonarr/Radarr rescan trigger, to let an NFS attribute cache invalidate before the arr walks the share. `0` disables (default; correct for local-FS arr-side libraries). Bump to `30` when symptomatic — see TROUBLESHOOTING for "Sonarr says hasFile=false right after a scan but imports correctly a minute later". Clamped to `[0, 300]`. | `0` |
 | `SYMLINK_VERIFY_INTERVAL` | Minutes between symlink verification sweeps | `360` (6h) |
 | `PREFERENCE_ENFORCE_INTERVAL` | Minutes between preference-enforcement passes | `60` |
 | `HOUSEKEEPING_INTERVAL` | Minutes between housekeeping (history prune, cache rotation) | `1440` (24h) |

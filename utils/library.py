@@ -39,6 +39,30 @@ def gap_fill_enabled():
     """
     return os.environ.get('GAP_FILL_ENABLED', 'true').strip().lower() == 'true'
 
+
+# Plan 41 phase B.2 — NFS attribute-cache delay between symlink creation
+# and arr rescan trigger.  See ``_create_debrid_symlinks`` for the
+# narrative.  Lifted to a module-level helper so it can be unit-tested
+# in isolation without exercising the entire scanner pipeline.
+_NFS_RESCAN_DELAY_MAX = 300
+
+
+def _resolve_nfs_rescan_delay():
+    """Return the configured rescan delay in seconds, clamped to ``[0, 300]``.
+
+    Empty/unset env yields 0.  Non-integer values yield 0 (best-effort —
+    a typo shouldn't crash the scanner; it just disables the mitigation).
+    Values >300 are clamped — a 5-minute ceiling caps user mistakes
+    without ever blocking the scan loop indefinitely.  Negative values
+    are clamped to 0.
+    """
+    raw = os.environ.get('LIBRARY_RESCAN_NFS_DELAY', '0') or '0'
+    try:
+        delay = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(delay, _NFS_RESCAN_DELAY_MAX))
+
 # Folders to skip during library scans (non-media content)
 _SKIP_FOLDERS = {
     'plex versions', 'subs', 'subtitles', 'featurettes',
@@ -292,6 +316,111 @@ def _parse_folder_name(name):
 _EPISODE_PATTERN = re.compile(r'S\d{1,2}E\d{1,2}', re.IGNORECASE)
 _EPISODE_ID_PATTERN = re.compile(r'S(\d{1,2})E(\d{1,2})', re.IGNORECASE)
 _SEASON_DIR_PATTERN = re.compile(r'^Season\s+(\d+)$', re.IGNORECASE)
+
+# Plan 41 phase B.1 — TV markers beyond ``SxxExx``.  Without these,
+# season packs (``S22.COMPLETE``), multi-season packs (``S01-S04``),
+# and ``Season 3`` folders that don't carry per-episode markers in the
+# folder name AND lack ``SxxExx``-tagged media inside (TB partial caches,
+# delete-after-watch torrents) get bucketed as movies — Radarr then
+# fields wasted lookups + gap-fill searches that loop indefinitely.
+#
+# Order matters: multi-season range FIRST (otherwise ``S01-S04`` would
+# match the single-season form ``S01`` and over-report a single season).
+# Each pattern has a negative lookahead/lookaround so ``SxxExx`` isn't
+# double-counted by the season-only matcher (the ``SxxExx`` form is
+# already handled by ``_EPISODE_PATTERN`` via ``_collect_episodes``).
+_MULTI_SEASON_RANGE_PATTERN = re.compile(
+    r'\bS(\d{1,2})\s*[-–]\s*S?(\d{1,2})\b', re.IGNORECASE,
+)
+_SEASON_ONLY_PATTERN = re.compile(
+    r'\bS(\d{1,2})(?![Ee\d])', re.IGNORECASE,
+)
+_SEASON_WORD_PATTERN = re.compile(
+    r'\bSeasons?\.?\s*(\d{1,2})\b', re.IGNORECASE,
+)
+
+
+def _merge_show_group(show_groups, key, title, year, episodes, path):
+    """Merge a newly-discovered folder's data into the running show-group dict.
+
+    Single source of truth used by BOTH ``_scan_mount`` (FUSE-mount
+    branch) and ``_webdav_scan_mount`` (WebDAV PROPFIND branch).  Plan
+    41 phase B second-pass reviewer fix-up — the two scan paths
+    previously carried structurally-identical merge code that drifted
+    out of lockstep when the path-swap heuristic was added: the
+    fix landed in the FUSE branch but missed the WebDAV branch (the
+    HOT path, since PROPFIND runs before FUSE fallback).  Lifting
+    the merge into a helper means a future change to merge semantics
+    updates both scan paths atomically.
+
+    Semantics:
+      - If ``key`` is not in ``show_groups``, insert a fresh entry.
+      - Otherwise, union the incoming ``episodes`` dict into the
+        stored one, preferring per-season higher ``_folder_ep_count``
+        on key collisions (season-pack > individual-episode grabs).
+      - Swap ``path`` to the new folder when its episode count
+        (``len(episodes)``) is strictly greater than the stored
+        folder's BEFORE-merge count.  Empty marker (len 0) loses to
+        any populated folder; equal counts keep the first-seen path
+        for stability.
+      - Prefer the title carrying a year over a no-year title.  On
+        no-year tie, prefer title-cased over lower-cased capitalisation.
+
+    Mutates ``show_groups`` in place.  Returns nothing.
+    """
+    if key not in show_groups:
+        show_groups[key] = {
+            'title': title,
+            'year': year,
+            'episodes': dict(episodes),
+            'path': path,
+        }
+        return
+
+    existing = show_groups[key]['episodes']
+    existing_count_before = len(existing)
+    for ep_key, ep_info in episodes.items():
+        if ep_key not in existing:
+            existing[ep_key] = ep_info
+        elif ep_info.get('_folder_ep_count', 1) > existing[ep_key].get('_folder_ep_count', 1):
+            existing[ep_key] = ep_info
+    if len(episodes) > existing_count_before:
+        show_groups[key]['path'] = path
+    if year and not show_groups[key]['year']:
+        show_groups[key]['year'] = year
+        show_groups[key]['title'] = title
+    elif title[0:1].isupper() and not show_groups[key]['title'][0:1].isupper():
+        show_groups[key]['title'] = title
+
+
+def _detect_tv_marker(folder_name):
+    """Return ``True`` when *folder_name* carries any TV-content marker.
+
+    Recognises:
+      - ``SxxExx`` per-episode tags (the canonical case).
+      - ``Sxx`` season-only tags (``S22.COMPLETE``, ``S03.1080p``).
+      - ``Sxx-Syy`` or ``Sxx-yy`` multi-season ranges (``S01-S04``).
+      - ``Season N`` / ``Seasons N`` word form (``Season.3.``,
+        ``Seasons 1``).
+
+    Used as a secondary classification gate in ``_scan_mount`` when
+    ``_collect_episodes`` returned empty — common on TB's flat layout
+    when the pack folder names a season range but the files inside are
+    still being cached, or when an indexer sanitises file names to drop
+    the per-episode marker.  Pre-fix these folders bucketed as movies
+    and produced cascading wasted Radarr API calls.
+    """
+    if not folder_name:
+        return False
+    if _EPISODE_PATTERN.search(folder_name):
+        return True
+    if _MULTI_SEASON_RANGE_PATTERN.search(folder_name):
+        return True
+    if _SEASON_ONLY_PATTERN.search(folder_name):
+        return True
+    if _SEASON_WORD_PATTERN.search(folder_name):
+        return True
+    return False
 
 
 def _get_folder_mtime(path):
@@ -4301,6 +4430,40 @@ class LibraryScanner:
                 pass
 
         if created:
+            # Plan 41 phase B.2 — NFS attribute-cache race mitigation.
+            # When Sonarr/Radarr lives on a different host from the symlink
+            # target and reaches it via an NFS share, the arr's view of the
+            # share is cached by the kernel (default 30-60s attribute TTL).
+            # A rescan fired immediately after symlink creation walks the
+            # directory before the cache refreshes, sees nothing new, and
+            # completes without imports — the file only lands on the next
+            # 1h library_scan cycle (which then re-triggers the rescan and
+            # this time succeeds).  Sleeping briefly here lets NFS see the
+            # new symlinks before the arr stat()s them.
+            nfs_delay = _resolve_nfs_rescan_delay()
+            # Only sleep when at least one arr is configured AND has matching
+            # symlinks — otherwise the sleep stalls the scan loop with no
+            # corresponding rescan fire (e.g. Radarr-only user just got show
+            # symlinks and SONARR_URL is unset; the rescan loop would warn
+            # and skip).  Reviewer feedback (code-reviewer Phase B LOW #2).
+            will_rescan_shows = bool(symlinked_shows and os.environ.get('SONARR_URL'))
+            will_rescan_movies = bool(symlinked_movies and os.environ.get('RADARR_URL'))
+            if nfs_delay > 0 and (will_rescan_shows or will_rescan_movies):
+                logger.info(
+                    f"[library] Sleeping {nfs_delay}s before arr rescans to let "
+                    f"NFS attribute cache invalidate (LIBRARY_RESCAN_NFS_DELAY)"
+                )
+                # NOTE: this sleep is NOT interruptible by SIGTERM — the
+                # scanner runs in a daemon thread, so the worst case on
+                # shutdown is the rescan trigger never fires for the
+                # symlinks just created.  Next container startup's
+                # library_scan cycle re-discovers them and triggers the
+                # rescan properly; no data loss.  Adding cooperative
+                # shutdown (via a ``_stop_event`` on ``LibraryScanner``)
+                # is deferred to plan 40 since it requires broader
+                # restructuring of the scanner threading model.
+                time.sleep(nfs_delay)
+
             # Trigger arr rescans so Sonarr/Radarr discover the new files.
             # Exception safety: the stash was reset to {} at the top of this
             # method, so even if the rescan loop raises the next scan won't
@@ -4517,6 +4680,35 @@ class LibraryScanner:
                             continue
                         episodes = _collect_episodes(entry.path)
                         is_show = len(episodes) > 0
+
+                        # Plan 41 phase B.1 — folder-name TV-marker
+                        # fallback.  On TB's flat layout the folder name
+                        # often carries Sxx / Sxx-Syy / Season N markers
+                        # without per-episode tags, and the files inside
+                        # may not be cached yet (or got sanitised by the
+                        # indexer to drop SxxExx).  ``_collect_episodes``
+                        # returns empty in that case; without this
+                        # fallback the entry buckets as a movie and
+                        # cascades into wasted Radarr API calls + gap-
+                        # fill searches that loop indefinitely.
+                        #
+                        # We flip ``is_show=True`` WITHOUT injecting
+                        # synthetic episode entries — those would
+                        # surface as "Episode 0" placeholders in the
+                        # library UI's per-episode breakdown.  The
+                        # show-entry bucket downstream gets a 0-episode
+                        # show that the next scan cycle (after TB
+                        # finishes caching) fills in with real
+                        # ``SxxExx`` files; until then the Sonarr
+                        # rescan trigger still fires correctly because
+                        # it's keyed on title, not episode count.
+                        if not is_show and _detect_tv_marker(entry.name):
+                            is_show = True
+                            logger.debug(
+                                f"[library] Classifying {entry.name!r} as TV via "
+                                f"folder-name marker (no SxxExx files found inside)"
+                            )
+
                         if not is_show and category_is_shows:
                             # Zurg says show but no S##E## episodes found.
                             # Check top level AND immediate subdirs for
@@ -4568,26 +4760,7 @@ class LibraryScanner:
                                 episodes[ep_key]['_folder_ep_count'] = season_counts[ep_key[0]]
 
                             key = _normalize_title(title)
-                            if key not in show_groups:
-                                show_groups[key] = {
-                                    'title': title,
-                                    'year': year,
-                                    'episodes': dict(episodes),
-                                    'path': entry.path,
-                                }
-                            else:
-                                existing = show_groups[key]['episodes']
-                                for ep_key, ep_info in episodes.items():
-                                    if ep_key not in existing:
-                                        existing[ep_key] = ep_info
-                                    elif ep_info.get('_folder_ep_count', 1) > existing[ep_key].get('_folder_ep_count', 1):
-                                        existing[ep_key] = ep_info
-                                # Prefer title with year or better capitalization
-                                if year and not show_groups[key]['year']:
-                                    show_groups[key]['year'] = year
-                                    show_groups[key]['title'] = title
-                                elif title[0:1].isupper() and not show_groups[key]['title'][0:1].isupper():
-                                    show_groups[key]['title'] = title
+                            _merge_show_group(show_groups, key, title, year, episodes, entry.path)
                         else:
                             key = _normalize_title(title)
                             if key not in movie_groups:
@@ -5022,25 +5195,10 @@ class LibraryScanner:
                         episodes[ep_key]['_folder_ep_count'] = season_counts[ep_key[0]]
 
                     key = _normalize_title(title)
-                    if key not in show_groups:
-                        show_groups[key] = {
-                            'title': title,
-                            'year': year,
-                            'episodes': dict(episodes),
-                            'path': os.path.join(self._mount_path, category, folder_name),
-                        }
-                    else:
-                        existing = show_groups[key]['episodes']
-                        for ep_key, ep_info in episodes.items():
-                            if ep_key not in existing:
-                                existing[ep_key] = ep_info
-                            elif ep_info.get('_folder_ep_count', 1) > existing[ep_key].get('_folder_ep_count', 1):
-                                existing[ep_key] = ep_info
-                        if year and not show_groups[key]['year']:
-                            show_groups[key]['year'] = year
-                            show_groups[key]['title'] = title
-                        elif title[0:1].isupper() and not show_groups[key]['title'][0:1].isupper():
-                            show_groups[key]['title'] = title
+                    _merge_show_group(
+                        show_groups, key, title, year, episodes,
+                        os.path.join(self._mount_path, category, folder_name),
+                    )
                 else:
                     key = _normalize_title(title)
                     if key not in movie_groups:

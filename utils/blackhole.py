@@ -16,6 +16,7 @@ import re
 import shutil
 import time
 import threading
+import uuid
 import requests
 from utils.file_utils import atomic_write
 from utils.logger import get_logger
@@ -44,6 +45,36 @@ _watcher = None
 # Retry configuration for failed torrent submissions
 RETRY_SCHEDULE = [300, 900, 3600]  # 5 min, 15 min, 1 hour
 MAX_RETRIES = 3
+
+# Plan 41 phase A — rescue-staging filename layout.  When the add-time
+# cross-rescue stages ``file_path`` to ``.alt_pending/`` before the
+# 60s wait_ready loop, it prefixes with ``.rescue-<uuid8>-`` so the
+# unique-name collision with the alt-release path's own same-directory
+# staging is impossible.  The recovery path on next startup
+# (``_recover_alt_pending``) MUST strip the prefix before moving to
+# ``failed/`` — otherwise the mangled name doesn't match what
+# Sonarr/Radarr expects on the next retry cycle and the file silently
+# rots.  The single-source-of-truth regex is below.
+_RESCUE_STAGED_PREFIX_RE = re.compile(r'^\.rescue-[0-9a-f]{8}-')
+# Cap the staged filename portion so the resulting basename
+# (``.rescue-<8 hex>-<filename>`` = 17 byte overhead) stays under
+# POSIX ``NAME_MAX`` (255 bytes) even for long multi-byte names from
+# non-English trackers.  220 + 17 = 237 bytes worst-case.
+_RESCUE_STAGED_FILENAME_MAX = 220
+
+
+def _restore_rescue_basename(name):
+    """Reverse the ``.rescue-<uuid8>-`` prefix added by the rescue staging.
+
+    Returns the original filename (or *name* unchanged when no prefix
+    is present).  Used by ``_recover_alt_pending`` on container restart
+    so a rescue-orphan that survived an SIGKILL gets moved to
+    ``failed/`` under its original name — Sonarr/Radarr's blackhole
+    import recognises that name on the next retry cycle.
+    """
+    if not name:
+        return name
+    return _RESCUE_STAGED_PREFIX_RE.sub('', name, count=1)
 
 # Per-provider rate-limit gating.  When a debrid API returns HTTP 429 or a
 # body containing "rate limit", the corresponding provider is marked
@@ -114,18 +145,23 @@ MOUNT_CATEGORIES = ['shows', 'movies', 'anime']
 # ``data.name`` field via the indexer scraper. The folder TorBox writes
 # to its WebDAV mount has the bare torrent folder name without that
 # prefix, so the mount lookup needs to try the stripped form too.
-_INDEXER_PREFIX_RE = re.compile(r'^\[[^\]]+\]\s*')
+#
+# Implementation lives in ``utils.debrid_routing`` (moved during plan
+# 41 phase-B reviewer fix-up to eliminate a cross-module private-name
+# dependency).  The alias below keeps the existing call sites in this
+# module working without per-call-site churn.
 
 
 def _strip_indexer_prefix(name):
     """Strip a leading ``[indexer.to] `` block from a release name.
 
-    Returns the stripped name, or *name* unchanged if no leading
-    bracket-block was present.
+    Thin alias for ``utils.debrid_routing.strip_indexer_prefix`` — kept
+    here so existing in-module callers (``_find_on_torbox_mount``) don't
+    grow a top-level import that would re-form the
+    ``blackhole ↔ debrid_routing`` cycle.
     """
-    if not name:
-        return name
-    return _INDEXER_PREFIX_RE.sub('', name, count=1)
+    from utils.debrid_routing import strip_indexer_prefix
+    return strip_indexer_prefix(name)
 
 
 def _is_safe_mount_name(name):
@@ -1538,7 +1574,7 @@ class BlackholeWatcher:
 
     # ── Mount scanning ───────────────────────────────────────────────
 
-    def _find_on_mount(self, release_name, debrid=None):
+    def _find_on_mount(self, release_name, debrid=None, file_names=None):
         """Search the rclone mount for a release folder.
 
         Returns (full_path, category, matched_name) or (None, None, None) if not found.
@@ -1568,21 +1604,23 @@ class BlackholeWatcher:
         debrid = debrid or self.debrid_service
         mount_path = self._mount_for(debrid)
 
+        if debrid == 'torbox':
+            # Plan 41 phase B.3 — single source of truth for TB folder-name
+            # candidates lives in ``utils.debrid_routing``.  ``file_names``
+            # bridges the indexer-display-title vs WebDAV-folder gap for
+            # non-English trackers (the API name is the indexer's native-
+            # language title; TB stores under the .torrent's info.name,
+            # which surfaces as the first path segment of each file in
+            # the API's data.files[].name list).
+            from utils.debrid_routing import build_tb_lookup_candidates
+            candidates = build_tb_lookup_candidates(release_name, file_names=file_names)
+            return self._find_on_torbox_mount(mount_path, release_name, candidates)
+
         # Try both the original name and with video extension stripped
         candidates = [release_name]
         base, ext = os.path.splitext(release_name)
         if ext.lower() in MEDIA_EXTENSIONS and base:
             candidates.append(base)
-
-        if debrid == 'torbox':
-            # Additional indexer-prefix-stripped candidates for TB.
-            stripped = _strip_indexer_prefix(release_name)
-            if stripped and stripped != release_name:
-                candidates.append(stripped)
-                s_base, s_ext = os.path.splitext(stripped)
-                if s_ext.lower() in MEDIA_EXTENSIONS and s_base:
-                    candidates.append(s_base)
-            return self._find_on_torbox_mount(mount_path, release_name, candidates)
 
         for name in candidates:
             if not _is_safe_mount_name(name):
@@ -2470,6 +2508,19 @@ class BlackholeWatcher:
         mount_path = None
         category = None
 
+        # Plan 41 phase B.3 — extract the per-file list from the last
+        # status response so ``_find_on_mount`` (TB branch) can derive
+        # WebDAV folder-name candidates from the file paths.  Critical
+        # for non-English trackers where the API ``data.name`` is the
+        # indexer's display title but TB stores under the .torrent's
+        # ``info.name``.  Computed once before the poll loop — TB's
+        # file list is stable post-cache-hit; no need to re-extract
+        # every iteration.
+        try:
+            file_names = self._extract_filenames_from_info(info, debrid=debrid)
+        except Exception:
+            file_names = None
+
         # Kick rclone to re-list the top-level category dirs immediately so
         # we don't have to wait for its next --poll-interval tick. Belt and
         # suspenders: rclone's active polling handles subsequent ticks, so
@@ -2497,7 +2548,9 @@ class BlackholeWatcher:
                 self._remove_pending(torrent_id)
                 return
 
-            mount_path, category, matched_name = self._find_on_mount(release_name, debrid=debrid)
+            mount_path, category, matched_name = self._find_on_mount(
+                release_name, debrid=debrid, file_names=file_names,
+            )
             if mount_path:
                 logger.info(f"[blackhole] Found on mount: {mount_path} (category: {category})")
                 break
@@ -2704,10 +2757,6 @@ class BlackholeWatcher:
 
     # ── Debrid rejection auto-retry ──────────────────────────────────
 
-    # RD error codes that mean "this specific hash is blocked, try another"
-    _REJECTION_CODES = {35, 30}  # infringing_file, torrent_file_invalid
-    _REJECTION_KEYWORDS = {'infringing_file', 'torrent_file_invalid'}
-
     @staticmethod
     def _alt_exhausted(file_path):
         """Check if alternative releases were already tried and exhausted."""
@@ -2715,16 +2764,294 @@ class BlackholeWatcher:
 
     @classmethod
     def _is_debrid_rejection(cls, result_text):
-        """Check if a debrid error response indicates the hash is blocked."""
-        if not isinstance(result_text, str):
+        """Check if a debrid error response indicates the hash is blocked.
+
+        Delegates to ``utils.debrid_routing.is_debrid_rejection`` so the
+        rejection vocabulary lives in one place — the routing module's
+        ``classify_add_failure`` is the source of truth that both this
+        predicate and the add-time rescue gate share (plan 41 phase A).
+        """
+        from utils.debrid_routing import is_debrid_rejection
+        return is_debrid_rejection(result_text)
+
+    def _attempt_add_time_rescue(self, file_path, filename, info_hash,
+                                 source_debrid, label, dispatch):
+        """Plan 41 phase A — add-time cross-debrid rescue.
+
+        When ``source_debrid`` returns a filter_block on the magnet add
+        (RD's May-2026 keyword filter) and an alt debrid is configured,
+        try the SAME hash on the alt.  On success: extract the alt
+        torrent id, start a monitor entry on the alt, log a
+        ``debrid_rescued`` history event, leave no file in the watch
+        dir, notify — exactly as the success branch of ``_process_file``
+        would have, but pointing at the alt provider.
+
+        Returns ``True`` when rescued (caller should ``return``).
+        Returns ``False`` on any failure mode — file is left at
+        ``file_path`` for the existing alt-release / failed/ fallback
+        paths.
+
+        File handling — the rescue stages ``file_path`` to a
+        uniquely-named entry under ``.alt_pending/`` BEFORE entering the
+        helper's up-to-60s wait_ready poll loop.  Without that move, a
+        Sonarr/Radarr re-grab of the same release name during the
+        rescue window would POSIX-rename a new file over ours and the
+        original grab would be silently lost when the rescue completes.
+        Unique name (``.rescue-<random8>-<filename>``) prevents
+        collision with the alt-release path's own staging in the same
+        directory.
+
+        Distinct from ``_try_alternative_release``: that path searches
+        for a DIFFERENT release of the same media; this path tries the
+        SAME hash on a DIFFERENT debrid.  Both are useful and chain
+        naturally — try cross-rescue first (cheap, hit-cached only),
+        fall back to alt-release search.
+
+        Known limitation (BH-3): if the alt's add request raises mid-
+        ``response.json()`` (TB serving malformed JSON during an
+        incident), the alt may have allocated a torrent_id server-side
+        but we have no id to delete from here — orphan on the alt
+        account.  Pre-existing in ``_add_to_torbox`` regardless of
+        rescue; the rescue path inherits but doesn't widen it.  A
+        follow-up wired through ``_add_to_torbox`` is the right place
+        to close the orphan window for all callers.
+        """
+        from utils.debrid_routing import attempt_add_rescue, pick_alt_debrid, classify_add_failure
+
+        alt = pick_alt_debrid(source_debrid)
+        if not alt:
             return False
-        rt = result_text.lower()
-        if any(kw in rt for kw in cls._REJECTION_KEYWORDS):
-            return True
-        return any(
-            f'"error_code": {c}' in rt or f'"error_code":{c}' in rt
-            for c in cls._REJECTION_CODES
+
+        alt_api_key = self._api_key_for(alt)
+        if not alt_api_key:
+            return False
+
+        # Resolve alt client in this namespace so tests that patch
+        # ``utils.blackhole.get_debrid_client`` (or equivalent) reach it.
+        # The shared helper accepts ``alt_client=`` so we can pass the
+        # pre-resolved client and skip the helper's internal lookup.
+        try:
+            from utils.debrid_client import get_debrid_client
+            alt_client, _svc = get_debrid_client(service=alt, api_key=alt_api_key)
+        except Exception as e:
+            logger.warning(
+                f"[blackhole] rescue get_debrid_client failed: "
+                f"{type(e).__name__}"
+            )
+            return False
+        if alt_client is None or not getattr(alt_client, 'configured', False):
+            return False
+
+        alt_handler = dispatch.get(alt)
+        if not alt_handler:
+            return False
+
+        # Stage the file BEFORE the rescue wait_ready loop (see method
+        # docstring).  Unique name keeps us out of alt-release staging's
+        # way.  On any failure mode below, we move back to file_path so
+        # the alt-release fallback can take over.
+        staging_dir = self._alt_pending_dir(label)
+        try:
+            os.makedirs(staging_dir, exist_ok=True)
+        except OSError as e:
+            logger.warning(
+                f"[blackhole] Could not create rescue staging dir {staging_dir}: {e}. "
+                f"Skipping rescue."
+            )
+            return False
+        # Truncate the filename portion so the full staged basename stays
+        # under POSIX NAME_MAX (255 bytes) even for long multi-byte
+        # names from non-English trackers — without the cap, ``os.rename``
+        # below would raise ``ENAMETOOLONG`` and the rescue would silently
+        # fall through to alt-release with a misleading "permissions"-
+        # shaped log line.  The truncation only affects the staged copy;
+        # the recovery path strips the prefix regex-anchored on the 8
+        # hex digits, not the trailing length, so a truncated suffix is
+        # still recoverable as a plain filename if needed.
+        safe_filename = filename[:_RESCUE_STAGED_FILENAME_MAX]
+        staged_basename = f'.rescue-{uuid.uuid4().hex[:8]}-{safe_filename}'
+        staged_path = os.path.join(staging_dir, staged_basename)
+        try:
+            os.rename(file_path, staged_path)
+        except OSError as e:
+            logger.warning(
+                f"[blackhole] Could not stage {filename} for rescue: {e}. "
+                f"Skipping rescue."
+            )
+            return False
+
+        # Closure captures the alt-side response so we can detect a
+        # "both providers filter-block" case after the helper returns.
+        # Stays as ``{'success': False, 'result': None}`` if the helper
+        # short-circuits before the add (e.g. cache_probe says
+        # not_cached_on_alt) — that's by design.  ``classify_add_failure(None)``
+        # returns ``None`` so the post-rescue blocklist gate below
+        # correctly doesn't fire for short-circuit cases.
+        add_response = {'success': False, 'result': None, 'extract_failed': False}
+
+        def _add_via_handler(client, h):  # noqa: ARG001 — client + h unused; we add via the staged file path
+            success, result = alt_handler(staged_path, api_key=alt_api_key)
+            add_response['success'] = success
+            add_response['result'] = result
+            if not success:
+                return None
+            tid = self._extract_torrent_id(result, debrid=alt)
+            if not tid:
+                # The alt accepted the add (HTTP 200/201) but the
+                # response shape didn't yield a torrent id.  Schema
+                # drift on the alt's side — NOT a filter block.  Flag
+                # this so the post-rescue blocklist gate below doesn't
+                # spuriously annotate the hash as
+                # ``filter_blocked_everywhere`` (which would permanently
+                # block future re-grabs of a hash the alt actually has).
+                add_response['extract_failed'] = True
+            return tid or None
+
+        core = attempt_add_rescue(
+            info_hash, source_debrid,
+            alt_debrid=alt,
+            alt_client=alt_client,
+            alt_add_fn=_add_via_handler,
+            ready_states=TB_READY_STATES,
+            stop_event=self._stop_event,
+            logger_prefix='blackhole',
         )
+
+        if not core.get('rescued'):
+            # Move the staged file back so the existing alt-release /
+            # failed-dir fallback paths can take over.  Atomic check-
+            # and-link via ``os.link`` (raises FileExistsError when
+            # ``file_path`` already exists) prevents the TOCTOU race
+            # where a fresh Sonarr drop lands between an ``os.path.exists``
+            # check and a follow-up ``os.rename`` — POSIX rename
+            # silently overwrites, which would lose the fresh grab.
+            # ``os.link`` is atomic on the same filesystem, which is
+            # always the case here (both paths are under ``self.watch_dir``).
+            try:
+                os.link(staged_path, file_path)
+                os.unlink(staged_path)
+            except FileExistsError:
+                # Fresh drop landed during the rescue wait — leave the
+                # original at its unique staged name for manual recovery.
+                logger.warning(
+                    f"[blackhole] {filename} re-appeared at watch dir during rescue wait; "
+                    f"original preserved at {staged_path} for manual recovery"
+                )
+            except OSError as e:
+                logger.warning(
+                    f"[blackhole] Could not restore {filename} from rescue staging: {e}. "
+                    f"File preserved at {staged_path}"
+                )
+
+            # Both-providers-filter-block: annotate the blocklist so future
+            # re-grabs of the same hash short-circuit at the pre-submit gate.
+            # The alt sweep will not rescue this either (it's filter-blocked
+            # there too), so blocklisting saves the indexer + API budget.
+            #
+            # Gate ALSO requires NOT extract_failed — a malformed alt
+            # response is schema drift, not a filter block, and would
+            # blocklist a hash the alt actually has.
+            #
+            # Best-effort detection: the trigger only fires when the alt's
+            # response carries an RD-shaped ``infringing_file`` / code 35
+            # payload.  TorBox doesn't ship a documented filter-block
+            # vocabulary today; if/when TB starts filter-blocking with its
+            # own response shape, ``classify_add_failure`` won't recognise
+            # it and this annotation will silently skip.  That's an
+            # acceptable miss — the rescue still falls through to the
+            # existing alt-release search; the only cost is an extra
+            # re-grab attempt on each Sonarr/Radarr retry cycle until
+            # ``_FILTER_BLOCK_KEYWORDS`` is updated.
+            alt_result = add_response.get('result')
+            if (core.get('reason') == 'add_failed'
+                    and not add_response.get('extract_failed')
+                    and classify_add_failure(alt_result) == 'filter_block'
+                    and _blocklist):
+                # Sanitize the title — filename comes from an
+                # uploader-controlled torrent name and can carry ASCII
+                # control chars that would render as raw text in
+                # notifications / logs.  Strip and truncate before
+                # storing in the persistent blocklist JSON.
+                safe_title = re.sub(r'[\x00-\x1f\x7f]', ' ', filename)[:200]
+                try:
+                    _blocklist.add(
+                        info_hash, safe_title,
+                        reason=f'filter_blocked_everywhere ({source_debrid}+{alt})',
+                        source='auto',
+                    )
+                except Exception as e:
+                    logger.debug(
+                        f"[blackhole] filter_blocked_everywhere blocklist add failed: {e}"
+                    )
+            return False
+
+        # Rescue succeeded — remove the staged file (it's no longer
+        # needed; the monitor entry is on the alt torrent_id now).
+        try:
+            os.remove(staged_path)
+        except OSError as e:
+            logger.warning(
+                f"[blackhole] Could not remove staged file after rescue: {e}"
+            )
+
+        alt_tid = core['alt_torrent_id']
+
+        # Prime alt dedup cache so a re-drop of the same .magnet pre-TTL
+        # is caught even before the alt account list refreshes.
+        try:
+            from utils.search import remember_added_hash
+            remember_added_hash(alt, info_hash)
+        except ImportError:
+            pass
+
+        # Start a monitor entry on the alt so symlink creation fires when
+        # the file lands on the alt's mount.
+        if self.symlink_enabled:
+            try:
+                self._start_monitor(alt_tid, filename, label=label, debrid=alt)
+            except Exception as e:
+                logger.error(
+                    f"[blackhole] Failed to start rescue monitor for {filename}: {e}"
+                )
+
+        # History — distinct cause from a normal grab so the activity
+        # feed shows the recovery story.  ``rescue_stage='add_time'``
+        # disambiguates from the sweep-driven rescue path that retargets
+        # existing symlinks.
+        if _history:
+            _mt, _ep = _enrich_for_history(filename)
+            _history.log_event(
+                'debrid', filename, episode=_ep, source='blackhole',
+                detail=f'Filter-blocked on {source_debrid} — rescued via {alt}',
+                meta={'cause': _history.CAUSE_DEBRID_RESCUED,
+                      'rescue_stage': 'add_time',
+                      'from': source_debrid,
+                      'to': alt,
+                      'info_hash': info_hash,
+                      'torrent_id': alt_tid,
+                      'provider': alt,
+                      'reason': 'infringing_file'},
+                media_title=_mt,
+            )
+
+        try:
+            from utils.metrics import metrics
+            metrics.inc('blackhole_processed', {'status': 'rescued'})
+        except Exception:
+            pass
+
+        if _notify:
+            _notify(
+                'debrid_rescued',
+                f'Debrid rescue: {filename[:60]}',
+                f'{source_debrid} filter-blocked, rescued via {alt}',
+            )
+
+        logger.info(
+            f"[blackhole] Rescued {filename}: {source_debrid} → {alt} "
+            f"(alt_tid={alt_tid})"
+        )
+        return True
 
     def _try_alternative_release(self, filename, file_path, debrid_handler, label=None):
         """On debrid rejection, query Sonarr/Radarr for an alternative release.
@@ -3587,6 +3914,20 @@ class BlackholeWatcher:
             else:
                 logger.error(f"[blackhole] Failed to add {filename}: {result}")
 
+                # Plan 41 phase A — filter-block cross-rescue BEFORE
+                # alt-release search.  Cross-rescue tries the SAME hash on
+                # the alt debrid (RD↔TB) and short-circuits when the alt
+                # has it cached; alt-release tries a DIFFERENT release of
+                # the same media.  They chain: cross-rescue first (cheap,
+                # hit-cached only), falls through to alt-release on miss.
+                from utils.debrid_routing import classify_add_failure
+                if (classify_add_failure(result) == 'filter_block'
+                        and info_hash
+                        and self._attempt_add_time_rescue(
+                            file_path, filename, info_hash, debrid, label, dispatch,
+                        )):
+                    return
+
                 # On debrid rejection (infringing/blocked), try alternative release
                 # in a background thread to avoid blocking the scan loop.
                 # Skip if alts were already exhausted in a prior attempt.
@@ -3817,11 +4158,18 @@ class BlackholeWatcher:
             return
 
         for label, src, filename in stranded:
+            # Strip the ``.rescue-<uuid8>-`` prefix the rescue path adds
+            # before staging (plan 41 phase A).  Without this restore,
+            # Sonarr/Radarr's blackhole-import would not recognise the
+            # mangled filename in ``failed/`` and the file would silently
+            # rot.  Alt-release-staging files (the older code path) have
+            # no prefix; the regex is a no-op for them.
+            recovered_filename = _restore_rescue_basename(filename)
             error_dir = self._failed_dir(label)
             os.makedirs(error_dir, exist_ok=True)
-            dest = os.path.join(error_dir, filename)
+            dest = os.path.join(error_dir, recovered_filename)
             if os.path.exists(dest):
-                base, fext = os.path.splitext(filename)
+                base, fext = os.path.splitext(recovered_filename)
                 dest = os.path.join(error_dir, f"{base}_{int(time.time())}{fext}")
             try:
                 os.rename(src, dest)
@@ -3829,7 +4177,8 @@ class BlackholeWatcher:
                 # tier_state on the recovered sidecar is preserved.
                 RetryMeta.mark_alt_exhausted(dest)
                 tag = f" [label={label}]" if label else ""
-                logger.warning(f"[blackhole] Recovered stranded alt-pending file: {filename}{tag}")
+                origin = " [rescue-orphan]" if recovered_filename != filename else ""
+                logger.warning(f"[blackhole] Recovered stranded alt-pending file: {recovered_filename}{origin}{tag}")
             except OSError as e:
                 logger.warning(f"[blackhole] Could not recover {filename} from alt_pending: {e}")
 

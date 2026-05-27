@@ -70,6 +70,8 @@ ENV_SCHEMA = [
             ('TORBOX_WEBDAV_USER', 'TorBox WebDAV User', 'string', False, 'TorBox account email used for WebDAV Basic auth. NOT the API key.'),
             ('TORBOX_WEBDAV_PASS', 'TorBox WebDAV Password', 'secret', False, 'WebDAV-only password set in the TorBox dashboard (Settings → Integrations → WebDAV). Distinct from the account login password and from the API key.'),
             ('TORBOX_MOUNT_NAME', 'TorBox Mount Name', 'string', False, 'Mount path under /data. Default "torbox" — must not collide with RCLONE_MOUNT_NAME.'),
+            ('TORBOX_RCLONE_TPSLIMIT', 'TorBox rclone tps limit', 'string', False, 'Max requests-per-second issued by the TB rclone mount. Default 5. TB rate-limits reads aggressively under concurrent Plex/Bazarr scans; capping tps avoids the "too many errors 11/10" 429 cascade. Set to 0 to omit the flag.'),
+            ('TORBOX_RCLONE_TPSLIMIT_BURST', 'TorBox rclone tps burst', 'string', False, 'Short-burst allowance on top of TORBOX_RCLONE_TPSLIMIT. Default 10. Lets quick peeks (ffprobe header reads) succeed without blocking. Set to 0 to omit the flag.'),
         ],
     },
     {
@@ -317,6 +319,11 @@ _ENV_DEFAULTS = {
     # applies when the env var is empty; surfacing a non-empty UI default
     # would pin the value into .env on first save.
     'CONFIG_BACKUP_RETENTION': '7',
+    # Plan 41 phase D: TB rclone tps defaults match the runtime fallback
+    # in rclone/rclone.py.  Listed here so the Settings UI shows the true
+    # default rather than an empty field that would suggest "no limit".
+    'TORBOX_RCLONE_TPSLIMIT': '5',
+    'TORBOX_RCLONE_TPSLIMIT_BURST': '10',
     # TorBox mount name default — matches base/__init__.py Config.load().
     # Listed so the Settings UI shows 'torbox' as the resolved value when
     # TORBOX_MOUNT_NAME isn't in .env, preventing an empty-looking field
@@ -626,6 +633,12 @@ def validate_env_values(values):
         # validation here surfaces an out-of-range value to the user
         # rather than silently clamping behind their back.
         'LIBRARY_RESCAN_NFS_DELAY': (0, 300),
+        # Plan 41 phase D — TB rclone throttling.  0 = omit flag (no
+        # throttle); upper bound 100 is well above any real-world value
+        # for TB's tier ceiling but catches typos that would cripple
+        # the mount.
+        'TORBOX_RCLONE_TPSLIMIT': (0, 100),
+        'TORBOX_RCLONE_TPSLIMIT_BURST': (0, 200),
         # Quality compromise (plan 33) — integer fields
         'QUALITY_COMPROMISE_DWELL_DAYS': (1, 30),
         'QUALITY_COMPROMISE_MIN_SEEDERS': (0, 1000),

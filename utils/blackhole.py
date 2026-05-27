@@ -17,6 +17,7 @@ import shutil
 import time
 import threading
 import uuid
+from datetime import datetime
 import requests
 from utils.file_utils import atomic_write
 from utils.logger import get_logger
@@ -93,23 +94,116 @@ _RATE_LIMIT_BACKOFF = 60  # seconds; one rate-limit token-bucket window
 _rate_limit_lock = threading.Lock()
 _rate_limit_until = {}    # provider -> unix timestamp until which adds wait
 
+# TorBox-specific: the per-tier daily/monthly download quota can put the
+# whole account into a ``cooldown_until`` window that is NOT a standard
+# 429 — TB returns HTTP 400 + ``{"error":"DOWNLOAD_SERVER_ERROR",...}``
+# on createtorrent while the cooldown is active.  ``_check_torbox_cooldown``
+# fetches the cooldown timestamp from /v1/api/user/me and exposes it as
+# "seconds until the cooldown expires", so a failed add can be converted
+# into a precise rate-limit window via ``_mark_rate_limited('torbox', seconds=N)``.
+# A short module-level cache keeps a retry storm from hammering /user/me.
+_TB_COOLDOWN_CACHE_TTL = 30  # seconds — short enough to react to manual lift
+_tb_cooldown_cache = {'checked_at': 0.0, 'seconds_until': 0.0}
 
-def _check_rate_limit(provider):
+
+def _check_torbox_cooldown(api_key, *, _now=None):
+    """Return seconds remaining on TB's account-level ``cooldown_until``.
+
+    Reads ``/v1/api/user/me`` and parses the ISO-8601 ``cooldown_until``
+    field.  Returns ``0.0`` when there is no active cooldown, the response
+    cannot be parsed, or the network call fails — every failure mode
+    degrades to "treat as no cooldown" so a transient /user/me hiccup
+    cannot wedge the entire TB add pipeline.
+
+    The success-path result is cached for ``_TB_COOLDOWN_CACHE_TTL``
+    seconds (with elapsed-time decay so callers see a monotonically
+    non-increasing snapshot) so a retry storm only triggers one
+    /user/me call per window.  **Failure paths do NOT write the cache**:
+    a transient /user/me 5xx during a real cooldown must not mask the
+    cooldown for the full TTL — the next call will re-probe and pick
+    it up once the API recovers.  ``_now`` is a test seam.
+    """
+    now = _now if _now is not None else time.time()
+    with _rate_limit_lock:
+        cached_at = _tb_cooldown_cache.get('checked_at', 0.0)
+        cached_seconds = _tb_cooldown_cache.get('seconds_until', 0.0)
+    if now - cached_at < _TB_COOLDOWN_CACHE_TTL:
+        elapsed = now - cached_at
+        return max(0.0, cached_seconds - elapsed)
+    if not api_key:
+        return 0.0
+    try:
+        headers = {'Authorization': f'Bearer {api_key}'}
+        resp = requests.get(
+            'https://api.torbox.app/v1/api/user/me',
+            headers=headers, timeout=10,
+        )
+        if resp.status_code != 200:
+            return 0.0  # transient failure — do NOT cache
+        payload = resp.json() or {}
+        cooldown_until_str = (payload.get('data') or {}).get('cooldown_until')
+        if not cooldown_until_str:
+            seconds_until = 0.0
+        else:
+            # TB returns RFC 3339 UTC like ``2026-05-28T08:40:58Z``.
+            # ``fromisoformat`` parses the ``Z`` suffix only from
+            # Python 3.11+; normalise to ``+00:00`` for compatibility.
+            # Also guard against a future TB change that drops the
+            # timezone marker entirely — assume UTC in that case so
+            # ``.timestamp()`` doesn't silently interpret as local time.
+            normalised = cooldown_until_str.replace('Z', '+00:00')
+            dt = datetime.fromisoformat(normalised)
+            if dt.tzinfo is None:
+                from datetime import timezone
+                dt = dt.replace(tzinfo=timezone.utc)
+            expires = dt.timestamp()
+            seconds_until = max(0.0, expires - now)
+    except Exception as exc:  # network, JSON, ISO parse — all degrade safely
+        logger.debug(f"[blackhole] TB cooldown probe failed: {exc}")
+        return 0.0  # transient failure — do NOT cache
+    with _rate_limit_lock:
+        _tb_cooldown_cache['checked_at'] = now
+        _tb_cooldown_cache['seconds_until'] = seconds_until
+    return seconds_until
+
+
+_RATE_LIMIT_SLEEP_CHUNK = 300  # seconds — cap per-call sleep so a long
+                                # cooldown (e.g. TB daily-quota 22h) can be
+                                # preempted by SIGTERM / manual window
+                                # reset without wedging the worker thread.
+
+
+def _check_rate_limit(provider, *, _max_chunk=None):
     """Block until any active rate-limit window for *provider* expires.
 
     Cheap when no window is active (one lock acquire + dict lookup).
-    Logs once per actual wait so operators see why a worker paused.
+    For long windows (e.g. TB account cooldown can be tens of thousands
+    of seconds), the sleep is chunked at ``_RATE_LIMIT_SLEEP_CHUNK`` so
+    a SIGTERM or a manually cleared window can interrupt the wait
+    without leaving the worker stuck on a 22-hour ``time.sleep``.
     """
-    with _rate_limit_lock:
-        until = _rate_limit_until.get(provider, 0)
-    now = time.time()
-    if until > now:
-        wait = until - now
-        logger.warning(
-            f"[blackhole] {provider}: rate-limit window active, sleeping {wait:.1f}s "
-            f"before next add"
-        )
+    max_chunk = _max_chunk if _max_chunk is not None else _RATE_LIMIT_SLEEP_CHUNK
+    logged = False
+    while True:
+        with _rate_limit_lock:
+            until = _rate_limit_until.get(provider, 0)
+        now = time.time()
+        remaining = until - now
+        if remaining <= 0:
+            return
+        wait = min(remaining, max_chunk)
+        if not logged:
+            logger.warning(
+                f"[blackhole] {provider}: rate-limit window active, "
+                f"sleeping up to {remaining:.1f}s before next add"
+            )
+            logged = True
         time.sleep(wait)
+        # If we slept the full remaining duration in one chunk we're done;
+        # otherwise loop to wait the rest (re-reading ``until`` so a
+        # manual reset can wake us up early).
+        if wait < max_chunk:
+            return
 
 
 def _mark_rate_limited(provider, seconds=None):
@@ -1381,6 +1475,19 @@ class BlackholeWatcher:
         if _is_rate_limit_response(response):
             _mark_rate_limited('torbox')
             return False, 'rate limit exceeded'
+        # TB does not surface its account-level cooldown via 429 — instead
+        # it returns HTTP 400 ``DOWNLOAD_SERVER_ERROR`` while ``cooldown_until``
+        # on /user/me is set.  Probe the cooldown so a quota-exhausted
+        # account converts into a precise rate-limit window rather than
+        # an open retry loop that wastes every subsequent createtorrent
+        # call until the cooldown lifts.
+        cooldown_seconds = _check_torbox_cooldown(api_key)
+        if cooldown_seconds > 0:
+            _mark_rate_limited('torbox', seconds=cooldown_seconds)
+            return False, (
+                f'TorBox account cooldown active for '
+                f'{int(cooldown_seconds)}s — gating subsequent adds'
+            )
         return False, response.text[:200]
 
     # ── Torrent ID extraction ────────────────────────────────────────

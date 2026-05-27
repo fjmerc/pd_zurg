@@ -12,6 +12,7 @@ from utils.blackhole import (
     _is_valid_label, iter_release_dirs,
     _is_rate_limit_response, _check_rate_limit, _mark_rate_limited,
     _rate_limit_until,
+    _check_torbox_cooldown, _tb_cooldown_cache,
 )
 
 
@@ -708,6 +709,218 @@ class TestRateLimitGate:
         _mark_rate_limited('realdebrid', seconds=-1)
         _check_rate_limit('realdebrid')
         assert sleeps == []
+
+
+class TestTorboxCooldownProbe:
+    """``_check_torbox_cooldown`` converts TB's account-level
+    ``cooldown_until`` field into a "seconds remaining" value so a
+    failed createtorrent can be gated via the existing rate-limit
+    window infrastructure.  TB returns HTTP 400 + generic
+    ``DOWNLOAD_SERVER_ERROR`` while the cooldown is active (not the
+    standard 429 path), so without this probe every subsequent add
+    silently wastes an API call until the cooldown lifts.
+    """
+
+    def setup_method(self):
+        _tb_cooldown_cache['checked_at'] = 0.0
+        _tb_cooldown_cache['seconds_until'] = 0.0
+
+    def teardown_method(self):
+        _tb_cooldown_cache['checked_at'] = 0.0
+        _tb_cooldown_cache['seconds_until'] = 0.0
+
+    def _mock_response(self, status_code, json_body):
+        from unittest.mock import MagicMock
+        resp = MagicMock()
+        resp.status_code = status_code
+        resp.json.return_value = json_body
+        return resp
+
+    def test_active_cooldown_returns_seconds_remaining(self, monkeypatch):
+        """Cooldown_until 600s in the future → returns ~600.0 (within
+        wall-clock jitter)."""
+        from datetime import datetime, timedelta, timezone
+        future = datetime.now(timezone.utc) + timedelta(seconds=600)
+        iso = future.strftime('%Y-%m-%dT%H:%M:%SZ')
+        resp = self._mock_response(200, {'data': {'cooldown_until': iso}})
+        monkeypatch.setattr('utils.blackhole.requests.get', lambda *a, **kw: resp)
+        seconds = _check_torbox_cooldown('tb-key')
+        assert 595 <= seconds <= 605
+
+    def test_no_cooldown_returns_zero(self, monkeypatch):
+        """``cooldown_until`` absent / null → 0.0."""
+        resp = self._mock_response(200, {'data': {'cooldown_until': None}})
+        monkeypatch.setattr('utils.blackhole.requests.get', lambda *a, **kw: resp)
+        assert _check_torbox_cooldown('tb-key') == 0.0
+
+    def test_expired_cooldown_returns_zero(self, monkeypatch):
+        """A cooldown_until in the past must clamp to 0 (not negative)
+        so callers can use the raw value as a sleep duration."""
+        from datetime import datetime, timedelta, timezone
+        past = datetime.now(timezone.utc) - timedelta(seconds=60)
+        iso = past.strftime('%Y-%m-%dT%H:%M:%SZ')
+        resp = self._mock_response(200, {'data': {'cooldown_until': iso}})
+        monkeypatch.setattr('utils.blackhole.requests.get', lambda *a, **kw: resp)
+        assert _check_torbox_cooldown('tb-key') == 0.0
+
+    def test_network_failure_degrades_to_zero(self, monkeypatch):
+        """A network hiccup on /user/me must NOT wedge the add path —
+        treat unknown cooldown state as 'no cooldown' (caller will
+        decide based on the original error response)."""
+        def _boom(*a, **kw):
+            raise OSError('connection refused')
+        monkeypatch.setattr('utils.blackhole.requests.get', _boom)
+        assert _check_torbox_cooldown('tb-key') == 0.0
+
+    def test_non_200_response_returns_zero(self, monkeypatch):
+        """401/500/etc. → treat as unknown → 0.0."""
+        resp = self._mock_response(401, {})
+        monkeypatch.setattr('utils.blackhole.requests.get', lambda *a, **kw: resp)
+        assert _check_torbox_cooldown('tb-key') == 0.0
+
+    def test_missing_api_key_returns_zero_without_network(self, monkeypatch):
+        """Empty api_key must not hit /user/me — silently return 0."""
+        calls = []
+        monkeypatch.setattr('utils.blackhole.requests.get',
+                            lambda *a, **kw: calls.append(a) or None)
+        assert _check_torbox_cooldown('') == 0.0
+        assert _check_torbox_cooldown(None) == 0.0
+        assert calls == []
+
+    def test_cache_suppresses_repeat_calls(self, monkeypatch):
+        """Within the TTL the helper must NOT re-hit /user/me — a retry
+        storm of failed adds would otherwise hammer the cooldown probe."""
+        from datetime import datetime, timedelta, timezone
+        future = datetime.now(timezone.utc) + timedelta(seconds=300)
+        iso = future.strftime('%Y-%m-%dT%H:%M:%SZ')
+        resp = self._mock_response(200, {'data': {'cooldown_until': iso}})
+        call_count = {'n': 0}
+        def _get(*a, **kw):
+            call_count['n'] += 1
+            return resp
+        monkeypatch.setattr('utils.blackhole.requests.get', _get)
+        s1 = _check_torbox_cooldown('tb-key')
+        s2 = _check_torbox_cooldown('tb-key')
+        s3 = _check_torbox_cooldown('tb-key')
+        assert call_count['n'] == 1  # cache hit on second + third
+        assert s1 > 0 and s2 > 0 and s3 > 0
+        # Cached value decays with elapsed time so the caller sees a
+        # monotonically non-increasing snapshot, not a stale fixed number.
+        assert s2 <= s1 + 0.5  # allow tiny clock jitter
+        assert s3 <= s2 + 0.5
+
+    def test_cache_expires_after_ttl(self, monkeypatch):
+        """Past the TTL the helper re-fetches /user/me so a manually
+        lifted cooldown is picked up promptly."""
+        from datetime import datetime, timedelta, timezone
+        future = datetime.now(timezone.utc) + timedelta(seconds=300)
+        iso = future.strftime('%Y-%m-%dT%H:%M:%SZ')
+        resp = self._mock_response(200, {'data': {'cooldown_until': iso}})
+        call_count = {'n': 0}
+        def _get(*a, **kw):
+            call_count['n'] += 1
+            return resp
+        monkeypatch.setattr('utils.blackhole.requests.get', _get)
+        now = time.time()
+        _check_torbox_cooldown('tb-key', _now=now)
+        # Jump past the cache TTL — should refresh.
+        _check_torbox_cooldown('tb-key', _now=now + 999)
+        assert call_count['n'] == 2
+
+
+class TestTorboxAddCooldownGate:
+    """``_add_to_torbox`` must convert a TB cooldown-shape failure
+    (HTTP 400 ``DOWNLOAD_SERVER_ERROR`` while /user/me reports an
+    active cooldown) into a rate-limit window so subsequent adds
+    block on ``_check_rate_limit('torbox')`` rather than wasting an
+    API call each.  Plain non-cooldown failures must still surface as
+    a generic error without setting a window.
+    """
+
+    def setup_method(self):
+        _rate_limit_until.clear()
+        _tb_cooldown_cache['checked_at'] = 0.0
+        _tb_cooldown_cache['seconds_until'] = 0.0
+
+    def teardown_method(self):
+        _rate_limit_until.clear()
+        _tb_cooldown_cache['checked_at'] = 0.0
+        _tb_cooldown_cache['seconds_until'] = 0.0
+
+    def _make_watcher(self, tmp_dir, monkeypatch):
+        monkeypatch.setattr('utils.blackhole.os.path.exists', lambda *_a, **_k: True)
+        return BlackholeWatcher(
+            watch_dir=tmp_dir, debrid_api_key='tb-key',
+            debrid_service='torbox', completed_dir=tmp_dir,
+        )
+
+    def _magnet_path(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'test.magnet')
+        with open(path, 'w') as f:
+            f.write('magnet:?xt=urn:btih:' + ('a' * 40))
+        return path
+
+    def test_cooldown_failure_marks_rate_limit_window(self, tmp_dir, monkeypatch):
+        """A 400 ``DOWNLOAD_SERVER_ERROR`` while cooldown_until is set
+        must set the TB rate-limit window so the *next* add blocks
+        instead of hitting createtorrent again."""
+        from unittest.mock import MagicMock
+        from datetime import datetime, timedelta, timezone
+
+        watcher = self._make_watcher(tmp_dir, monkeypatch)
+        path = self._magnet_path(tmp_dir)
+
+        # First call: createtorrent returns 400 cooldown error.
+        post_resp = MagicMock()
+        post_resp.status_code = 400
+        post_resp.text = '{"success":false,"error":"DOWNLOAD_SERVER_ERROR"}'
+        post_resp.json.return_value = {'success': False, 'error': 'DOWNLOAD_SERVER_ERROR'}
+        # /user/me returns an active cooldown.
+        future = datetime.now(timezone.utc) + timedelta(seconds=300)
+        iso = future.strftime('%Y-%m-%dT%H:%M:%SZ')
+        get_resp = MagicMock()
+        get_resp.status_code = 200
+        get_resp.json.return_value = {'data': {'cooldown_until': iso}}
+
+        monkeypatch.setattr('utils.blackhole.tracked_request',
+                            lambda *a, **kw: post_resp)
+        monkeypatch.setattr('utils.blackhole.requests.get',
+                            lambda *a, **kw: get_resp)
+
+        ok, msg = watcher._add_to_torbox(path)
+        assert ok is False
+        assert 'cooldown' in msg.lower()
+        # Window must be set so the next _check_rate_limit('torbox') blocks.
+        assert _rate_limit_until.get('torbox', 0) > time.time() + 250
+
+    def test_plain_failure_does_not_set_window(self, tmp_dir, monkeypatch):
+        """A non-cooldown error (e.g. 400 with no active cooldown) must
+        propagate without arming a rate-limit window — otherwise a
+        single bad torrent would gate the whole TB pipeline for the
+        full window duration."""
+        from unittest.mock import MagicMock
+
+        watcher = self._make_watcher(tmp_dir, monkeypatch)
+        path = self._magnet_path(tmp_dir)
+
+        post_resp = MagicMock()
+        post_resp.status_code = 400
+        post_resp.text = '{"success":false,"error":"INVALID_MAGNET"}'
+        post_resp.json.return_value = {'success': False, 'error': 'INVALID_MAGNET'}
+        get_resp = MagicMock()
+        get_resp.status_code = 200
+        # No cooldown_until → helper returns 0 → no window arming.
+        get_resp.json.return_value = {'data': {'cooldown_until': None}}
+
+        monkeypatch.setattr('utils.blackhole.tracked_request',
+                            lambda *a, **kw: post_resp)
+        monkeypatch.setattr('utils.blackhole.requests.get',
+                            lambda *a, **kw: get_resp)
+
+        ok, msg = watcher._add_to_torbox(path)
+        assert ok is False
+        assert 'cooldown' not in msg.lower()
+        assert _rate_limit_until.get('torbox', 0) <= time.time()
 
 
 class TestSymlinkConstants:

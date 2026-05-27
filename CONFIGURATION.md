@@ -73,6 +73,8 @@ mount you need the two `TORBOX_WEBDAV_*` vars as well.
 | `TORBOX_WEBDAV_USER` | TorBox account email used for WebDAV Basic auth | |
 | `TORBOX_WEBDAV_PASS` | WebDAV-only password from the TorBox dashboard → Settings → Integrations → WebDAV. **Not** the account password, **not** the API key. | |
 | `TORBOX_MOUNT_NAME` | Mount path under `/data` (must not collide with `RCLONE_MOUNT_NAME`) | `torbox` |
+| `TORBOX_RCLONE_TPSLIMIT` | Max requests-per-second issued by the TB rclone mount. TB rate-limits reads aggressively under concurrent Plex/Bazarr scans; capping tps avoids the `too many errors 11/10` 429 cascade. Set to `0` to omit the flag entirely. | `5` |
+| `TORBOX_RCLONE_TPSLIMIT_BURST` | Short-burst allowance on top of `TORBOX_RCLONE_TPSLIMIT`. Lets quick peeks (ffprobe header reads) succeed without blocking. Set to `0` to omit the flag entirely. | `10` |
 
 > **Note**: plex_debrid (`PD_ENABLED=true`) speaks directly to RD via its
 > own client and bypasses pd_zurg's blackhole entirely — multi-debrid

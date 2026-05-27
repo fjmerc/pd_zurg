@@ -284,6 +284,49 @@ def setup():
                 if val:
                     rclone_command.append(f'--{flag}={val}')
 
+            # Per-mount throttling / retry tuning (plan 41 phase D).
+            #
+            # FUSE-only — ``rclone serve nfs`` does not accept these
+            # flags (it's a server, not a mount), and ``--low-level-retries``
+            # specifically would crash the NFS subcommand with an
+            # unknown-flag error.  Skip the entire block when NFSMOUNT is
+            # active so the NFS path stays exactly as it was before D.
+            #
+            # TorBox: rate-limits reads aggressively under concurrent
+            # Plex/Bazarr/library-scan load — the symptom is rclone vfs
+            # cache 429 spam that ends with "too many errors 11/10".
+            # --tpslimit caps tokens-per-second issued by rclone so we
+            # stay under TB's threshold; --tpslimit-burst lets short
+            # bursts (e.g. ffprobe quick-peek) succeed.  Defaults of
+            # 5/10 match TB Essential's observed steady-state ceiling.
+            # Set either env var to ``0`` to omit the flag entirely.
+            #
+            # RD/AD (Zurg-backed): RD returns HTTP 423 on freshly-grabbed
+            # files while the upstream re-cracks the rar; that resolves
+            # in seconds.  Default rclone retry count is 10, which floods
+            # the log with retries before giving up.  Cap to 3 retries —
+            # plenty for the recovery window, and the rest of the noise
+            # disappears.
+            nfs_mode = NFSMOUNT is not None and NFSMOUNT.lower() == "true"
+            if not nfs_mode:
+                if mn == TORBOX_MOUNT_NAME and torbox_remote_written:
+                    tps_raw = (os.environ.get('TORBOX_RCLONE_TPSLIMIT') or '5').strip()
+                    burst_raw = (os.environ.get('TORBOX_RCLONE_TPSLIMIT_BURST') or '10').strip()
+                    try:
+                        tps = int(tps_raw)
+                        if tps > 0:
+                            rclone_command.append(f'--tpslimit={tps}')
+                    except ValueError:
+                        logger.warning(f"Invalid TORBOX_RCLONE_TPSLIMIT={tps_raw!r}; ignoring")
+                    try:
+                        burst = int(burst_raw)
+                        if burst > 0:
+                            rclone_command.append(f'--tpslimit-burst={burst}')
+                    except ValueError:
+                        logger.warning(f"Invalid TORBOX_RCLONE_TPSLIMIT_BURST={burst_raw!r}; ignoring")
+                else:
+                    rclone_command.append('--low-level-retries=3')
+
             # Pick the URL + auth + verb to probe for readiness.  RD/AD
             # point at a local Zurg instance and accept plain GET on
             # /dav/.  TorBox goes direct to webdav.torbox.app and rejects

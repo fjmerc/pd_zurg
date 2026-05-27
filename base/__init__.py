@@ -47,6 +47,7 @@ __all__ = [
     'PLEXDEBRID', 'PDLOGLEVEL', 'PLEXUSER', 'PLEXTOKEN',
     'JFADD', 'JFAPIKEY', 'RDAPIKEY', 'ADAPIKEY',
     'TORBOXAPIKEY', 'TORBOXWEBDAVUSER', 'TORBOXWEBDAVPASS', 'TORBOX_MOUNT_NAME',
+    'TORBOX_RCLONE_TPSLIMIT', 'TORBOX_RCLONE_TPSLIMIT_BURST',
     'GHTOKEN',
     'SEERRAPIKEY', 'SEERRADD', 'PLEXADD', 'ZURGUSER', 'ZURGPASS',
     'SHOWMENU', 'LOGFILE', 'PDUPDATE', 'PDREPO',
@@ -180,6 +181,12 @@ class Config:
         # _ENV_DEFAULTS drift guard in tests/test_settings_api.py
         # ::test_env_defaults_stays_in_sync_with_config can verify it.
         self.TORBOX_MOUNT_NAME = os.getenv('TORBOX_MOUNT_NAME', 'torbox')
+        # Plan 41 phase D: TB rclone tpslimit knobs.  TB rate-limits
+        # reads aggressively under concurrent Plex/Bazarr scans; default
+        # 5 tps / 10-burst stays under the observed Essential-tier
+        # ceiling.  Set either to '0' to omit the flag entirely.
+        self.TORBOX_RCLONE_TPSLIMIT = os.getenv('TORBOX_RCLONE_TPSLIMIT', '5')
+        self.TORBOX_RCLONE_TPSLIMIT_BURST = os.getenv('TORBOX_RCLONE_TPSLIMIT_BURST', '10')
         self.GHTOKEN = load_secret_or_env('GITHUB_TOKEN')
         self.SEERRAPIKEY = load_secret_or_env('seerr_api_key')
         self.SEERRADD = load_secret_or_env('seerr_address')
@@ -349,6 +356,8 @@ TORBOXAPIKEY = config.TORBOXAPIKEY
 TORBOXWEBDAVUSER = config.TORBOXWEBDAVUSER
 TORBOXWEBDAVPASS = config.TORBOXWEBDAVPASS
 TORBOX_MOUNT_NAME = config.TORBOX_MOUNT_NAME
+TORBOX_RCLONE_TPSLIMIT = config.TORBOX_RCLONE_TPSLIMIT
+TORBOX_RCLONE_TPSLIMIT_BURST = config.TORBOX_RCLONE_TPSLIMIT_BURST
 GHTOKEN = config.GHTOKEN
 SEERRAPIKEY = config.SEERRAPIKEY
 SEERRADD = config.SEERRADD

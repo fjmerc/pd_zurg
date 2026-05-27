@@ -20,7 +20,6 @@ from utils.search import (
     search_torrents,
     add_to_debrid,
     check_debrid_cache,
-    _coerce_instant,
     _TORBOX_MAX_PROBES,
     _existing_hashes,
     remember_added_hash,
@@ -422,75 +421,55 @@ class TestCheckDebridCache:
             check_debrid_cache(['a' * 40])
             assert mock_urlopen.call_count == 0
 
-    @patch('urllib.request.urlopen')
-    def test_alldebrid_batch_success(self, mock_urlopen):
-        """AD returns the batch in a single call; True/False mapped
-        back by the hash the API echoes (not by list index, so a
-        dropped entry can't mis-tag another hash)."""
-        mock_urlopen.return_value = _mock_urlopen_response({
-            'status': 'success',
-            'data': {
-                'magnets': [
-                    {'hash': 'a' * 40, 'instant': True},
-                    {'hash': 'b' * 40, 'instant': False},
-                ],
-            },
-        })
-        with patch('utils.search._get_debrid_service') as ms:
-            ms.return_value = ('alldebrid', 'ad-key')
-            result = check_debrid_cache(['a' * 40, 'b' * 40])
-        assert result == {'a' * 40: True, 'b' * 40: False}
-        assert mock_urlopen.call_count == 1
+    def test_alldebrid_returns_unknown(self):
+        """AD discontinued /v4/magnet/instant (and there is no
+        replacement) — probe is a deliberate no-op that returns None
+        uniformly so compromise logic treats AD responses as 'unknown'
+        (safe default refuses escalation unless
+        QUALITY_COMPROMISE_ONLY_CACHED=false)."""
+        import utils.search as search_mod
+        # Reset the module-level flag so test order doesn't hide the emit;
+        # restore it afterwards so a later test exercising the same flag
+        # starts from a clean slate (mirrors the RD pattern below).
+        search_mod._ad_cache_warning_emitted = False
+        try:
+            with patch('utils.search._get_debrid_service') as ms:
+                ms.return_value = ('alldebrid', 'ad-key')
+                result = check_debrid_cache(['a' * 40, 'b' * 40])
+            assert result == {'a' * 40: None, 'b' * 40: None}
+        finally:
+            search_mod._ad_cache_warning_emitted = False
 
-    @patch('urllib.request.urlopen')
-    def test_alldebrid_missing_hash_defaults_to_none(self, mock_urlopen):
-        """AD dropping a hash from the response must leave that hash
-        as None (unknown), not False (safe conservatism: absence is
-        not evidence of uncached)."""
-        mock_urlopen.return_value = _mock_urlopen_response({
-            'status': 'success',
-            'data': {'magnets': [{'hash': 'a' * 40, 'instant': True}]},
-        })
-        with patch('utils.search._get_debrid_service') as ms:
-            ms.return_value = ('alldebrid', 'ad-key')
-            result = check_debrid_cache(['a' * 40, 'b' * 40])
-        assert result == {'a' * 40: True, 'b' * 40: None}
-
-    @patch('urllib.request.urlopen')
-    def test_alldebrid_status_failure_returns_none_map(self, mock_urlopen):
-        mock_urlopen.return_value = _mock_urlopen_response({
-            'status': 'error', 'data': {'error': {'message': 'bad key'}},
-        })
-        with patch('utils.search._get_debrid_service') as ms:
-            ms.return_value = ('alldebrid', 'ad-key')
-            result = check_debrid_cache(['a' * 40])
-        assert result == {'a' * 40: None}
-
-    @patch('urllib.request.urlopen')
-    def test_alldebrid_timeout_returns_none_map(self, mock_urlopen):
-        """Silent failure returns None for every hash — per the plan
-        contract, the caller decides whether to treat unknown as
-        'not cached' or 'assume cached'."""
-        import socket
-        mock_urlopen.side_effect = socket.timeout('timed out')
-        with patch('utils.search._get_debrid_service') as ms:
-            ms.return_value = ('alldebrid', 'ad-key')
-            result = check_debrid_cache(['a' * 40, 'b' * 40])
-        assert result == {'a' * 40: None, 'b' * 40: None}
-
-    @patch('urllib.request.urlopen')
-    def test_alldebrid_url_redaction(self, mock_urlopen, caplog):
-        """API key must NOT leak into warning logs on probe failure.
-        Query string (with apikey) is stripped by _safe_log_url."""
-        import logging
-        mock_urlopen.side_effect = OSError('boom')
+    def test_alldebrid_does_not_hit_network(self):
+        """Regression: the AD stub must NOT emit an HTTP call —
+        v4 + v4.1 /magnet/instant both return DISCONTINUED, so a
+        stray call wastes an AD API-rate-limit slot on every
+        compromise decision."""
         with patch('utils.search._get_debrid_service') as ms, \
-             caplog.at_level(logging.WARNING, logger='ProjectDebridZurg'):
-            ms.return_value = ('alldebrid', 'SUPER-SECRET-KEY-42')
+             patch('urllib.request.urlopen') as mock_urlopen:
+            ms.return_value = ('alldebrid', 'ad-key')
             check_debrid_cache(['a' * 40])
-        for record in caplog.records:
-            assert 'SUPER-SECRET-KEY-42' not in record.message
-            assert 'apikey' not in record.message
+            assert mock_urlopen.call_count == 0
+
+    def test_ad_warning_emits_once(self, caplog):
+        """Users with AD + only-cached mode must see a one-time warning
+        explaining why compromise never fires.  Repeated probes must
+        not spam the log."""
+        import logging
+        import utils.search as search_mod
+        search_mod._ad_cache_warning_emitted = False
+        try:
+            with patch('utils.search._get_debrid_service') as ms, \
+                 caplog.at_level(logging.WARNING, logger='ProjectDebridZurg'):
+                ms.return_value = ('alldebrid', 'ad-key')
+                check_debrid_cache(['a' * 40])
+                check_debrid_cache(['b' * 40])
+                check_debrid_cache(['c' * 40])
+            ad_msgs = [r for r in caplog.records if 'AllDebrid' in r.message]
+            assert len(ad_msgs) == 1
+            assert 'discontinued' in ad_msgs[0].message.lower()
+        finally:
+            search_mod._ad_cache_warning_emitted = False
 
     @patch('urllib.request.urlopen')
     def test_torbox_per_hash_success(self, mock_urlopen):
@@ -533,73 +512,6 @@ class TestCheckDebridCache:
             check_debrid_cache(['a' * 40])
         for record in caplog.records:
             assert 'TB-SECRET-XYZ' not in record.message
-
-    @patch('urllib.request.urlopen')
-    def test_alldebrid_uppercase_hash_in_response(self, mock_urlopen):
-        """Defensive: AD could return uppercase hashes.  The membership
-        check lowercases before comparing so the correct mapping still
-        holds — flagging a regression if someone removes that guard."""
-        mock_urlopen.return_value = _mock_urlopen_response({
-            'status': 'success',
-            'data': {
-                'magnets': [
-                    {'hash': ('A' * 40), 'instant': True},
-                ],
-            },
-        })
-        with patch('utils.search._get_debrid_service') as ms:
-            ms.return_value = ('alldebrid', 'ad-key')
-            result = check_debrid_cache(['a' * 40])
-        assert result == {'a' * 40: True}
-
-    @patch('urllib.request.urlopen')
-    def test_alldebrid_coerces_string_instant(self, mock_urlopen):
-        """Defensive: if AD ever serialises instant as 'true'/'false'
-        strings, the coercion helper must still yield a bool rather
-        than dropping the value to None."""
-        mock_urlopen.return_value = _mock_urlopen_response({
-            'status': 'success',
-            'data': {
-                'magnets': [
-                    {'hash': 'a' * 40, 'instant': 'true'},
-                    {'hash': 'b' * 40, 'instant': 'FALSE'},
-                ],
-            },
-        })
-        with patch('utils.search._get_debrid_service') as ms:
-            ms.return_value = ('alldebrid', 'ad-key')
-            result = check_debrid_cache(['a' * 40, 'b' * 40])
-        assert result == {'a' * 40: True, 'b' * 40: False}
-
-    @patch('urllib.request.urlopen')
-    def test_alldebrid_response_cannot_poison_with_extra_hashes(self, mock_urlopen):
-        """A hostile/buggy AD response echoing hashes the caller did
-        not ask about must not inject keys into the result map."""
-        mock_urlopen.return_value = _mock_urlopen_response({
-            'status': 'success',
-            'data': {
-                'magnets': [
-                    {'hash': 'a' * 40, 'instant': True},
-                    # Not requested — must be ignored
-                    {'hash': 'c' * 40, 'instant': True},
-                ],
-            },
-        })
-        with patch('utils.search._get_debrid_service') as ms:
-            ms.return_value = ('alldebrid', 'ad-key')
-            result = check_debrid_cache(['a' * 40, 'b' * 40])
-        assert result == {'a' * 40: True, 'b' * 40: None}
-        assert 'c' * 40 not in result
-
-    def test_coerce_instant_helper(self):
-        assert _coerce_instant(True) is True
-        assert _coerce_instant(False) is False
-        assert _coerce_instant('true') is True
-        assert _coerce_instant('FALSE') is False
-        assert _coerce_instant(' True ') is True
-        assert _coerce_instant(None) is None
-        assert _coerce_instant(1) is None  # int is not a bool truthiness — safe
-        assert _coerce_instant('maybe') is None
 
     @patch('urllib.request.urlopen')
     def test_torbox_none_payload_returns_none_not_false(self, mock_urlopen):

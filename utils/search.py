@@ -266,6 +266,7 @@ _TORBOX_MAX_PROBES = 25
 # with RD + QUALITY_COMPROMISE_ONLY_CACHED=true understand why compromise
 # never fires.  A module-level flag avoids log-spam across many searches.
 _rd_cache_warning_emitted = False
+_ad_cache_warning_emitted = False
 
 
 def check_debrid_cache(info_hashes, service=None, api_key=None):
@@ -291,11 +292,19 @@ def check_debrid_cache(info_hashes, service=None, api_key=None):
         ``None`` as "not cached" (safe) and under aggressive mode treat
         it as "assume cached".
 
-    Real-Debrid note: RD deprecated ``/torrents/instantAvailability`` in
-    Nov 2024 and the endpoint now returns an empty object.  We return
-    ``{hash: None}`` for RD — there is no way to pre-check cache status
-    anymore.  AllDebrid (`/v4/magnet/instant`) and TorBox
-    (`/api/torrents/checkcached`) still expose working probes.
+    Provider notes:
+      - **Real-Debrid** deprecated ``/torrents/instantAvailability`` in
+        Nov 2024.  Stub returns ``{hash: None}``; no network call.
+      - **AllDebrid** discontinued ``/v4/magnet/instant`` (404 ``DISCONTINUED``
+        as of May 2026, verified against the live API + the public
+        docs at https://docs.alldebrid.com).  No replacement endpoint
+        exists — cache state is only knowable post-upload via the
+        ``ready`` flag on ``/v4.1/magnet/upload``, which is a
+        state-changing operation and therefore unsuitable for a
+        read-only pre-add probe.  Stub returns ``{hash: None}``;
+        no network call.
+      - **TorBox** ``/api/torrents/checkcached`` is the only provider
+        endpoint still exposing a working pre-add cache probe.
 
     URL redaction: every HTTP URL logged by this function is passed
     through ``_safe_log_url`` so API keys in query strings never leak
@@ -357,56 +366,33 @@ def _check_cache_rd(hashes, api_key):
     return {h: None for h in hashes}
 
 
-def _coerce_instant(value):
-    """Normalise AD's ``instant`` field to True/False/None.
-
-    The API returns a bool today; defensive coercion for ``"true"`` /
-    ``"false"`` strings guards against a silent server-side change
-    that would otherwise drop confirmed-uncached into None.
-    """
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        v = value.strip().lower()
-        if v == 'true':
-            return True
-        if v == 'false':
-            return False
-    return None
-
-
 def _check_cache_ad(hashes, api_key):
-    """AllDebrid batch cache probe via ``/v4/magnet/instant``.
+    """AllDebrid cache probe stub.
 
-    AD accepts the full hash batch in a single POST and returns a
-    parallel array; we map by the hash the API echoes back so index
-    drift (e.g. AD dropping a hash from the response) cannot mis-tag
-    another hash.  Body uses repeated ``magnets[]`` fields via
-    ``_urllib_post(doseq=True)``.
+    ``/v4/magnet/instant`` was discontinued by AD some time before
+    May 2026 (verified live: every call to v4 and v4.1 returns
+    ``{"status":"error","error":{"code":"DISCONTINUED",...}}``).  No
+    replacement endpoint exists — AD's only remaining cache signal is
+    the ``ready`` boolean on a successful ``/v4.1/magnet/upload``
+    response, which is a state-changing operation and therefore
+    unsuitable for a read-only pre-add probe.  We return
+    ``{hash: None}`` uniformly without hitting the network and emit a
+    single process-lifetime warning so users with AD +
+    ``QUALITY_COMPROMISE_ONLY_CACHED=true`` understand why compromise
+    never fires.
     """
-    magnets = [_hash_to_magnet(h) for h in hashes]
-    qs = urllib.parse.urlencode({'agent': 'zurgarr', 'apikey': api_key})
-    url = f'https://api.alldebrid.com/v4/magnet/instant?{qs}'
-    data = _urllib_post(url, data=[('magnets[]', m) for m in magnets],
-                        timeout=_CACHE_PROBE_TIMEOUT, doseq=True)
-    result = {h: None for h in hashes}
-    if not data or data.get('status') != 'success':
-        return result
-    magnets_data = (data.get('data') or {}).get('magnets') or []
-    if not isinstance(magnets_data, list):
-        return result
-
-    hash_set = set(hashes)
-    for entry in magnets_data:
-        if not isinstance(entry, dict):
-            continue
-        entry_hash = (entry.get('hash') or '').strip().lower()
-        if entry_hash not in hash_set:
-            continue
-        coerced = _coerce_instant(entry.get('instant'))
-        if coerced is not None:
-            result[entry_hash] = coerced
-    return result
+    global _ad_cache_warning_emitted
+    if not _ad_cache_warning_emitted:
+        logger.warning(
+            "[search] AllDebrid cache probes are a no-op — AD discontinued "
+            "/v4/magnet/instant (no replacement endpoint).  Cache-gated "
+            "features (QUALITY_COMPROMISE_ONLY_CACHED, cached_first sort) "
+            "will treat all AD releases as 'unknown' and refuse escalation; "
+            "set QUALITY_COMPROMISE_ONLY_CACHED=false to opt into aggressive "
+            "escalation without cache verification"
+        )
+        _ad_cache_warning_emitted = True
+    return {h: None for h in hashes}
 
 
 def _check_cache_tb(hashes, api_key):
@@ -663,9 +649,10 @@ def search_torrents(imdb_id, media_type='movie', season=None, episode=None,
     Blocklisted hashes are filtered out.
 
     Provider note: Real-Debrid's cache-query endpoint was deprecated in
-    Nov 2024, so RD annotations are always ``None`` and ``'cached_first'``
-    sort degrades to quality order for RD users.  AllDebrid and TorBox
-    return meaningful True/False.
+    Nov 2024 and AllDebrid discontinued ``/v4/magnet/instant`` in May 2026,
+    so RD and AD annotations are always ``None`` and ``'cached_first'`` sort
+    degrades to quality order for those users.  Only TorBox
+    (``/api/torrents/checkcached``) still returns meaningful True/False.
     """
     results = search_torrentio(imdb_id, media_type, season, episode)
     if not results:

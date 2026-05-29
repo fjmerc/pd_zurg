@@ -72,6 +72,54 @@ _SKIP_FOLDERS = {
     '.recycle', '@eadir', '@recently-snapshot',
 }
 
+
+def _all_debrid_symlink_prefixes():
+    """Return all configured per-debrid symlink-target prefixes (each with
+    trailing ``os.sep`` so ``startswith`` matches whole path components only).
+
+    Plan 39 introduced per-debrid target bases — TorBox content lives under
+    ``BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX`` (or auto-derived ``<RD>_torbox``).
+    Local scanners that only checked the RD base would silently misclassify
+    TB-routed folders as local content, dropping them into the wrong
+    movies/shows bucket and rendering show episodes in the movies UI.
+
+    Iterates ``VALID_DEBRIDS`` rather than hard-coding TB so future providers
+    (AD's pending per-base env var, Premiumize) auto-extend without touching
+    this helper.  Paths are normalised via ``os.path.normpath`` so
+    consecutive separators (``/mnt//debrid``) and relative configs collapse
+    to canonical form before the prefix is built.  Empty bases are dropped;
+    the result is deduped and order-preserved.
+    """
+    bases = []
+    rd = (os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE') or '').strip()
+    if rd:
+        bases.append(rd)
+    try:
+        from utils.debrid_routing import VALID_DEBRIDS, symlink_target_base_for_debrid
+        for svc in VALID_DEBRIDS:
+            try:
+                b = (symlink_target_base_for_debrid(svc) or '').strip()
+            except Exception as e:
+                logger.debug("[library] symlink_target_base_for_debrid(%r) failed: %s", svc, e)
+                continue
+            if b:
+                bases.append(b)
+    except ImportError as e:
+        # debrid_routing import shouldn't fail in production but log it so
+        # a misconfigured install leaves a trace instead of silently
+        # degrading to RD-only behaviour (re-introducing the very bug
+        # this helper exists to prevent).
+        logger.debug("[library] debrid_routing import failed: %s", e)
+    seen = set()
+    result = []
+    for b in bases:
+        # normpath collapses consecutive seps + resolves relative segments
+        prefix = os.path.normpath(b).rstrip(os.sep) + os.sep
+        if prefix not in seen:
+            seen.add(prefix)
+            result.append(prefix)
+    return tuple(result)
+
 # Quality and codec markers stripped when parsing folder names
 _QUALITY_PATTERN = re.compile(
     r'[\s.\-_(\[]('
@@ -3666,8 +3714,10 @@ class LibraryScanner:
         broken links and removes them so the next symlink-creation pass can
         lay down fresh links for replacement content.
 
-        Only touches symlinks whose targets start with BLACKHOLE_SYMLINK_TARGET_BASE.
-        Real files and non-debrid symlinks are never modified.
+        Walks all configured (debrid-target-prefix, rclone-mount) pairs so
+        TorBox-routed symlinks under ``<RD_base>_torbox`` get cleanup too —
+        otherwise broken TB symlinks accumulate on disk forever (plan 39
+        dual-debrid gap).  Real files and non-debrid symlinks are never modified.
 
         Must run BEFORE ``_create_debrid_symlinks`` in the effects pipeline.
         """
@@ -3679,7 +3729,24 @@ class LibraryScanner:
             return
 
         rclone_real = os.path.realpath(rclone_mount)
-        base_prefix = symlink_base.rstrip(os.sep) + os.sep
+        # Build (target-prefix, rclone-mount-real-path) pairs for every
+        # configured debrid so the check-path translation step finds the
+        # right mount per symlink.  RD is the primary pair; TB is appended
+        # when its mount discovers cleanly.  Same pattern as
+        # ``_create_debrid_symlinks::_mount_target_pairs``.
+        debrid_pair_list = [(os.path.normpath(symlink_base).rstrip(os.sep) + os.sep, rclone_real)]
+        try:
+            from utils.debrid_routing import TORBOX, symlink_target_base_for_debrid
+            tb_base = (symlink_target_base_for_debrid(TORBOX) or '').strip()
+            tb_mount = self._discover_torbox_mount() if tb_base else None
+            if tb_base and tb_mount:
+                tb_real = os.path.realpath(tb_mount)
+                tb_prefix = os.path.normpath(tb_base).rstrip(os.sep) + os.sep
+                if (tb_prefix, tb_real) not in debrid_pair_list:
+                    debrid_pair_list.append((tb_prefix, tb_real))
+        except Exception as exc:
+            logger.debug("[library] TB cleanup-pair resolution failed: %s", exc)
+        debrid_prefixes_only = tuple(p for p, _m in debrid_pair_list)
 
         # Guard: verify the rclone mount exists, is responsive, and has content.
         # A missing or stalled FUSE mount makes os.path.exists() return False
@@ -3745,14 +3812,25 @@ class LibraryScanner:
                                     target = os.path.normpath(
                                         os.path.join(os.path.dirname(fpath), target)
                                     )
-                                if not target.startswith(base_prefix):
+                                # Match the symlink target to one of the configured
+                                # debrid (prefix, mount) pairs so RD and TB symlinks
+                                # both get cleanup against the right mount.
+                                matched_prefix = None
+                                matched_mount = None
+                                for _p, _m in debrid_pair_list:
+                                    if target.startswith(_p):
+                                        matched_prefix = _p
+                                        matched_mount = _m
+                                        break
+                                if matched_prefix is None:
                                     continue
-                                # Translate arr-namespace target to rclone mount for existence check
+                                # Translate arr-namespace target to the per-debrid
+                                # rclone mount for existence check.
                                 check_path = os.path.normpath(
-                                    rclone_real + os.sep + target[len(base_prefix):]
+                                    matched_mount + os.sep + target[len(matched_prefix):]
                                 )
                                 # Ensure translated path stays within the mount
-                                if not check_path.startswith(rclone_real + os.sep):
+                                if not check_path.startswith(matched_mount + os.sep):
                                     continue
                                 if not os.path.exists(check_path):
                                     # Re-verify still a symlink to narrow TOCTOU window
@@ -3775,7 +3853,7 @@ class LibraryScanner:
                                     if _extract_release_info is not None:
                                         try:
                                             release_name, _, _ = _extract_release_info(
-                                                target, [base_prefix]
+                                                target, debrid_prefixes_only
                                             )
                                         except Exception as exc:
                                             logger.warning(
@@ -5332,7 +5410,7 @@ class LibraryScanner:
         if not os.path.isdir(self._local_movies_path):
             logger.warning(f"[library] Local movies path not found: {self._local_movies_path}")
             return items
-        symlink_base = os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', '').strip()
+        symlink_prefixes = _all_debrid_symlink_prefixes()
         try:
             with os.scandir(self._local_movies_path) as it:
                 for entry in it:
@@ -5342,7 +5420,7 @@ class LibraryScanner:
                     if entry.name.lower() in _SKIP_FOLDERS:
                         continue
                     # Skip folders that only contain debrid symlinks
-                    if symlink_base and self._is_debrid_symlink_dir(entry.path, symlink_base):
+                    if symlink_prefixes and self._is_debrid_symlink_dir(entry.path, symlink_prefixes):
                         continue
                     # Skip folders with no media files — these are either empty
                     # Radarr placeholders or dirs whose symlinks were deleted.
@@ -5370,14 +5448,22 @@ class LibraryScanner:
         return items
 
     @staticmethod
-    def _is_debrid_symlink_dir(path, symlink_base):
+    def _is_debrid_symlink_dir(path, symlink_prefixes):
         """Check if a directory contains only debrid symlinks (no real media files).
+
+        ``symlink_prefixes`` is a tuple of trailing-``os.sep``-terminated
+        prefixes — one per configured debrid target base.  A symlink whose
+        target starts with ANY of them counts as a debrid symlink; a symlink
+        targeting an unknown path counts as non-debrid and disqualifies the
+        whole dir.  Plan 39: dual-debrid setups have a separate prefix for
+        each provider; checking only one would misclassify the other.
 
         Only considers media-extension files. Non-media files (.nfo, .srt, .jpg)
         are ignored so Radarr metadata doesn't cause false local classification.
         Returns False for empty directories.
         """
-        prefix = symlink_base.rstrip(os.sep) + os.sep
+        if not symlink_prefixes:
+            return False
         has_debrid_symlink = False
         try:
             with os.scandir(path) as it:
@@ -5387,7 +5473,7 @@ class LibraryScanner:
                         continue
                     if f.is_symlink():
                         target = os.readlink(f.path)
-                        if not target.startswith(prefix):
+                        if not any(target.startswith(p) for p in symlink_prefixes):
                             return False  # symlink to non-debrid location
                         has_debrid_symlink = True
                     elif f.is_file(follow_symlinks=False):
@@ -5414,13 +5500,20 @@ class LibraryScanner:
         return False
 
     @staticmethod
-    def _is_debrid_symlink_only(path, symlink_base):
+    def _is_debrid_symlink_only(path, symlink_prefixes):
         """Check if a show directory tree contains only debrid symlinks (no real media files).
+
+        ``symlink_prefixes`` is a tuple of debrid-target prefixes (one per
+        configured debrid).  See ``_is_debrid_symlink_dir`` for the dual-debrid
+        rationale — the same single-prefix bug applied here, mis-bucketing
+        TB-routed show folders as local TV (and, when the show name collided
+        with a movie folder, surfacing as a movie card in the library UI).
 
         Walks into Season subdirectories to check episode files. Non-media files
         are ignored. Returns False for empty directories.
         """
-        prefix = symlink_base.rstrip(os.sep) + os.sep
+        if not symlink_prefixes:
+            return False
         has_any_media = False
         try:
             with os.scandir(path) as it:
@@ -5435,7 +5528,8 @@ class LibraryScanner:
                                         continue
                                     has_any_media = True
                                     if f.is_symlink():
-                                        if not os.readlink(f.path).startswith(prefix):
+                                        target = os.readlink(f.path)
+                                        if not any(target.startswith(p) for p in symlink_prefixes):
                                             return False
                                     elif f.is_file(follow_symlinks=False):
                                         return False  # real file
@@ -5445,7 +5539,8 @@ class LibraryScanner:
                         ext = os.path.splitext(entry.name)[1].lower()
                         if ext in MEDIA_EXTENSIONS:
                             has_any_media = True
-                            if not os.readlink(entry.path).startswith(prefix):
+                            target = os.readlink(entry.path)
+                            if not any(target.startswith(p) for p in symlink_prefixes):
                                 return False
                     elif entry.is_file(follow_symlinks=False):
                         ext = os.path.splitext(entry.name)[1].lower()
@@ -5462,7 +5557,7 @@ class LibraryScanner:
         if not os.path.isdir(self._local_tv_path):
             logger.warning(f"[library] Local TV path not found: {self._local_tv_path}")
             return items
-        symlink_base = os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', '').strip()
+        symlink_prefixes = _all_debrid_symlink_prefixes()
         try:
             with os.scandir(self._local_tv_path) as it:
                 for entry in it:
@@ -5472,7 +5567,7 @@ class LibraryScanner:
                     if entry.name.lower() in _SKIP_FOLDERS:
                         continue
                     # Skip show folders that are entirely debrid symlinks
-                    if symlink_base and self._is_debrid_symlink_only(entry.path, symlink_base):
+                    if symlink_prefixes and self._is_debrid_symlink_only(entry.path, symlink_prefixes):
                         continue
                     title, year = _parse_folder_name(entry.name)
                     if not title:

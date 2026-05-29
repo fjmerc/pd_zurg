@@ -1053,6 +1053,275 @@ class TestLibraryScannerScanLocal:
         assert result["shows"] == []
 
 
+class TestDebridSymlinkPrefixesDualDebrid:
+    """Guards for the dual-debrid symlink-prefix recognition that drives
+    local-scanner debrid-vs-local classification.
+
+    Regression: with plan 39's per-debrid target bases, TorBox content
+    landed under ``BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX`` (or the
+    auto-derived ``<RD>_torbox`` suffix).  The pre-fix scanner checked
+    only against ``BLACKHOLE_SYMLINK_TARGET_BASE``, so TB-only symlink
+    folders looked like genuine local content — appearing as movie or
+    TV cards in the wrong bucket of the library UI (the user-visible
+    surface: 'Why is Grey's Anatomy showing up as a movie in Recently
+    Added?').
+    """
+
+    def test_all_debrid_symlink_prefixes_includes_tb_auto_derived(self, monkeypatch):
+        """When TB is not explicitly configured but RD is set, the TB
+        prefix auto-derives as ``<RD>_torbox`` and must be included."""
+        from utils.library import _all_debrid_symlink_prefixes
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+        prefixes = _all_debrid_symlink_prefixes()
+        assert '/mnt/debrid/' in prefixes
+        assert '/mnt/debrid_torbox/' in prefixes
+
+    def test_all_debrid_symlink_prefixes_explicit_tb_wins(self, monkeypatch):
+        from utils.library import _all_debrid_symlink_prefixes
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/rd')
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', '/mnt/tb')
+        prefixes = _all_debrid_symlink_prefixes()
+        assert '/mnt/rd/' in prefixes
+        assert '/mnt/tb/' in prefixes
+        assert '/mnt/rd_torbox/' not in prefixes  # explicit beats auto-derived
+
+    def test_all_debrid_symlink_prefixes_single_debrid_no_dup(self, monkeypatch):
+        """RD-only setup (no TB env): TB's auto-derived `_torbox` suffix is
+        included (harmless over-include — the helper deliberately doesn't
+        couple to configured_debrids detection).  Critical assertion: no
+        duplicates regardless of how many bases get added."""
+        from utils.library import _all_debrid_symlink_prefixes
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+        prefixes = _all_debrid_symlink_prefixes()
+        assert '/mnt/debrid/' in prefixes
+        # Verify actual dedup behavior: if user sets RD and explicit-TB to
+        # the SAME path (legitimate "share one mount" config), the result
+        # collapses to a single prefix instead of duplicating it.
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', '/mnt/debrid')
+        deduped = _all_debrid_symlink_prefixes()
+        assert deduped.count('/mnt/debrid/') == 1, \
+            'identical RD+TB bases must dedup to one entry'
+
+    def test_all_debrid_symlink_prefixes_normalises_paths(self, monkeypatch):
+        """Helper must collapse consecutive separators and resolve relative
+        segments — raw env values like ``/mnt//debrid`` or ``./debrid``
+        would otherwise produce prefixes that no real symlink target
+        starts with."""
+        from utils.library import _all_debrid_symlink_prefixes
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt//debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+        prefixes = _all_debrid_symlink_prefixes()
+        # normpath collapses consecutive separators
+        assert '/mnt/debrid/' in prefixes
+        assert '/mnt//debrid/' not in prefixes
+
+    def test_all_debrid_symlink_prefixes_tb_only_install(self, monkeypatch):
+        """TB-only setup: RD unset, TB explicit.  Pre-fix the local-scanner
+        gate ``if symlink_base`` skipped the dedup-check entirely when RD
+        was unset; post-fix it runs because TB is configured.  This was
+        previously broken — TB-only users had no debrid-symlink detection."""
+        from utils.library import _all_debrid_symlink_prefixes
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE', raising=False)
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', '/mnt/torbox_only')
+        prefixes = _all_debrid_symlink_prefixes()
+        assert '/mnt/torbox_only/' in prefixes
+        assert prefixes, 'TB-only install must produce a non-empty prefix tuple'
+
+    def test_all_debrid_symlink_prefixes_empty_when_no_rd_no_tb(self, monkeypatch):
+        from utils.library import _all_debrid_symlink_prefixes
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE', raising=False)
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+        prefixes = _all_debrid_symlink_prefixes()
+        assert prefixes == ()
+
+    def test_movie_dir_with_tb_symlink_skipped(self, tmp_dir, monkeypatch):
+        """The user's exact reported scenario: a show-named folder under
+        local_movies containing a single symlink pointing at the TB mount.
+        Pre-fix: classified as local movie (because TB prefix wasn't
+        checked).  Post-fix: recognized as all-debrid → skipped → no
+        movie entry created."""
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+
+        local_movies = os.path.join(tmp_dir, 'local_movies')
+        misclassified = os.path.join(local_movies, 'Greys Anatomy')
+        os.makedirs(misclassified)
+        sym = os.path.join(misclassified, 'Greys.Anatomy.S19E09.mkv')
+        os.symlink('/mnt/debrid_torbox/some/path/Greys.Anatomy.S19E09.mkv', sym)
+
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_movies_path = local_movies
+        items = scanner._scan_local_movies()
+        assert items == [], \
+            'TB-routed show symlinks must NOT classify as local movies'
+
+    def test_tv_dir_with_tb_symlink_skipped(self, tmp_dir, monkeypatch):
+        """Sonarr/Radarr-parity counterpart: TB-routed show symlinks
+        under local_tv must also skip (otherwise they'd show as
+        spurious source='local' shows blocking debrid symlink recreation)."""
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+
+        local_tv = os.path.join(tmp_dir, 'local_tv')
+        show_dir = os.path.join(local_tv, 'Pagan Peak')
+        os.makedirs(os.path.join(show_dir, 'Season 03'))
+        sym = os.path.join(show_dir, 'Season 03', 'Pagan.Peak.S03E05.mkv')
+        os.symlink('/mnt/debrid_torbox/some/Pagan.Peak.S03E05.mkv', sym)
+
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_tv_path = local_tv
+        items = scanner._scan_local_shows()
+        assert items == [], \
+            'TB-routed show symlinks under local_tv must skip too (Sonarr parity)'
+
+    def test_mixed_rd_and_tb_symlinks_skipped(self, tmp_dir, monkeypatch):
+        """A real local Plex library may have content split across both
+        debrids during migration.  Mixed RD+TB symlinks must still skip
+        as 'all-debrid' — neither prefix alone disqualifies the dir."""
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+
+        local_movies = os.path.join(tmp_dir, 'local_movies')
+        d = os.path.join(local_movies, 'Mixed Show')
+        os.makedirs(d)
+        os.symlink('/mnt/debrid/some/rd-path.mkv', os.path.join(d, 'rd.mkv'))
+        os.symlink('/mnt/debrid_torbox/some/tb-path.mkv', os.path.join(d, 'tb.mkv'))
+
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_movies_path = local_movies
+        items = scanner._scan_local_movies()
+        assert items == [], 'mixed RD+TB symlink dirs must skip'
+
+    def test_genuine_local_file_alongside_tb_symlink_classified_local(
+        self, tmp_dir, monkeypatch,
+    ):
+        """A real local file (not a symlink) alongside a TB symlink means
+        the user has genuine content there — classify as local so the
+        existing rich-source-merge logic can pair it with a debrid sibling
+        in the source='both' bucket."""
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+
+        local_movies = os.path.join(tmp_dir, 'local_movies')
+        d = os.path.join(local_movies, 'Real Movie (2024)')
+        os.makedirs(d)
+        # Real on-disk file, not a symlink
+        open(os.path.join(d, 'Real.Movie.2024.mkv'), 'w').close()
+        # Plus a TB symlink (could be a sample / different cut)
+        os.symlink('/mnt/debrid_torbox/some/tb.mkv', os.path.join(d, 'sample.mkv'))
+
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_movies_path = local_movies
+        items = scanner._scan_local_movies()
+        assert len(items) == 1
+        assert items[0]['source'] == 'local'
+
+    def test_cleanup_removes_broken_tb_symlinks(self, tmp_dir, monkeypatch):
+        """Regression for the cleanup-not-updated finding: broken symlinks
+        under the auto-derived TB base must be removable too.  Pre-fix
+        the cleanup only matched the RD prefix → TB symlinks fell through
+        the prefix-check and stayed on disk forever even when their
+        targets had gone."""
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_ENABLED', 'true')
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', os.path.join(tmp_dir, 'rd_mount'))
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+
+        # Populate the RD mount with a category dir so the "categories empty"
+        # guard doesn't short-circuit the function.
+        rd_mount = os.path.join(tmp_dir, 'rd_mount')
+        os.makedirs(os.path.join(rd_mount, 'shows', '_keep'))
+        tb_mount = os.path.join(tmp_dir, 'tb_mount')
+        os.makedirs(tb_mount)
+
+        # Local TV folder with a broken TB symlink (target doesn't exist).
+        local_tv = os.path.join(tmp_dir, 'local_tv')
+        show_dir = os.path.join(local_tv, 'Pagan Peak', 'Season 03')
+        os.makedirs(show_dir)
+        broken_tb_link = os.path.join(show_dir, 'Pagan.Peak.S03E05.mkv')
+        # Use the auto-derived TB base /mnt/debrid_torbox to match the helper.
+        os.symlink('/mnt/debrid_torbox/Pagan.Peak.S03E05/Pagan.Peak.S03E05.mkv',
+                   broken_tb_link)
+
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_movies_path = None
+        scanner._local_tv_path = local_tv
+        scanner._discover_torbox_mount = lambda: tb_mount
+        scanner._cleanup_broken_debrid_symlinks()
+
+        assert not os.path.lexists(broken_tb_link), \
+            'broken TB symlink under the auto-derived TB base must be removed'
+
+    def test_cleanup_keeps_intact_rd_symlinks(self, tmp_dir, monkeypatch):
+        """Cleanup MUST NOT remove RD symlinks whose targets still exist —
+        regression guard for false-positive removal during the multi-prefix
+        refactor.  Sets up a real RD-mount file that the symlink points to."""
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_ENABLED', 'true')
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', os.path.join(tmp_dir, 'rd_mount'))
+        # Use the test tmp_dir as the RD symlink base so the existence check
+        # finds the real file.  Symlink targets are translated from
+        # symlink_base → rclone_mount; pointing them at the same dir
+        # produces a passthrough translation.
+        rd_base = os.path.join(tmp_dir, 'rd_mount')
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', rd_base)
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+
+        rd_mount = os.path.join(tmp_dir, 'rd_mount')
+        os.makedirs(os.path.join(rd_mount, 'shows', '_keep'))
+        # Real file on the "rclone mount" that the symlink will target.
+        real_file_dir = os.path.join(rd_mount, 'shows', 'real-release')
+        os.makedirs(real_file_dir)
+        real_file = os.path.join(real_file_dir, 'real.mkv')
+        open(real_file, 'w').close()
+
+        local_tv = os.path.join(tmp_dir, 'local_tv')
+        show_dir = os.path.join(local_tv, 'Real Show', 'Season 01')
+        os.makedirs(show_dir)
+        live_link = os.path.join(show_dir, 'real.mkv')
+        # Symlink target uses the rd_base prefix; translation: rd_base → rd_mount
+        # which produces the actual real_file path that exists.
+        os.symlink(os.path.join(rd_base, 'shows', 'real-release', 'real.mkv'),
+                   live_link)
+
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_movies_path = None
+        scanner._local_tv_path = local_tv
+        scanner._discover_torbox_mount = lambda: None
+        scanner._cleanup_broken_debrid_symlinks()
+
+        assert os.path.lexists(live_link), \
+            'intact RD symlink whose target exists must NOT be removed'
+
+    def test_non_debrid_symlink_classified_local(self, tmp_dir, monkeypatch):
+        """A symlink to a non-debrid path (e.g. NAS mount, secondary drive)
+        means genuine local content via symlink farm — must classify as
+        local, not skip."""
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+
+        local_movies = os.path.join(tmp_dir, 'local_movies')
+        d = os.path.join(local_movies, 'NAS Movie (2024)')
+        os.makedirs(d)
+        os.symlink('/mnt/nas/Movies/NAS Movie/NAS.Movie.2024.mkv',
+                   os.path.join(d, 'NAS.Movie.2024.mkv'))
+
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_movies_path = local_movies
+        items = scanner._scan_local_movies()
+        assert len(items) == 1, \
+            'symlinks pointing outside known debrid mounts are genuine local content'
+        assert items[0]['source'] == 'local'
+
+
 # ---------------------------------------------------------------------------
 # LibraryScanner.scan() — source='both' cross-referencing
 # ---------------------------------------------------------------------------

@@ -1465,8 +1465,10 @@ class BlackholeWatcher:
                 magnet_link = f.read().strip()
             response = tracked_request('torbox', requests.post, url, headers=headers, data={'magnet': magnet_link}, timeout=30)
         elif ext == '.torrent':
+            # TB rejects with BOZO_TORRENT unless the file part carries Content-Type: application/x-bittorrent.
             with open(file_path, 'rb') as f:
-                response = tracked_request('torbox', requests.post, url, headers=headers, files={'file': f}, timeout=30)
+                files = {'file': (os.path.basename(file_path), f, 'application/x-bittorrent')}
+                response = tracked_request('torbox', requests.post, url, headers=headers, files=files, timeout=30)
         else:
             return False, f'Unsupported extension: {ext}'
 
@@ -3939,6 +3941,51 @@ class BlackholeWatcher:
                         pass
                     return
                 if cached is None:
+                    # Cross-probe: only TB has a working cache endpoint; avoid defer-forever on RD/AD.
+                    # `debrid != 'torbox'` skip: a TB-routed file that returned None already had its
+                    # chance — a re-probe would be circular and burn a second rate-limit slot.
+                    _debrid_lc = (debrid or '').lower()
+                    tb_key = self._api_key_for('torbox') if _debrid_lc != 'torbox' else None
+                    tb_cached = None
+                    if tb_key:
+                        try:
+                            tb_map = check_debrid_cache([lowered], service='torbox', api_key=tb_key)
+                            tb_cached = tb_map.get(lowered) if isinstance(tb_map, dict) else None
+                        except Exception as e:
+                            # Don't orphan the file on an unexpected TB-probe raise — fall through
+                            # to defer.  ``check_debrid_cache`` catches network/JSON errors and
+                            # returns None, but a schema change at TB could surface a KeyError.
+                            logger.debug(f"[blackhole] TB cross-probe raised for {filename}: {e}")
+                    if tb_key and tb_cached is False:
+                        logger.info(
+                            f"[blackhole] Skipping uncached (cross-confirmed via TB): "
+                            f"{filename} routed to {debrid}"
+                        )
+                        if _history:
+                            _mt, _ep = _enrich_for_history(filename)
+                            _history.log_event('uncached_rejected', filename, episode=_ep,
+                                               source='blackhole',
+                                               detail=f'Skipped — uncached on {debrid} '
+                                                      f'(cross-confirmed via torbox)',
+                                               meta={'cause': 'uncached_rejected',
+                                                     'info_hash': info_hash,
+                                                     'provider': debrid,
+                                                     'cross_confirmed_via': 'torbox'},
+                                               media_title=_mt)
+                        try:
+                            os.remove(file_path)
+                        except OSError as e:
+                            logger.warning(
+                                f"[blackhole] Could not remove uncached file {filename}: {e}"
+                            )
+                        try:
+                            from utils.metrics import metrics
+                            metrics.inc('blackhole_processed',
+                                        {'status': 'skipped_uncached_cross_confirmed'})
+                        except Exception:
+                            pass
+                        return
+
                     # Unknown — API outage, rate-limit, key rotation, or
                     # RD's deprecated endpoint.  Do NOT delete: leave the
                     # drop in the watch dir so the next poll retries.  An

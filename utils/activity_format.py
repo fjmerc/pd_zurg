@@ -349,7 +349,10 @@ def _fmt_uncached_timeout(ev, meta):
 
 def _fmt_uncached_rejected(ev, meta):
     prov = meta.get('provider', 'debrid')
-    return f'Rejected — not cached on {prov}', f'Rejected — not cached on {prov}'
+    cross = meta.get('cross_confirmed_via')
+    suffix = f' (cross-confirmed via {cross})' if cross else ''
+    msg = f'Rejected — not cached on {prov}{suffix}'
+    return msg, msg
 
 
 def _fmt_incomplete_release(ev, meta):
@@ -664,7 +667,7 @@ FORMATTER_JS = r"""
     },
     terminal_error: function(ev,m){ return 'Failed on ' + (m.provider||'debrid') + ': ' + (m.status || m.error || 'unknown'); },
     uncached_timeout: function(ev,m){ return 'Timed out waiting for cache' + (m.deleted ? ' — removed from debrid' : ' — debrid cleanup skipped'); },
-    uncached_rejected: function(ev,m){ return 'Rejected — not cached on ' + (m.provider||'debrid'); },
+    uncached_rejected: function(ev,m){ return 'Rejected — not cached on ' + (m.provider||'debrid') + (m.cross_confirmed_via ? ' (cross-confirmed via ' + m.cross_confirmed_via + ')' : ''); },
     incomplete_release: function(ev,m){
       var miss = Array.isArray(m.missing) ? m.missing.join(', ') : String(m.missing || '');
       return miss ? ('Incomplete release — missing ' + miss) : 'Incomplete release';

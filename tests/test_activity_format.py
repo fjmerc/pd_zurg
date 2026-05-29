@@ -205,6 +205,20 @@ def test_uncached_timeout_deleted_vs_not():
     assert 'removed from debrid' in removed
 
 
+def test_uncached_rejected_renders_cross_confirmation_when_present():
+    """The cross-probe path attaches meta['cross_confirmed_via']='torbox' so
+    audit-trail readers can distinguish single-probe rejections (chosen
+    debrid said no) from cross-confirmed ones (chosen debrid said unknown,
+    TB said no).  The formatter must surface that distinction."""
+    plain = format_event(_ev('uncached_rejected', provider='realdebrid'))['short']
+    crossed = format_event(_ev('uncached_rejected', provider='realdebrid',
+                                cross_confirmed_via='torbox'))['short']
+    assert 'Rejected — not cached on realdebrid' in plain
+    assert '(cross-confirmed' not in plain
+    assert 'Rejected — not cached on realdebrid' in crossed
+    assert '(cross-confirmed via torbox)' in crossed
+
+
 def test_unknown_cause_falls_back_to_detail():
     ev = {'id': 't', 'ts': '2026', 'type': 'x', 'title': 'Y',
           'detail': 'legacy string', 'meta': {'cause': 'not_a_real_cause'}}

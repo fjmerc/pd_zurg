@@ -1527,7 +1527,10 @@ function _observeUncachedCards() {
         var title = card.getAttribute('data-title');
         var type = card.getAttribute('data-type');
         var year = card.getAttribute('data-year') || '';
-        if (!title) return;
+        // Same guard as showDetail() — when data-type is empty or
+        // "undefined" (escAttr serialises a JS undefined that way),
+        // skip the fetch rather than send a malformed request.
+        if (!title || !type || type === 'undefined') return;
         var nk = normTitle(title);
         if (_metaCache[nk]) { _applyMeta(card, _metaCache[nk]); return; }
         var url = '/api/library/metadata?title=' + encodeURIComponent(title) + '&type=' + encodeURIComponent(type);
@@ -2337,18 +2340,23 @@ function showDetail(index) {
   var backBtn = document.querySelector('.detail-back');
   if (backBtn) backBtn.focus();
 
-  // Fetch TMDB metadata
-  var params = 'title=' + encodeURIComponent(item.title) + '&type=' + encodeURIComponent(item.type);
-  if (item.year) params += '&year=' + item.year;
-  fetch('/api/library/metadata?' + params)
-    .then(function(r) { return r.ok ? r.json() : null; })
-    .then(function(meta) {
-      if (meta && _inDetailView && _detailItem === item) {
-        _detailMeta = meta;
-        _renderDetail();
-      }
-    })
-    .catch(function() {});
+  // Fetch TMDB metadata.  Guard against item.type being undefined —
+  // encodeURIComponent(undefined) returns the literal "undefined" which
+  // the server then rejected as not in {show,movie}.  Skip the fetch
+  // entirely when we can't tell the caller what kind of entry it is.
+  if (item.type) {
+    var params = 'title=' + encodeURIComponent(item.title) + '&type=' + encodeURIComponent(item.type);
+    if (item.year) params += '&year=' + item.year;
+    fetch('/api/library/metadata?' + params)
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(meta) {
+        if (meta && _inDetailView && _detailItem === item) {
+          _detailMeta = meta;
+          _renderDetail();
+        }
+      })
+      .catch(function() {});
+  }
 }
 
 function _renderDetail() {

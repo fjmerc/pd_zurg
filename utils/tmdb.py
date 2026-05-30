@@ -102,6 +102,35 @@ def _pick_best_result(results, year, date_key):
     return results[0]
 
 
+# Year-distance guard for fallback_no_year retries and on-read cache
+# sanity.  When TMDB returns zero results for ``title + year`` and we
+# retry without the year filter, the response can include shows/movies
+# whose actual year is wildly off — e.g. searching "Alien" 1979 returns
+# "Resident Alien" (2021+), then gets cached under ``alien (1979)`` and
+# poisons every downstream lookup.  A 10-year window admits legitimate
+# drift cases (anime dub vs original air year, shelved-then-released
+# films like ``The Other Side of the Wind``, miniseries adapted years
+# after a source year used in folder names) while still blocking the
+# cross-decade false matches that surfaced the original bug.
+#
+# DO NOT widen beyond ~10 without re-verifying the
+# ``test_search_show_fallback_no_year_rejects_far_year_drift`` regression
+# test — raising the window re-opens the Alien/Resident-Alien class of
+# bug for any title that happens to share words with a different-era
+# property on TMDB.
+_YEAR_FALLBACK_MAX_DRIFT = 10
+
+
+def _year_from_date(date_str):
+    """Extract a 4-digit year from a TMDB date string, or None."""
+    if not isinstance(date_str, str) or len(date_str) < 4:
+        return None
+    head = date_str[:4]
+    if not head.isdigit():
+        return None
+    return int(head)
+
+
 def search_show(title, year=None, fallback_no_year=False):
     """Search TMDB for a TV show. Returns first result dict or None.
 
@@ -110,20 +139,38 @@ def search_show(title, year=None, fallback_no_year=False):
     where torrent folder names often carry a season air year instead of the
     show's premiere year.  Callers that need precise disambiguation (e.g.
     Sonarr/Radarr series matching) should leave this False.
+
+    Fallback results whose ``first_air_date`` year drifts more than
+    ``_YEAR_FALLBACK_MAX_DRIFT`` years from the requested ``year`` are
+    rejected — the year-filter zero-result outcome is much more often
+    "you asked about a movie that's not a TV show" than "TMDB is wrong
+    about the year".
     """
+    # Coerce year for downstream arithmetic — pre-existing callers
+    # pass int or None, but some history paths pass string years.
+    try:
+        year_int = int(year) if year is not None else None
+    except (TypeError, ValueError):
+        year_int = None
     params = {'query': title}
-    if year is not None:
-        params['first_air_date_year'] = year
+    if year_int is not None:
+        params['first_air_date_year'] = year_int
     data = _api_get('/search/tv', params)
-    effective_year = year
-    if data and not data.get('results') and year is not None and fallback_no_year:
+    effective_year = year_int
+    fallback_used = False
+    if data and not data.get('results') and year_int is not None and fallback_no_year:
         # Year filter too strict — retry without it; don't apply year
         # preference on retry results since the year is proven unreliable
         data = _api_get('/search/tv', {'query': title})
         effective_year = None
+        fallback_used = True
     if not data or not data.get('results'):
         return None
     r = _pick_best_result(data['results'], effective_year, 'first_air_date')
+    if fallback_used and year_int is not None:
+        result_year = _year_from_date(r.get('first_air_date', ''))
+        if result_year is not None and abs(result_year - year_int) > _YEAR_FALLBACK_MAX_DRIFT:
+            return None
     return {
         'tmdb_id': r['id'],
         'title': r.get('name', ''),
@@ -139,19 +186,31 @@ def search_movie(title, year=None, fallback_no_year=False):
     When *fallback_no_year* is True and a year-filtered search returns no
     results, retries without the year.  Callers that need precise
     disambiguation should leave this False.
+
+    Same year-drift guard as ``search_show`` — see its docstring.
     """
+    try:
+        year_int = int(year) if year is not None else None
+    except (TypeError, ValueError):
+        year_int = None
     params = {'query': title}
-    if year is not None:
-        params['year'] = year
+    if year_int is not None:
+        params['year'] = year_int
     data = _api_get('/search/movie', params)
-    effective_year = year
-    if data and not data.get('results') and year is not None and fallback_no_year:
+    effective_year = year_int
+    fallback_used = False
+    if data and not data.get('results') and year_int is not None and fallback_no_year:
         # Year filter too strict — retry without it
         data = _api_get('/search/movie', {'query': title})
         effective_year = None
+        fallback_used = True
     if not data or not data.get('results'):
         return None
     r = _pick_best_result(data['results'], effective_year, 'release_date')
+    if fallback_used and year_int is not None:
+        result_year = _year_from_date(r.get('release_date', ''))
+        if result_year is not None and abs(result_year - year_int) > _YEAR_FALLBACK_MAX_DRIFT:
+            return None
     return {
         'tmdb_id': r['id'],
         'title': r.get('title', ''),
@@ -458,14 +517,31 @@ def _cache_key(norm, year=None):
 
 
 def _cache_lookup(section, norm, year=None):
-    """Look up a cache entry, trying year-qualified key first then yearless."""
-    if year is not None:
-        qualified = _cache_key(norm, year)
-        if qualified != norm:
-            entry = section.get(qualified)
-            if entry:
-                return entry
-    return section.get(norm)
+    """Look up a cache entry, trying year-qualified key first then yearless.
+
+    On-read sanity: when both *year* is supplied AND the returned entry
+    has a release/first-air year that drifts more than
+    ``_YEAR_FALLBACK_MAX_DRIFT`` from *year*, the entry is treated as a
+    miss.  This catches pre-fix cache-poisoning artifacts (where
+    fallback_no_year wrote unrelated content under a movie-style key
+    in the wrong section) without forcing operators to clear the cache.
+    Entries without a stored date fail-open — legacy/year-less entries
+    must continue to work.
+    """
+    qualified = _cache_key(norm, year) if year is not None else norm
+    entry = None
+    if year is not None and qualified != norm:
+        entry = section.get(qualified)
+    if entry is None:
+        entry = section.get(norm)
+    if entry and year is not None:
+        # Trust release_date for movies, first_air_date for shows.  TMDB
+        # stores one or the other; check both for forward-compat.
+        stored_year = (_year_from_date(entry.get('release_date', ''))
+                       or _year_from_date(entry.get('first_air_date', '')))
+        if stored_year is not None and abs(stored_year - year) > _YEAR_FALLBACK_MAX_DRIFT:
+            return None  # poisoned entry — caller will refetch
+    return entry
 
 
 def remove_cached_entry(normalized_title, media_type, year=None):

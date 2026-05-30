@@ -3769,6 +3769,14 @@ class TestApplyRadarrWantedMovies:
         assert ghost['size_bytes'] == 0
         assert ghost['_radarr_id'] == 1
         assert ghost['_radarr_tmdb_id'] == 100
+        # Regression for the TMDB cache-poisoning bug — the detail-view
+        # fetch JS uses item.type to build /api/library/metadata?type=...
+        # Without the type field the URL serialised type=undefined and
+        # the server defaulted to 'show', writing show data under
+        # movie-style cache keys.
+        assert ghost['type'] == 'movie', \
+            'ghost movie must carry type=movie so the detail-view fetch ' \
+            'does not poison the TMDB cache via type=undefined'
 
     def test_skips_monitored_with_file(self):
         """A monitored movie that DOES have a file is already on disk,

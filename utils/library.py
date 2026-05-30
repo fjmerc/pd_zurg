@@ -1467,6 +1467,11 @@ def _apply_radarr_wanted_movies(movies, pending=None):
         ghost = {
             'title': title,
             'year': year,
+            # ``type`` is load-bearing for the /api/library/metadata UI
+            # call — without it, the JS sends ``type=undefined`` and the
+            # server defaults to 'show', poisoning the TMDB cache with
+            # show-shaped data under movie-style keys.
+            'type': 'movie',
             'source': 'wanted',
             'size_bytes': 0,
             'path': '',

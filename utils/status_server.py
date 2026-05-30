@@ -1555,9 +1555,19 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             qs = parse_qs(urlparse(self.path).query)
             title = qs.get('title', [''])[0]
             year = qs.get('year', [None])[0]
-            media_type = qs.get('type', ['show'])[0]
+            media_type = qs.get('type', [''])[0]
             if not title:
                 self._send_json_response(400, json.dumps({'error': 'title required'}))
+            elif media_type not in ('show', 'movie'):
+                # Reject missing / malformed type so the TMDB cache never
+                # gets poisoned with show data under movie-style keys (or
+                # vice versa).  The JS sometimes serialises an undefined
+                # ``item.type`` as the literal string ``"undefined"`` —
+                # don't paper over that by defaulting silently.
+                self._send_json_response(400, json.dumps({
+                    'error': 'type must be "show" or "movie"',
+                    'got': media_type or '(missing)',
+                }))
             else:
                 try:
                     year_int = int(year) if year else None

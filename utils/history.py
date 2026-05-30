@@ -35,6 +35,7 @@ _retention_days = 30
 CAUSE_BLACKHOLE_NEW_IMPORT = 'blackhole_new_import'
 CAUSE_BLACKHOLE_CACHE_HIT = 'blackhole_cache_hit'
 CAUSE_BLACKHOLE_GRAB_SUBMITTED = 'blackhole_grab_submitted'
+CAUSE_BLACKHOLE_MOUNT_HANDOFF = 'blackhole_mount_handoff'
 CAUSE_LIBRARY_NEW_IMPORT = 'library_new_import'
 CAUSE_LIBRARY_UPGRADE_REPLACED = 'library_upgrade_replaced'
 CAUSE_LIBRARY_STATE_INIT = 'library_state_init'

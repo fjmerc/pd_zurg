@@ -4299,3 +4299,161 @@ class TestRescueRestoreAtomicity:
         assert rescue_orphan_survived, \
             "Rescue's staged file must remain under its unique .rescue-* " \
             "name for manual recovery — collision-with-fresh-drop case"
+
+
+class TestScannerHandoff:
+    """Mount-timeout-but-confirmed-ready hand-off to the library scanner.
+
+    When a torrent is confirmed added + ready on the debrid but doesn't
+    surface on the rclone mount within mount_poll_timeout (common under
+    TorBox 429 rate-limiting), the worker must NOT treat it as a hard
+    failure.  It registers a 'to-debrid' library pending entry so the
+    scanner resolves it on a later pass.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_prefs(self, tmp_dir, monkeypatch):
+        import utils.library_prefs as lp
+        monkeypatch.setattr(lp, 'PREFS_PATH', os.path.join(tmp_dir, 'library_prefs.json'))
+        monkeypatch.setattr(lp, 'PENDING_PATH', os.path.join(tmp_dir, 'library_pending.json'))
+
+    # ── _register_scanner_handoff unit tests ──────────────────────────
+
+    def test_handoff_movie_registers_pending(self):
+        import utils.library_prefs as lp
+        from utils.library import normalize_title
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid')
+        ok = watcher._register_scanner_handoff(
+            'Inside.Out.2.2024.1080p.WEB-DL.x264.magnet')
+        assert ok is True
+        pending = lp.get_all_pending()
+        key = normalize_title('Inside Out 2')
+        assert key in pending
+        entry = pending[key]
+        assert entry['direction'] == 'to-debrid'
+        assert entry['episodes'] == [{'season': 0, 'episode': 0}]
+        assert entry.get('created')  # escalation clock starts
+
+    def test_handoff_show_single_episode(self):
+        import utils.library_prefs as lp
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        ok = watcher._register_scanner_handoff(
+            'The.Show.S01E05.1080p.WEB.H264-GROUP.torrent')
+        assert ok is True
+        pending = lp.get_all_pending()
+        # exactly one entry, direction to-debrid, the parsed episode
+        assert len(pending) == 1
+        entry = next(iter(pending.values()))
+        assert entry['direction'] == 'to-debrid'
+        assert entry['episodes'] == [{'season': 1, 'episode': 5}]
+
+    def test_handoff_show_episode_range(self):
+        import utils.library_prefs as lp
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        ok = watcher._register_scanner_handoff(
+            'The.Show.S02E01-E03.1080p.WEB.torrent')
+        assert ok is True
+        entry = next(iter(lp.get_all_pending().values()))
+        assert entry['episodes'] == [
+            {'season': 2, 'episode': 1},
+            {'season': 2, 'episode': 2},
+            {'season': 2, 'episode': 3},
+        ]
+
+    def test_handoff_season_pack_skips(self):
+        """Season pack (no parseable episodes) must NOT register pending —
+        an empty episode list would falsely escalate to debrid-unavailable
+        even after the scanner creates symlinks."""
+        import utils.library_prefs as lp
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        ok = watcher._register_scanner_handoff(
+            'The.Show.S03.1080p.WEB.Complete.Season.torrent')
+        assert ok is False
+        assert lp.get_all_pending() == {}
+
+    def test_handoff_multi_season_pack_skips(self):
+        """Multi-season pack (S01-S05) parses as is_tv=False — must NOT
+        register a bogus movie (0,0) entry under the show's title (would
+        never resolve and falsely escalate to debrid-unavailable)."""
+        import utils.library_prefs as lp
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        ok = watcher._register_scanner_handoff(
+            'The.Show.S01-S05.1080p.WEB.Complete.torrent')
+        assert ok is False
+        assert lp.get_all_pending() == {}
+
+    def test_handoff_cross_season_range_skips(self):
+        """Cross-season episode range (S01E01-S02E10) can't be one
+        (season, episodes) entry — must skip, not register a partial list."""
+        import utils.library_prefs as lp
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        ok = watcher._register_scanner_handoff(
+            'The.Show.S01E01-S02E10.1080p.WEB.torrent')
+        assert ok is False
+        assert lp.get_all_pending() == {}
+
+    # ── timeout-branch integration ────────────────────────────────────
+
+    def _make_symlink_watcher(self, tmp_dir, debrid):
+        completed = os.path.join(tmp_dir, 'completed')
+        os.makedirs(completed, exist_ok=True)
+        return BlackholeWatcher(
+            os.path.join(tmp_dir, 'watch'), 'key', debrid,
+            symlink_enabled=True, completed_dir=completed,
+            rclone_mount=os.path.join(tmp_dir, 'data'),
+            mount_poll_timeout=0.3, mount_poll_interval=0.02,
+        )
+
+    def _drive_timeout(self, watcher, monkeypatch, torrent_id, filename,
+                       debrid, ready_status, label=None):
+        """Run _monitor_and_symlink with stubs so it reaches the Phase-2
+        mount-timeout branch (ready on debrid, never on mount)."""
+        status_attr = {
+            'realdebrid': '_check_realdebrid_status',
+            'torbox': '_check_torbox_status',
+        }[debrid]
+        monkeypatch.setattr(
+            watcher, status_attr,
+            lambda tid, api_key=None: (ready_status, {'filename': filename}))
+        monkeypatch.setattr(watcher, '_has_usable_media_files',
+                            lambda *a, **k: True)
+        monkeypatch.setattr(watcher, '_extract_release_name',
+                            lambda info, debrid=None: filename.rsplit('.', 1)[0])
+        monkeypatch.setattr(watcher, '_extract_filenames_from_info',
+                            lambda *a, **k: [])
+        # Never surfaces on the mount → forces the timeout branch.
+        monkeypatch.setattr(watcher, '_find_on_mount',
+                            lambda *a, **k: (None, None, None))
+        # Seed the blackhole monitor entry so we can assert it's removed.
+        watcher._add_pending(torrent_id, filename, label=label, debrid=debrid)
+        watcher._monitor_and_symlink(torrent_id, filename, label, debrid)
+
+    def test_mount_timeout_movie_hands_off(self, tmp_dir, monkeypatch):
+        import utils.library_prefs as lp
+        from utils.library import normalize_title
+        watcher = self._make_symlink_watcher(tmp_dir, 'realdebrid')
+        self._drive_timeout(
+            watcher, monkeypatch, 'rd-abc',
+            'Inside.Out.2.2024.1080p.WEB-DL.x264.magnet',
+            'realdebrid', 'downloaded')
+        # Library pending registered for the scanner.
+        pending = lp.get_all_pending()
+        assert normalize_title('Inside Out 2') in pending
+        assert pending[normalize_title('Inside Out 2')]['direction'] == 'to-debrid'
+        # Blackhole monitor handed off (removed) — not retried / resumed.
+        assert all(e['torrent_id'] != 'rd-abc' for e in watcher._load_pending())
+
+    def test_mount_timeout_show_hands_off(self, tmp_dir, monkeypatch):
+        """Sonarr parity: a show grab takes the same hand-off path."""
+        import utils.library_prefs as lp
+        watcher = self._make_symlink_watcher(tmp_dir, 'torbox')
+        self._drive_timeout(
+            watcher, monkeypatch, 'tb-xyz',
+            'The.Show.S01E05.1080p.WEB.H264-GROUP.torrent',
+            'torbox', 'completed', label='sonarr')
+        pending = lp.get_all_pending()
+        assert len(pending) == 1
+        entry = next(iter(pending.values()))
+        assert entry['direction'] == 'to-debrid'
+        assert entry['episodes'] == [{'season': 1, 'episode': 5}]
+        assert all(e['torrent_id'] != 'tb-xyz' for e in watcher._load_pending())

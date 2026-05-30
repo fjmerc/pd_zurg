@@ -166,6 +166,12 @@ def _fmt_blackhole_grab_submitted(ev, meta):
     return f'Submitted to {prov}', f'Submitted to {prov}'
 
 
+def _fmt_blackhole_mount_handoff(ev, meta):
+    prov = meta.get('provider', 'debrid')
+    short = f'Ready on {prov}, mount slow — handed to library scanner'
+    return short, short
+
+
 def _fmt_compromise_grab(ev, meta):
     pref = meta.get('preferred_tier', '?')
     got = meta.get('grabbed_tier', '?')
@@ -461,6 +467,7 @@ _CAUSE_FORMATTERS = {
     'blackhole_new_import': _fmt_blackhole_new_import,
     'blackhole_cache_hit': _fmt_blackhole_cache_hit,
     'blackhole_grab_submitted': _fmt_blackhole_grab_submitted,
+    'blackhole_mount_handoff': _fmt_blackhole_mount_handoff,
     'compromise_grab': _fmt_compromise_grab,
     'post_symlink_rescan': _fmt_post_symlink_rescan,
     'post_grab_rescan': _fmt_post_grab_rescan,
@@ -605,6 +612,7 @@ FORMATTER_JS = r"""
     },
     blackhole_cache_hit: function(ev,m){ return 'Cached on ' + (m.provider || 'debrid') + ' — ready to link'; },
     blackhole_grab_submitted: function(ev,m){ return 'Submitted to ' + (m.provider || 'debrid'); },
+    blackhole_mount_handoff: function(ev,m){ return 'Ready on ' + (m.provider || 'debrid') + ', mount slow — handed to library scanner'; },
     compromise_grab: function(ev,m){
       var s = 'Compromise grab: preferred ' + (m.preferred_tier||'?') + ', grabbed ' + (m.grabbed_tier||'?');
       if (m.strategy) s += ' (' + m.strategy + ')';

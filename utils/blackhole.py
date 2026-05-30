@@ -2368,6 +2368,84 @@ class BlackholeWatcher:
         provider_tag = f" via {debrid}" if debrid != self.debrid_service else ""
         logger.info(f"[blackhole] Monitoring torrent {torrent_id} for {filename}{tag}{provider_tag}")
 
+    def _register_scanner_handoff(self, filename):
+        """Hand a confirmed-ready grab off to the library scanner.
+
+        Called when a torrent was confirmed added + ready on the debrid but
+        the content did not surface on the rclone mount within
+        ``mount_poll_timeout`` (common under TorBox 429 rate-limiting — the
+        torrent IS permanently in the account and surfaces shortly after).
+        Rather than treating that as a hard failure, we record a 'to-debrid'
+        pending entry keyed by the canonical title so the library scanner
+        resolves it on a later pass: ``_create_debrid_symlinks`` creates the
+        symlink once the content surfaces, ``_clear_resolved_pending`` clears
+        the entry, and ``_escalate_stuck_pending`` marks it debrid-unavailable
+        if it never does.
+
+        Returns True iff a pending entry was registered. Packs whose episode
+        list can't be represented as a single ``(season, episodes)`` entry
+        return False — single-season packs (no parseable episodes), multi- and
+        cross-season packs (``S01-S05`` / ``S01E01-S02E10`` / ``Complete
+        Series``), and unresolvable titles. A partial or sentinel episode list
+        would never match the scanner's source map and would falsely escalate
+        to debrid-unavailable even after the symlinks are created; the
+        scanner's unconditional symlinking still recovers that content, just
+        without the escalation safety-net.
+        """
+        try:
+            from utils.library import normalize_title
+            from utils.library_prefs import set_pending
+        except Exception as e:
+            logger.debug(f"[blackhole] scanner hand-off imports failed: {e}")
+            return False
+
+        media_title, _ep = _enrich_for_history(filename)
+        if not media_title:
+            logger.debug(f"[blackhole] Hand-off skipped — unresolved title: {filename}")
+            return False
+        norm = normalize_title(media_title)
+        if not norm:
+            logger.debug(f"[blackhole] Hand-off skipped — empty norm title: {filename}")
+            return False
+
+        _name, season, is_tv = parse_release_name(filename)
+
+        # Multi- and cross-season packs (S01-S05, S01E01-S02E10, Complete
+        # Series) can't be represented as one (season, episodes) entry, and a
+        # partial/sentinel list would falsely escalate to debrid-unavailable
+        # even after the scanner symlinks the content. Note: a multi-season
+        # pack with no single-season marker parses as is_tv=False, so this
+        # check MUST run before the movie branch — otherwise it would register
+        # a bogus movie (0,0) entry under a show's title. Detection runs on the
+        # de-extensioned filename (the season range lives in the full release
+        # name, which parse_release_name strips out of _name).
+        base = re.sub(r'\.(torrent|magnet)$', '', filename, flags=re.IGNORECASE)
+        is_multi_pack, _ss, _se = _is_multi_season_pack(base)
+        if is_multi_pack:
+            logger.debug(f"[blackhole] Hand-off skipped — multi/cross-season pack: {filename}")
+            return False
+
+        if is_tv:
+            if season is None:
+                logger.debug(f"[blackhole] Hand-off skipped — TV with no season: {filename}")
+                return False
+            eps = _parse_episodes(filename)
+            if not eps:
+                logger.debug(f"[blackhole] Hand-off skipped — season pack: {filename}")
+                return False  # season pack / unparseable — see docstring
+            episodes = [{'season': season, 'episode': e} for e in sorted(eps)]
+        else:
+            episodes = [{'season': 0, 'episode': 0}]
+
+        try:
+            set_pending(norm, episodes, direction='to-debrid')
+        except Exception as e:
+            logger.warning(
+                f"[blackhole] Could not register scanner hand-off for {filename}: {e}"
+            )
+            return False
+        return True
+
     def _monitor_and_symlink(self, torrent_id, filename, label=None, debrid=None):
         """Background thread: poll debrid status, wait for mount, create symlinks.
 
@@ -2643,17 +2721,39 @@ class BlackholeWatcher:
         while not self._stop_event.is_set():
             elapsed_mount = time.time() - mount_start
             if elapsed_mount > self.mount_poll_timeout:
-                logger.warning(f"[blackhole] Timeout waiting for {release_name} on mount "
-                               f"({elapsed_mount:.0f}s)")
+                # The torrent was confirmed added + ready on the debrid before
+                # this branch is reachable (Phase 1 broke out via
+                # _is_torrent_ready and passed the disc-rip check), so a slow
+                # mount is NOT a hard failure — the content IS in the account
+                # and will surface.  Hand off to the library scanner instead
+                # of dropping the item; see _register_scanner_handoff.
+                logger.warning(f"[blackhole] {release_name} not on mount after "
+                               f"{elapsed_mount:.0f}s — confirmed ready on {debrid}, "
+                               f"handing off to library scanner")
                 try:
                     from utils.metrics import metrics
                     metrics.inc('blackhole_torrent_timeout')
                 except Exception:
                     pass
-                if _notify:
-                    _notify('download_error', 'Blackhole: Mount Timeout',
-                            f'{filename} timed out waiting for content on mount',
-                            level='warning')
+                handed_off = self._register_scanner_handoff(filename)
+                # Guard the history block so a parse/log failure can't kill the
+                # monitor thread before _remove_pending runs — a leaked
+                # _active_monitors entry would block a later re-add of the id.
+                if _history:
+                    try:
+                        _mt, _ep = _enrich_for_history(filename)
+                        _detail = ('Ready on debrid, mount slow — handed to library scanner'
+                                   if handed_off
+                                   else 'Ready on debrid, mount slow — scanner will resolve on next pass')
+                        _history.log_event('cached', filename, episode=_ep, source='blackhole',
+                                           detail=_detail,
+                                           meta={'cause': 'blackhole_mount_handoff',
+                                                 'provider': debrid,
+                                                 'torrent_id': torrent_id,
+                                                 'handoff_registered': handed_off},
+                                           media_title=_mt)
+                    except Exception as e:
+                        logger.debug(f"[blackhole] hand-off history log failed: {e}")
                 self._remove_pending(torrent_id)
                 return
 

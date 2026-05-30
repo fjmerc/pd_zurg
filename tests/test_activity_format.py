@@ -156,6 +156,13 @@ def test_blackhole_cache_hit_lists_provider():
     assert 'realdebrid' in format_event(ev)['short']
 
 
+def test_blackhole_mount_handoff_lists_provider():
+    ev = _ev('blackhole_mount_handoff', provider='torbox')
+    s = format_event(ev)['short']
+    assert 'torbox' in s
+    assert 'library scanner' in s
+
+
 def test_terminal_error_shows_status():
     ev = _ev('terminal_error', provider='realdebrid', status='magnet_error')
     assert 'Failed on realdebrid: magnet_error' == format_event(ev)['short']

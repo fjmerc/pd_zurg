@@ -4019,6 +4019,369 @@ class TestStripGhostDuplicates:
         assert movies == []
 
 
+class TestDedupShowsByExternalId:
+    """Post-enrichment shows-dedup pass.
+
+    The alias-map dedup in ``_dedup_by_tmdb`` keys by normalized
+    parsed-folder titles and runs pre-enrichment.  Three debrid folders
+    that parse to distinct norms (``your friends and neighbors`` vs
+    ``your friends neighbors`` vs ``your friends and neighbours``)
+    survive as three groups when the TMDB alias map doesn't carry all
+    three variants.  Enrichment then stamps the same canonical title +
+    imdb_id on every entry → UI renders three cards for one show.
+
+    Reworked after reviewer-flagged CRITICAL/HIGH findings on the v1
+    implementation: this version rebuilds ``season_data`` from the
+    unioned ``_episodes``, preserves the survivor's Sonarr-aware
+    ``missing_episodes`` from ``_apply_sonarr_monitored_filter``,
+    per-episode quality compare on collisions (larger size wins),
+    ``size_bytes`` summed from merged episodes (no double-count), and
+    drops the dead tmdb_id fallback (enrichment never stamps it).
+    """
+
+    def _ep(self, file_name, size_bytes=1_000_000_000):
+        """Build a minimal _episodes value dict matching _build_season_data
+        expectations: 'file' and 'size_bytes' minimum."""
+        return {'file': file_name, 'size_bytes': size_bytes}
+
+    def test_three_debrid_folders_collapse_with_unioned_episodes(self):
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'Your Friends & Neighbors', 'imdb_id': 'tt30459041',
+             'source': 'debrid', 'path': '/data/zurgarr/path1',
+             'size_bytes': 100, 'total_episodes': 18, 'missing_episodes': 16,
+             '_episodes': {(1, 1): self._ep('s1e1.mkv'),
+                           (1, 2): self._ep('s1e2.mkv')}},
+            {'title': 'Your Friends & Neighbors', 'imdb_id': 'tt30459041',
+             'source': 'debrid', 'path': '/data/torbox/path2',
+             'size_bytes': 200, 'total_episodes': 18, 'missing_episodes': 16,
+             '_episodes': {(2, 1): self._ep('s2e1.mkv'),
+                           (2, 8): self._ep('s2e8.mkv')}},
+            {'title': 'Your Friends & Neighbors', 'imdb_id': 'tt30459041',
+             'source': 'debrid', 'path': '/data/torbox/path3',
+             'size_bytes': 50, 'total_episodes': 18, 'missing_episodes': 16,
+             '_episodes': {(1, 3): self._ep('s1e3.mkv')}}
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 1
+        m = shows[0]
+        # Episodes from all three folders unioned: 5 distinct keys
+        assert len(m['_episodes']) == 5
+        # Two seasons represented (1 and 2)
+        assert m['seasons'] == 2
+        assert m['episodes'] == 5
+
+    def test_season_data_rebuilt_from_merged_episodes(self):
+        """CRITICAL #1 fix: downstream consumers iterate ``season_data``,
+        not ``_episodes`` — composition card, prefs enforcer, gap-fill,
+        search loops.  Without rebuilding, sibling-folder episodes are
+        invisible to all of them."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             'season_data': [{'number': 1, 'episode_count': 1,
+                              'episodes': [{'number': 1, 'file': 's1e1.mkv',
+                                            'source': 'debrid', 'size_bytes': 100,
+                                            'quality': {}}]}],
+             '_episodes': {(1, 1): self._ep('s1e1.mkv', 100)}},
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             'season_data': [{'number': 2, 'episode_count': 1,
+                              'episodes': [{'number': 1, 'file': 's2e1.mkv',
+                                            'source': 'debrid', 'size_bytes': 200,
+                                            'quality': {}}]}],
+             '_episodes': {(2, 1): self._ep('s2e1.mkv', 200)}},
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 1
+        sd = shows[0]['season_data']
+        seasons = {s['number'] for s in sd}
+        assert seasons == {1, 2}, \
+            f'season_data must contain both merged seasons, got {seasons}'
+        total_eps = sum(s['episode_count'] for s in sd)
+        assert total_eps == 2, \
+            'season_data episode_count must reflect merged episodes'
+
+    def test_missing_episodes_preserves_sonarr_filtered_value(self):
+        """CRITICAL #2 fix: ``_apply_sonarr_monitored_filter`` runs
+        pre-merge and writes monitored-aware ``missing_episodes`` that
+        accounts for unmonitored seasons.  The v1 implementation
+        recomputed from ``total_episodes - merged_have`` (TMDB-all math),
+        which would re-inflate missing on Grey's Anatomy (22 seasons,
+        most unmonitored) — exactly the bug ``_apply_sonarr_monitored_filter``
+        exists to prevent.  Preserve survivor's value instead."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            # Survivor: Sonarr filter wrote missing_episodes=1 because
+            # only S22 is monitored. total_episodes=430 (all seasons).
+            {'title': 'Greys Anatomy', 'imdb_id': 'tt0413573',
+             'source': 'debrid',
+             'total_episodes': 430, 'missing_episodes': 1,
+             'monitored_episodes': 20,
+             '_episodes': {(22, 1): self._ep('s22e1.mkv', 100)}},
+            # Sibling: same show, different debrid folder
+            {'title': 'Greys Anatomy', 'imdb_id': 'tt0413573',
+             'source': 'debrid',
+             'total_episodes': 430, 'missing_episodes': 1,
+             'monitored_episodes': 20,
+             '_episodes': {(1, 1): self._ep('s1e1.mkv', 100)}},  # S1 unmonitored
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 1
+        merged = shows[0]
+        # CRITICAL: must NOT recompute as 430 - 2 = 428 (TMDB-all math)
+        # MUST preserve survivor's Sonarr-aware value
+        assert merged['missing_episodes'] == 1, \
+            f'must preserve Sonarr-filtered missing_episodes=1 (Greys Anatomy ' \
+            f'unmonitored-seasons regression), got {merged["missing_episodes"]}'
+        # monitored_episodes must also survive
+        assert merged.get('monitored_episodes') == 20
+
+    def test_episode_collision_higher_size_wins(self):
+        """HIGH #4 fix: per-episode quality compare.  v1 was first-seen
+        wins regardless of quality — would silently keep a 720p episode
+        when a 2160p REMUX sibling existed."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             '_episodes': {(1, 1): self._ep('s1e1.720p.mkv', 1_000_000_000)}},
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             '_episodes': {(1, 1): self._ep('s1e1.2160p.mkv', 30_000_000_000)}},
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 1
+        ep = shows[0]['_episodes'][(1, 1)]
+        assert '2160p' in ep['file'], \
+            f'larger-size episode (2160p) must win collision, got {ep["file"]!r}'
+
+    def test_size_bytes_summed_from_merged_episodes_not_show_field(self):
+        """HIGH #5 fix: don't sum show-level size_bytes (which would
+        double-count overlapping releases — same S01E01 in three
+        qualities triple-counted).  Sum per-episode size from the merged
+        ``_episodes`` dict instead."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             'size_bytes': 10_000_000_000,  # stale show-level field
+             '_episodes': {(1, 1): self._ep('a.mkv', 1_000_000)}},
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             'size_bytes': 10_000_000_000,
+             '_episodes': {(1, 2): self._ep('b.mkv', 2_000_000)}},
+        ]
+        _dedup_shows_by_external_id(shows)
+        # Correct: 1_000_000 + 2_000_000 from merged episodes
+        # Wrong (v1): 10B + 10B from show-level fields
+        assert shows[0]['size_bytes'] == 3_000_000, \
+            f'size_bytes must sum merged episode sizes, got {shows[0]["size_bytes"]}'
+
+    def test_distinct_imdb_ids_left_alone(self):
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'A', 'imdb_id': 'tt1', 'source': 'debrid'},
+            {'title': 'B', 'imdb_id': 'tt2', 'source': 'debrid'},
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 2
+
+    def test_shows_without_imdb_id_passed_through(self):
+        """Items lacking imdb_id can't safely merge — risk of
+        distinct-shows-same-title collisions."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'Mystery 1', 'source': 'debrid'},
+            {'title': 'Mystery 2', 'source': 'debrid'},
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 2
+
+    def test_tmdb_id_alone_does_not_merge(self):
+        """HIGH #3 fix: tmdb_id-only fallback was dead code in v1
+        because enrichment never stamps tmdb_id on shows.  We dropped
+        the fallback; shows with only tmdb_id are now treated as
+        no-external-id (passed through, not merged)."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'X', 'tmdb_id': 123, 'source': 'debrid',
+             '_episodes': {(1, 1): self._ep('a.mkv')}},
+            {'title': 'X', 'tmdb_id': 123, 'source': 'debrid',
+             '_episodes': {(1, 2): self._ep('b.mkv')}},
+        ]
+        _dedup_shows_by_external_id(shows)
+        # Both pass through unmerged — there is no imdb_id either, so
+        # they hit the no_id list.
+        assert len(shows) == 2
+
+    def test_source_promotion_to_both_when_local_present(self):
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             '_episodes': {(1, 1): self._ep('a.mkv')}},
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'local',
+             '_episodes': {(1, 2): self._ep('b.mkv')}},
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 1
+        assert shows[0]['source'] == 'both'
+
+    def test_best_entry_preferred_by_rank(self):
+        """Source ranking: 'both' > 'local' > 'debrid'.  When ranks
+        tie, prefer entries with a year populated, then most episodes."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             'year': None, 'path': '/data/path1', '_episodes': {}},
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             'year': 2024, 'path': '/data/path2',
+             '_episodes': {(1, 1): self._ep('a.mkv'),
+                           (1, 2): self._ep('b.mkv')}},
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 1
+        # path2 wins: has year AND more episodes
+        assert shows[0]['path'] == '/data/path2'
+
+    def test_single_show_no_op(self):
+        from utils.library import _dedup_shows_by_external_id
+        shows = [{'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid'}]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 1
+
+    def test_empty_shows_no_op(self):
+        from utils.library import _dedup_shows_by_external_id
+        shows = []
+        _dedup_shows_by_external_id(shows)
+        assert shows == []
+
+    def test_mixed_groups_only_dupes_collapsed(self):
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'A', 'imdb_id': 'tt1', 'source': 'debrid',
+             '_episodes': {(1, 1): self._ep('a.mkv')}},
+            {'title': 'A', 'imdb_id': 'tt1', 'source': 'debrid',
+             '_episodes': {(1, 2): self._ep('b.mkv')}},
+            {'title': 'B', 'imdb_id': 'tt2', 'source': 'debrid'},
+            {'title': 'C', 'source': 'debrid'},  # no external id
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 3
+        merged = next(s for s in shows if s.get('imdb_id') == 'tt1')
+        assert len(merged['_episodes']) == 2
+
+    # ── Reviewer-flagged v2 edge cases ──
+
+    def test_sonarr_filtered_sibling_wins_survivor_pick(self):
+        """v2 reviewer HIGH: survivor selection must prefer entries that
+        ``_apply_sonarr_monitored_filter`` matched (i.e. have
+        ``monitored_episodes`` set).  Without this, a non-Sonarr-matched
+        rank-winner inherits TMDB-all missing math and the
+        Grey's-Anatomy unmonitored-seasons regression returns."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            # Would-be rank-winner under old logic: more episodes, no Sonarr
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             'total_episodes': 430, 'missing_episodes': 428,
+             # No monitored_episodes set → no Sonarr filter
+             '_episodes': {(1, 1): self._ep('a.mkv'), (1, 2): self._ep('b.mkv')}},
+            # Sonarr-matched: fewer episodes but correct monitored math
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             'total_episodes': 430, 'missing_episodes': 1,
+             'monitored_episodes': 20,
+             '_episodes': {(22, 1): self._ep('s22e1.mkv')}},
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 1
+        merged = shows[0]
+        # Sonarr-aware values must survive even though the sibling has
+        # more episodes — reviewer-confirmed regression.
+        assert merged['missing_episodes'] == 1
+        assert merged.get('monitored_episodes') == 20
+
+    def test_debrid_only_sibling_episode_not_tagged_both(self):
+        """v2 reviewer HIGH: when merged source is 'both' (local present
+        in one sibling), debrid-only sibling episodes WITHOUT an explicit
+        ``source`` key in their info dict must NOT be tagged 'both' by
+        the season_data rebuild.  Pre-fix the show-level merged 'both'
+        was passed as ``default_source``, falsely promoting debrid-only
+        episodes."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            # Local entry with explicit per-episode source='local'
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'local',
+             '_episodes': {(1, 1): {'file': 'local.mkv', 'size_bytes': 100,
+                                    'source': 'local'}}},
+            # Debrid entry whose episode info dict has NO 'source' key
+            # (FUSE/WebDAV scanners don't write one).
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             '_episodes': {(2, 1): {'file': 'debrid.mkv', 'size_bytes': 200}}},
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 1
+        merged = shows[0]
+        # Show-level promoted to 'both' (local + debrid)
+        assert merged['source'] == 'both'
+        # But the debrid-only episode must NOT inherit 'both'
+        sd_by_season = {s['number']: s for s in merged['season_data']}
+        s2_ep1 = sd_by_season[2]['episodes'][0]
+        assert s2_ep1['source'] == 'debrid', \
+            f'debrid-only sibling episode falsely tagged {s2_ep1["source"]!r} after rebuild'
+
+    def test_size_bytes_falls_back_to_show_level_when_per_episode_zero(self):
+        """v2 reviewer MEDIUM: legacy scanner paths emit empty info dicts
+        with no size_bytes.  Summing 0 across them would silently zero
+        the composition-card footprint.  Falls back to max sibling
+        show-level size when per-episode sum is 0."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             'size_bytes': 5_000_000_000,
+             '_episodes': {(1, 1): {'file': 'a.mkv'}}},  # no size_bytes
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             'size_bytes': 8_000_000_000,
+             '_episodes': {(1, 2): {'file': 'b.mkv'}}},  # no size_bytes
+        ]
+        _dedup_shows_by_external_id(shows)
+        # Per-episode sum is 0 → use max show-level fallback
+        assert shows[0]['size_bytes'] == 8_000_000_000
+
+    def test_episodes_missing_file_key_skipped_not_crashed(self):
+        """v2 reviewer MEDIUM: ``_build_season_data`` does
+        ``info['file']`` unconditionally — empty/file-less dicts crash
+        it with KeyError.  ``_normalize_episodes_for_merge`` legacy
+        list-of-tuples path emits ``{}`` shells.  Dedup must skip them
+        rather than propagate into the rebuild."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             '_episodes': {(1, 1): self._ep('a.mkv'),
+                           (1, 99): {}}},  # legacy empty shell
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             '_episodes': {(1, 2): self._ep('b.mkv')}},
+        ]
+        # Must not raise KeyError
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 1
+        # Empty shell dropped
+        assert (1, 99) not in shows[0]['_episodes']
+        # Real episodes preserved
+        assert (1, 1) in shows[0]['_episodes']
+        assert (1, 2) in shows[0]['_episodes']
+
+    def test_equal_size_collision_keeps_first_seen(self):
+        """v2 reviewer MEDIUM: equal-size collisions keep first-seen
+        (the survivor's release) so folder/blocklist tracking stays on
+        the survivor's release name.  Documented behavior, asserted."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             '_episodes': {(1, 1): self._ep('survivor-release.mkv', 100)}},
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             '_episodes': {(1, 1): self._ep('sibling-release.mkv', 100)}},
+        ]
+        _dedup_shows_by_external_id(shows)
+        ep = shows[0]['_episodes'][(1, 1)]
+        assert ep['file'] == 'survivor-release.mkv', \
+            f'equal-size collision should keep first-seen, got {ep["file"]!r}'
+
+
 class TestSearchForMissingEpisodesSkipGhosts:
     """Ghost entries (source='wanted') MUST NOT be processed by the
     gap-fill search loop. Reviewer-flagged CRITICAL from commit

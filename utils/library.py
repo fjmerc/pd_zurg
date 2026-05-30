@@ -1155,6 +1155,182 @@ def _apply_sonarr_monitored_filter(shows):
             show['monitored_episodes'] = monitored_total
 
 
+def _dedup_shows_by_external_id(shows):
+    """Collapse shows that share the same IMDb ID into a single entry.
+
+    Three different debrid folder names for the same series (e.g.
+    ``Your Friends And Neighbors``, ``Your Friends Neighbors``, and
+    ``Your Friends and Neighbours``) survive ``_dedup_by_tmdb`` when
+    the TMDB alias map doesn't carry all three normalized titles.
+    ``_enrich_with_tmdb_cache`` then stamps the same ``imdb_id`` on
+    each — at which point we have N library cards showing the SAME
+    canonical title and external ID but different debrid paths.
+
+    Keys by ``imdb_id`` only.  Enrichment currently does not stamp
+    ``tmdb_id`` on shows, so a tmdb fallback would be dead code; if
+    that changes (an enrichment refactor adds it), this helper can be
+    extended without breaking callers.
+
+    For each multi-entry group:
+      * picks a survivor via ``_rank`` (source 'both' > 'local' > 'debrid',
+        then year-populated, then more episodes)
+      * unions ``_episodes`` with PER-EPISODE quality compare on
+        collisions (larger ``size_bytes`` wins — preserves the better
+        release rather than first-seen)
+      * rebuilds ``season_data`` from the merged dict via
+        ``_build_season_data`` so downstream consumers (composition
+        card, prefs enforcer, gap-fill, search loops) see the full
+        episode set, not just the survivor's
+      * PRESERVES the survivor's Sonarr-aware ``missing_episodes`` /
+        ``monitored_episodes`` from ``_apply_sonarr_monitored_filter``
+        (which ran pre-merge) — naively recomputing against
+        ``total_episodes`` would revert to TMDB-all math and inflate
+        missing counts on shows with unmonitored seasons (Grey's
+        Anatomy regression)
+      * recomputes ``size_bytes`` from the merged ``_episodes`` so
+        overlapping episode releases don't double-count
+      * promotes ``source`` to ``'both'`` when any input is local-or-mixed
+
+    Runs in place on the ``shows`` list. O(n).
+    """
+    if not shows or len(shows) < 2:
+        return
+
+    groups = {}  # imdb_id -> list of show dicts (preserves order)
+    no_id = []
+    for show in shows:
+        imdb = show.get('imdb_id')
+        if imdb:
+            groups.setdefault(imdb, []).append(show)
+        else:
+            no_id.append(show)
+
+    if not any(len(g) > 1 for g in groups.values()):
+        return  # no collisions, nothing to do
+
+    def _has_sonarr_filter(s):
+        # _apply_sonarr_monitored_filter writes monitored_episodes only
+        # for shows whose title matched a Sonarr series.  Prefer those
+        # as the survivor so the merged entry inherits the Sonarr-aware
+        # counts (Grey's-Anatomy unmonitored-seasons math), not TMDB-all.
+        return s.get('monitored_episodes') is not None
+
+    def _rank(s):
+        # Sonarr-filtered FIRST so a sibling with monitored counts wins
+        # over a survivor that missed the title-match cascade.  Then
+        # source 'both' > 'local' > 'debrid', year populated, most episodes.
+        src = s.get('source', '')
+        src_rank = {'both': 0, 'local': 1, 'debrid': 2}.get(src, 3)
+        return (
+            0 if _has_sonarr_filter(s) else 1,
+            src_rank,
+            0 if s.get('year') else 1,
+            -len(s.get('_episodes') or {}),
+        )
+
+    def _episode_size(info):
+        # Best-effort size extraction — used for collision tie-breaking.
+        # Falls back to 0 so missing-size entries lose ties to known-good
+        # entries.  ``info`` is a per-episode dict from ``_episodes``.
+        try:
+            return int(info.get('size_bytes') or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _resolve_merged_source(group):
+        sources = {s.get('source') for s in group if s.get('source')}
+        if 'both' in sources or ('local' in sources and 'debrid' in sources):
+            return 'both'
+        if 'local' in sources and 'debrid' not in sources:
+            return 'local'
+        return 'debrid'
+
+    result = []
+    for imdb_id, group in groups.items():
+        if len(group) == 1:
+            result.append(group[0])
+            continue
+        best = min(group, key=_rank)
+        merged = dict(best)
+
+        # Compute the merged source FIRST so the season_data rebuild sees
+        # the right default_source.  Episodes from siblings often lack an
+        # explicit 'source' key (FUSE/WebDAV scanners don't stamp one);
+        # _build_season_data falls back to default_source for those, so
+        # passing 'both' here would falsely tag debrid-only sibling
+        # episodes as 'both' and surface bogus source badges in the UI.
+        # Override only the show-level source; per-episode source labels
+        # come from the survivor's explicit per-ep keys when present.
+        merged_source = _resolve_merged_source(group)
+        # The season_data rebuild uses a non-promoted default for the
+        # episode fallback path so debrid-only sibling episodes stay
+        # tagged 'debrid' rather than inheriting the show-level 'both'.
+        episode_default_source = 'debrid' if 'debrid' in (s.get('source') for s in group) else merged_source
+
+        # Union episodes with per-episode quality compare.  Per-episode
+        # ``size_bytes`` proxies for quality (1080p AMZN WEB-DL > 720p
+        # WEB cap, etc.).  On collision the larger-size info wins;
+        # equal-size collisions keep first-seen (best's release) so
+        # folder/blocklist tracking points at the survivor's release.
+        # Episodes lacking a 'file' key (legacy list-of-tuples shape
+        # from _normalize_episodes_for_merge produces empty info dicts)
+        # are skipped — _build_season_data would crash on them.
+        merged_eps = {}
+        for item in group:
+            for ep_key, ep_info in (item.get('_episodes') or {}).items():
+                if not isinstance(ep_info, dict) or 'file' not in ep_info:
+                    continue
+                existing = merged_eps.get(ep_key)
+                if existing is None or _episode_size(ep_info) > _episode_size(existing):
+                    merged_eps[ep_key] = ep_info
+        merged['_episodes'] = merged_eps
+        merged['seasons'] = len({ek[0] for ek in merged_eps})
+        merged['episodes'] = len(merged_eps)
+
+        # Rebuild season_data from the unioned episode dict — downstream
+        # consumers (composition card sizes, prefs enforcer, gap-fill,
+        # search loops) all iterate ``season_data`` not ``_episodes``.
+        merged['season_data'] = _build_season_data(merged_eps, episode_default_source)
+
+        # Recompute size_bytes from the merged per-episode sizes.  Summing
+        # show.size_bytes across siblings would double-count overlapping
+        # releases.  Fall back to the max sibling show-level size when
+        # all merged episodes lack per-ep sizes (legacy scanner path)
+        # so the composition card doesn't silently zero-out.
+        per_episode_total = sum(_episode_size(info) for info in merged_eps.values())
+        if per_episode_total > 0:
+            merged['size_bytes'] = per_episode_total
+        else:
+            fallback_max = max((s.get('size_bytes') or 0 for s in group), default=0)
+            merged['size_bytes'] = fallback_max
+
+        # Preserve the survivor's Sonarr-aware missing_episodes /
+        # monitored_episodes.  Because ``_rank`` now puts Sonarr-filtered
+        # entries first, the survivor either HAS monitored math
+        # (correct) or NONE of the siblings did (so survivor's TMDB-all
+        # math is the best available).  Don't recompute against
+        # total_episodes — would revert to TMDB-all math and re-inflate
+        # missing on shows with unmonitored seasons.
+
+        merged['source'] = merged_source
+
+        # Use the earliest date_added (skip zero = stat failure) — most
+        # honest "when did this enter the user's library" timestamp.
+        dates = [s.get('date_added', 0) for s in group if s.get('date_added', 0) > 0]
+        if dates:
+            merged['date_added'] = min(dates)
+
+        logger.debug(
+            "[library] external-id dedup: collapsed %d entries for imdb=%s "
+            "(%r) — kept %r, dropped %d", len(group), imdb_id,
+            merged.get('title'), best.get('path', ''), len(group) - 1
+        )
+
+        result.append(merged)
+
+    shows[:] = result + no_id
+
+
 def _strip_ghost_duplicates(movies):
     """Drop ghost entries whose post-enrichment ``(norm, year)`` collides
     with a real on-disk movie.
@@ -2393,6 +2569,15 @@ class LibraryScanner:
         # "F1 The Movie" → canonical "F1" collides with a Radarr ghost
         # titled "F1"). Pre-enrichment dedup couldn't see this collision.
         _strip_ghost_duplicates(movies)
+
+        # Collapse show entries that share an IMDb ID post-enrichment.
+        # The alias-map dedup in ``_dedup_by_tmdb`` runs pre-enrichment
+        # off normalized parsed-folder titles, so three debrid folders
+        # whose parsed names are "your friends and neighbors" /
+        # "your friends neighbors" / "your friends and neighbours"
+        # survive as three groups even though enrichment stamps the
+        # same canonical title + imdb_id on all three.
+        _dedup_shows_by_external_id(shows)
 
         # Build path indexes keyed by post-rename normalized titles.  When
         # two items collide on the same (norm, season, episode) — possible

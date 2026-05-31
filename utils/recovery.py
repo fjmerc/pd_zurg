@@ -62,15 +62,29 @@ def _pct(num, denom):
 
 
 def _count_wanted(data):
-    """Count not-yet-acquired media units (missing movies + missing episodes).
+    """Count not-yet-acquired but *releasable* media units.
+
+    The denominator should reflect media you could actually have today, not
+    announced/unaired future content — otherwise the recovery percentage is
+    diluted by titles that don't exist yet.
 
     Wanted movies are the Radarr ghost entries (``missing=True`` /
-    ``source='wanted'``); wanted episodes come from Sonarr/TMDB enrichment
-    via the pre-computed ``missing_episodes`` per show.
+    ``source='wanted'``); we skip any stamped ``is_available=False`` (Radarr
+    hasn't reached the movie's minimum-availability date). Entries without
+    the flag (legacy snapshots, non-Radarr libraries) count as before.
+
+    Wanted episodes come from the pre-computed ``missing_episodes`` per show.
+    Where Sonarr matched the show, that count is already aired-monitored-only
+    (``_apply_sonarr_monitored_filter`` rebases it on Sonarr's aired
+    ``episodeCount``), so unaired episodes are already excluded here. Shows
+    that fell back to the TMDB total-episode count can still include a few
+    unaired episodes — an accepted residual for unmatched shows.
     """
     wanted = 0
     for movie in data.get('movies', []) or []:
         if movie.get('missing') or movie.get('source') == 'wanted':
+            if movie.get('is_available') is False:
+                continue
             wanted += 1
     for show in data.get('shows', []) or []:
         me = show.get('missing_episodes')

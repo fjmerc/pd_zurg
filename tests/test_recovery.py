@@ -69,6 +69,29 @@ def test_compute_snapshot_basic(rec):
     assert r['pct_on_disk'] == pytest.approx(66.7, abs=0.1)
 
 
+def test_unavailable_wanted_movie_excluded_from_denominator(rec):
+    """A monitored-but-unreleased movie (Radarr is_available=False) must not
+    dilute the recovery denominator; an available wanted movie still counts."""
+    data = {
+        'movies': [
+            {'title': 'OnDebrid', 'source': 'debrid', 'size_bytes': 100},
+            {'title': 'Released', 'source': 'wanted', 'missing': True,
+             'is_available': True},
+            {'title': 'NotOutYet', 'source': 'wanted', 'missing': True,
+             'is_available': False},
+            # No flag at all → counts as before (legacy / non-Radarr).
+            {'title': 'Unknown', 'source': 'wanted', 'missing': True},
+        ],
+        'shows': [],
+    }
+    r = rec.compute_snapshot(data)['recovery']
+    # available_debrid = 1; wanted = Released + Unknown = 2 (NotOutYet excluded)
+    assert r['available_debrid'] == 1
+    assert r['wanted'] == 2
+    assert r['total'] == 3
+    assert r['pct_debrid'] == pytest.approx(33.3, abs=0.1)
+
+
 def test_empty_library_no_divide_by_zero(rec):
     snap = rec.compute_snapshot({'movies': [], 'shows': []})
     r = snap['recovery']

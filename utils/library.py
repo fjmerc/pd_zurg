@@ -1476,6 +1476,11 @@ def _apply_radarr_wanted_movies(movies, pending=None):
             'size_bytes': 0,
             'path': '',
             'missing': True,
+            # Radarr's computed "has reached minimum availability" flag.
+            # Stamped so the recovery metric can exclude announced/unreleased
+            # titles from its denominator; the Wanted UI view ignores it and
+            # still shows every monitored-but-missing movie.
+            'is_available': bool(rm.get('isAvailable')),
             '_radarr_id': rm.get('id'),
             '_radarr_tmdb_id': tmdb_id,
         }

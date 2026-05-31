@@ -1677,7 +1677,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == '/api/blocklist':
             from utils import blocklist as blocklist_mod
             self._send_json_response(200, json.dumps(blocklist_mod.get_all()))
-        elif self.path == '/activity':
+        elif self.path == '/activity' or self.path.startswith('/activity?'):
             from utils.activity_page import get_activity_html
             self._send_html_response(get_activity_html().encode())
         elif self.path == '/system':

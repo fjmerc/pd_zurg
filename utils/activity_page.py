@@ -67,6 +67,7 @@ __NAV_HTML__
       <option value="task_completed">Task</option>
       <option value="blocklisted">Blocklisted</option>
       <option value="blocklist_added">Auto-Blocked</option>
+      <option value="debrid">Debrid Health</option>
     </select>
     <input type="text" id="activity-search" data-kb="search" placeholder="Search titles... (/)" oninput="loadActivity(1)" style="flex:1;background:var(--input-bg);border:1px solid var(--input-border);border-radius:4px;padding:4px 8px;font-size:.8em;color:var(--text);outline:none;min-width:120px">
     <label style="font-size:.78em;color:var(--text2);display:inline-flex;align-items:center;gap:4px;user-select:none">
@@ -269,6 +270,18 @@ window.onKbEscape=function(){
   if(s&&s.value){s.value='';loadActivity(1);return;}
 };
 
+/* Preselect the type filter from the URL (?type=...) so deep links from
+   other pages — e.g. the System page Debrid Health cards' "View activity"
+   button (?type=debrid) — land on a pre-filtered view. */
+(function(){
+  var t=new URLSearchParams(window.location.search).get('type');
+  if(!t)return;
+  var sel=document.getElementById('activity-type');
+  for(var i=0;i<sel.options.length;i++){
+    if(sel.options[i].value===t){sel.value=t;break;}
+  }
+})();
+
 /* Initial load (wait for auth detection) + polling */
 window._hasAuthReady.then(function(){loadActivity();loadBlocklist();});
 setInterval(loadActivity,15000);
@@ -289,7 +302,7 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .act-link:hover{color:var(--blue);border-bottom-color:var(--blue);text-decoration:none}
 .type-badge{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-size:.75em;font-weight:500;white-space:nowrap}
 .act-run-count{display:inline-block;padding:0 5px;margin-left:4px;border-radius:3px;font-size:.78em;font-weight:600;background:var(--border);color:var(--text);font-family:monospace}
-.type-grabbed{background:#58a6ff1a;color:var(--blue)}.type-cached{background:#3fb9501a;color:var(--green)}.type-symlink_created{background:#bc8cff1a;color:#bc8cff}.type-failed{background:#f851491a;color:var(--red)}.type-cleanup{background:#d299221a;color:var(--yellow)}.type-switched_source{background:#db6d281a;color:var(--orange)}.type-search_triggered{background:#58a6ff1a;color:var(--blue)}.type-rescan_triggered{background:#3fb9501a;color:var(--green)}.type-task_completed{background:var(--border);color:var(--text2)}.type-blocklisted{background:#f851491a;color:var(--red)}.type-blocklist_added{background:#db6d281a;color:var(--orange)}
+.type-grabbed{background:#58a6ff1a;color:var(--blue)}.type-cached{background:#3fb9501a;color:var(--green)}.type-symlink_created{background:#bc8cff1a;color:#bc8cff}.type-failed{background:#f851491a;color:var(--red)}.type-cleanup{background:#d299221a;color:var(--yellow)}.type-switched_source{background:#db6d281a;color:var(--orange)}.type-search_triggered{background:#58a6ff1a;color:var(--blue)}.type-rescan_triggered{background:#3fb9501a;color:var(--green)}.type-task_completed{background:var(--border);color:var(--text2)}.type-blocklisted{background:#f851491a;color:var(--red)}.type-blocklist_added{background:#db6d281a;color:var(--orange)}.type-debrid{background:#bc8cff1a;color:#bc8cff}
 #activity-search:focus{border-color:var(--input-focus)}
 .footer{display:flex;justify-content:flex-end;align-items:center;gap:8px;color:var(--text3);font-size:.78em}
 

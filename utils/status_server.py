@@ -1402,6 +1402,21 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json_response(200, json.dumps(get_summary()))
             except Exception as e:
                 self._send_json_response(500, json.dumps({'error': str(e)}))
+        elif self.path.startswith('/api/recovery'):
+            try:
+                from utils import recovery
+                params = parse_qs(urlparse(self.path).query)
+                try:
+                    limit = int(params.get('limit', ['0'])[0])
+                except ValueError:
+                    limit = 0
+                snapshots = recovery.load_snapshots(limit=limit or None)
+                self._send_json_response(200, json.dumps({
+                    'latest': snapshots[-1] if snapshots else None,
+                    'snapshots': snapshots,
+                }))
+            except Exception as e:
+                self._send_json_response(500, json.dumps({'error': str(e)}))
         elif self.path == '/settings':
             # Settings editor — requires auth
             if not self.auth_credentials:

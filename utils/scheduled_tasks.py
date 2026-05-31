@@ -144,6 +144,14 @@ def library_scan():
                                  'movies': movies, 'shows': shows,
                                  'duration_ms': duration_ms})
 
+    # Record a daily recovery snapshot (upsert-by-day) for the TB-viability
+    # time series. Best-effort: snapshotting must never break the scan.
+    try:
+        from utils import recovery as _recovery
+        _recovery.record_snapshot(data)
+    except Exception as e:
+        logger.debug(f"[scheduler] Recovery snapshot failed: {e}")
+
     return {
         'status': 'success',
         'message': f'{movies} movies, {shows} shows ({dur_str})',

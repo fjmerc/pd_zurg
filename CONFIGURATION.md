@@ -210,6 +210,8 @@ Sweep cadence (`DEBRID_HEALTH_INTERVAL`, default 12h) is a power-user override r
 
 **Recommended rollout when enabling auto-remediate**: Leave `DEBRID_HEALTH_ENABLED=true` and `DEBRID_HEALTH_AUTO_REMEDIATE=false` for at least one sweep (12 h). Inspect `/config/debrid_health.json` (entries with `status: "blocked"`) and confirm the kill list looks right. Then flip auto-remediate ON. Subsequent sweeps will batch-process blocked entries (≤100 per sweep) — for a large backlog, this takes several sweeps to drain. Each remediation produces an Activity-feed entry with cause `debrid_filtered`; a single per-sweep summary notification fires under the `debrid_filtered` event (subscribe via `NOTIFICATION_EVENTS`).
 
+**Media recovery snapshots**: the hourly library scan records a once-per-day data point of library composition (debrid-playable / local-only / wanted, counted per movie and per episode) plus filter-gate deltas to `/config/recovery_snapshots.json`, queryable at `GET /api/recovery`. Retention is `RECOVERY_SNAPSHOT_RETENTION_DAYS` (default 365) — a power-user override read directly from env, not surfaced in the Settings UI.
+
 ---
 
 ## Library browser, preferences, gap-fill

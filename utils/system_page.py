@@ -68,6 +68,11 @@ __NAV_HTML__
 
 <!-- Tasks Tab -->
 <div class="tab-panel" id="panel-tasks">
+  <!-- Media Recovery tile: headline % of the library playable on debrid
+       (library-health framing A) plus the filter-gate deltas (framing B)
+       with a sparkline of the daily pct_debrid series. Hidden until the
+       first recovery snapshot has been recorded. -->
+  <div id="rec-card" style="display:none;margin-bottom:12px"></div>
   <!-- Debrid Health mini-dashboard (plan 38 phase 5, expanded for
        plan 39 phase 5 to render side-by-side RD + TB cards when both
        providers are configured; collapses to one card when only one is.
@@ -379,6 +384,74 @@ function runDebridHealth(btn){
   }).catch(function(){btn.disabled=false;btn.textContent='Run sweep now';});
 }
 
+/* Media Recovery tile */
+function _recSparkline(snaps){
+  /* Tiny inline trend of pct_debrid across recorded days. Auto-scales to
+     the observed min/max so a flat-but-high series doesn't look like noise;
+     a single data point renders nothing (no line to draw yet). */
+  var pts=snaps.map(function(s){return ((s.recovery||{}).pct_debrid)||0;});
+  if(pts.length<2)return '';
+  var W=160,H=36,pad=2,n=pts.length;
+  var lo=Math.min.apply(null,pts),hi=Math.max.apply(null,pts),range=(hi-lo)||1;
+  var coords=pts.map(function(v,i){
+    var x=pad+(W-2*pad)*(i/(n-1));
+    var y=pad+(H-2*pad)*(1-(v-lo)/range);
+    return x.toFixed(1)+','+y.toFixed(1);
+  });
+  return '<svg class="rec-spark" viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'" '
+    +'preserveAspectRatio="none" aria-hidden="true">'
+    +'<polyline points="'+coords.join(' ')+'" fill="none" stroke="var(--green)" stroke-width="1.5" '
+    +'stroke-linejoin="round" stroke-linecap="round"/></svg>';
+}
+function _recDeltaPill(snaps){
+  if(snaps.length<2)return '';
+  var first=(snaps[0].recovery||{}).pct_debrid||0;
+  var last=(snaps[snaps.length-1].recovery||{}).pct_debrid||0;
+  var d=Math.round((last-first)*10)/10;
+  var sign=d>0?'+':'';
+  var cls=d>0?'rec-up':d<0?'rec-down':'rec-neutral';
+  return '<span class="rec-delta '+cls+'" title="Change since '+esc(snaps[0].date||'')+'">'
+    +sign+d+' pts</span>';
+}
+function updateRecovery(){
+  fetch('/api/recovery').then(function(r){return r.json()}).then(function(d){
+    var container=document.getElementById('rec-card');
+    var snaps=(d&&d.snapshots)||[];
+    var latest=(d&&d.latest)||null;
+    if(!latest){container.style.display='none';return;}
+    var r=latest.recovery||{};
+    var fg=latest.filter_gate;
+    var body=''
+      +'<div class="dh-row"><span class="dh-label">Debrid-playable:</span><span>'+esc(String(r.available_debrid||0))+' units</span></div>'
+      +'<div class="dh-row"><span class="dh-label">Local-only (fallback):</span><span>'+esc(String(r.available_local||0))+' units</span></div>'
+      +'<div class="dh-row"><span class="dh-label">Wanted (not acquired):</span><span>'+esc(String(r.wanted||0))+' units</span></div>'
+      +'<div class="dh-row"><span class="dh-label">On disk / total:</span><span>'+esc(String(r.on_disk||0))+' / '+esc(String(r.total||0))+' ('+esc(String(r.pct_on_disk||0))+'%)</span></div>';
+    if(fg){
+      var blockedPart=esc(String(fg.blocked||0));
+      if(fg.blocked)blockedPart='<span class="dh-bad">'+blockedPart+'</span>';
+      body+='<div class="rec-sep">Filter-gate (Real-Debrid)</div>'
+        +'<div class="dh-row"><span class="dh-label">Blocked (current):</span><span>'+blockedPart+'</span></div>'
+        +'<div class="dh-row"><span class="dh-label">Filter-blocked (24h):</span><span>'+esc(String(fg.filtered_24h||0))+'</span></div>'
+        +'<div class="dh-row"><span class="dh-label">Rescued to alt (24h):</span><span>'+esc(String(fg.rescued_24h||0))+'</span></div>';
+    }
+    container.style.display='';
+    container.innerHTML=''
+      +'<div class="dh-card">'
+      +'<div class="dh-card-head">'
+      +'<span class="dh-card-title">Media Recovery</span>'
+      +'<span class="dh-card-pills"><span class="dh-pill dh-pill-tb">as of '+esc(latest.date||'')+'</span></span>'
+      +'</div>'
+      +'<div class="rec-headline">'
+      +'<div class="rec-pct">'+esc(String(r.pct_debrid||0))+'%</div>'
+      +'<div class="rec-pct-label">playable on debrid<br><small>'+esc(String(r.available_debrid||0))+' of '+esc(String(r.total||0))+' units</small></div>'
+      +'<div class="rec-trend">'+_recSparkline(snaps)+_recDeltaPill(snaps)+'</div>'
+      +'</div>'
+      +'<div class="dh-card-body">'+body+'</div>'
+      +'<div class="dh-card-actions"><a class="btn btn-ghost btn-sm" href="/activity">View activity &rarr;</a></div>'
+      +'</div>';
+  }).catch(function(){});
+}
+
 /* Config viewer (load once) */
 fetch('/api/config').then(function(r){return r.json()}).then(function(cfg){
   var h='';
@@ -395,10 +468,11 @@ window.onKbEscape=function(){
 };
 
 /* Initial load (wait for auth detection) + polling */
-window._hasAuthReady.then(function(){updateLogs();updateTasks();updateDebridHealth();});
+window._hasAuthReady.then(function(){updateLogs();updateTasks();updateDebridHealth();updateRecovery();});
 setInterval(updateLogs,10000);
 setInterval(updateTasks,15000);
 setInterval(updateDebridHealth,30000);
+setInterval(updateRecovery,60000);
 __WANTED_BADGE_JS__
 </script>
 </main>
@@ -433,6 +507,18 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .dh-label{color:var(--text2);min-width:130px}
 .dh-bad{color:var(--red);font-weight:600}
 .dh-card-actions{display:flex;gap:8px;flex-wrap:wrap}
+.rec-headline{display:flex;align-items:center;gap:16px;margin-bottom:10px;flex-wrap:wrap}
+.rec-pct{font-size:2.1em;font-weight:700;color:var(--green);line-height:1}
+.rec-pct-label{font-size:.78em;color:var(--text2);line-height:1.35}
+.rec-pct-label small{color:var(--text3)}
+.rec-trend{margin-left:auto;display:flex;align-items:center;gap:8px}
+.rec-spark{display:block}
+.rec-delta{font-size:.72em;font-weight:600;white-space:nowrap}
+.rec-delta.rec-up{color:var(--green)}
+.rec-delta.rec-down{color:var(--red)}
+.rec-delta.rec-neutral{color:var(--text2)}
+.rec-sep{font-size:.7em;text-transform:uppercase;letter-spacing:.04em;color:var(--text3);margin-top:6px;padding-top:6px;border-top:1px solid var(--border2)}
+@media(max-width:600px){.rec-trend{margin-left:0;flex-basis:100%}}
 details{margin-top:0}
 details summary{cursor:pointer;color:var(--text2);font-size:.85em;padding:4px 0;font-weight:500}
 details summary:hover{color:var(--blue)}

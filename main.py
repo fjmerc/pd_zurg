@@ -9,6 +9,7 @@ from utils import auto_update
 from utils.processes import shutdown_all_processes, start_process_monitor
 from utils import notifications
 from utils import history
+from utils import recovery
 from utils import blocklist
 from utils import blackhole
 from utils import ffprobe_monitor
@@ -74,6 +75,7 @@ def main():
     status_server.status_data.add_event('main', f'Zurgarr v{version} starting')
 
     history.init()
+    recovery.init()
     blocklist.init()
     notifications.init()
     notifications.notify('startup', 'Zurgarr Started', f'Version {version}')

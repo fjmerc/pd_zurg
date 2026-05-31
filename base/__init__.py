@@ -48,6 +48,7 @@ __all__ = [
     'JFADD', 'JFAPIKEY', 'RDAPIKEY', 'ADAPIKEY',
     'TORBOXAPIKEY', 'TORBOXWEBDAVUSER', 'TORBOXWEBDAVPASS', 'TORBOX_MOUNT_NAME',
     'TORBOX_RCLONE_TPSLIMIT', 'TORBOX_RCLONE_TPSLIMIT_BURST',
+    'TORBOX_RCLONE_DIR_CACHE_TIME', 'TORBOX_SCAN_TIMEOUT',
     'GHTOKEN',
     'SEERRAPIKEY', 'SEERRADD', 'PLEXADD', 'ZURGUSER', 'ZURGPASS',
     'SHOWMENU', 'LOGFILE', 'PDUPDATE', 'PDREPO',
@@ -187,6 +188,19 @@ class Config:
         # ceiling.  Set either to '0' to omit the flag entirely.
         self.TORBOX_RCLONE_TPSLIMIT = os.getenv('TORBOX_RCLONE_TPSLIMIT', '5')
         self.TORBOX_RCLONE_TPSLIMIT_BURST = os.getenv('TORBOX_RCLONE_TPSLIMIT_BURST', '10')
+        # TB's dir cache must outlive the hourly library scan. With the
+        # default 30m it expires before the next scan, so every scan re-lists
+        # all release folders over the throttled (tpslimit) FUSE mount and
+        # times out — dropping TB titles, which then flip to "Wanted".
+        # Default 2h > LIBRARY_SCAN_INTERVAL (1h); the blackhole grab hook
+        # calls vfs/refresh, so new content still appears promptly between
+        # expiries rather than waiting out the full TTL.
+        self.TORBOX_RCLONE_DIR_CACHE_TIME = os.getenv('TORBOX_RCLONE_DIR_CACHE_TIME', '2h')
+        # Wall-clock budget (seconds) for the TB FUSE walk during a library
+        # scan. The shared scan deadline (30s) can't enumerate a large TB
+        # mount on a cold cache at 5 tps (~450 folders ≈ 90s); give TB its
+        # own budget so cold scans complete instead of truncating.
+        self.TORBOX_SCAN_TIMEOUT = os.getenv('TORBOX_SCAN_TIMEOUT', '180')
         self.GHTOKEN = load_secret_or_env('GITHUB_TOKEN')
         self.SEERRAPIKEY = load_secret_or_env('seerr_api_key')
         self.SEERRADD = load_secret_or_env('seerr_address')
@@ -358,6 +372,8 @@ TORBOXWEBDAVPASS = config.TORBOXWEBDAVPASS
 TORBOX_MOUNT_NAME = config.TORBOX_MOUNT_NAME
 TORBOX_RCLONE_TPSLIMIT = config.TORBOX_RCLONE_TPSLIMIT
 TORBOX_RCLONE_TPSLIMIT_BURST = config.TORBOX_RCLONE_TPSLIMIT_BURST
+TORBOX_RCLONE_DIR_CACHE_TIME = config.TORBOX_RCLONE_DIR_CACHE_TIME
+TORBOX_SCAN_TIMEOUT = config.TORBOX_SCAN_TIMEOUT
 GHTOKEN = config.GHTOKEN
 SEERRAPIKEY = config.SEERRAPIKEY
 SEERRADD = config.SEERRADD

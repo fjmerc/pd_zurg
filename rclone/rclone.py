@@ -277,14 +277,26 @@ def setup():
 
             rc_port = _RC_BASE_PORT + idx
 
+            # TorBox's dir cache must outlive the hourly library scan
+            # (TORBOX_RCLONE_DIR_CACHE_TIME, default 2h) — with the shorter
+            # shared default it expires between scans, so every scan re-lists
+            # all release folders over the throttled (tpslimit) mount, hits
+            # the scan deadline, and drops TB titles (they flip to "Wanted").
+            # Other mounts keep the shared RCLONE_DIR_CACHE_TIME.  Gate on
+            # torbox_remote_written (not just the name) so a Zurg mount that
+            # happens to be named "torbox" — RCLONE_MOUNT_NAME with TorBox
+            # unconfigured — doesn't wrongly inherit the 2h cache.
+            if mn == TORBOX_MOUNT_NAME and torbox_remote_written:
+                dir_cache_time = (TORBOX_RCLONE_DIR_CACHE_TIME or '').strip() or '2h'
+            else:
+                dir_cache_time = (os.environ.get('RCLONE_DIR_CACHE_TIME') or '').strip() or '10s'
+
             if NFSMOUNT is not None and NFSMOUNT.lower() == "true":
                 port = NFSPORT if NFSPORT else find_available_port(8001, 8999)
                 logger.info(f"Setting up rclone NFS server for {mn} at 0.0.0.0:{port}")
                 vfs_cache_mode = (os.environ.get('RCLONE_VFS_CACHE_MODE') or '').strip() or 'full'
-                dir_cache_time = (os.environ.get('RCLONE_DIR_CACHE_TIME') or '').strip() or '10s'
                 rclone_command = ["rclone", "serve", "nfs", f"{mn}:", "--config", "/config/rclone.config", "--addr", f"0.0.0.0:{port}", f"--vfs-cache-mode={vfs_cache_mode}", f"--dir-cache-time={dir_cache_time}"]
             else:
-                dir_cache_time = (os.environ.get('RCLONE_DIR_CACHE_TIME') or '').strip() or '10s'
                 # poll-interval makes rclone actively diff the backend on a
                 # schedule and emit FUSE_NOTIFY_INVAL_ENTRY for any entries
                 # that changed. Without it, rclone only ever re-reads when

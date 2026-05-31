@@ -2488,9 +2488,24 @@ class LibraryScanner:
         # "available on RD + TB" without duplicating the card.
         tb_mount = self._discover_torbox_mount()
         if tb_mount:
+            # TB is a throttled FUSE mount (rclone --tpslimit). A cold walk of
+            # a large library (~450 folders at 5 tps ≈ 90s) can't finish
+            # within the shared 30s scan deadline; it would truncate and drop
+            # TB titles, which then surface as "Wanted". Give TB its own
+            # budget, measured fresh from now so the time already spent on the
+            # RD/WebDAV scan above doesn't eat into it.
+            # Read from os.environ (not the base global) so a SIGHUP-less UI
+            # settings change takes effect on the next scan — library.py reads
+            # all config live this way; the base.TORBOX_SCAN_TIMEOUT global
+            # exists only for __all__/schema symmetry.
+            try:
+                tb_timeout = int(os.environ.get('TORBOX_SCAN_TIMEOUT', '180'))
+            except (ValueError, TypeError):
+                tb_timeout = 180
+            tb_deadline = time.monotonic() + max(tb_timeout, 30)
             try:
                 tb_movies, tb_shows = self._scan_mount(
-                    tb_mount, deadline, source_debrid='torbox',
+                    tb_mount, tb_deadline, source_debrid='torbox',
                     flat_layout=True,
                 )
                 debrid_movies, debrid_shows = self._merge_alt_debrid_items(

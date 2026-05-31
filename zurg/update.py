@@ -2,6 +2,7 @@ from base import *
 from utils.logger import *
 from utils.processes import ProcessHandler
 from utils.auto_update import Update
+from utils.file_utils import atomic_write
 from zurg.download import get_latest_release, download_and_unzip_release, get_architecture
 
 class ZurgUpdate(Update, ProcessHandler):
@@ -106,7 +107,15 @@ class ZurgUpdate(Update, ProcessHandler):
                         zurg_app_base = '/zurg/zurg'
                         zurg_executable_path = os.path.join(dir_to_check, 'zurg')
                         self.stop_process(process_name, key_type)
-                        shutil.copy(zurg_app_base, zurg_executable_path)
+                        # Atomic copy: the auto-update thread is a daemon, so a
+                        # SIGTERM at interpreter exit can kill it mid-write.
+                        # atomic_write stages to a temp file and only
+                        # os.replace()s on completion (preserving the existing
+                        # binary's +x mode), so an interrupted update can never
+                        # leave a truncated, unexecutable zurg binary on disk.
+                        with open(zurg_app_base, 'rb') as src, \
+                                atomic_write(zurg_executable_path, mode='wb') as dst:
+                            shutil.copyfileobj(src, dst)
                         self.start_process('Zurg', dir_to_check)
                         return True
 

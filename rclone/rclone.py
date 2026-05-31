@@ -245,10 +245,28 @@ def setup():
 
         process_handler = ProcessHandler(logger)
 
-        for idx, mn in enumerate(mount_names):
+        def _configure_mount(idx, mn):
             logger.info(f"Configuring rclone for {mn}")
-            subprocess.run(["umount", f"/data/{mn}"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            os.makedirs(f"/data/{mn}", exist_ok=True)
+            mount_path = f"/data/{mn}"
+            # Plain (non-lazy) umount clears a clean leftover mount but is a
+            # no-op (EBUSY) on a healthy, actively-streaming mount — which is
+            # exactly what we want, since setup() also runs on SIGHUP reload.
+            subprocess.run(["umount", mount_path], check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                os.makedirs(mount_path, exist_ok=True)
+            except OSError:
+                # A dead/stale FUSE mountpoint left by a prior container can
+                # survive a plain umount; the path then exists but isn't a
+                # usable directory, so makedirs(exist_ok=True) still raises.
+                # Escalate to lazy unmounts to detach the corpse, then retry.
+                # This only fires when the mount is already broken, so a
+                # healthy active mount is never force-detached.
+                for unmount_cmd in (["fusermount", "-uz", mount_path],
+                                    ["umount", "-l", mount_path]):
+                    subprocess.run(unmount_cmd, check=False,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                os.makedirs(mount_path, exist_ok=True)
 
             rc_port = _RC_BASE_PORT + idx
 
@@ -273,7 +291,6 @@ def setup():
             # process that discards the RC server.  ProcessHandler manages the
             # lifecycle instead, keeping the RC port alive for vfs/refresh calls.
             rclone_command.extend(["--rc", f"--rc-addr=localhost:{rc_port}", "--rc-no-auth"])
-            _rc_urls[mn] = f"http://localhost:{rc_port}"
 
             # Optional VFS cache flags — apply to both NFS and FUSE modes.
             # Rclone also reads these natively from RCLONE_* env vars, but
@@ -356,13 +373,37 @@ def setup():
                     suppress_logging = True
                     logger.info(f"Suppressing {process_name} logging")                     
                 rclone_process = process_handler.start_process(process_name, "/config", rclone_command, mn, suppress_logging=suppress_logging)
+                if rclone_process:
+                    # Register the RC URL only once the mount process is
+                    # actually up, so a skipped/failed mount never leaves a
+                    # dead localhost URL for the RC-refresh consumers.
+                    _rc_urls[mn] = f"http://localhost:{rc_port}"
                 notify('mount_success', 'Rclone Mounted', f'Mount {mn} is ready')
             else:
                 logger.error(f"The Zurg WebDav URL {url}/dav is not accessible within the timeout period. Skipping rclone setup for {mn}")
                 notify('health_error', 'Rclone Mount Failed', f'Mount {mn} failed: Zurg WebDAV timeout', level='error')
 
+        # Per-mount isolation: a single mount failing (stale FUSE mountpoint
+        # left by a prior container, an unreachable WebDAV) must not abort
+        # setup for the other mounts or starve the rest of startup (scheduler
+        # registration runs after this in main()).
+        for idx, mn in enumerate(mount_names):
+            try:
+                _configure_mount(idx, mn)
+            except Exception as e:
+                logger.error(f"Error configuring rclone mount {mn!r}: {e}", exc_info=True)
+                notify('health_error', 'Rclone Mount Failed', f'Mount {mn} failed: {e}', level='error')
+                continue
+
         logger.info("rclone startup complete")
 
     except Exception as e:
-        logger.error(e)
-        exit(1)
+        # Pre-loop config failure (missing key, unwritable config). Don't
+        # exit(1) — that raises SystemExit, which main()'s `except Exception`
+        # can't catch, aborting startup before the task scheduler is even
+        # registered. Re-raise so main.py logs it and the rest of startup
+        # (scheduler, blackhole) still runs.
+        logger.error(f"rclone setup failed before any mount started: {e}", exc_info=True)
+        notify('health_error', 'Rclone Setup Failed',
+               f'rclone configuration failed before any mount started: {e}', level='error')
+        raise

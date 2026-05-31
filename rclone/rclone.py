@@ -262,10 +262,17 @@ def setup():
                 # Escalate to lazy unmounts to detach the corpse, then retry.
                 # This only fires when the mount is already broken, so a
                 # healthy active mount is never force-detached.
-                for unmount_cmd in (["fusermount", "-uz", mount_path],
+                # fuse3 ships `fusermount3`; `fusermount` (fuse2) may be absent,
+                # so tolerate a missing binary and still fall through to the
+                # kernel-level `umount -l` rather than aborting the escalation.
+                for unmount_cmd in (["fusermount3", "-uz", mount_path],
+                                    ["fusermount", "-uz", mount_path],
                                     ["umount", "-l", mount_path]):
-                    subprocess.run(unmount_cmd, check=False,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    try:
+                        subprocess.run(unmount_cmd, check=False,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except FileNotFoundError:
+                        pass
                 os.makedirs(mount_path, exist_ok=True)
 
             rc_port = _RC_BASE_PORT + idx

@@ -981,6 +981,41 @@ def _get_sonarr_series_list(client, force_refresh=False):
     return series_list
 
 
+def _sonarr_monitored_missing(series):
+    """Monitored-aware missing-episode math for a single Sonarr series.
+
+    Returns ``(missing, monitored_total, unmonitored_seasons)`` summed from
+    the series' per-season ``statistics`` — aired monitored ``episodeCount``
+    minus ``episodeFileCount`` — skipping specials (season 0) and seasons
+    the user has unmonitored.  Shared by ``_apply_sonarr_monitored_filter``
+    (rebasing real library shows) and ``_apply_sonarr_wanted_shows``
+    (injecting fully-absent monitored series) so both agree on the same
+    arithmetic.
+
+    Note ``episodeFileCount`` counts files across ALL episodes in a season
+    regardless of per-episode monitored flag, so in a mixed season it can
+    exceed the monitored ``episodeCount``; the ``max(0, …)`` clamp keeps
+    that from going negative (at the cost of hiding genuine gaps in such
+    seasons — accepted, see the original call-site note).
+    """
+    missing = 0
+    monitored_total = 0
+    unmonitored_nums = []
+    for sd in series.get('seasons') or []:
+        snum = sd.get('seasonNumber')
+        if snum is None or snum <= 0:
+            continue  # skip specials
+        if not sd.get('monitored'):
+            unmonitored_nums.append(snum)
+            continue
+        stats = sd.get('statistics') or {}
+        ep_count = stats.get('episodeCount', 0) or 0
+        ep_file = stats.get('episodeFileCount', 0) or 0
+        monitored_total += ep_count
+        missing += max(0, ep_count - ep_file)
+    return missing, monitored_total, sorted(unmonitored_nums)
+
+
 def _apply_sonarr_monitored_filter(shows):
     """Rebase show missing-episode counts against Sonarr's monitored view.
 
@@ -1013,20 +1048,26 @@ def _apply_sonarr_monitored_filter(shows):
     Shows without a Sonarr match (or when Sonarr is unreachable) keep
     the TMDB-only calculation — it's conservative but preserves the
     existing behavior for hand-imported libraries.
+
+    Returns the set of Sonarr series ids that matched a real library show,
+    so ``_apply_sonarr_wanted_shows`` can inject ghosts only for the
+    monitored series that remain unmatched (no double-counting).  Returns
+    an empty set on every early exit.
     """
+    matched_ids = set()
     if not shows:
-        return
+        return matched_ids
     try:
         from utils.arr_client import get_download_service
         client, svc = get_download_service('show')
     except Exception as e:
         logger.debug(f"[library] Sonarr unavailable for monitored filter: {e}")
-        return
+        return matched_ids
     if not client or svc != 'sonarr':
-        return
+        return matched_ids
     series_list = _get_sonarr_series_list(client)
     if not series_list:
-        return
+        return matched_ids
 
     by_tmdb = {}
     by_norm = {}
@@ -1115,35 +1156,13 @@ def _apply_sonarr_monitored_filter(shows):
         if not series:
             continue
 
-        seasons = series.get('seasons') or []
-        missing = 0
-        monitored_total = 0
-        unmonitored_nums = []
-        for sd in seasons:
-            snum = sd.get('seasonNumber')
-            if snum is None or snum <= 0:
-                continue  # skip specials
-            if not sd.get('monitored'):
-                unmonitored_nums.append(snum)
-                continue
-            stats = sd.get('statistics') or {}
-            ep_count = stats.get('episodeCount', 0) or 0
-            ep_file = stats.get('episodeFileCount', 0) or 0
-            monitored_total += ep_count
-            # Sonarr's `episodeFileCount` counts files across ALL episodes
-            # in the season regardless of per-episode monitored flag.  In
-            # a mixed season (monitored as a whole, with a few unmonitored
-            # individual episodes that still have files — common after
-            # unmonitoring a pilot you already watched) `ep_file` can
-            # exceed `ep_count`, so the clamp hides genuine monitored
-            # gaps.  Teasing that apart would require a per-series
-            # /episode call (one HTTP round-trip per show), which we
-            # decline for the cost.  Accept that the bar and pill agree
-            # with each other and with Sonarr's own series-stats widget.
-            missing += max(0, ep_count - ep_file)
+        sid = series.get('id')
+        if sid is not None:
+            matched_ids.add(sid)
 
+        missing, monitored_total, unmonitored_nums = _sonarr_monitored_missing(series)
         show['missing_episodes'] = missing
-        show['unmonitored_seasons'] = sorted(unmonitored_nums)
+        show['unmonitored_seasons'] = unmonitored_nums
         # ``monitored_episodes`` is the denominator the UI needs for a
         # progress bar that agrees with the "X missing" pill — otherwise
         # the bar stays red at a low TMDB-based ratio while the pill
@@ -1153,6 +1172,164 @@ def _apply_sonarr_monitored_filter(shows):
         # to the TMDB total and doesn't draw a divide-by-zero bar.
         if monitored_total > 0:
             show['monitored_episodes'] = monitored_total
+
+    return matched_ids
+
+
+def _apply_sonarr_wanted_shows(shows, matched_ids, pending=None):
+    """Inject Sonarr-monitored series with no on-disk episodes as "ghost"
+    show entries so fully-absent wanted TV surfaces in the Wanted view and
+    is counted by the recovery metric.
+
+    This is the TV mirror of ``_apply_radarr_wanted_movies``.  The library
+    scanner reads episodes from disk, so a monitored series you haven't
+    downloaded *any* episode of is invisible to the rest of the pipeline —
+    and, crucially, to the recovery denominator, which sums per-show
+    ``missing_episodes``.  A show that's partially on disk already carries
+    a Sonarr-aware ``missing_episodes`` (set by
+    ``_apply_sonarr_monitored_filter``); this adds the missing half for
+    series with zero matched episodes.
+
+    ``matched_ids`` is the set of Sonarr series ids that already matched a
+    real library show (the return value of the monitored filter); those
+    are skipped so we never duplicate a card or double-count episodes.
+    That shortcut alone is not sufficient: a partially-on-disk show whose
+    title-match cascade the filter *missed* never lands in ``matched_ids``,
+    so without a second guard its real entry (carrying a TMDB-based
+    ``missing_episodes``) AND a Sonarr-based ghost would both count toward
+    the recovery denominator — a double-count.  So we also dedup against
+    the on-disk ``shows`` list by ``tmdb_id``, ``imdb_id``, and the
+    ``(norm_title, year)`` pair, mirroring ``_apply_radarr_wanted_movies``.
+    The later ``_dedup_shows_by_external_id`` pass can't be relied on here
+    because it keys on ``imdb_id`` only, which TVDB-only series and cache
+    misses frequently lack.
+
+    Runs AFTER enrichment, so each ghost's ``missing_episodes`` comes from
+    Sonarr's monitored season statistics (aired-monitored only — unaired
+    episodes are excluded) rather than TMDB-total math.  A series is
+    injected only when that count is > 0, so series Sonarr already
+    considers satisfied never appear.
+
+    Ghost entry shape mirrors the movie ghost: ``source='wanted'`` (outside
+    the ``('local','debrid','both')`` set every effect path checks), empty
+    ``_episodes`` / ``season_data`` so symlink, search, preference, and
+    path-index loops naturally no-op.  ``imdb_id`` is carried from Sonarr
+    so a later ``_dedup_shows_by_external_id`` pass collapses any ghost that
+    collides with a real show whose title-match the filter happened to miss.
+
+    Pending suppression mirrors the movie path: a series currently being
+    downloaded is already represented by the pending bucket, so its ghost
+    is skipped to avoid double-counting.
+
+    Returns the count of ghost entries injected (for caller logging).
+    """
+    pending = pending or {}
+    matched_ids = matched_ids or set()
+    try:
+        from utils.arr_client import get_download_service
+        client, svc = get_download_service('show')
+    except Exception as e:
+        logger.debug(f"[library] Sonarr unavailable for wanted-shows: {e}")
+        return 0
+    if not client or svc != 'sonarr':
+        return 0
+
+    series_list = _get_sonarr_series_list(client)
+    if not series_list:
+        return 0
+
+    # Build dedup keys from the real on-disk shows. matched_ids only
+    # captures title-cascade hits; these sets catch a real show the
+    # cascade missed so we never inject a ghost beside it (double-count).
+    existing_tmdb_ids = set()
+    existing_imdb_ids = set()
+    existing_keys = set()
+    for sh in shows:
+        if sh.get('source') == 'wanted':
+            continue
+        tid = sh.get('tmdb_id')
+        if tid:
+            existing_tmdb_ids.add(tid)
+        iid = sh.get('imdb_id')
+        if iid:
+            existing_imdb_ids.add(iid)
+        norm = _normalize_title(sh.get('title') or '')
+        if norm:
+            existing_keys.add((norm, sh.get('year')))
+
+    injected = 0
+    for s in series_list:
+        if not isinstance(s, dict):
+            continue
+        if not s.get('monitored'):
+            continue
+        sid = s.get('id')
+        if sid is not None and sid in matched_ids:
+            continue
+        title = s.get('title') or ''
+        if not title:
+            continue
+
+        year = s.get('year')
+        tmdb_id = s.get('tmdbId')
+        imdb_id = s.get('imdbId')
+        norm = _normalize_title(title)
+        if tmdb_id and tmdb_id in existing_tmdb_ids:
+            continue
+        if imdb_id and imdb_id in existing_imdb_ids:
+            continue
+        if (norm, year) in existing_keys:
+            continue
+
+        missing, monitored_total, unmonitored_nums = _sonarr_monitored_missing(s)
+        if missing <= 0:
+            continue
+
+        # Pending suppression: a title (or any alias) currently downloading
+        # is already counted under the pending bucket; skip its ghost.
+        if pending:
+            pe = pending.get(norm)
+            if not pe and _scanner is not None:
+                for alias in _scanner.aliases_for(norm):
+                    pe = pending.get(alias)
+                    if pe:
+                        break
+            if pe:
+                continue
+
+        ghost = {
+            'title': title,
+            'year': year,
+            'type': 'show',
+            'source': 'wanted',
+            'size_bytes': 0,
+            'path': '',
+            'missing': True,
+            'missing_episodes': missing,
+            'unmonitored_seasons': unmonitored_nums,
+            # Empty so downstream effect loops (symlinks, searches, prefs,
+            # path-index) iterate zero episodes and naturally no-op.
+            'season_data': [],
+            '_episodes': {},
+            '_sonarr_id': sid,
+            '_sonarr_tmdb_id': tmdb_id,
+        }
+        if monitored_total > 0:
+            ghost['monitored_episodes'] = monitored_total
+        if imdb_id:
+            ghost['imdb_id'] = imdb_id
+        if tmdb_id:
+            ghost['tmdb_id'] = tmdb_id
+        shows.append(ghost)
+        injected += 1
+        # Update dedup keys so a duplicate Sonarr entry can't double-inject.
+        if tmdb_id:
+            existing_tmdb_ids.add(tmdb_id)
+        if imdb_id:
+            existing_imdb_ids.add(imdb_id)
+        existing_keys.add((norm, year))
+
+    return injected
 
 
 def _dedup_shows_by_external_id(shows):
@@ -2571,7 +2748,20 @@ class LibraryScanner:
         # unmonitored) don't report 100s of "missing" episodes the user
         # never asked to track.  Also surfaces unmonitored season numbers
         # to the UI and to gap-fill so neither invents phantom work.
-        _apply_sonarr_monitored_filter(shows)
+        matched_series_ids = _apply_sonarr_monitored_filter(shows)
+
+        # Inject ghost entries for Sonarr-monitored series with no episode
+        # on disk yet — the TV mirror of the Radarr wanted-movie injection
+        # above.  Skips series already matched to a real library show
+        # (``matched_series_ids``) so we never double-count.  Reuses the
+        # same pending snapshot as the movie path so in-flight downloads
+        # don't double-count against the pending bucket.  Silently no-ops
+        # when Sonarr is unavailable.
+        show_ghosts = _apply_sonarr_wanted_shows(
+            shows, matched_series_ids, pending=_pending_snapshot,
+        )
+        if show_ghosts:
+            logger.debug(f"[library] Injected {show_ghosts} Sonarr wanted show(s) as ghost entries")
 
         # Strip ghost movies that now duplicate a real entry. Enrichment
         # may have renamed a real movie to a canonical TMDB title that
@@ -3291,6 +3481,17 @@ class LibraryScanner:
                 if time.monotonic() > deadline:
                     logger.info("[library] Search budget exhausted, deferring remaining to next scan")
                     break
+                # Ghost entries (source='wanted') are Sonarr's own
+                # monitored-no-file series — Sonarr is ALREADY searching
+                # for them. Their season_data is empty but
+                # _compute_missing_episodes derives candidates from the
+                # TMDB episode cache, so without this guard a fully-absent
+                # ghost would (a) fire redundant Sonarr search commands and
+                # (b) write a set_pending entry that suppresses the ghost on
+                # the next scan — the same self-erase regression the movie
+                # path guards against below.
+                if show.get('source') == 'wanted':
+                    continue
                 norm = _normalize_title(show['title'])
                 route = self._route_for(norm, preferences)
                 direction = {True: 'to-debrid', False: 'to-local', None: 'to-any'}[route]
@@ -5949,6 +6150,13 @@ def compute_library_stats(data):
 
     for show in data.get('shows', []) or []:
         show_src = show.get('source') or 'debrid'
+        # Ghost shows from _apply_sonarr_wanted_shows (source='wanted') are
+        # Sonarr-monitored-but-not-downloaded series. Like ghost movies,
+        # they aren't on-disk library and MUST NOT count toward the
+        # local/debrid/both buckets — otherwise the Composition card
+        # inflates with content that doesn't exist yet.
+        if show_src == 'wanted':
+            continue
         if show_src not in shows_by_src:
             show_src = 'debrid'
         shows_by_src[show_src] += 1

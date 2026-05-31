@@ -92,6 +92,40 @@ def test_unavailable_wanted_movie_excluded_from_denominator(rec):
     assert r['pct_debrid'] == pytest.approx(33.3, abs=0.1)
 
 
+def test_ghost_show_counts_wanted_episodes_without_inflating_on_disk(rec):
+    """A fully-absent monitored series injected as a ghost show
+    (source='wanted', empty season_data, missing_episodes>0) must add to
+    the wanted denominator but NOT to the on-disk composition — the TV
+    mirror of the wanted-movie behavior."""
+    data = {
+        'movies': [],
+        'shows': [
+            {
+                'title': 'Partial',
+                'source': 'debrid',
+                'missing_episodes': 2,
+                'season_data': [
+                    {'episodes': [{'source': 'debrid', 'size_bytes': 10}]},
+                ],
+            },
+            # Ghost: zero episodes on disk, 8 wanted.
+            {
+                'title': 'FullyAbsent',
+                'source': 'wanted',
+                'missing': True,
+                'missing_episodes': 8,
+                'season_data': [],
+            },
+        ],
+    }
+    r = rec.compute_snapshot(data)['recovery']
+    # on_disk = 1 debrid episode (ghost contributes nothing)
+    assert r['on_disk'] == 1
+    # wanted = 2 (partial) + 8 (ghost) = 10
+    assert r['wanted'] == 10
+    assert r['total'] == 11
+
+
 def test_empty_library_no_divide_by_zero(rec):
     snap = rec.compute_snapshot({'movies': [], 'shows': []})
     r = snap['recovery']

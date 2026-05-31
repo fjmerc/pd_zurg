@@ -79,6 +79,13 @@ def _count_wanted(data):
     ``episodeCount``), so unaired episodes are already excluded here. Shows
     that fell back to the TMDB total-episode count can still include a few
     unaired episodes — an accepted residual for unmatched shows.
+
+    Fully-absent monitored series (zero episodes on disk) are injected as
+    ghost shows by ``_apply_sonarr_wanted_shows`` carrying the same
+    aired-monitored ``missing_episodes``, so they're counted here too — the
+    TV mirror of the Radarr ghost-movie path. Without that injection a show
+    you've downloaded nothing of would never reach ``data['shows']`` and the
+    TV side of the denominator would read low.
     """
     wanted = 0
     for movie in data.get('movies', []) or []:

@@ -3938,6 +3938,268 @@ class TestApplyRadarrWantedMovies:
         assert injected_titles == ['A', 'B']
 
 
+class TestSonarrMonitoredMissingHelper:
+    """The shared monitored-aware missing-episode math, factored out of
+    the filter so the ghost-show injector agrees on the same arithmetic."""
+
+    def test_sums_monitored_skips_unmonitored_and_specials(self):
+        from utils.library import _sonarr_monitored_missing
+        series = {
+            'seasons': [
+                {'seasonNumber': 0, 'monitored': False,
+                 'statistics': {'episodeCount': 4, 'episodeFileCount': 0}},
+                {'seasonNumber': 1, 'monitored': False,
+                 'statistics': {'episodeCount': 9, 'episodeFileCount': 9}},
+                {'seasonNumber': 2, 'monitored': True,
+                 'statistics': {'episodeCount': 10, 'episodeFileCount': 6}},
+            ],
+        }
+        missing, monitored_total, unmonitored = _sonarr_monitored_missing(series)
+        assert missing == 4
+        assert monitored_total == 10
+        assert unmonitored == [1]
+
+    def test_clamps_negative_and_handles_no_seasons(self):
+        from utils.library import _sonarr_monitored_missing
+        series = {'seasons': [
+            {'seasonNumber': 1, 'monitored': True,
+             'statistics': {'episodeCount': 3, 'episodeFileCount': 5}},
+        ]}
+        assert _sonarr_monitored_missing(series) == (0, 3, [])
+        assert _sonarr_monitored_missing({}) == (0, 0, [])
+
+
+class TestApplySonarrMonitoredFilterReturnsMatchedIds:
+    """The filter now returns the set of matched Sonarr series ids so the
+    ghost injector can skip series already represented by a real show."""
+
+    def test_returns_matched_series_id(self):
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{'title': 'Show', 'year': None}]
+        series = [{
+            'id': 77, 'title': 'Show', 'tmdbId': 42,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 10, 'episodeFileCount': 6}}],
+        }]
+        with _fake_sonarr(series):
+            matched = _apply_sonarr_monitored_filter(shows)
+        assert matched == {77}
+
+    def test_returns_empty_set_when_unmatched(self):
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{'title': 'Orphan', 'year': None, 'missing_episodes': 7}]
+        with _fake_sonarr([]):
+            matched = _apply_sonarr_monitored_filter(shows)
+        assert matched == set()
+
+    def test_returns_empty_set_when_sonarr_not_configured(self):
+        from utils.library import _apply_sonarr_monitored_filter
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(None, None)):
+            matched = _apply_sonarr_monitored_filter([{'title': 'X'}])
+        assert matched == set()
+
+
+class TestApplySonarrWantedShows:
+    """Inject Sonarr-monitored series with zero on-disk episodes as ghost
+    show entries — the TV mirror of ``_apply_radarr_wanted_movies``.
+
+    Without this, a series you've downloaded nothing of never reaches the
+    library shows list, so the recovery metric's wanted-TV denominator
+    reads low and the Wanted view hides it.
+    """
+
+    def test_injects_ghost_for_fully_absent_monitored_series(self):
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = []
+        series = [{
+            'id': 5, 'tmdbId': 100, 'imdbId': 'tt123', 'title': 'Absent Show',
+            'year': 2022, 'monitored': True,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 8, 'episodeFileCount': 0}}],
+        }]
+        with _fake_sonarr(series):
+            count = _apply_sonarr_wanted_shows(shows, set())
+        assert count == 1
+        ghost = shows[0]
+        assert ghost['title'] == 'Absent Show'
+        assert ghost['year'] == 2022
+        assert ghost['source'] == 'wanted'
+        assert ghost['missing'] is True
+        assert ghost['missing_episodes'] == 8
+        assert ghost['monitored_episodes'] == 8
+        assert ghost['type'] == 'show'
+        assert ghost['size_bytes'] == 0
+        assert ghost['season_data'] == []
+        assert ghost['_episodes'] == {}
+        assert ghost['_sonarr_id'] == 5
+        assert ghost['imdb_id'] == 'tt123'
+        assert ghost['tmdb_id'] == 100
+
+    def test_skips_series_already_matched_to_a_library_show(self):
+        """A series whose id is in ``matched_ids`` already has a real
+        library show carrying its missing count — don't double-count."""
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = []
+        series = [{
+            'id': 5, 'tmdbId': 100, 'title': 'Present', 'monitored': True,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 8, 'episodeFileCount': 0}}],
+        }]
+        with _fake_sonarr(series):
+            count = _apply_sonarr_wanted_shows(shows, {5})
+        assert count == 0
+        assert shows == []
+
+    def test_skips_unmonitored_series(self):
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = []
+        series = [{
+            'id': 5, 'title': 'Unmon', 'monitored': False,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 8, 'episodeFileCount': 0}}],
+        }]
+        with _fake_sonarr(series):
+            count = _apply_sonarr_wanted_shows(shows, set())
+        assert count == 0
+        assert shows == []
+
+    def test_skips_series_sonarr_considers_satisfied(self):
+        """A monitored series with all monitored episodes on file (per
+        Sonarr) has missing==0 — not wanted, don't inject."""
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = []
+        series = [{
+            'id': 5, 'title': 'Complete', 'monitored': True,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 8, 'episodeFileCount': 8}}],
+        }]
+        with _fake_sonarr(series):
+            count = _apply_sonarr_wanted_shows(shows, set())
+        assert count == 0
+        assert shows == []
+
+    def test_pending_series_suppressed(self):
+        """A series currently downloading is represented by the pending
+        bucket; skip its ghost to avoid double-counting."""
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = []
+        series = [{
+            'id': 5, 'title': 'Pending Show', 'monitored': True,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 8, 'episodeFileCount': 0}}],
+        }]
+        pending = {'pending show': {'direction': 'to-debrid'}}
+        with _fake_sonarr(series):
+            count = _apply_sonarr_wanted_shows(shows, set(), pending=pending)
+        assert count == 0
+        assert shows == []
+
+    def test_sonarr_not_configured_no_op(self):
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = []
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(None, None)):
+            count = _apply_sonarr_wanted_shows(shows, set())
+        assert count == 0
+        assert shows == []
+
+    def test_fetch_failure_graceful(self):
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = [{'title': 'Real', 'source': 'debrid'}]
+        client = MagicMock()
+        client.get_all_series.side_effect = RuntimeError('sonarr down')
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(client, 'sonarr')):
+            count = _apply_sonarr_wanted_shows(shows, set())
+        assert count == 0
+        assert len(shows) == 1
+
+    def test_skips_series_matching_on_disk_show_by_tmdb_id(self):
+        """A partially-on-disk show the title cascade MISSED (so its id is
+        not in matched_ids) must still be deduped against the real shows
+        list by tmdbId — otherwise its real entry and a ghost both count."""
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = [{'title': 'On Disk', 'source': 'debrid', 'tmdb_id': 100,
+                  'missing_episodes': 3}]
+        series = [{
+            'id': 5, 'tmdbId': 100, 'title': 'Different Folder Name',
+            'monitored': True,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 8, 'episodeFileCount': 0}}],
+        }]
+        with _fake_sonarr(series):
+            count = _apply_sonarr_wanted_shows(shows, set())
+        assert count == 0
+        assert len(shows) == 1
+
+    def test_skips_series_matching_on_disk_show_by_imdb_id(self):
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = [{'title': 'On Disk', 'source': 'debrid', 'imdb_id': 'tt999',
+                  'missing_episodes': 3}]
+        series = [{
+            'id': 5, 'imdbId': 'tt999', 'title': 'Different Folder Name',
+            'monitored': True,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 8, 'episodeFileCount': 0}}],
+        }]
+        with _fake_sonarr(series):
+            count = _apply_sonarr_wanted_shows(shows, set())
+        assert count == 0
+        assert len(shows) == 1
+
+    def test_skips_series_matching_on_disk_show_by_norm_title_year(self):
+        """No external IDs on either side (TVDB-only / cache miss): the
+        (norm_title, year) fallback still prevents the double-inject."""
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = [{'title': 'The Show', 'source': 'debrid', 'year': 2021,
+                  'missing_episodes': 3}]
+        series = [{
+            'id': 5, 'title': 'The Show', 'year': 2021, 'monitored': True,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 8, 'episodeFileCount': 0}}],
+        }]
+        with _fake_sonarr(series):
+            count = _apply_sonarr_wanted_shows(shows, set())
+        assert count == 0
+        assert len(shows) == 1
+
+    def test_ghost_entries_in_shows_list_not_used_for_dedup(self):
+        """A pre-existing source='wanted' entry must not seed the dedup
+        sets (it's not a real on-disk show)."""
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = [{'title': 'Ghosty', 'source': 'wanted', 'tmdb_id': 100}]
+        series = [{
+            'id': 5, 'tmdbId': 100, 'title': 'Ghosty', 'monitored': True,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 8, 'episodeFileCount': 0}}],
+        }]
+        with _fake_sonarr(series):
+            count = _apply_sonarr_wanted_shows(shows, set())
+        # Pre-existing ghost doesn't block injection; but the freshly
+        # injected ghost's own keys prevent a second copy of the same id.
+        assert count == 1
+
+    def test_ghost_show_not_counted_in_composition_stats(self):
+        """A source='wanted' ghost show must NOT inflate the on-disk
+        library composition (mirrors the ghost-movie skip)."""
+        from utils.library import compute_library_stats
+        data = {
+            'movies': [],
+            'shows': [
+                {'title': 'Real', 'source': 'debrid', 'season_data': [
+                    {'number': 1, 'episodes': [
+                        {'number': 1, 'source': 'debrid', 'size_bytes': 100}]}]},
+                {'title': 'Ghost', 'source': 'wanted', 'missing_episodes': 8,
+                 'season_data': [], '_episodes': {}},
+            ],
+        }
+        stats = compute_library_stats(data)
+        assert stats['shows']['total'] == 1  # ghost excluded
+        assert stats['shows']['by_source'] == {'local': 0, 'debrid': 1, 'both': 0}
+        assert stats['shows']['episodes']['total'] == 1
+
+
 class TestStripGhostDuplicates:
     """Post-enrichment ghost-deduplication pass.
 
@@ -4450,6 +4712,48 @@ class TestSearchForMissingEpisodesSkipGhosts:
         # called for the ghost. Pre-fix this fired on every scan and
         # caused the self-erase bug.
         assert radarr_client.ensure_and_search.call_count == 0
+
+    def test_ghost_show_skipped_in_search_loop(self, monkeypatch):
+        """TV mirror of the ghost-movie skip. A source='wanted' show has
+        empty season_data, but _compute_missing_episodes derives candidates
+        from the TMDB episode cache — so without the guard it would fire
+        Sonarr searches and write a self-erasing set_pending entry."""
+        from utils.library import LibraryScanner
+
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._alias_norms = {}
+        scanner._search_cooldown = {}
+        scanner._lock = __import__('threading').RLock()
+
+        sonarr_client = MagicMock()
+        sonarr_client.configured = True
+        sonarr_client.ensure_and_search.return_value = {'status': 'sent'}
+        monkeypatch.setattr(
+            'utils.arr_client.get_download_service',
+            lambda mt: (sonarr_client, 'sonarr') if mt == 'show'
+            else (None, None),
+        )
+        monkeypatch.setattr('utils.library.gap_fill_enabled', lambda: True)
+        monkeypatch.setattr('utils.library_prefs.get_all_pending', lambda: {})
+        monkeypatch.setattr('utils.library_prefs.set_pending', MagicMock())
+        monkeypatch.setattr('utils.library_prefs.touch_pending_searched',
+                            MagicMock())
+        monkeypatch.setattr('utils.library_prefs.update_pending_error',
+                            MagicMock())
+        # If the guard were absent, the loop would reach this and find a
+        # missing episode → fire ensure_and_search. The guard must skip
+        # the ghost before _compute_missing_episodes is consulted.
+        monkeypatch.setattr(LibraryScanner, '_compute_missing_episodes',
+                            lambda self, show: [(1, 1)])
+
+        shows = [
+            {'title': 'Ghost Show', 'year': 2025, 'source': 'wanted',
+             'missing': True, 'missing_episodes': 8, 'season_data': []},
+        ]
+        scanner._search_for_missing_episodes(shows=shows, movies=[],
+                                             preferences={})
+
+        assert sonarr_client.ensure_and_search.call_count == 0
 
 
 class TestGetRadarrMoviesList:

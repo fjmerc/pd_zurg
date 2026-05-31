@@ -68,10 +68,12 @@ __NAV_HTML__
 
 <!-- Tasks Tab -->
 <div class="tab-panel" id="panel-tasks">
-  <!-- Media Recovery tile: headline % of the library playable on debrid
-       (library-health framing A) plus the filter-gate deltas (framing B)
-       with a sparkline of the daily pct_debrid series. Hidden until the
-       first recovery snapshot has been recorded. -->
+  <!-- Media Recovery tile: headline % of the library available/ready to
+       play (pct_on_disk = debrid + local + both) with a sparkline of that
+       daily series. Body breaks it down by source and demotes the
+       debrid-recovery % (pct_debrid) to a secondary stat for the TB
+       experiment, plus the filter-gate deltas. Hidden until the first
+       recovery snapshot has been recorded. -->
   <div id="rec-card" style="display:none;margin-bottom:12px"></div>
   <!-- Debrid Health mini-dashboard (plan 38 phase 5, expanded for
        plan 39 phase 5 to render side-by-side RD + TB cards when both
@@ -386,10 +388,11 @@ function runDebridHealth(btn){
 
 /* Media Recovery tile */
 function _recSparkline(snaps){
-  /* Tiny inline trend of pct_debrid across recorded days. Auto-scales to
-     the observed min/max so a flat-but-high series doesn't look like noise;
-     a single data point renders nothing (no line to draw yet). */
-  var pts=snaps.map(function(s){return ((s.recovery||{}).pct_debrid)||0;});
+  /* Tiny inline trend of the headline metric (pct_on_disk = available to
+     play) across recorded days. Auto-scales to the observed min/max so a
+     flat-but-high series doesn't look like noise; a single data point
+     renders nothing (no line to draw yet). */
+  var pts=snaps.map(function(s){return ((s.recovery||{}).pct_on_disk)||0;});
   if(pts.length<2)return '';
   var W=160,H=36,pad=2,n=pts.length;
   var lo=Math.min.apply(null,pts),hi=Math.max.apply(null,pts),range=(hi-lo)||1;
@@ -405,8 +408,8 @@ function _recSparkline(snaps){
 }
 function _recDeltaPill(snaps){
   if(snaps.length<2)return '';
-  var first=(snaps[0].recovery||{}).pct_debrid||0;
-  var last=(snaps[snaps.length-1].recovery||{}).pct_debrid||0;
+  var first=(snaps[0].recovery||{}).pct_on_disk||0;
+  var last=(snaps[snaps.length-1].recovery||{}).pct_on_disk||0;
   var d=Math.round((last-first)*10)/10;
   var sign=d>0?'+':'';
   var cls=d>0?'rec-up':d<0?'rec-down':'rec-neutral';
@@ -422,10 +425,9 @@ function updateRecovery(){
     var r=latest.recovery||{};
     var fg=latest.filter_gate;
     var body=''
-      +'<div class="dh-row"><span class="dh-label">Debrid-playable:</span><span>'+esc(String(r.available_debrid||0))+' units</span></div>'
+      +'<div class="dh-row"><span class="dh-label">Served by debrid (recovery):</span><span>'+esc(String(r.available_debrid||0))+' units ('+esc(String(r.pct_debrid||0))+'%)</span></div>'
       +'<div class="dh-row"><span class="dh-label">Local-only (fallback):</span><span>'+esc(String(r.available_local||0))+' units</span></div>'
-      +'<div class="dh-row"><span class="dh-label">Wanted (not acquired):</span><span>'+esc(String(r.wanted||0))+' units</span></div>'
-      +'<div class="dh-row"><span class="dh-label">On disk / total:</span><span>'+esc(String(r.on_disk||0))+' / '+esc(String(r.total||0))+' ('+esc(String(r.pct_on_disk||0))+'%)</span></div>';
+      +'<div class="dh-row"><span class="dh-label">Wanted (not acquired):</span><span>'+esc(String(r.wanted||0))+' units</span></div>';
     if(fg){
       var blockedPart=esc(String(fg.blocked||0));
       if(fg.blocked)blockedPart='<span class="dh-bad">'+blockedPart+'</span>';
@@ -442,8 +444,8 @@ function updateRecovery(){
       +'<span class="dh-card-pills"><span class="dh-pill dh-pill-tb">as of '+esc(latest.date||'')+'</span></span>'
       +'</div>'
       +'<div class="rec-headline">'
-      +'<div class="rec-pct">'+esc(String(r.pct_debrid||0))+'%</div>'
-      +'<div class="rec-pct-label">playable on debrid<br><small>'+esc(String(r.available_debrid||0))+' of '+esc(String(r.total||0))+' units</small></div>'
+      +'<div class="rec-pct">'+esc(String(r.pct_on_disk||0))+'%</div>'
+      +'<div class="rec-pct-label">available &middot; ready to play<br><small>'+esc(String(r.on_disk||0))+' of '+esc(String(r.total||0))+' units</small></div>'
       +'<div class="rec-trend">'+_recSparkline(snaps)+_recDeltaPill(snaps)+'</div>'
       +'</div>'
       +'<div class="dh-card-body">'+body+'</div>'

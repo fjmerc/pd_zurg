@@ -310,22 +310,41 @@ function _dhRenderRdBody(s,card){
   var c=card.counts||{};
   var parts=[];
   parts.push((c.total||0)+' total');
-  parts.push((c.healthy||0)+' healthy');
+  parts.push('<span class="dh-good">'+(c.healthy||0)+' healthy</span>');
   var blockedPart=(c.blocked||0)+' blocked';
   if(c.blocked)blockedPart='<span class="dh-bad">'+blockedPart+'</span>';
   parts.push(blockedPart);
   if(c.unknown)parts.push((c.unknown||0)+' unknown');
   return ''
-    +'<div class="dh-row"><span class="dh-label">Last probe:</span><span>'+esc(fmtAge(card.last_probe_ts))+'</span></div>'
-    +'<div class="dh-row"><span class="dh-label">Torrents:</span><span>'+parts.join(' · ')+'</span></div>'
-    +'<div class="dh-row"><span class="dh-label">Remediated (24h):</span><span>'+esc(String(s.remediated_24h||0))+'</span></div>';
+    +'<div class="dh-row"><span class="dh-label">Last sweep:</span><span>'+esc(fmtAge(card.last_probe_ts))+'</span></div>'
+    +'<div class="dh-row"><span class="dh-label">Probed torrents:</span><span>'+parts.join(' · ')+'</span></div>'
+    +'<div class="dh-row"><span class="dh-label">Remediated (24h):</span><span>'+esc(String(s.remediated_24h||0))+'</span></div>'
+    +'<div class="dh-note">The sweep asks Real-Debrid whether it will still serve each torrent. '
+    +'<b>Blocked</b> = RD refuses it (the filter-gate). <b>Remediated</b> = a blocked item removed '
+    +'from RD &amp; re-queued for download in the last 24h.</div>';
 }
 function _dhRenderTbBody(s,card){
   var rescued=(card.counts||{}).rescued||0;
+  var blocked=(s.counts||{}).blocked||0;
+  var denom=rescued+blocked;
+  var rateHtml='';
+  if(s.rd_configured&&denom>0){
+    var pct=Math.round(rescued/denom*1000)/10;
+    var lowCls=pct<50?' dh-rate-low':'';
+    rateHtml=''
+      +'<div class="dh-rate-wrap">'
+      +'<span class="dh-rate'+lowCls+'" title="rescued ÷ (rescued + still-blocked)">'+esc(String(pct))+'%</span>'
+      +'<span class="dh-rate-label">of RD filter-blocks<br>re-served via TorBox</span>'
+      +'</div>';
+  }
+  var notRescued=blocked?'<span class="dh-bad">'+esc(String(blocked))+'</span>':esc(String(blocked));
   return ''
+    +rateHtml
+    +'<div class="dh-row"><span class="dh-label">Rescued via TorBox:</span><span>'+esc(String(rescued))+' total · '+esc(String(s.rescued_24h||0))+' in 24h</span></div>'
+    +(s.rd_configured?'<div class="dh-row"><span class="dh-label">Not rescued (blocked):</span><span>'+notRescued+'</span></div>':'')
     +'<div class="dh-row"><span class="dh-label">WebDAV mount:</span><span>'+(card.configured?'configured':'not configured')+'</span></div>'
-    +'<div class="dh-row"><span class="dh-label">Rescued from RD:</span><span>'+esc(String(rescued))+'</span></div>'
-    +'<div class="dh-row"><span class="dh-label">Rescued (24h):</span><span>'+esc(String(s.rescued_24h||0))+'</span></div>';
+    +(s.rd_configured&&denom===0?'<div class="dh-note">No RD filter-blocks recorded yet — the rescue rate appears once a sweep finds one.</div>'
+      :'<div class="dh-note"><b>Rescue rate</b> = share of RD filter-blocks that TorBox could re-serve instead of leaving them blocked. This is the core TorBox-viability signal.</div>');
 }
 function _dhRenderCardHtml(s,card){
   var bodyHtml=card.service==='torbox'?_dhRenderTbBody(s,card):_dhRenderRdBody(s,card);
@@ -423,19 +442,13 @@ function updateRecovery(){
     var latest=(d&&d.latest)||null;
     if(!latest){container.style.display='none';return;}
     var r=latest.recovery||{};
-    var fg=latest.filter_gate;
+    // Filter-gate / rescue signals intentionally live only on the Debrid
+    // Health cards now (live, with a rescue-rate headline). Keeping a frozen
+    // copy here duplicated the numbers under a stale snapshot date.
     var body=''
       +'<div class="dh-row"><span class="dh-label">Served by debrid (recovery):</span><span>'+esc(String(r.available_debrid||0))+' units ('+esc(String(r.pct_debrid||0))+'%)</span></div>'
       +'<div class="dh-row"><span class="dh-label">Local-only (fallback):</span><span>'+esc(String(r.available_local||0))+' units</span></div>'
       +'<div class="dh-row"><span class="dh-label">Wanted (not acquired):</span><span>'+esc(String(r.wanted||0))+' units</span></div>';
-    if(fg){
-      var blockedPart=esc(String(fg.blocked||0));
-      if(fg.blocked)blockedPart='<span class="dh-bad">'+blockedPart+'</span>';
-      body+='<div class="rec-sep">Filter-gate (Real-Debrid)</div>'
-        +'<div class="dh-row"><span class="dh-label">Blocked (current):</span><span>'+blockedPart+'</span></div>'
-        +'<div class="dh-row"><span class="dh-label">Filter-blocked (24h):</span><span>'+esc(String(fg.filtered_24h||0))+'</span></div>'
-        +'<div class="dh-row"><span class="dh-label">Rescued to alt (24h):</span><span>'+esc(String(fg.rescued_24h||0))+'</span></div>';
-    }
     container.style.display='';
     container.innerHTML=''
       +'<div class="dh-card">'
@@ -508,6 +521,12 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .dh-row{display:flex;gap:8px;font-size:.8em;color:var(--text)}
 .dh-label{color:var(--text2);min-width:130px}
 .dh-bad{color:var(--red);font-weight:600}
+.dh-good{color:var(--green);font-weight:600}
+.dh-rate-wrap{display:flex;align-items:baseline;gap:10px;margin-bottom:8px}
+.dh-rate{font-size:1.9em;font-weight:700;line-height:1;color:var(--green)}
+.dh-rate.dh-rate-low{color:var(--red)}
+.dh-rate-label{font-size:.74em;color:var(--text2);line-height:1.3}
+.dh-note{font-size:.7em;color:var(--text3);margin-top:4px;line-height:1.45}
 .dh-card-actions{display:flex;gap:8px;flex-wrap:wrap}
 .rec-headline{display:flex;align-items:center;gap:16px;margin-bottom:10px;flex-wrap:wrap}
 .rec-pct{font-size:2.1em;font-weight:700;color:var(--green);line-height:1}
@@ -519,7 +538,6 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .rec-delta.rec-up{color:var(--green)}
 .rec-delta.rec-down{color:var(--red)}
 .rec-delta.rec-neutral{color:var(--text2)}
-.rec-sep{font-size:.7em;text-transform:uppercase;letter-spacing:.04em;color:var(--text3);margin-top:6px;padding-top:6px;border-top:1px solid var(--border2)}
 @media(max-width:600px){.rec-trend{margin-left:0;flex-basis:100%}}
 details{margin-top:0}
 details summary{cursor:pointer;color:var(--text2);font-size:.85em;padding:4px 0;font-weight:500}

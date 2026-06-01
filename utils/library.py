@@ -6194,16 +6194,27 @@ class LibraryScanner:
 
     @staticmethod
     def _has_media_files(path):
-        """Check if a directory contains at least one media file (real or symlink).
+        """Check if a directory contains at least one *resolving* media file.
 
         Used to avoid classifying metadata-only directories (leftover .nfo/.jpg
         from Radarr after symlinks were deleted) as genuine local content.
+
+        A symlink counts only if it RESOLVES: a dangling video symlink (target
+        gone, or pointing outside every configured debrid base after a target-
+        base rename) is morally identical to a deleted symlink — counting it as
+        local would inflate the recovery metric and hide the title from
+        "Wanted", blocking symlink recreation. Real files short-circuit before
+        any deref so a live mount isn't stat'd unnecessarily.
         """
         try:
             with os.scandir(path) as it:
                 for f in it:
                     ext = os.path.splitext(f.name)[1].lower()
-                    if ext in MEDIA_EXTENSIONS and (f.is_file() or f.is_symlink()):
+                    if ext not in MEDIA_EXTENSIONS:
+                        continue
+                    if f.is_file(follow_symlinks=False):
+                        return True
+                    if f.is_symlink() and os.path.exists(f.path):
                         return True
         except OSError:
             pass

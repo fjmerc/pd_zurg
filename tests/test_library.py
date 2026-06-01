@@ -1027,6 +1027,42 @@ class TestLibraryScannerScanLocal:
 
         assert len(result["movies"]) == 0
 
+    def test_scan_local_movies_skips_dangling_symlink_only_dir(self, tmp_dir):
+        """A folder whose only video is a dangling symlink is NOT local content.
+
+        Regression: `_has_media_files` counted any `is_symlink()` media entry,
+        so a broken video symlink (e.g. after a symlink-target-base rename, or
+        a non-debrid symlink whose target vanished) inflated the recovery
+        metric and hid the title from "Wanted", blocking symlink recreation.
+        """
+        local_movies = os.path.join(tmp_dir, "local_movies")
+        movie_dir = os.path.join(local_movies, "Dune (2021)")
+        os.makedirs(movie_dir)
+        # Symlink to a target that doesn't exist (and isn't a debrid prefix)
+        os.symlink(os.path.join(tmp_dir, "gone", "Dune.2021.mkv"),
+                   os.path.join(movie_dir, "Dune.2021.mkv"))
+
+        scanner = self._make_local_scanner(local_movies=local_movies)
+        result = scanner.scan()
+
+        assert len(result["movies"]) == 0
+
+    def test_scan_local_movies_keeps_resolving_symlink_dir(self, tmp_dir):
+        """A folder whose video symlink RESOLVES is still genuine local content."""
+        local_movies = os.path.join(tmp_dir, "local_movies")
+        target = os.path.join(tmp_dir, "real", "Dune.2021.mkv")
+        os.makedirs(os.path.dirname(target))
+        open(target, "w").close()
+        movie_dir = os.path.join(local_movies, "Dune (2021)")
+        os.makedirs(movie_dir)
+        os.symlink(target, os.path.join(movie_dir, "Dune.2021.mkv"))
+
+        scanner = self._make_local_scanner(local_movies=local_movies)
+        result = scanner.scan()
+
+        assert len(result["movies"]) == 1
+        assert result["movies"][0]["source"] == "local"
+
     def test_scan_local_tv_source_is_local(self, tmp_dir):
         local_tv = os.path.join(tmp_dir, "local_tv")
         _make_show(local_tv, "The Wire (2002)", {
@@ -1301,24 +1337,29 @@ class TestDebridSymlinkPrefixesDualDebrid:
             'intact RD symlink whose target exists must NOT be removed'
 
     def test_non_debrid_symlink_classified_local(self, tmp_dir, monkeypatch):
-        """A symlink to a non-debrid path (e.g. NAS mount, secondary drive)
-        means genuine local content via symlink farm — must classify as
-        local, not skip."""
+        """A *resolving* symlink to a non-debrid path (e.g. NAS mount, secondary
+        drive) means genuine local content via symlink farm — must classify as
+        local, not skip. (A dangling such symlink is covered separately and is
+        NOT local — it can't be played and would inflate the recovery metric.)"""
         from utils.library import LibraryScanner
         monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
         monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
 
+        # Real target outside the debrid base (a mounted NAS, here a tmp path).
+        nas_target = os.path.join(tmp_dir, 'nas', 'NAS.Movie.2024.mkv')
+        os.makedirs(os.path.dirname(nas_target))
+        open(nas_target, 'w').close()
+
         local_movies = os.path.join(tmp_dir, 'local_movies')
         d = os.path.join(local_movies, 'NAS Movie (2024)')
         os.makedirs(d)
-        os.symlink('/mnt/nas/Movies/NAS Movie/NAS.Movie.2024.mkv',
-                   os.path.join(d, 'NAS.Movie.2024.mkv'))
+        os.symlink(nas_target, os.path.join(d, 'NAS.Movie.2024.mkv'))
 
         scanner = LibraryScanner.__new__(LibraryScanner)
         scanner._local_movies_path = local_movies
         items = scanner._scan_local_movies()
         assert len(items) == 1, \
-            'symlinks pointing outside known debrid mounts are genuine local content'
+            'resolving symlinks pointing outside known debrid mounts are genuine local content'
         assert items[0]['source'] == 'local'
 
 

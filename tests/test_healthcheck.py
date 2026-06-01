@@ -12,6 +12,7 @@ so importing it here does not run the live check.
 
 import os
 import threading
+import urllib.error
 
 import pytest
 
@@ -125,3 +126,36 @@ class TestMountAlive:
         assert 'slow' in err.lower()
         # Warning reflects the explicit 0.2s budget, not the 99s default.
         assert '0.2s' in err
+
+
+# ---------------------------------------------------------------------------
+# _status_server_alive
+# ---------------------------------------------------------------------------
+
+class TestStatusServerAlive:
+
+    def test_2xx_is_alive(self, monkeypatch):
+        monkeypatch.setattr(healthcheck.urllib.request, 'urlopen',
+                            lambda *a, **k: object())
+        assert healthcheck._status_server_alive(8080, 3) is True
+
+    def test_http_error_is_alive(self, monkeypatch):
+        """A 401 from the auth-gated UI proves the server is responding —
+        it must NOT be reported as "not responding"."""
+        def raise_401(*a, **k):
+            raise urllib.error.HTTPError(
+                'http://localhost:8080/', 401, 'Unauthorized', {}, None)
+        monkeypatch.setattr(healthcheck.urllib.request, 'urlopen', raise_401)
+        assert healthcheck._status_server_alive(8080, 3) is True
+
+    def test_connection_refused_is_down(self, monkeypatch):
+        def refuse(*a, **k):
+            raise urllib.error.URLError('Connection refused')
+        monkeypatch.setattr(healthcheck.urllib.request, 'urlopen', refuse)
+        assert healthcheck._status_server_alive(8080, 3) is False
+
+    def test_timeout_is_down(self, monkeypatch):
+        def slow(*a, **k):
+            raise TimeoutError('timed out')
+        monkeypatch.setattr(healthcheck.urllib.request, 'urlopen', slow)
+        assert healthcheck._status_server_alive(8080, 3) is False

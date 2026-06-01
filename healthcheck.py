@@ -2,6 +2,7 @@ from base import *
 from utils.logger import *
 import time
 import urllib.request
+import urllib.error
 
 
 # FUSE liveness probe budget.  A *dead* mount raises ENOTCONN
@@ -87,6 +88,23 @@ def _mount_alive(mount_path, timeout=None):
     except Exception as exc:  # noqa: BLE001 — any hard failure means mount is unusable
         return False, f"{type(exc).__name__}: {exc}"
     return True, ""
+
+
+def _status_server_alive(port, timeout):
+    """Is the status UI accepting connections on ``port``?
+
+    An HTTP status code (e.g. 401 from the auth-gated UI) IS a response —
+    the server is up and serving — so an ``HTTPError`` counts as alive.
+    Only a connection-level failure (refused, reset, timeout) means the
+    server is genuinely not responding.
+    """
+    try:
+        urllib.request.urlopen(f'http://localhost:{port}/', timeout=timeout)
+    except urllib.error.HTTPError:
+        return True
+    except Exception:  # noqa: BLE001 — URLError / timeout / socket error → down
+        return False
+    return True
 
 
 def main():
@@ -186,10 +204,8 @@ def main():
         # Status server responsiveness (non-fatal — log warning but don't
         # fail healthcheck).  Kept short so it can't, together with the
         # bounded mount probes, push the whole check past Docker's 10s cap.
-        try:
-            port = int(os.environ.get('STATUS_UI_PORT', '8080'))
-            urllib.request.urlopen(f'http://localhost:{port}/', timeout=_STATUS_PROBE_TIMEOUT_SEC)
-        except Exception:
+        port = int(os.environ.get('STATUS_UI_PORT', '8080'))
+        if not _status_server_alive(port, _STATUS_PROBE_TIMEOUT_SEC):
             print("Warning: Status server is not responding on port " + str(port), file=sys.stderr)
 
         if error_messages:

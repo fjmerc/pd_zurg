@@ -3,7 +3,7 @@
 import os
 import sys
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, mock_open
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -171,3 +171,110 @@ class TestNfsCommandFlags:
         monkeypatch.setenv('RCLONE_VFS_CACHE_MAX_AGE', '1h')
         cmd = _run_setup(monkeypatch, nfs=True)
         assert _extract_flag(cmd, 'vfs-cache-max-age') == '1h'
+
+
+class TestIsMountPoint:
+    """Tests for the /proc/self/mountinfo-based mount-point check."""
+
+    def _mountinfo(self, *mount_points):
+        # Minimal mountinfo lines; field 5 (index 4) is the mount point.
+        lines = []
+        for i, mp in enumerate(mount_points):
+            lines.append(
+                f"{100 + i} 30 0:{i} / {mp} rw,relatime shared:1 - fuse.rclone x: rw\n")
+        return "".join(lines)
+
+    def test_present_path_is_mount_point(self):
+        import rclone.rclone as mod
+        data = self._mountinfo("/data/zurgarr", "/data/torbox")
+        with patch("builtins.open", mock_open(read_data=data)):
+            assert mod._is_mount_point("/data/torbox") is True
+
+    def test_absent_path_is_not_mount_point(self):
+        import rclone.rclone as mod
+        data = self._mountinfo("/data/zurgarr")
+        with patch("builtins.open", mock_open(read_data=data)):
+            assert mod._is_mount_point("/data/torbox") is False
+
+    def test_prefix_path_does_not_false_match(self):
+        """/data/torbox must not match a longer /data/torbox2 mount."""
+        import rclone.rclone as mod
+        data = self._mountinfo("/data/torbox2")
+        with patch("builtins.open", mock_open(read_data=data)):
+            assert mod._is_mount_point("/data/torbox") is False
+
+    def test_unreadable_mountinfo_returns_false(self):
+        import rclone.rclone as mod
+        with patch("builtins.open", side_effect=OSError("boom")):
+            assert mod._is_mount_point("/data/torbox") is False
+
+    def test_matches_octal_escaped_path(self):
+        """Kernel escapes spaces as \\040; the comparison must decode them."""
+        import rclone.rclone as mod
+        data = ("120 30 0:1 / /data/My\\040Mount rw,relatime "
+                "shared:1 - fuse.rclone x: rw\n")
+        with patch("builtins.open", mock_open(read_data=data)):
+            assert mod._is_mount_point("/data/My Mount") is True
+
+
+class TestForceClearStaleMount:
+    """Tests for the escalate-and-verify stale-mount clearing loop."""
+
+    def test_clears_on_first_attempt_when_unmount_succeeds(self):
+        import rclone.rclone as mod
+        logger = MagicMock()
+        with patch("rclone.rclone.subprocess.run") as run, \
+             patch("rclone.rclone._is_mount_point", return_value=False), \
+             patch("rclone.rclone.os.makedirs") as makedirs, \
+             patch("rclone.rclone.time.sleep") as sleep:
+            assert mod._force_clear_stale_mount("/data/torbox", logger) is True
+            # No retry sleep on a first-attempt success.
+            sleep.assert_not_called()
+            makedirs.assert_called_once()
+            assert run.called
+
+    def test_retries_then_succeeds_when_lazy_teardown_settles(self):
+        import rclone.rclone as mod
+        logger = MagicMock()
+        # Still mounted for two checks, then clears.
+        with patch("rclone.rclone.subprocess.run"), \
+             patch("rclone.rclone._is_mount_point",
+                   side_effect=[True, True, False]), \
+             patch("rclone.rclone.os.makedirs"), \
+             patch("rclone.rclone.time.sleep") as sleep:
+            assert mod._force_clear_stale_mount("/data/torbox", logger) is True
+            assert sleep.call_count == 2
+
+    def test_returns_false_and_warns_when_never_clears(self):
+        import rclone.rclone as mod
+        logger = MagicMock()
+        with patch("rclone.rclone.subprocess.run"), \
+             patch("rclone.rclone._is_mount_point", return_value=True), \
+             patch("rclone.rclone.os.makedirs"), \
+             patch("rclone.rclone.time.sleep"):
+            assert mod._force_clear_stale_mount(
+                "/data/torbox", logger, attempts=3) is False
+            logger.warning.assert_called_once()
+
+    def test_makedirs_failure_after_unmount_keeps_retrying(self):
+        """Detached from mount table but dir still a corpse (ENOTCONN)."""
+        import rclone.rclone as mod
+        logger = MagicMock()
+        with patch("rclone.rclone.subprocess.run"), \
+             patch("rclone.rclone._is_mount_point", return_value=False), \
+             patch("rclone.rclone.os.makedirs",
+                   side_effect=[OSError("ENOTCONN"), None]), \
+             patch("rclone.rclone.time.sleep") as sleep:
+            assert mod._force_clear_stale_mount("/data/torbox", logger) is True
+            assert sleep.call_count == 1
+
+    def test_tolerates_missing_fusermount_binary(self):
+        import rclone.rclone as mod
+        logger = MagicMock()
+        with patch("rclone.rclone.subprocess.run",
+                   side_effect=FileNotFoundError("no fusermount")), \
+             patch("rclone.rclone._is_mount_point", return_value=False), \
+             patch("rclone.rclone.os.makedirs"), \
+             patch("rclone.rclone.time.sleep"):
+            # FileNotFoundError on every ladder command must not propagate.
+            assert mod._force_clear_stale_mount("/data/torbox", logger) is True

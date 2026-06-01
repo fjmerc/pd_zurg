@@ -18,6 +18,89 @@ _rc_urls = {}
 TORBOX_WEBDAV_URL = 'https://webdav.torbox.app/'
 
 
+def _is_mount_point(path):
+    """True iff ``path`` is currently a mount point in this namespace.
+
+    Reads /proc/self/mountinfo directly (field 5 is the mount point) rather
+    than ``os.path.ismount``, which can raise on a stale FUSE corpse
+    (ENOTCONN) instead of answering.  This is the authoritative signal rclone
+    itself keys off — if a line for ``path`` is present, rclone will refuse to
+    mount with "directory already mounted".
+    """
+    try:
+        with open("/proc/self/mountinfo") as fh:
+            for line in fh:
+                fields = line.split()
+                if len(fields) > 4 and _unescape_mountinfo(fields[4]) == path:
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def _unescape_mountinfo(field):
+    """Decode the kernel's octal escapes in a mountinfo path field.
+
+    /proc/self/mountinfo escapes space (\\040), tab (\\011), newline (\\012)
+    and backslash (\\134) in path fields, so a raw == comparison would miss a
+    mount whose name contains any of them.  Backslash is decoded last so a
+    literal ``\\134`` in the source isn't re-interpreted.
+    """
+    return (field.replace("\\040", " ")
+                 .replace("\\011", "\t")
+                 .replace("\\012", "\n")
+                 .replace("\\134", "\\"))
+
+
+def _force_clear_stale_mount(mount_path, logger, attempts=10, delay=0.5):
+    """Detach a stale FUSE corpse at ``mount_path`` and wait until it is gone.
+
+    Only called once a plain ``os.makedirs(exist_ok=True)`` has already failed,
+    i.e. the mountpoint is already broken — so a healthy, actively-streaming
+    mount is never reached here.
+
+    The corpse is left by a prior container whose rclone was SIGKILLed mid
+    shutdown; because the TorBox mount is nested under the ``:shared`` ``/data``
+    bind, the dead host-side mount propagates back into the fresh container on
+    ``--force-recreate``.  A single lazy unmount detaches asynchronously, so
+    the old code's "unmount then immediately remount" raced the deferred
+    teardown and rclone hit "directory already mounted".  Here we escalate and
+    then *verify* the path is genuinely no longer a mount point (and is a usable
+    dir) before returning, retrying a bounded number of times.
+    """
+    unmount_ladder = (["fusermount3", "-uz", mount_path],
+                      ["fusermount", "-uz", mount_path],
+                      ["umount", "-l", mount_path])
+    for attempt in range(attempts):
+        for cmd in unmount_ladder:
+            try:
+                subprocess.run(cmd, check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except FileNotFoundError:
+                # fuse3 image ships only `fusermount3`; tolerate the others
+                # being absent and still fall through to `umount -l`.
+                pass
+        if not _is_mount_point(mount_path):
+            try:
+                os.makedirs(mount_path, exist_ok=True)
+            except OSError:
+                # Detached from the mount table but the dir entry is still a
+                # corpse (ENOTCONN); give the lazy teardown a moment, retry.
+                pass
+            else:
+                if attempt:
+                    logger.info(
+                        f"Cleared stale mountpoint {mount_path} after "
+                        f"{attempt + 1} unmount attempt(s)")
+                return True
+        time.sleep(delay)
+    logger.warning(
+        f"Stale mountpoint {mount_path} still present after {attempts} "
+        f"unmount attempts; rclone mount may fail with 'directory already "
+        f"mounted'")
+    return False
+
+
 def _torbox_mount_configured():
     """Return True iff all three TorBox WebDAV credentials are present.
 
@@ -259,20 +342,20 @@ def setup():
                 # A dead/stale FUSE mountpoint left by a prior container can
                 # survive a plain umount; the path then exists but isn't a
                 # usable directory, so makedirs(exist_ok=True) still raises.
-                # Escalate to lazy unmounts to detach the corpse, then retry.
-                # This only fires when the mount is already broken, so a
+                # Escalate, then *wait* until the corpse is verifiably gone
+                # before remounting — a bare lazy unmount detaches async and
+                # rclone would otherwise race it and fail "directory already
+                # mounted".  Only fires on an already-broken mount, so a
                 # healthy active mount is never force-detached.
-                # fuse3 ships `fusermount3`; `fusermount` (fuse2) may be absent,
-                # so tolerate a missing binary and still fall through to the
-                # kernel-level `umount -l` rather than aborting the escalation.
-                for unmount_cmd in (["fusermount3", "-uz", mount_path],
-                                    ["fusermount", "-uz", mount_path],
-                                    ["umount", "-l", mount_path]):
-                    try:
-                        subprocess.run(unmount_cmd, check=False,
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    except FileNotFoundError:
-                        pass
+                if not _force_clear_stale_mount(mount_path, logger):
+                    # Surface the real reason in the per-mount error/notify
+                    # (the loop's `except Exception` catches this) rather than
+                    # letting the retry makedirs raise a generic OSError that
+                    # buries the diagnostic warning already logged above.
+                    raise OSError(
+                        f"Stale FUSE mountpoint {mount_path} could not be "
+                        f"cleared; skipping mount to avoid 'directory already "
+                        f"mounted'")
                 os.makedirs(mount_path, exist_ok=True)
 
             rc_port = _RC_BASE_PORT + idx

@@ -13,6 +13,7 @@ from utils.blackhole import (
     _is_rate_limit_response, _check_rate_limit, _mark_rate_limited,
     _rate_limit_until,
     _check_torbox_cooldown, _tb_cooldown_cache,
+    _is_resolving_video, _dir_has_video, _local_episodes,
 )
 
 
@@ -1694,6 +1695,76 @@ class TestParseReleaseName:
         assert is_tv is True
 
 
+class TestDirHasVideo:
+    """Unit tests for the resolving-video helpers underpinning local dedup."""
+
+    def test_is_resolving_video_real_file(self, tmp_dir):
+        p = os.path.join(tmp_dir, 'ep.mkv')
+        with open(p, 'w') as f:
+            f.write('data')
+        assert _is_resolving_video(p) is True
+
+    def test_is_resolving_video_subtitle_rejected(self, tmp_dir):
+        p = os.path.join(tmp_dir, 'ep.srt')
+        with open(p, 'w') as f:
+            f.write('sub')
+        assert _is_resolving_video(p) is False
+
+    def test_is_resolving_video_broken_symlink_rejected(self, tmp_dir):
+        link = os.path.join(tmp_dir, 'ep.mkv')
+        os.symlink(os.path.join(tmp_dir, 'gone.mkv'), link)
+        assert _is_resolving_video(link) is False
+
+    def test_dir_has_video_flat_true(self, tmp_dir):
+        with open(os.path.join(tmp_dir, 'movie.mp4'), 'w') as f:
+            f.write('data')
+        assert _dir_has_video(tmp_dir) is True
+
+    def test_dir_has_video_subtitle_only_false(self, tmp_dir):
+        with open(os.path.join(tmp_dir, 'movie.srt'), 'w') as f:
+            f.write('sub')
+        assert _dir_has_video(tmp_dir) is False
+
+    def test_dir_has_video_nonrecursive_ignores_subdir(self, tmp_dir):
+        sub = os.path.join(tmp_dir, 'Season 01')
+        os.makedirs(sub)
+        with open(os.path.join(sub, 'ep.mkv'), 'w') as f:
+            f.write('data')
+        assert _dir_has_video(tmp_dir, recursive=False) is False
+
+    def test_dir_has_video_recursive_finds_subdir(self, tmp_dir):
+        sub = os.path.join(tmp_dir, 'Season 01')
+        os.makedirs(sub)
+        with open(os.path.join(sub, 'ep.mkv'), 'w') as f:
+            f.write('data')
+        assert _dir_has_video(tmp_dir, recursive=True) is True
+
+    def test_dir_has_video_recursive_subtitle_only_false(self, tmp_dir):
+        sub = os.path.join(tmp_dir, 'Season 01')
+        os.makedirs(sub)
+        with open(os.path.join(sub, 'ep.srt'), 'w') as f:
+            f.write('sub')
+        assert _dir_has_video(tmp_dir, recursive=True) is False
+
+    def test_dir_has_video_recursive_depth_bounded(self, tmp_dir):
+        """Recursion is one level only — video two levels deep is NOT found."""
+        deep = os.path.join(tmp_dir, 'Season 01', 'extras')
+        os.makedirs(deep)
+        with open(os.path.join(deep, 'ep.mkv'), 'w') as f:
+            f.write('data')
+        assert _dir_has_video(tmp_dir, recursive=True) is False
+
+    def test_dir_has_video_missing_path_false(self, tmp_dir):
+        assert _dir_has_video(os.path.join(tmp_dir, 'nope')) is False
+
+    def test_local_episodes_skips_subtitles(self, tmp_dir):
+        with open(os.path.join(tmp_dir, 'Show.S01E01.mkv'), 'w') as f:
+            f.write('data')
+        with open(os.path.join(tmp_dir, 'Show.S01E02.srt'), 'w') as f:
+            f.write('sub')
+        assert _local_episodes(tmp_dir) == {1}
+
+
 class TestCheckLocalLibrary:
 
     def _make_watcher(self, tmp_dir):
@@ -1788,6 +1859,64 @@ class TestCheckLocalLibrary:
         # Empty season dir
 
         assert watcher._check_local_library('Fargo.S05E01.1080p.WEB.torrent') is False
+
+    def test_subtitle_only_season_pack_not_matched(self, tmp_dir):
+        """A season folder holding only subtitles must NOT block a season pack.
+
+        Regression: an orphan ``.srt`` season made every Sonarr grab skip with
+        "Season N exists locally", leaving the show permanently missing.
+        """
+        watcher, tv_dir, _ = self._make_watcher(tmp_dir)
+        season_dir = os.path.join(tv_dir, 'Adolescence', 'Season 01')
+        os.makedirs(season_dir)
+        for ep in range(1, 5):
+            with open(os.path.join(season_dir, f'Adolescence.S01E{ep:02d}.srt'), 'w') as f:
+                f.write('1\n00:00:00,000 --> 00:00:01,000\nhi\n')
+
+        # Season pack (no specific episodes) — subtitles alone must not count.
+        assert watcher._check_local_library('Adolescence.S01.1080p.NF.WEB-DL.magnet') is False
+
+    def test_subtitle_only_does_not_satisfy_episode(self, tmp_dir):
+        """A stray ``.srt`` for an episode must not mark that episode present."""
+        watcher, tv_dir, _ = self._make_watcher(tmp_dir)
+        season_dir = os.path.join(tv_dir, 'Fargo (2014)', 'Season 05')
+        os.makedirs(season_dir)
+        with open(os.path.join(season_dir, 'Fargo.S05E01.srt'), 'w') as f:
+            f.write('sub')
+
+        assert watcher._check_local_library('Fargo.S05E01.1080p.WEB.torrent') is False
+
+    def test_subtitle_only_movie_not_matched(self, tmp_dir):
+        """A movie folder with only a subtitle must not block the grab."""
+        watcher, _, movies_dir = self._make_watcher(tmp_dir)
+        movie_dir = os.path.join(movies_dir, 'Gattaca (1997)')
+        os.makedirs(movie_dir)
+        with open(os.path.join(movie_dir, 'Gattaca.srt'), 'w') as f:
+            f.write('sub')
+
+        assert watcher._check_local_library('Gattaca.1997.1080p.BluRay.torrent') is False
+
+    def test_broken_symlink_video_not_matched(self, tmp_dir):
+        """A dangling video symlink (dead debrid target) must not count as local."""
+        watcher, tv_dir, _ = self._make_watcher(tmp_dir)
+        season_dir = os.path.join(tv_dir, 'Fargo (2014)', 'Season 05')
+        os.makedirs(season_dir)
+        link = os.path.join(season_dir, 'Fargo (2014) - S05E01.mkv')
+        os.symlink(os.path.join(tmp_dir, 'does-not-exist.mkv'), link)
+
+        assert watcher._check_local_library('Fargo.S05E01.1080p.WEB.torrent') is False
+
+    def test_mixed_video_and_subtitle_still_matches(self, tmp_dir):
+        """A real video alongside subtitles must still register as present."""
+        watcher, tv_dir, _ = self._make_watcher(tmp_dir)
+        season_dir = os.path.join(tv_dir, 'Fargo (2014)', 'Season 05')
+        os.makedirs(season_dir)
+        with open(os.path.join(season_dir, 'Fargo.S05E01.srt'), 'w') as f:
+            f.write('sub')
+        with open(os.path.join(season_dir, 'Fargo (2014) - S05E01.mkv'), 'w') as f:
+            f.write('data')
+
+        assert watcher._check_local_library('Fargo.S05E01.1080p.WEB.torrent') is True
 
 
 class TestCheckLocalLibraryPreferDebridBypass:

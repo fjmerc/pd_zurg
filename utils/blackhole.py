@@ -670,11 +670,58 @@ def _enrich_for_history(filename):
     return (refined or None), ep_str
 
 
+def _is_resolving_video(path):
+    """True iff path is a video file (by extension) that actually resolves.
+
+    Broken symlinks (dangling debrid targets) return False so they never count
+    as local content.
+    """
+    if os.path.splitext(path)[1].lower() not in MEDIA_EXTENSIONS:
+        return False
+    return os.path.exists(path)
+
+
+def _dir_has_video(path, recursive=False):
+    """True iff the directory contains at least one resolving video file.
+
+    Subtitles (.srt), .nfo, artwork, and broken symlinks do NOT count — only a
+    real, resolving media file marks the content as present locally. This is
+    what prevents an orphan subtitle folder from permanently blocking a grab.
+
+    ``recursive`` descends exactly one level (``show/Season NN/episode.mkv`` is
+    the deepest real arr/Plex layout) — a bounded scan, NOT an unbounded
+    ``os.walk``, so a no-video show folder full of subtitle/metadata files on a
+    throttled FUSE mount can't trigger a full-subtree stat storm.
+    """
+    try:
+        for f in os.listdir(path):
+            child = os.path.join(path, f)
+            if _is_resolving_video(child):
+                return True
+            if recursive and os.path.isdir(child):
+                try:
+                    for sub in os.listdir(child):
+                        if _is_resolving_video(os.path.join(child, sub)):
+                            return True
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return False
+
+
 def _local_episodes(season_dir):
-    """Extract episode numbers from files in a local season directory."""
+    """Extract episode numbers from resolving video files in a local season dir.
+
+    Only real video files (MEDIA_EXTENSIONS, not broken symlinks) contribute an
+    episode number — a stray ``ShowName.S01E03.srt`` must not make episode 3
+    look present locally.
+    """
     eps = set()
     try:
         for f in os.listdir(season_dir):
+            if not _is_resolving_video(os.path.join(season_dir, f)):
+                continue
             for m in re.finditer(r'(?<![a-zA-Z])[Ee](\d+)', f):
                 eps.add(int(m.group(1)))
     except OSError:
@@ -2963,7 +3010,7 @@ class BlackholeWatcher:
                 show_path = os.path.join(self.local_library_tv, folder)
                 if season is not None:
                     season_dir = os.path.join(show_path, f"Season {season:02d}")
-                    if os.path.isdir(season_dir) and os.listdir(season_dir):
+                    if os.path.isdir(season_dir) and _dir_has_video(season_dir):
                         # Check at episode level if the torrent targets specific episodes
                         target_eps = _parse_episodes(filename)
                         if target_eps:
@@ -2973,11 +3020,11 @@ class BlackholeWatcher:
                                 return True
                             logger.debug(f"[blackhole] '{folder}' S{season:02d} has local eps {sorted(local_eps)} but torrent has {sorted(target_eps)} — not skipping")
                         else:
-                            # Season pack — skip if season folder has content
+                            # Season pack — skip if season folder has video content
                             logger.info(f"[blackhole] Skipping {filename}: '{folder}' Season {season} exists locally")
                             return True
                 else:
-                    if os.path.isdir(show_path) and os.listdir(show_path):
+                    if _dir_has_video(show_path, recursive=True):
                         logger.info(f"[blackhole] Skipping {filename}: '{folder}' exists locally")
                         return True
 
@@ -2986,7 +3033,7 @@ class BlackholeWatcher:
                 if self._normalize_name(folder) != name_norm:
                     continue
                 movie_path = os.path.join(self.local_library_movies, folder)
-                if os.path.isdir(movie_path) and os.listdir(movie_path):
+                if _dir_has_video(movie_path):
                     logger.info(f"[blackhole] Skipping {filename}: '{folder}' exists locally")
                     return True
 

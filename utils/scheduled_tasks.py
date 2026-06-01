@@ -1074,7 +1074,7 @@ def _listdir_with_timeout(path, timeout):
     return result['entries']
 
 
-def _probe_mount(mount_path):
+def _probe_mount(mount_path, tolerate_timeout=False):
     """Probe a single FUSE mount.
 
     Returns ``(status, message, items)`` where status is one of
@@ -1088,6 +1088,12 @@ def _probe_mount(mount_path):
     bounded to ``_LISTDIR_TIMEOUT_SEC`` so one stuck mount can't block
     the entire scheduler thread (which also runs verify_symlinks,
     library_scan, debrid_health sweeps, etc).
+
+    ``tolerate_timeout`` softens *only* the timeout case to a slow-but-
+    alive ``'success'`` (used for TorBox, whose tight rate limit makes a
+    full FUSE walk routinely 429-throttle past the deadline — a slow
+    walk there is expected, not a dead mount).  A genuinely dead mount
+    still raises ENOTCONN, which is handled as ``'error'`` regardless.
     """
     if not os.path.isdir(mount_path):
         return 'absent', f'Mount path does not exist: {mount_path}', 0
@@ -1102,6 +1108,14 @@ def _probe_mount(mount_path):
             return 'success', f'Mount responsive but slow ({elapsed:.1f}s)', len(entries)
         return 'success', f'{len(entries)} entries, {elapsed:.2f}s', len(entries)
     except TimeoutError as e:
+        if tolerate_timeout:
+            # A rate-limited mount (TorBox 429-throttling the FUSE walk)
+            # is alive, just slow — reporting 'error' would flap the
+            # System page red on every TB walk.  Only the *timeout* case
+            # is softened; a dead mount raises ENOTCONN (handled below).
+            logger.warning(f"[scheduler] Mount {mount_path} slow/rate-limited "
+                           f"(no listing within {_LISTDIR_TIMEOUT_SEC}s): {e}")
+            return 'success', f'Mount responsive but rate-limited ({e})', 0
         logger.error(f"[scheduler] Mount {mount_path} hung past {_LISTDIR_TIMEOUT_SEC}s: {e}")
         return 'error', f'Mount hung: {e}', 0
     except Exception as e:  # noqa: BLE001 — FUSE bindings raise non-OSError too
@@ -1168,7 +1182,7 @@ def mount_liveness_probe():
             logger.debug(f"[scheduler] TB mount discovery failed: {e}")
 
     if tb_mount_path:
-        tb_status, tb_msg, tb_items = _probe_mount(tb_mount_path)
+        tb_status, tb_msg, tb_items = _probe_mount(tb_mount_path, tolerate_timeout=True)
 
     # Combine.  TB 'absent' means TB not configured — don't degrade.
     # TB 'error' means TB configured but dead — degrade to error.

@@ -7,6 +7,7 @@ not silently green.
 """
 
 import os
+import threading
 import pytest
 from unittest.mock import patch
 
@@ -53,6 +54,46 @@ class TestProbeMount:
         assert status == 'error'
         assert 'unresponsive' in msg
         assert 'Transport endpoint' in msg
+
+    def test_timeout_is_error_by_default(self, tmp_path, monkeypatch):
+        """Default (RD) semantics: a hung listdir is an error."""
+        monkeypatch.setattr(os.path, 'ismount', lambda p: True)
+        monkeypatch.setattr(
+            scheduled_tasks, '_LISTDIR_TIMEOUT_SEC', 0.2,
+        )
+        hang = threading.Event()
+        def hang_listdir(_):
+            hang.wait(timeout=5)
+            return []
+        monkeypatch.setattr(os, 'listdir', hang_listdir)
+        try:
+            status, msg, _ = scheduled_tasks._probe_mount(str(tmp_path))
+        finally:
+            hang.set()
+        assert status == 'error'
+        assert 'hung' in msg.lower()
+
+    def test_timeout_tolerated_returns_success(self, tmp_path, monkeypatch):
+        """TorBox semantics: a hung listdir under rate-limiting is a
+        slow-but-alive mount, not an error — so the System page doesn't
+        flap red on every TB walk.  A genuinely dead mount still raises
+        ENOTCONN and is handled as error (see test above)."""
+        monkeypatch.setattr(os.path, 'ismount', lambda p: True)
+        monkeypatch.setattr(
+            scheduled_tasks, '_LISTDIR_TIMEOUT_SEC', 0.2,
+        )
+        hang = threading.Event()
+        def hang_listdir(_):
+            hang.wait(timeout=5)
+            return []
+        monkeypatch.setattr(os, 'listdir', hang_listdir)
+        try:
+            status, msg, _ = scheduled_tasks._probe_mount(
+                str(tmp_path), tolerate_timeout=True)
+        finally:
+            hang.set()
+        assert status == 'success'
+        assert 'rate-limited' in msg.lower()
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import time
 import threading
 import uuid
@@ -46,6 +47,14 @@ _watcher = None
 # Retry configuration for failed torrent submissions
 RETRY_SCHEDULE = [300, 900, 3600]  # 5 min, 15 min, 1 hour
 MAX_RETRIES = 3
+
+# Max same-tier alternatives to probe against TorBox when recovering an
+# uncached grab (_try_torbox_cached_alternative).  TorBox's cache probe is
+# per-hash and synchronous on the serial blackhole thread, so this bounds
+# worst-case added latency to roughly _TB_ALT_MAX_PROBES * _CACHE_PROBE_TIMEOUT.
+# Probed candidates are pre-ranked by seeders, so the best releases are seen
+# first even when a popular title returns far more streams than this.
+_TB_ALT_MAX_PROBES = 12
 
 # Plan 41 phase A — rescue-staging filename layout.  When the add-time
 # cross-rescue stages ``file_path`` to ``.alt_pending/`` before the
@@ -3395,6 +3404,237 @@ class BlackholeWatcher:
         )
 
     @staticmethod
+    def _tb_alt_recovery_enabled():
+        return str(os.environ.get(
+            'BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')).lower() == 'true'
+
+    def _resolve_arr_identity(self, filename):
+        """Resolve ``(imdb_id, media_type, season, episode)`` for *filename*.
+
+        Looks the parsed title up in Radarr (movies) or Sonarr (series) to
+        recover the IMDb id Torrentio needs.  Returns ``(None, None, None,
+        None)`` when the arr is unconfigured, the title isn't in its
+        library, or the record carries no IMDb id.  Never raises.
+        """
+        try:
+            from utils.arr_client import SonarrClient, RadarrClient
+        except Exception as e:
+            logger.debug(f"[blackhole] TB-alt: arr import failed: {e}")
+            return None, None, None, None
+        name, season, is_tv = parse_release_name(filename)
+        if not name:
+            return None, None, None, None
+        try:
+            if is_tv:
+                client = SonarrClient()
+                if not client.configured:
+                    return None, None, None, None
+                series = client.find_series_in_library(title=name)
+                if not series:
+                    return None, None, None, None
+                eps = _parse_episodes(filename)
+                episode = min(eps) if eps else None
+                return series.get('imdbId'), 'series', season, episode
+            client = RadarrClient()
+            if not client.configured:
+                return None, None, None, None
+            movie = client.find_movie_in_library(title=name)
+            if not movie:
+                return None, None, None, None
+            return movie.get('imdbId'), 'movie', None, None
+        except Exception as e:
+            logger.debug(f"[blackhole] TB-alt: arr lookup failed for {filename}: {e}")
+            return None, None, None, None
+
+    def _try_torbox_cached_alternative(self, file_path, filename, info_hash, debrid, label=None):
+        """Last-ditch recovery before deleting an uncached-rejected grab.
+
+        The release Radarr/Sonarr grabbed is uncached (on its routed
+        debrid, and — for the cross-confirmed path — also on TorBox), but
+        OTHER releases of the same title may be cached on TorBox.  Rather
+        than let the title fall back to "Wanted", search Torrentio for
+        same-title releases, keep only those TorBox has cached AT THE SAME
+        quality tier the arr already approved, grab the best one on TorBox,
+        and start a TB-routed symlink monitor.
+
+        Returns True iff a cached alternative was grabbed — in which case
+        the original watch-dir file has already been removed and the caller
+        must NOT delete again.  False → caller falls through to its
+        existing delete.  Never raises; any failure degrades to delete.
+        """
+        if not self._tb_alt_recovery_enabled():
+            return False
+        # No info hash means we can't exclude the rejected release from the
+        # candidate set, and the file already failed the cache gate for a
+        # reason unrelated to a swappable hash — decline.
+        if not info_hash:
+            return False
+        tb_key = self._api_key_for('torbox')
+        if not tb_key:
+            return False
+        try:
+            from utils.search import search_torrentio, check_debrid_cache, parse_quality
+            from utils.quality_compromise import _filter_candidates, _rank_within_tier
+
+            # Stay within the arr's already-approved ceiling: only accept
+            # alternatives at the SAME quality tier as the rejected release
+            # (Radarr/Sonarr already deemed that tier acceptable).  An
+            # unparseable tier ('Unknown') can't be safely matched, so we
+            # decline rather than risk grabbing below-profile quality.
+            target_tier = parse_quality(filename).get('label')
+            if not target_tier or target_tier == 'Unknown':
+                logger.debug(f"[blackhole] TB-alt: unparseable tier for {filename}; skipping")
+                return False
+
+            imdb_id, media_type, season, episode = self._resolve_arr_identity(filename)
+            if not imdb_id:
+                logger.debug(f"[blackhole] TB-alt: no IMDb id for {filename}; skipping")
+                return False
+
+            results = search_torrentio(
+                imdb_id, media_type=media_type, season=season, episode=episode,
+            )
+            if not results:
+                return False
+
+            rejected = info_hash.lower()
+            # Pre-filter to the approved tier and rank by seeders BEFORE
+            # probing.  TorBox's cache probe is per-hash and capped
+            # (_TORBOX_MAX_PROBES), so probing the full unranked Torrentio
+            # result set (often 40-60+ streams across all tiers) would (a)
+            # waste the budget on wrong-tier releases and (b) silently leave
+            # genuinely-cached same-tier releases past the cap looking
+            # uncached — defeating the recovery.  Probing only the best-seeded
+            # same-tier slice also bounds worst-case latency on this serial
+            # path (each probe can block up to _CACHE_PROBE_TIMEOUT).
+            candidates = [r for r in results
+                          if (r.get('info_hash') or '').lower() != rejected
+                          and (r.get('quality') or {}).get('label') == target_tier]
+            if not candidates:
+                logger.debug(f"[blackhole] TB-alt: no same-tier "
+                             f"({target_tier}) alternative for {filename}")
+                return False
+            candidates.sort(key=lambda r: -(r.get('seeds') or 0))
+            probe = candidates[:_TB_ALT_MAX_PROBES]
+
+            # RD/AD cache endpoints are dead, so we MUST ask TorBox explicitly
+            # here — search_torrents would annotate via the primary debrid (RD)
+            # and return all-None.  search_torrentio yields lowercase hashes,
+            # matching the lowercased map keys check_debrid_cache returns.
+            cache_map = check_debrid_cache(
+                [r['info_hash'] for r in probe],
+                service='torbox', api_key=tb_key,
+            )
+            for r in probe:
+                r['cached'] = cache_map.get(r['info_hash'])
+
+            # min_seeders=0: a TorBox-cached release is served from TB
+            # storage, so seeder count is irrelevant to whether it streams.
+            eligible = _filter_candidates(probe, target_tier,
+                                          min_seeders=0, only_cached=True)
+            best = _rank_within_tier(eligible)
+            if not best:
+                logger.debug(f"[blackhole] TB-alt: no cached {target_tier} "
+                             f"alternative for {filename}")
+                return False
+
+            alt_hash = (best.get('info_hash') or '').strip().lower()
+            if not alt_hash or not re.match(r'^[a-fA-F0-9]{40}$', alt_hash):
+                return False
+        except Exception as e:
+            logger.debug(f"[blackhole] TB-alt: candidate search failed for {filename}: {e}")
+            return False
+
+        # Grab the cached alternative on TorBox via a throwaway .magnet.
+        magnet = f'magnet:?xt=urn:btih:{alt_hash}'
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix='.magnet', prefix='_tbalt_')
+        success = False
+        result = None
+        try:
+            with os.fdopen(tmp_fd, 'w') as f:
+                f.write(magnet)
+            success, result = self._add_to_torbox(tmp_path, api_key=tb_key)
+        except Exception as e:
+            logger.warning(f"[blackhole] TB-alt: TorBox add errored for {filename}: {e}")
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+        if not success:
+            logger.info(f"[blackhole] TB-alt: TorBox rejected cached alternative for "
+                        f"{filename}: {str(result)[:100]}")
+            return False
+
+        # The alternative is now on TorBox.  In symlink mode the monitor is
+        # what eventually creates the symlink + triggers the arr import — so
+        # if we can't start it (no torrent id, or _start_monitor errors), the
+        # title is NOT recovered: the torrent would sit orphaned on TB with
+        # nothing tracking it.  Start the monitor BEFORE removing the original
+        # and committing to success; on failure, decline (leave the original
+        # for the caller's normal rejection handling — the cached orphan is
+        # harmless, far better than silently claiming a recovery that never
+        # produces a playable file).  With symlinking off, the library scanner
+        # owns symlink creation, so no monitor is needed.
+        if self.symlink_enabled:
+            torrent_id = self._extract_torrent_id(result, debrid='torbox')
+            if not torrent_id:
+                logger.error(f"[blackhole] TB-alt: could not extract torrent id for "
+                             f"{filename}; not claiming recovery")
+                return False
+            try:
+                self._start_monitor(torrent_id, filename, label=label, debrid='torbox')
+            except Exception as e:
+                logger.error(f"[blackhole] TB-alt: failed to start monitor for "
+                             f"{filename}; not claiming recovery: {e}")
+                return False
+
+        # Committed: record the dedup hash and remove the original so the
+        # scanner doesn't re-process the rejected release on its next pass.
+        try:
+            from utils.search import remember_added_hash
+            remember_added_hash('torbox', alt_hash)
+        except ImportError:
+            pass
+        try:
+            os.remove(file_path)
+        except OSError as e:
+            logger.warning(f"[blackhole] TB-alt: could not remove original {filename}: {e}")
+
+        alt_title = (best.get('title') or '')[:80]
+        logger.info(f"[blackhole] TB-alt: recovered {filename} — grabbed cached "
+                    f"{target_tier} alternative on TorBox ({alt_title})")
+        # History/notify/metrics are best-effort — the recovery has already
+        # succeeded and the original is gone, so a failure here must not raise
+        # out of the method and kill the _process_file worker mid-batch.
+        try:
+            if _history:
+                _mt, _ep = _enrich_for_history(filename)
+                _history.log_event(
+                    'tb_cached_alt_grabbed', filename, episode=_ep, source='blackhole',
+                    detail=f'Recovered — grabbed cached {target_tier} alternative on TorBox',
+                    meta={'cause': 'tb_cached_alt_grabbed',
+                          'info_hash': alt_hash,
+                          'rejected_info_hash': info_hash,
+                          'rejected_provider': debrid,
+                          'provider': 'torbox',
+                          'tier': target_tier,
+                          'alt_title': alt_title},
+                    media_title=_mt,
+                )
+            if _notify:
+                _notify('download_complete', 'Blackhole: Cached Alternative Found',
+                        f'{filename}: original uncached, grabbed cached {target_tier} '
+                        f'alternative on TorBox', level='info')
+            from utils.metrics import metrics
+            metrics.inc('blackhole_processed', {'status': 'tb_cached_alt_grabbed'})
+        except Exception as e:
+            logger.warning(f"[blackhole] TB-alt: post-recovery bookkeeping failed for "
+                           f"{filename}: {e}")
+        return True
+
+    @staticmethod
     def _compromise_enabled():
         return str(os.environ.get('QUALITY_COMPROMISE_ENABLED', 'false')).lower() == 'true'
 
@@ -4018,6 +4258,12 @@ class BlackholeWatcher:
                                                api_key=api_key)
                 cached = cache_map.get(lowered)
                 if cached is False:
+                    # Provider confirmed THIS hash uncached.  Before
+                    # deleting, see if a DIFFERENT release of the same title
+                    # is cached on TorBox and grab that instead — otherwise
+                    # an abundantly-cached title silently falls to "Wanted".
+                    if self._try_torbox_cached_alternative(file_path, filename, info_hash, debrid, label=label):
+                        return
                     # Provider confirmed uncached — safe to delete; nothing
                     # to wait for.
                     cache_label = 'uncached'
@@ -4057,6 +4303,12 @@ class BlackholeWatcher:
                             # returns None, but a schema change at TB could surface a KeyError.
                             logger.debug(f"[blackhole] TB cross-probe raised for {filename}: {e}")
                     if tb_key and tb_cached is False:
+                        # This exact hash is uncached on both the routed
+                        # debrid and TorBox — but a different release of the
+                        # same title may still be TB-cached.  Try to recover
+                        # before deleting.
+                        if self._try_torbox_cached_alternative(file_path, filename, info_hash, debrid, label=label):
+                            return
                         logger.info(
                             f"[blackhole] Skipping uncached (cross-confirmed via TB): "
                             f"{filename} routed to {debrid}"

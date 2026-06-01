@@ -163,6 +163,21 @@ def test_blackhole_mount_handoff_lists_provider():
     assert 'library scanner' in s
 
 
+def test_tb_cached_alt_grabbed_names_rejected_provider_and_tier():
+    ev = _ev('tb_cached_alt_grabbed', rejected_provider='realdebrid', tier='1080p')
+    s = format_event(ev)['short']
+    assert 'realdebrid' in s
+    assert '1080p' in s
+    assert 'TorBox' in s
+
+
+def test_tb_cached_alt_grabbed_without_tier_still_renders():
+    ev = _ev('tb_cached_alt_grabbed', rejected_provider='realdebrid')
+    s = format_event(ev)['short']
+    assert 'realdebrid' in s
+    assert 'TorBox' in s
+
+
 def test_terminal_error_shows_status():
     ev = _ev('terminal_error', provider='realdebrid', status='magnet_error')
     assert 'Failed on realdebrid: magnet_error' == format_event(ev)['short']

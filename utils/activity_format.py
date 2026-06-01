@@ -331,6 +331,15 @@ def _fmt_debrid_rescued(ev, meta):
     return head + tail, head + tail
 
 
+def _fmt_tb_cached_alt_grabbed(ev, meta):
+    tier = meta.get('tier')
+    rejected = (meta.get('rejected_provider') or 'debrid')
+    tier_part = f' {tier}' if tier else ''
+    msg = (f'Recovered — release uncached on {rejected}, grabbed a cached'
+           f'{tier_part} alternative on TorBox')
+    return msg, msg
+
+
 def _fmt_debrid_unavailable_marked(ev, meta):
     days = meta.get('age_days')
     attempts = meta.get('search_attempts')
@@ -486,6 +495,7 @@ _CAUSE_FORMATTERS = {
     'debrid_unavailable_marked': _fmt_debrid_unavailable_marked,
     'debrid_filtered': _fmt_debrid_filtered,
     'debrid_rescued': _fmt_debrid_rescued,
+    'tb_cached_alt_grabbed': _fmt_tb_cached_alt_grabbed,
     'terminal_error': _fmt_terminal_error,
     'uncached_timeout': _fmt_uncached_timeout,
     'uncached_rejected': _fmt_uncached_rejected,
@@ -672,6 +682,10 @@ FORMATTER_JS = r"""
         else tail = ' — alt-debrid has cache, file accessible via alt mount';
       }
       return head + tail;
+    },
+    tb_cached_alt_grabbed: function(ev,m){
+      var tier = m.tier ? (' ' + m.tier) : '';
+      return 'Recovered — release uncached on ' + (m.rejected_provider||'debrid') + ', grabbed a cached' + tier + ' alternative on TorBox';
     },
     terminal_error: function(ev,m){ return 'Failed on ' + (m.provider||'debrid') + ': ' + (m.status || m.error || 'unknown'); },
     uncached_timeout: function(ev,m){ return 'Timed out waiting for cache' + (m.deleted ? ' — removed from debrid' : ' — debrid cleanup skipped'); },

@@ -90,7 +90,7 @@ __all__ = [
     'TORRENTIO_URL', 'SEARCH_REQUIRE_CACHED', 'SEARCH_DEDUP_ENABLED',
     # Blackhole cache / debrid-account dedup gates
     'BLACKHOLE_REQUIRE_CACHED', 'BLACKHOLE_DEBRID_DEDUP_ENABLED',
-    'BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT',
+    'BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'BLACKHOLE_TB_ALT_RECOVERY_ENABLED',
     # plex_debrid content-version cache-rule enforcer
     'PD_ENFORCE_CACHED_VERSIONS',
     # Quality compromise (plan 33)
@@ -333,6 +333,16 @@ class Config:
         self.BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT = os.getenv(
             'BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'false'
         )
+        # When ON, an uncached blackhole grab that would otherwise be
+        # rejected triggers a search for a same-title, same-tier release
+        # cached on TorBox to grab instead — so a well-cached title isn't
+        # dropped to "Wanted" just because the specific hash the arr picked
+        # is uncached.  Read live from os.environ in blackhole.py so a UI
+        # change applies on the next grab; declared here for the globals
+        # export + settings drift guard.  No-op without TorBox configured.
+        self.BLACKHOLE_TB_ALT_RECOVERY_ENABLED = os.getenv(
+            'BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true'
+        )
         # When ON, plex_debrid setup injects the ``cache status / requirement
         # / cached`` rule into every content version on startup so the
         # vendored download path refuses uncached releases.  Default OFF
@@ -451,6 +461,7 @@ SEARCH_DEDUP_ENABLED = config.SEARCH_DEDUP_ENABLED
 BLACKHOLE_REQUIRE_CACHED = config.BLACKHOLE_REQUIRE_CACHED
 BLACKHOLE_DEBRID_DEDUP_ENABLED = config.BLACKHOLE_DEBRID_DEDUP_ENABLED
 BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT = config.BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT
+BLACKHOLE_TB_ALT_RECOVERY_ENABLED = config.BLACKHOLE_TB_ALT_RECOVERY_ENABLED
 PD_ENFORCE_CACHED_VERSIONS = config.PD_ENFORCE_CACHED_VERSIONS
 QUALITY_COMPROMISE_ENABLED = config.QUALITY_COMPROMISE_ENABLED
 QUALITY_COMPROMISE_DWELL_DAYS = config.QUALITY_COMPROMISE_DWELL_DAYS

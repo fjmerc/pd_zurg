@@ -74,6 +74,11 @@ CAUSE_DEBRID_FILTERED = 'debrid_filtered'
 # because the user-visible outcome is different (file still plays, no
 # arr re-search fired, no blocklist add).
 CAUSE_DEBRID_RESCUED = 'debrid_rescued'
+# A grab was rejected because its exact hash was uncached, but a DIFFERENT
+# release of the same title was found cached on TorBox and grabbed in its
+# place.  Distinct from CAUSE_DEBRID_RESCUED (same hash, different debrid) —
+# here the hash differs and recovery happens at uncached-reject time.
+CAUSE_TB_CACHED_ALT_GRABBED = 'tb_cached_alt_grabbed'
 CAUSE_ROUTING_REPAIRED = 'routing_repaired'
 CAUSE_ARR_DELETED_USER = 'arr_deleted_user'
 CAUSE_ARR_DELETED_CLEANUP = 'arr_deleted_cleanup'

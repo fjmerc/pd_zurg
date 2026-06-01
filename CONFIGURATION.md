@@ -165,6 +165,7 @@ for recommended settings per provider.
 | `BLACKHOLE_DEBRID_DEDUP_ENABLED` | Skip if the hash is already on the debrid account. Stops Sonarr/Radarr re-grabs from producing duplicate entries in DMM | `true` |
 | `BLACKHOLE_REQUIRE_CACHED` | Refuse `.torrent`/`.magnet` drops that aren't confirmed cached. **RD users leave OFF** (RD deprecated its cache probe Nov 2024); AD/TB users can turn this ON | `false` |
 | `BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT` | When the blackhole gives up waiting for debrid to cache a torrent (`BLACKHOLE_MOUNT_POLL_TIMEOUT`), actively delete it from the debrid account instead of leaving it as a 0%/0-seed entry. **Recommended ON for RD users** — see [TROUBLESHOOTING](TROUBLESHOOTING.md#uncached-torrents-pile-up-on-my-debrid-account-from-the-blackhole) | `false` |
+| `BLACKHOLE_TB_ALT_RECOVERY_ENABLED` | When a grabbed release is uncached and would be rejected, search Torrentio for other releases of the same title cached on **TorBox** (at the same quality tier the arr approved) and grab one instead. Stops well-cached titles falling to "Wanted" because the specific hash Sonarr/Radarr picked is uncached. Requires TorBox configured; no-op without it | `true` |
 
 ### Quality compromise + season-pack fallback (opt-in)
 

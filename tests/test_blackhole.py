@@ -4457,3 +4457,237 @@ class TestScannerHandoff:
         assert entry['direction'] == 'to-debrid'
         assert entry['episodes'] == [{'season': 1, 'episode': 5}]
         assert all(e['torrent_id'] != 'tb-xyz' for e in watcher._load_pending())
+
+
+class TestTorboxCachedAlternative:
+    """_try_torbox_cached_alternative: when a grabbed release is uncached,
+    grab a same-title, same-tier alternative that IS cached on TorBox rather
+    than dropping the title to 'Wanted'."""
+
+    REJECTED = 'a' * 40   # the uncached hash the arr picked
+    CACHED_ALT = 'b' * 40  # a same-title release cached on TorBox
+
+    def _make_watcher(self, tmp_dir, tb_key='tbkey', symlink_enabled=False):
+        return BlackholeWatcher(
+            os.path.join(tmp_dir, 'watch'), tb_key, 'torbox',
+            symlink_enabled=symlink_enabled,
+            completed_dir=os.path.join(tmp_dir, 'completed'),
+            rclone_mount=os.path.join(tmp_dir, 'data'),
+            debrid_api_keys={'torbox': tb_key} if tb_key else None,
+        )
+
+    def _make_file(self, tmp_dir, name):
+        os.makedirs(tmp_dir, exist_ok=True)
+        path = os.path.join(tmp_dir, name)
+        with open(path, 'w') as f:
+            f.write('magnet:?xt=urn:btih:' + self.REJECTED)
+        return path
+
+    def _stub_search(self, monkeypatch, results):
+        import utils.search as search
+        monkeypatch.setattr(search, 'search_torrentio',
+                            lambda *a, **k: results)
+
+    def _stub_cache(self, monkeypatch, cache_map):
+        import utils.search as search
+        monkeypatch.setattr(search, 'check_debrid_cache',
+                            lambda hashes, **k: {h: cache_map.get(h) for h in hashes})
+        monkeypatch.setattr(search, 'remember_added_hash', lambda *a, **k: None)
+
+    def _candidate(self, info_hash, tier='1080p', seeds=10, size=8_000_000_000,
+                   title=None):
+        score = {'2160p': 4, '1080p': 3, '720p': 2}.get(tier, 0)
+        return {
+            'title': title or f'Movie.{tier}.WEB.x264-GRP',
+            'info_hash': info_hash,
+            'size_bytes': size,
+            'seeds': seeds,
+            'quality': {'label': tier, 'score': score},
+        }
+
+    def test_disabled_via_env_declines_and_keeps_file(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'false')
+        w = self._make_watcher(tmp_dir)
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert os.path.exists(fp)
+
+    def test_no_info_hash_declines(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), '', 'realdebrid') is False
+        assert os.path.exists(fp)
+
+    def test_no_torbox_key_declines(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir, tb_key='')
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert os.path.exists(fp)
+
+    def test_unparseable_tier_declines(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        # No 1080p/720p/2160p marker -> parse_quality returns 'Unknown'.
+        fp = self._make_file(tmp_dir, 'Sing.2.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert os.path.exists(fp)
+
+    def test_no_imdb_declines(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn: (None, None, None, None))
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert os.path.exists(fp)
+
+    def test_no_cached_alternative_declines_and_keeps_file(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn: ('tt1234567', 'movie', None, None))
+        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        # The only alternative is uncached on TorBox.
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: False})
+        add_called = []
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: add_called.append(1) or (True, {}))
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert not add_called
+        assert os.path.exists(fp)
+
+    def test_wrong_tier_alternative_declined(self, tmp_dir, monkeypatch):
+        """A cached alternative at a DIFFERENT tier than the arr approved
+        must not be grabbed (don't silently downgrade/upgrade quality)."""
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn: ('tt1234567', 'movie', None, None))
+        # Rejected release was 1080p; only cached alt is 720p.
+        self._stub_search(monkeypatch,
+                          [self._candidate(self.CACHED_ALT, tier='720p')])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: (True, {}))
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert os.path.exists(fp)
+
+    def test_rejected_hash_excluded_from_candidates(self, tmp_dir, monkeypatch):
+        """Even if the rejected hash is reported cached, it is excluded from
+        the candidate set (it's the one we already know fails downstream)."""
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn: ('tt1234567', 'movie', None, None))
+        # Search returns ONLY the rejected hash -> nothing left after exclusion.
+        self._stub_search(monkeypatch, [self._candidate(self.REJECTED)])
+        self._stub_cache(monkeypatch, {self.REJECTED: True})
+        monkeypatch.setattr(w, '_add_to_torbox', lambda *a, **k: (True, {}))
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert os.path.exists(fp)
+
+    def test_happy_path_grabs_cached_alt_and_removes_file(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn: ('tt1234567', 'movie', None, None))
+        # One uncached alt + one cached alt, same tier as rejected (1080p).
+        self._stub_search(monkeypatch, [
+            self._candidate(self.CACHED_ALT, tier='1080p', seeds=50),
+            self._candidate('c' * 40, tier='1080p', seeds=5),
+        ])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True, 'c' * 40: False})
+        added = {}
+        def fake_add(path, api_key=None):
+            with open(path) as f:
+                added['magnet'] = f.read()
+            return True, {'data': {'torrent_id': 999}}
+        monkeypatch.setattr(w, '_add_to_torbox', fake_add)
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+
+        events = []
+        import utils.blackhole as bh
+        monkeypatch.setattr(bh, '_history', type('H', (), {
+            'log_event': staticmethod(lambda *a, **k: events.append((a, k)))})())
+
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is True
+        # Grabbed the cached alternative (best seeded), not the uncached one.
+        assert self.CACHED_ALT in added['magnet']
+        # Original watch-dir file removed so the scanner won't re-process it.
+        assert not os.path.exists(fp)
+        # History event records the recovery with the right cause + provider.
+        assert events
+        _, kwargs = events[0]
+        assert kwargs['meta']['cause'] == 'tb_cached_alt_grabbed'
+        assert kwargs['meta']['provider'] == 'torbox'
+        assert kwargs['meta']['rejected_provider'] == 'realdebrid'
+        assert kwargs['meta']['info_hash'] == self.CACHED_ALT
+
+    def test_torbox_add_failure_keeps_file(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn: ('tt1234567', 'movie', None, None))
+        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: (False, 'rate limit exceeded'))
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        # Add failed -> leave the file for the caller's normal handling.
+        assert os.path.exists(fp)
+
+    def test_symlink_mode_starts_monitor_and_removes_file(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir, symlink_enabled=True)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn: ('tt1234567', 'movie', None, None))
+        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: (True, {'data': {'torrent_id': 777}}))
+        started = []
+        monkeypatch.setattr(w, '_start_monitor',
+                            lambda tid, fn, label=None, debrid=None: started.append((tid, debrid)))
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is True
+        assert started == [('777', 'torbox')]
+        assert not os.path.exists(fp)
+
+    def test_symlink_mode_no_torrent_id_declines_and_keeps_file(self, tmp_dir, monkeypatch):
+        """If the torrent id can't be extracted in symlink mode, the alt would
+        be orphaned on TorBox with no monitor — decline (and keep the original
+        for the caller's normal handling) rather than silently claim success."""
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir, symlink_enabled=True)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn: ('tt1234567', 'movie', None, None))
+        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        # TorBox add "succeeds" but returns a body with no extractable id.
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: (True, {'data': {}}))
+        started = []
+        monkeypatch.setattr(w, '_start_monitor',
+                            lambda *a, **k: started.append(1))
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert not started
+        assert os.path.exists(fp)

@@ -481,6 +481,25 @@ def _get_folder_mtime(path):
         return 0
 
 
+def _parse_tb_timestamp(value):
+    """Parse a TorBox ``created_at`` string to a Unix timestamp, or 0.
+
+    TorBox returns ISO-8601 (``2024-01-15T12:34:56.000Z`` or with a
+    ``+00:00`` offset).  Used to populate ``date_added`` for API-scanned
+    TB items — better than the old FUSE-walk folder mtime, since it's the
+    real torrent-add time rather than whenever rclone materialised the dir.
+    """
+    if not isinstance(value, str) or not value:
+        return 0
+    v = value.strip()
+    if v.endswith('Z'):
+        v = v[:-1] + '+00:00'
+    try:
+        return int(datetime.fromisoformat(v).timestamp())
+    except (ValueError, TypeError):
+        return 0
+
+
 def _collect_episodes(folder_path):
     """Collect episode details from a torrent folder.
 
@@ -2524,29 +2543,19 @@ class LibraryScanner:
         # "available on RD + TB" without duplicating the card.
         tb_mount = self._discover_torbox_mount()
         if tb_mount:
-            # TB is a throttled FUSE mount (rclone --tpslimit). A cold walk of
-            # a large library (~450 folders at 5 tps ≈ 90s) can't finish
-            # within the shared 30s scan deadline; it would truncate and drop
-            # TB titles, which then surface as "Wanted". Give TB its own
-            # budget, measured fresh from now so the time already spent on the
-            # RD/WebDAV scan above doesn't eat into it.
-            # Read from os.environ (not the base global) so a SIGHUP-less UI
-            # settings change takes effect on the next scan — library.py reads
-            # all config live this way; the base.TORBOX_SCAN_TIMEOUT global
-            # exists only for __all__/schema symmetry.
+            # TB enumeration goes through the mylist API, not a FUSE walk.
+            # The old per-folder scandir/stat walk over the 5-tps rclone
+            # mount (~450 folders) generated 429 storms that contended with
+            # real content downloads — occasionally abandoning an in-flight
+            # download.  One mylist call returns the whole account with zero
+            # FUSE ops.  The mount is still discovered above because it's
+            # needed for symlink TARGETS (real file access), and the
+            # synthesized item paths must match its layout.
             try:
-                tb_timeout = int(os.environ.get('TORBOX_SCAN_TIMEOUT', '180'))
-            except (ValueError, TypeError):
-                tb_timeout = 180
-            tb_deadline = time.monotonic() + max(tb_timeout, 30)
-            try:
-                tb_movies, tb_shows = self._scan_mount(
-                    tb_mount, tb_deadline, source_debrid='torbox',
-                    flat_layout=True,
-                )
+                tb_movies, tb_shows = self._scan_torbox_via_api(tb_mount)
                 tb_incomplete = self._last_scan_mount_truncated
             except Exception as e:
-                logger.warning(f"[library] TB mount scan failed: {e}")
+                logger.warning(f"[library] TB API scan failed: {e}")
                 tb_movies, tb_shows, tb_incomplete = [], [], True
 
             # An incomplete TB walk (TorBox 429 / deadline) must not be
@@ -5906,6 +5915,187 @@ class LibraryScanner:
                     episodes[key] = {'file': fname, 'path': fpath, 'size_bytes': fsize, 'folder': folder_name}
 
         return episodes
+
+    def _scan_torbox_via_api(self, tb_mount):
+        """Enumerate TorBox library content via the mylist API.
+
+        Replaces the throttled per-folder FUSE walk (``_scan_mount(
+        flat_layout=True)``): that walk issued thousands of scandir/stat
+        calls over a 5-tps rclone mount and contended with real content
+        downloads, producing 429 storms that occasionally abandoned an
+        in-flight download.  ``mylist`` returns the whole account (folder
+        names + per-file paths/sizes) in ONE HTTP call, so enumeration
+        costs zero FUSE ops.  The FUSE mount is still required for symlink
+        TARGETS (real file access) — only enumeration moves to the API.
+
+        Returns ``(movies, shows)`` in ``_scan_mount`` output shape.  Sets
+        ``self._last_scan_mount_truncated`` True (so the caller falls back
+        to its last-good TB baseline instead of dropping titles to
+        "Wanted") only when the API call FAILS — i.e. ``list_torbox_torrents``
+        returns ``None``.  An empty account (``[]``) is a complete,
+        authoritative zero-item scan and is NOT treated as incomplete.
+        """
+        self._last_scan_mount_truncated = False
+
+        from base import load_secret_or_env
+        from utils import search
+
+        api_key = load_secret_or_env('torbox_api_key')
+        if not api_key:
+            self._last_scan_mount_truncated = True
+            return [], []
+
+        # TORBOX_SCAN_TIMEOUT was the old FUSE-walk deadline; it now caps the
+        # single mylist HTTP call instead (read live from os.environ so a
+        # SIGHUP-less UI change applies next scan).  Floor at 10s — a healthy
+        # mylist responds in seconds, but a large account over a slow link
+        # shouldn't spuriously fail and drop TB to the last-good fallback.
+        try:
+            tb_timeout = max(int(os.environ.get('TORBOX_SCAN_TIMEOUT', '180')), 10)
+        except (ValueError, TypeError):
+            tb_timeout = 180
+        torrents = search.list_torbox_torrents(api_key, timeout=tb_timeout)
+        if torrents is None:
+            logger.warning("[library] TB mylist API call failed; treating "
+                           "TB scan as incomplete (will fall back to last-good)")
+            self._last_scan_mount_truncated = True
+            return [], []
+
+        # Build the per-folder structure _collect_episodes_from_webdav
+        # expects: folder name -> {'files': [(fname, size, path)],
+        # 'season_files': {subdir: [(fname, size, path)]}}.  File paths are
+        # SYNTHESIZED as <tb_mount>/<folder>/<subpath> to match the rclone
+        # FUSE layout exactly, so _create_debrid_symlinks /
+        # _resolve_symlink_target resolve them identically to a FUSE walk.
+        folders = {}
+        folder_created = {}
+        for t in torrents:
+            tname = t.get('name')
+            if not tname:
+                continue
+            bucket = folders.setdefault(tname, {'files': [], 'season_files': {}})
+            folder_created[tname] = max(
+                folder_created.get(tname, 0),
+                _parse_tb_timestamp(t.get('created_at')),
+            )
+            for f in t.get('files', []):
+                frel = f.get('name')
+                if not frel:
+                    continue
+                # mylist file names are the full relative path INCLUDING the
+                # torrent folder; strip the leading "<folder>/" so the
+                # remaining depth (1 = flat file, 2 = season subdir) mirrors
+                # the WebDAV grouping consumed below.
+                if frel.startswith(tname + '/'):
+                    sub = frel[len(tname) + 1:]
+                else:
+                    sub = os.path.basename(frel)
+                # Strip leading slashes: a crafted/odd API path that strips to
+                # "/abs/path" would make os.path.join DISCARD tb_mount+tname
+                # (absolute component wins), escaping the mount root. Reject
+                # ".." components for the same reason — synthesized paths must
+                # stay under <tb_mount>/<tname> so _resolve_symlink_target maps
+                # them and nothing points outside the TB mount.
+                sub = sub.lstrip('/')
+                if not sub or '..' in sub.split('/'):
+                    continue
+                size = f.get('size', 0)
+                if not isinstance(size, int) or size < 0:
+                    size = 0
+                synth_path = os.path.join(tb_mount, tname, sub)
+                subparts = sub.split('/')
+                if len(subparts) == 1:
+                    bucket['files'].append((subparts[0], size, synth_path))
+                elif len(subparts) == 2:
+                    bucket['season_files'].setdefault(subparts[0], []).append(
+                        (subparts[1], size, synth_path)
+                    )
+                # Deeper nesting is ignored — mirrors _webdav_scan_mount,
+                # which only buckets 2- and 3-level paths.
+
+        show_groups = {}
+        movie_groups = {}
+        for folder_name, contents in folders.items():
+            title, year = _parse_folder_name(folder_name)
+            if not title:
+                continue
+            episodes = self._collect_episodes_from_webdav(contents, folder_name)
+            is_show = len(episodes) > 0
+            # Flat-layout TV-marker fallback (mirrors _scan_mount): a season
+            # pack still caching on TB carries the marker in its folder name
+            # but has no SxxExx files yet.  Flip to show WITHOUT injecting
+            # synthetic episodes; the next scan fills in real files.
+            if not is_show and _detect_tv_marker(folder_name):
+                is_show = True
+            created = folder_created.get(folder_name, 0)
+            if is_show:
+                season_counts = {}
+                for ep_key in episodes:
+                    season_counts[ep_key[0]] = season_counts.get(ep_key[0], 0) + 1
+                for ep_key in episodes:
+                    episodes[ep_key]['_folder_ep_count'] = season_counts[ep_key[0]]
+                key = _normalize_title(title)
+                _merge_show_group(show_groups, key, title, year, episodes,
+                                  os.path.join(tb_mount, folder_name))
+                g = show_groups[key]
+                if created > g.get('date_added', 0):
+                    g['date_added'] = created
+            else:
+                key = _normalize_title(title)
+                if key not in movie_groups:
+                    movie_groups[key] = {
+                        'title': title,
+                        'year': year,
+                        'path': os.path.join(tb_mount, folder_name),
+                        'date_added': created,
+                        '_contents': contents,
+                    }
+                else:
+                    if year and not movie_groups[key]['year']:
+                        movie_groups[key]['year'] = year
+                        movie_groups[key]['title'] = title
+                    if created > movie_groups[key].get('date_added', 0):
+                        movie_groups[key]['date_added'] = created
+
+        movies = []
+        for g in movie_groups.values():
+            mq, msz = _get_movie_quality_from_webdav(g.get('_contents', {}))
+            movies.append({
+                'title': g['title'],
+                'year': g['year'],
+                'source': 'debrid',
+                'source_debrid': 'torbox',
+                'type': 'movie',
+                'seasons': 0,
+                'episodes': 0,
+                'path': g['path'],
+                'quality': mq,
+                'size_bytes': msz,
+                'date_added': g.get('date_added', 0),
+            })
+
+        shows = []
+        for g in show_groups.values():
+            eps = g['episodes']
+            unique_seasons = {s for s, _e in eps} if eps else set()
+            shows.append({
+                'title': g['title'],
+                'year': g['year'],
+                'source': 'debrid',
+                'source_debrid': 'torbox',
+                'type': 'show',
+                'seasons': len(unique_seasons),
+                'episodes': len(eps),
+                '_episodes': eps,
+                'path': g['path'],
+                'date_added': g.get('date_added', 0),
+            })
+
+        logger.debug(
+            f"[library] TB API scan: {len(torrents)} torrents → "
+            f"{len(movies)} movies, {len(shows)} shows"
+        )
+        return movies, shows
 
     def _scan_local_movies(self):
         items = []

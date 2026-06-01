@@ -6082,11 +6082,11 @@ class TestTbScanTruncationFallback:
         monkeypatch.setattr(scanner, '_webdav_scan_mount', lambda *a, **k: ([], []))
         monkeypatch.setattr(scanner, '_discover_torbox_mount', lambda: '/nonexistent/tb')
 
-        def fake_scan_mount(mount_path, deadline=None, source_debrid=None, flat_layout=False):
+        def fake_scan_api(tb_mount):
             scanner._last_scan_mount_truncated = truncated
             return tb_partial
 
-        monkeypatch.setattr(scanner, '_scan_mount', fake_scan_mount)
+        monkeypatch.setattr(scanner, '_scan_torbox_via_api', fake_scan_api)
         return scanner
 
     def test_scan_read_complete_scan_promotes_last_good(self, monkeypatch):
@@ -6108,11 +6108,11 @@ class TestTbScanTruncationFallback:
         # Next scan is truncated and only returns Alpha (Beta dropped by 429).
         partial = [{'title': 'Alpha', 'year': 2020, 'type': 'movie', 'source': 'debrid', 'source_debrid': 'torbox'}]
 
-        def fake_partial(mount_path, deadline=None, source_debrid=None, flat_layout=False):
+        def fake_partial(tb_mount):
             scanner._last_scan_mount_truncated = True
             return (partial, [])
 
-        monkeypatch.setattr(scanner, '_scan_mount', fake_partial)
+        monkeypatch.setattr(scanner, '_scan_torbox_via_api', fake_partial)
         data = scanner._scan_read()
         titles = {m['title'] for m in data['movies']}
         # Beta survives via last-good despite being absent from the partial scan.
@@ -6552,3 +6552,169 @@ class TestMergeShowGroup:
         _merge_show_group(groups, 'show1', 'Show', 2024, eps, '/mnt/new')
         # Season-pack version wins.
         assert groups['show1']['episodes'][(1, 1)]['file'] == 'high_quality.mkv'
+
+
+class TestScanTorboxViaApi:
+    """_scan_torbox_via_api enumerates TB via the mylist API (no FUSE walk)."""
+
+    TB_MOUNT = '/data/torbox'
+
+    def _scan(self, torrents, api_key='tbkey'):
+        from unittest.mock import patch
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        with patch('base.load_secret_or_env', return_value=api_key), \
+             patch('utils.search.list_torbox_torrents', return_value=torrents):
+            movies, shows = scanner._scan_torbox_via_api(self.TB_MOUNT)
+        return scanner, movies, shows
+
+    def test_splits_movies_and_shows(self):
+        torrents = [
+            {'name': 'Big.Movie.2021.1080p', 'hash': 'a' * 40,
+             'created_at': '2024-01-15T12:00:00Z',
+             'files': [{'name': 'Big.Movie.2021.1080p/big.mkv', 'size': 10}]},
+            {'name': 'Cool.Show.S01.1080p', 'hash': 'b' * 40,
+             'created_at': '2024-02-01T00:00:00Z',
+             'files': [
+                 {'name': 'Cool.Show.S01.1080p/Cool.Show.S01E01.mkv', 'size': 5},
+                 {'name': 'Cool.Show.S01.1080p/Cool.Show.S01E02.mkv', 'size': 6},
+             ]},
+        ]
+        _, movies, shows = self._scan(torrents)
+        assert [m['title'] for m in movies] == ['Big Movie']
+        assert len(shows) == 1
+        assert shows[0]['episodes'] == 2
+        assert shows[0]['seasons'] == 1
+        for item in movies + shows:
+            assert item['source'] == 'debrid'
+            assert item['source_debrid'] == 'torbox'
+
+    def test_synthesized_paths_are_under_mount(self):
+        """The make-or-break property: every episode/movie path must live
+        under the TB mount so _resolve_symlink_target maps it to the TB
+        symlink base (prefix match against realpath(tb_mount))."""
+        torrents = [
+            {'name': 'Cool.Show.S01.1080p',
+             'files': [{'name': 'Cool.Show.S01.1080p/Cool.Show.S01E01.mkv', 'size': 5}]},
+        ]
+        _, _movies, shows = self._scan(torrents)
+        ep = shows[0]['_episodes'][(1, 1)]
+        assert ep['path'] == os.path.join(
+            self.TB_MOUNT, 'Cool.Show.S01.1080p', 'Cool.Show.S01E01.mkv')
+        assert ep['path'].startswith(self.TB_MOUNT + os.sep)
+
+    def test_movie_quality_and_size_from_api(self):
+        """Movies must carry quality + size derived from the API file data,
+        not all-None / 0 (the UI sorts and displays on these)."""
+        torrents = [
+            {'name': 'Big.Movie.2021.1080p',
+             'files': [{'name': 'Big.Movie.2021.1080p/Big.Movie.2021.1080p.BluRay.x264.mkv',
+                        'size': 1_000_000}]},
+        ]
+        _, movies, _shows = self._scan(torrents)
+        assert movies[0]['quality']['resolution'] == '1080p'
+        assert movies[0]['size_bytes'] == 1_000_000
+
+    def test_absolute_subpath_does_not_escape_mount(self):
+        """A file whose stripped sub-path is absolute must not escape the
+        mount (os.path.join would otherwise discard the mount prefix)."""
+        torrents = [
+            {'name': 'Weird.Show.S01',
+             'files': [
+                 {'name': 'Weird.Show.S01//Weird.Show.S01E01.mkv', 'size': 4},
+             ]},
+        ]
+        _, _movies, shows = self._scan(torrents)
+        # The leading-slash sub is normalised; the episode path stays under
+        # the mount (or the entry is skipped) — never an absolute escape.
+        for ep in (shows[0]['_episodes'].values() if shows else []):
+            assert ep['path'].startswith(self.TB_MOUNT + os.sep)
+
+    def test_traversal_components_rejected(self):
+        torrents = [
+            {'name': 'Show',
+             'files': [{'name': 'Show/../escape.mkv', 'size': 4}]},
+        ]
+        _, movies, shows = self._scan(torrents)
+        # No episode/movie path may contain a traversal escape.
+        paths = [m['path'] for m in movies]
+        for s in shows:
+            paths += [ep['path'] for ep in s['_episodes'].values()]
+        for p in paths:
+            assert '..' not in p.split(os.sep)
+
+    def test_season_subdir_episodes(self):
+        torrents = [
+            {'name': 'Nested.Show',
+             'files': [
+                 {'name': 'Nested.Show/Season 1/Nested.Show.S01E05.mkv', 'size': 9},
+             ]},
+        ]
+        _, _movies, shows = self._scan(torrents)
+        assert (1, 5) in shows[0]['_episodes']
+        assert shows[0]['_episodes'][(1, 5)]['path'] == os.path.join(
+            self.TB_MOUNT, 'Nested.Show', 'Season 1', 'Nested.Show.S01E05.mkv')
+
+    def test_file_name_without_folder_prefix(self):
+        """A file whose name lacks the folder prefix is placed under the
+        folder by basename so the synthesized path still matches FUSE."""
+        torrents = [
+            {'name': 'Odd.Movie.2020',
+             'files': [{'name': 'odd.mkv', 'size': 3}]},
+        ]
+        _, movies, _shows = self._scan(torrents)
+        assert len(movies) == 1
+        assert movies[0]['path'] == os.path.join(self.TB_MOUNT, 'Odd.Movie.2020')
+
+    def test_tv_marker_fallback_classifies_show(self):
+        """Season-pack folder still caching (no SxxExx files) is classified
+        as a show via the folder-name marker, with 0 episodes."""
+        torrents = [
+            {'name': 'Pending.Show.S03.COMPLETE.1080p', 'files': []},
+        ]
+        _, movies, shows = self._scan(torrents)
+        assert movies == []
+        assert len(shows) == 1
+        assert shows[0]['episodes'] == 0
+
+    def test_api_failure_marks_incomplete(self):
+        scanner, movies, shows = self._scan(None)
+        assert (movies, shows) == ([], [])
+        assert scanner._last_scan_mount_truncated is True
+
+    def test_empty_account_is_complete(self):
+        scanner, movies, shows = self._scan([])
+        assert (movies, shows) == ([], [])
+        assert scanner._last_scan_mount_truncated is False
+
+    def test_no_api_key_marks_incomplete(self):
+        scanner, movies, shows = self._scan([{'name': 'x'}], api_key=None)
+        assert (movies, shows) == ([], [])
+        assert scanner._last_scan_mount_truncated is True
+
+    def test_date_added_from_created_at(self):
+        from utils.library import _parse_tb_timestamp
+        ts = '2024-01-15T12:00:00Z'
+        torrents = [
+            {'name': 'Dated.Movie.2021', 'created_at': ts,
+             'files': [{'name': 'Dated.Movie.2021/m.mkv', 'size': 1}]},
+        ]
+        _, movies, _shows = self._scan(torrents)
+        assert movies[0]['date_added'] == _parse_tb_timestamp(ts)
+        assert movies[0]['date_added'] > 0
+
+
+class TestParseTbTimestamp:
+    def test_z_suffix(self):
+        from utils.library import _parse_tb_timestamp
+        assert _parse_tb_timestamp('2024-01-15T12:00:00Z') > 0
+
+    def test_offset_form(self):
+        from utils.library import _parse_tb_timestamp
+        assert _parse_tb_timestamp('2024-01-15T12:00:00+00:00') > 0
+
+    def test_invalid_returns_zero(self):
+        from utils.library import _parse_tb_timestamp
+        assert _parse_tb_timestamp('not-a-date') == 0
+        assert _parse_tb_timestamp('') == 0
+        assert _parse_tb_timestamp(None) == 0
+        assert _parse_tb_timestamp(12345) == 0

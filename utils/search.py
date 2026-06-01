@@ -256,6 +256,12 @@ def search_torrentio(imdb_id, media_type='movie', season=None, episode=None):
 # spuriously return "unknown".
 _CACHE_PROBE_TIMEOUT = 10
 
+# mylist returns the FULL account (hundreds of torrents, each with its file
+# list) in one response — a much bigger payload than a cache probe, so it
+# gets a longer ceiling.  This is the library-enumeration path; it must not
+# share the snappy cache-probe budget.
+_MYLIST_TIMEOUT = 30
+
 # Cap TorBox per-hash fan-out so a large Torrentio result set cannot
 # produce a ``N * _CACHE_PROBE_TIMEOUT`` wall-clock stall holding the
 # status-server worker thread.  Callers that want more coverage should
@@ -619,6 +625,65 @@ def _existing_hashes_tb(api_key):
         h = _coerce_hash(entry.get('hash'))
         if h:
             out.add(h)
+    return out
+
+
+def list_torbox_torrents(api_key, timeout=_MYLIST_TIMEOUT):
+    """TB: GET /v1/api/torrents/mylist → full per-torrent listing.
+
+    Returns the entire account in ONE call so the library scanner can
+    enumerate TorBox content without walking the throttled FUSE mount
+    (the source of the rclone 429 storms).  Each returned dict carries the
+    release-folder ``name`` (matches the rclone mount folder) and a ``files``
+    list whose ``name`` is the full relative path *including* that folder.
+
+    Returns a ``list[dict]`` on success or ``None`` on any API failure, so
+    the caller can distinguish "TB has zero torrents" (``[]``) from "couldn't
+    reach TB" (``None``) and fall back to its last-good baseline.
+    """
+    headers = {'Authorization': f'Bearer {api_key}'}
+    # bypass_cache=true: TorBox caches mylist server-side, so without this a
+    # scan can promote a STALE page as the authoritative TB baseline and drop
+    # since-added titles to "Wanted".  Mirrors debrid_client.list_torrents.
+    data = _urllib_get(
+        'https://api.torbox.app/v1/api/torrents/mylist?bypass_cache=true',
+        headers=headers, timeout=timeout,
+    )
+    if not isinstance(data, dict) or not data.get('success'):
+        return None
+    payload = data.get('data') if isinstance(data.get('data'), list) else []
+    out = []
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get('name')
+        if not isinstance(name, str) or not name:
+            continue
+        files = []
+        raw_files = entry.get('files')
+        if isinstance(raw_files, list):
+            for f in raw_files:
+                if not isinstance(f, dict):
+                    continue
+                fname = f.get('name')
+                if not isinstance(fname, str) or not fname:
+                    continue
+                size = f.get('size')
+                if not isinstance(size, int) or size < 0:
+                    size = 0
+                short = f.get('short_name')
+                files.append({
+                    'name': fname,
+                    'short_name': short if isinstance(short, str) else os.path.basename(fname),
+                    'size': size,
+                })
+        out.append({
+            'name': name,
+            'hash': _coerce_hash(entry.get('hash')),
+            'id': entry.get('id'),
+            'files': files,
+            'created_at': entry.get('created_at'),
+        })
     return out
 
 

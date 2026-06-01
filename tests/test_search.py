@@ -998,6 +998,82 @@ class TestExistingHashesHelpers:
             mock_get.return_value = ['garbage']
             assert _existing_hashes_tb('key') is None
 
+    def test_list_torbox_torrents_parses_success(self):
+        from utils.search import list_torbox_torrents
+        with patch('utils.search._urllib_get') as mock_get:
+            mock_get.return_value = {
+                'success': True,
+                'data': [
+                    {
+                        'name': 'Some.Movie.2021.1080p',
+                        'hash': 'A' * 40,
+                        'id': 7,
+                        'created_at': '2024-01-15T12:00:00Z',
+                        'files': [
+                            {'name': 'Some.Movie.2021.1080p/movie.mkv',
+                             'short_name': 'movie.mkv', 'size': 1234},
+                        ],
+                    },
+                ],
+            }
+            out = list_torbox_torrents('key')
+        assert out == [{
+            'name': 'Some.Movie.2021.1080p',
+            'hash': 'a' * 40,
+            'id': 7,
+            'created_at': '2024-01-15T12:00:00Z',
+            'files': [{'name': 'Some.Movie.2021.1080p/movie.mkv',
+                       'short_name': 'movie.mkv', 'size': 1234}],
+        }]
+
+    def test_list_torbox_torrents_failure_returns_none(self):
+        from utils.search import list_torbox_torrents
+        with patch('utils.search._urllib_get') as mock_get:
+            mock_get.return_value = None
+            assert list_torbox_torrents('key') is None
+            mock_get.return_value = {'success': False}
+            assert list_torbox_torrents('key') is None
+            mock_get.return_value = ['garbage']
+            assert list_torbox_torrents('key') is None
+
+    def test_list_torbox_torrents_skips_malformed_entries(self):
+        from utils.search import list_torbox_torrents
+        with patch('utils.search._urllib_get') as mock_get:
+            mock_get.return_value = {
+                'success': True,
+                'data': [
+                    'not-a-dict',
+                    {'name': ''},                      # empty name → skip
+                    {'name': None},                    # non-str name → skip
+                    {'name': 'OK', 'files': 'nope'},   # files not a list → []
+                    {'name': 'Has.Files', 'files': [
+                        'not-a-dict',
+                        {'name': ''},                  # empty file name → skip
+                        {'name': 123},                 # non-str → skip
+                        {'name': 'Has.Files/a.mkv', 'size': -5},  # bad size → 0
+                        {'name': 'Has.Files/b.mkv'},   # missing size → 0, short derived
+                    ]},
+                ],
+            }
+            out = list_torbox_torrents('key')
+        names = [t['name'] for t in out]
+        assert names == ['OK', 'Has.Files']
+        ok = next(t for t in out if t['name'] == 'OK')
+        assert ok['files'] == []
+        hf = next(t for t in out if t['name'] == 'Has.Files')
+        assert hf['files'] == [
+            {'name': 'Has.Files/a.mkv', 'short_name': 'a.mkv', 'size': 0},
+            {'name': 'Has.Files/b.mkv', 'short_name': 'b.mkv', 'size': 0},
+        ]
+        assert hf['hash'] is None
+
+    def test_list_torbox_torrents_passes_timeout(self):
+        from utils.search import list_torbox_torrents
+        with patch('utils.search._urllib_get') as mock_get:
+            mock_get.return_value = {'success': True, 'data': []}
+            list_torbox_torrents('key', timeout=42)
+        assert mock_get.call_args.kwargs['timeout'] == 42
+
     def test_hash_field_not_a_string_skipped(self):
         """Entries with non-string ``hash`` fields (e.g. ``{'hash': 123}``)
         must be skipped, not crash on ``.strip()``."""

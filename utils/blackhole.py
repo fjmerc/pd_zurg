@@ -56,6 +56,19 @@ MAX_RETRIES = 3
 # first even when a popular title returns far more streams than this.
 _TB_ALT_MAX_PROBES = 12
 
+# Suppress redundant cached-alternative recovery grabs for the same
+# (imdb_id, season) within this window.  When a whole season is
+# uncached-but-Wanted, the arr drops every episode's .magnet at once; without
+# this guard each episode independently grabs a cached alternative and — before
+# the first pack lands (~300s) and gets symlinked — siblings pick *different*
+# season packs, grabbing 3+ full-season packs for one season and multiplying the
+# rclone VFS download load into a TorBox 429 storm.  One cached pack recovers the
+# whole season, so the first grab wins and the rest defer.  Sized to cover the
+# grab→land→hourly-scan→symlink window; after content lands, the local-dedup
+# check skips re-drops anyway, and a still-missing episode self-heals via the
+# arr re-drop once this expires.
+_TB_ALT_DEDUP_TTL = 21600  # 6 hours
+
 # Plan 41 phase A — rescue-staging filename layout.  When the add-time
 # cross-rescue stages ``file_path`` to ``.alt_pending/`` before the
 # 60s wait_ready loop, it prefixes with ``.rescue-<uuid8>-`` so the
@@ -1259,6 +1272,12 @@ class BlackholeWatcher:
         self._audit_retrigger_lock = threading.Lock()
         self._AUDIT_RETRIGGER_COOLDOWN = 7200  # 2 hours
         self._AUDIT_RETRIGGER_MAX_PER_WINDOW = 3  # caps retries within window
+
+        # Dedup for TorBox cached-alternative recovery: one grabbed pack
+        # recovers a whole season, so the first grab for an (imdb_id, season)
+        # suppresses sibling episode grabs within _TB_ALT_DEDUP_TTL.
+        self._tb_alt_recent_grabs = {}  # {(imdb_id, season): epoch}
+        self._tb_alt_grabs_lock = threading.Lock()
         if symlink_enabled:
             self._pending_file = os.path.join(completed_dir, 'pending_monitors.json')
         else:
@@ -3491,6 +3510,18 @@ class BlackholeWatcher:
                 logger.debug(f"[blackhole] TB-alt: no IMDb id for {filename}; skipping")
                 return False
 
+            # One cached pack recovers the whole season — if a sibling episode
+            # already grabbed an alternative for this (imdb_id, season), skip
+            # the redundant search/probe/grab that would pull another pack and
+            # multiply the rclone VFS load.  Checked before the Torrentio search
+            # so we also spare the TorBox cache-probe API calls.
+            dedup_key = (imdb_id, season)
+            if self._tb_alt_recently_grabbed(dedup_key):
+                logger.info(f"[blackhole] TB-alt: already recovered "
+                            f"{imdb_id} (season={season}) within TTL; "
+                            f"skipping redundant grab for {filename}")
+                return False
+
             results = search_torrentio(
                 imdb_id, media_type=media_type, season=season, episode=episode,
             )
@@ -3597,6 +3628,11 @@ class BlackholeWatcher:
             remember_added_hash('torbox', alt_hash)
         except ImportError:
             pass
+        # Suppress sibling-episode grabs for this season for _TB_ALT_DEDUP_TTL.
+        # dedup_key is always bound here: the only way to reach this line is to
+        # fall through the candidate-resolution try block (whose except returns
+        # False), and dedup_key is assigned before any code that can do so.
+        self._remember_tb_alt_grab(dedup_key)
         try:
             os.remove(file_path)
         except OSError as e:
@@ -3633,6 +3669,25 @@ class BlackholeWatcher:
             logger.warning(f"[blackhole] TB-alt: post-recovery bookkeeping failed for "
                            f"{filename}: {e}")
         return True
+
+    def _tb_alt_recently_grabbed(self, key):
+        """True if a cached alternative was grabbed for this (imdb_id, season)
+        within _TB_ALT_DEDUP_TTL.  Prunes expired entries opportunistically so
+        the dict stays bounded over a long-running process."""
+        now = time.time()
+        with self._tb_alt_grabs_lock:
+            expired = [k for k, ts in self._tb_alt_recent_grabs.items()
+                       if now - ts >= _TB_ALT_DEDUP_TTL]
+            for k in expired:
+                del self._tb_alt_recent_grabs[k]
+            # Anything still present is, by construction, within the TTL.
+            return key in self._tb_alt_recent_grabs
+
+    def _remember_tb_alt_grab(self, key):
+        """Record that a cached alternative was grabbed for this (imdb_id,
+        season) so sibling-episode grabs in the same burst are suppressed."""
+        with self._tb_alt_grabs_lock:
+            self._tb_alt_recent_grabs[key] = time.time()
 
     @staticmethod
     def _compromise_enabled():

@@ -4691,3 +4691,107 @@ class TestTorboxCachedAlternative:
             fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
         assert not started
         assert os.path.exists(fp)
+
+    def test_dedup_suppresses_second_grab_for_same_season(self, tmp_dir, monkeypatch):
+        """One cached pack recovers a whole season: after the first episode of
+        a season grabs an alternative, a sibling episode is skipped before any
+        search/probe/grab — this is what stops 3+ packs landing for one season
+        and overdriving the rclone VFS into a TorBox 429 storm."""
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn: ('tt999', 'series', 2, 1))
+        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        adds = []
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: adds.append(1) or (True, {}))
+        fp1 = self._make_file(tmp_dir, 'Show.S02E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp1, os.path.basename(fp1), self.REJECTED, 'realdebrid') is True
+        assert len(adds) == 1
+        # Sibling episode of the SAME season: suppressed, file kept, no 2nd add.
+        fp2 = self._make_file(tmp_dir, 'Show.S02E02.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp2, os.path.basename(fp2), self.REJECTED, 'realdebrid') is False
+        assert len(adds) == 1
+        assert os.path.exists(fp2)
+
+    def test_dedup_does_not_suppress_a_different_season(self, tmp_dir, monkeypatch):
+        """The dedup key is (imdb_id, season) — a grab for S02 must not block
+        recovery of S03."""
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        ident = {'season': 2}
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn: ('tt999', 'series', ident['season'], 1))
+        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        adds = []
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: adds.append(1) or (True, {}))
+        fp1 = self._make_file(tmp_dir, 'Show.S02E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp1, os.path.basename(fp1), self.REJECTED, 'realdebrid') is True
+        ident['season'] = 3
+        fp2 = self._make_file(tmp_dir, 'Show.S03E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp2, os.path.basename(fp2), self.REJECTED, 'realdebrid') is True
+        assert len(adds) == 2
+
+    def test_dedup_not_set_when_grab_fails(self, tmp_dir, monkeypatch):
+        """The guard records only on a committed grab — a failed first attempt
+        (no cached alt) must not poison the season so a later sibling can still
+        recover once an alternative becomes cached."""
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn: ('tt999', 'series', 2, 1))
+        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        cache = {self.CACHED_ALT: False}  # uncached on first attempt
+        import utils.search as search
+        monkeypatch.setattr(search, 'check_debrid_cache',
+                            lambda hashes, **k: {h: cache.get(h) for h in hashes})
+        monkeypatch.setattr(search, 'remember_added_hash', lambda *a, **k: None)
+        adds = []
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: adds.append(1) or (True, {}))
+        fp1 = self._make_file(tmp_dir, 'Show.S02E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp1, os.path.basename(fp1), self.REJECTED, 'realdebrid') is False
+        assert not adds
+        # Now the alternative is cached — the season was NOT poisoned, so a
+        # sibling episode recovers normally.
+        cache[self.CACHED_ALT] = True
+        fp2 = self._make_file(tmp_dir, 'Show.S02E02.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp2, os.path.basename(fp2), self.REJECTED, 'realdebrid') is True
+        assert len(adds) == 1
+
+    def test_dedup_key_for_movie_uses_none_season(self, tmp_dir, monkeypatch):
+        """Movies key on (imdb_id, None).  A successful grab records the key,
+        so a re-drop of the same movie is suppressed — and the None season
+        never collides with a different movie's key."""
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        imdb = {'id': 'tt111'}
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn: (imdb['id'], 'movie', None, None))
+        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        adds = []
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: adds.append(1) or (True, {}))
+        fp1 = self._make_file(tmp_dir, 'Movie.A.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp1, os.path.basename(fp1), self.REJECTED, 'realdebrid') is True
+        # Same movie re-dropped -> suppressed (already recovered).
+        fp2 = self._make_file(tmp_dir, 'Movie.A.REPACK.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp2, os.path.basename(fp2), self.REJECTED, 'realdebrid') is False
+        # A DIFFERENT movie (different imdb) is not collided by the None season.
+        imdb['id'] = 'tt222'
+        fp3 = self._make_file(tmp_dir, 'Movie.B.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp3, os.path.basename(fp3), self.REJECTED, 'realdebrid') is True
+        assert len(adds) == 2

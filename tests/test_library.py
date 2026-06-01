@@ -6008,6 +6008,165 @@ class TestScanMountFlatLayout:
         assert shows[0]['episodes'] == 3
 
 
+class TestTbScanTruncationFallback:
+    """A TorBox FUSE walk that gets rate-limited (429) or hits its deadline
+    must not drop TB titles to "Wanted". _scan_mount flags the truncation;
+    _scan_read falls back to the last COMPLETE scan, unioning the partial
+    over it. Regression: pre-fix, _scan_mount discarded its timed_out flag
+    and the caller fed the partial set straight into the merge, so every
+    truncated hourly scan wiped the missing TB titles.
+    """
+
+    def test_scan_mount_sets_truncated_flag_on_deadline(self, tmp_dir):
+        """A deadline already in the past trips the truncation flag."""
+        tb_mount = os.path.join(tmp_dir, 'tb')
+        os.makedirs(tb_mount)
+        d = os.path.join(tb_mount, 'My.Movie.2024.1080p-FLUX')
+        os.makedirs(d)
+        with open(os.path.join(d, 'My.Movie.2024.mkv'), 'w') as f:
+            f.write('video')
+        scanner = library.LibraryScanner()
+        # Deadline 100s in the past → the first entry check trips the timeout.
+        scanner._scan_mount(
+            tb_mount, deadline=time.monotonic() - 100,
+            source_debrid='torbox', flat_layout=True,
+        )
+        assert scanner._last_scan_mount_truncated is True
+
+    def test_scan_mount_clears_truncated_flag_on_clean_scan(self, tmp_dir):
+        """A complete walk leaves the flag False (and resets a prior True)."""
+        tb_mount = os.path.join(tmp_dir, 'tb')
+        os.makedirs(tb_mount)
+        d = os.path.join(tb_mount, 'My.Movie.2024.1080p-FLUX')
+        os.makedirs(d)
+        with open(os.path.join(d, 'My.Movie.2024.mkv'), 'w') as f:
+            f.write('video')
+        scanner = library.LibraryScanner()
+        scanner._last_scan_mount_truncated = True  # stale prior state
+        scanner._scan_mount(
+            tb_mount, source_debrid='torbox', flat_layout=True,
+        )
+        assert scanner._last_scan_mount_truncated is False
+
+    def test_union_tb_items_partial_wins_and_carries_last_good(self):
+        scanner = library.LibraryScanner()
+        last_good = [
+            {'title': 'Alpha', 'year': 2020, 'quality': '720p'},
+            {'title': 'Beta', 'year': 2021, 'quality': '1080p'},
+        ]
+        partial = [
+            {'title': 'Alpha', 'year': 2020, 'quality': '2160p'},  # upgraded
+            {'title': 'Gamma', 'year': 2022, 'quality': '1080p'},  # new
+        ]
+        out = scanner._union_tb_items(last_good, partial)
+        by_title = {it['title']: it for it in out}
+        assert set(by_title) == {'Alpha', 'Beta', 'Gamma'}
+        # Partial wins on collision (fresh quality), Beta carried from last-good.
+        assert by_title['Alpha']['quality'] == '2160p'
+        assert by_title['Beta']['quality'] == '1080p'
+
+    def test_union_tb_items_empty_inputs(self):
+        scanner = library.LibraryScanner()
+        assert scanner._union_tb_items([], []) == []
+        assert scanner._union_tb_items(None, None) == []
+        out = scanner._union_tb_items(None, [{'title': 'X', 'year': 2020}])
+        assert len(out) == 1 and out[0]['title'] == 'X'
+
+    def _make_scanner_for_scan_read(self, monkeypatch, tb_partial, truncated):
+        """Build a scanner whose RD path is a no-op and whose TB scan returns
+        ``tb_partial`` with the given truncation flag, so _scan_read exercises
+        only the TB fallback branch."""
+        scanner = library.LibraryScanner()
+        scanner._mount_path = '/nonexistent/rd'
+        # RD WebDAV + FUSE both yield nothing, no exceptions.
+        monkeypatch.setattr(scanner, '_webdav_scan_mount', lambda *a, **k: ([], []))
+        monkeypatch.setattr(scanner, '_discover_torbox_mount', lambda: '/nonexistent/tb')
+
+        def fake_scan_mount(mount_path, deadline=None, source_debrid=None, flat_layout=False):
+            scanner._last_scan_mount_truncated = truncated
+            return tb_partial
+
+        monkeypatch.setattr(scanner, '_scan_mount', fake_scan_mount)
+        return scanner
+
+    def test_scan_read_complete_scan_promotes_last_good(self, monkeypatch):
+        movies = [{'title': 'Alpha', 'year': 2020, 'type': 'movie', 'source': 'debrid', 'source_debrid': 'torbox'}]
+        scanner = self._make_scanner_for_scan_read(monkeypatch, (movies, []), truncated=False)
+        scanner._scan_read()
+        assert scanner._last_tb_movies is not None
+        assert [m['title'] for m in scanner._last_tb_movies] == ['Alpha']
+
+    def test_scan_read_truncated_falls_back_to_last_good(self, monkeypatch):
+        """A truncated scan that drops 'Beta' still surfaces it via last-good."""
+        full = [
+            {'title': 'Alpha', 'year': 2020, 'type': 'movie', 'source': 'debrid', 'source_debrid': 'torbox'},
+            {'title': 'Beta', 'year': 2021, 'type': 'movie', 'source': 'debrid', 'source_debrid': 'torbox'},
+        ]
+        scanner = self._make_scanner_for_scan_read(monkeypatch, (full, []), truncated=False)
+        scanner._scan_read()  # complete scan → baseline = {Alpha, Beta}
+
+        # Next scan is truncated and only returns Alpha (Beta dropped by 429).
+        partial = [{'title': 'Alpha', 'year': 2020, 'type': 'movie', 'source': 'debrid', 'source_debrid': 'torbox'}]
+
+        def fake_partial(mount_path, deadline=None, source_debrid=None, flat_layout=False):
+            scanner._last_scan_mount_truncated = True
+            return (partial, [])
+
+        monkeypatch.setattr(scanner, '_scan_mount', fake_partial)
+        data = scanner._scan_read()
+        titles = {m['title'] for m in data['movies']}
+        # Beta survives via last-good despite being absent from the partial scan.
+        assert 'Alpha' in titles and 'Beta' in titles
+        # Baseline NOT overwritten by the partial.
+        assert {m['title'] for m in scanner._last_tb_movies} == {'Alpha', 'Beta'}
+
+    def test_scan_read_truncated_no_baseline_uses_partial(self, monkeypatch):
+        """First-ever scan truncated, no last-good → use partial, don't promote."""
+        partial = [{'title': 'Alpha', 'year': 2020, 'type': 'movie', 'source': 'debrid', 'source_debrid': 'torbox'}]
+        scanner = self._make_scanner_for_scan_read(monkeypatch, (partial, []), truncated=True)
+        data = scanner._scan_read()
+        assert {m['title'] for m in data['movies']} == {'Alpha'}
+        # Partial must NOT become the baseline.
+        assert scanner._last_tb_movies is None
+
+    def test_scan_read_baseline_isolated_from_downstream_mutation(self, monkeypatch):
+        """The promoted baseline must be a deep copy — downstream stages mutate
+        the returned item dicts in place, and a shallow copy would corrupt the
+        last-good set for the next truncated scan."""
+        movies = [{'title': 'Alpha', 'year': 2020, 'type': 'movie', 'source': 'debrid', 'source_debrid': 'torbox'}]
+        scanner = self._make_scanner_for_scan_read(monkeypatch, (movies, []), truncated=False)
+        data = scanner._scan_read()
+        # Simulate a downstream stage mutating the returned dict in place.
+        for m in data['movies']:
+            if m['title'] == 'Alpha':
+                m['has_alt_source'] = True
+                m['source'] = 'both'
+        # Baseline snapshot must be untouched by that mutation.
+        base = {m['title']: m for m in scanner._last_tb_movies}
+        assert base['Alpha'].get('has_alt_source') is not True
+        assert base['Alpha']['source'] == 'debrid'
+
+    def test_scan_mount_sets_truncated_flag_on_listing_oserror(self, tmp_dir, monkeypatch):
+        """A listing OSError mid-walk (e.g. a TorBox 429) flags truncation."""
+        tb_mount = os.path.join(tmp_dir, 'tb')
+        os.makedirs(tb_mount)
+        scanner = library.LibraryScanner()
+        real_scandir = os.scandir
+
+        def boom(path, *a, **k):
+            # Fail the flat-root listing the way a 429 surfaces through FUSE.
+            if os.path.normpath(path) == os.path.normpath(tb_mount):
+                raise OSError("rate limit exceeded: 429 Too Many Requests")
+            return real_scandir(path, *a, **k)
+
+        monkeypatch.setattr(os, 'scandir', boom)
+        movies, shows = scanner._scan_mount(
+            tb_mount, source_debrid='torbox', flat_layout=True,
+        )
+        assert movies == [] and shows == []
+        assert scanner._last_scan_mount_truncated is True
+
+
 class TestResolveNfsRescanDelay:
     """Plan 41 phase B.2 — NFS attribute-cache delay between symlink
     creation and arr rescan trigger."""

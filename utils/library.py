@@ -5,6 +5,7 @@ unified item list, cross-referencing by title to detect content present
 in both sources.
 """
 
+import copy
 import os
 import re
 import shutil
@@ -2018,6 +2019,16 @@ class LibraryScanner:
         self._cache = None
         self._cache_time = 0
         self._ttl = 600
+        # Set by _scan_mount when a walk is truncated (deadline hit or the
+        # listing raised — e.g. a TorBox 429). _scan_read reads it right after
+        # the (synchronous) TB scan to decide whether to fall back to the
+        # last-known-good TB set instead of overwriting with partial data.
+        self._last_scan_mount_truncated = False
+        # Last COMPLETE TorBox scan results, kept in memory so an incomplete
+        # scan doesn't drop TB titles to "Wanted". In-memory only — lost on
+        # restart, repopulated by the first complete scan.
+        self._last_tb_movies = None
+        self._last_tb_shows = None
         self._lock = threading.Lock()
         self._scanning = False
         self._effects_running = False
@@ -2270,6 +2281,31 @@ class LibraryScanner:
         return out
 
     @staticmethod
+    def _union_tb_items(last_good, partial):
+        """Union two TorBox item lists, keyed by normalized title.
+
+        Used to recover from an incomplete TB scan: ``last_good`` is the most
+        recent COMPLETE scan, ``partial`` is the truncated current scan.
+        Partial entries win on collision (fresh data), and titles present
+        only in ``last_good`` are carried over so a rate-limited walk doesn't
+        drop them to "Wanted". Movies and shows are unioned separately by the
+        caller, so there's no cross-type key collision.
+
+        Keyed by ``_normalize_title`` to match the keying ``_scan_mount`` and
+        ``_merge_alt_debrid_items`` already use — same-normalized titles that
+        differ only by year (e.g. ``Dune (1984)`` vs ``Dune (2021)``) already
+        collapse to one entry inside a single scan, so the union introduces no
+        new title-loss beyond that pre-existing pipeline limitation.
+        ``title`` is coerced via ``or ''`` so a None value can't raise.
+        """
+        by_key = {}
+        for it in (last_good or []):
+            by_key[_normalize_title(it.get('title') or '')] = it
+        for it in (partial or []):
+            by_key[_normalize_title(it.get('title') or '')] = it
+        return list(by_key.values())
+
+    @staticmethod
     def _merge_alt_debrid_items(primary_movies, primary_shows,
                                 alt_movies, alt_shows):
         """Merge alt-debrid items into the primary lists.
@@ -2508,15 +2544,53 @@ class LibraryScanner:
                     tb_mount, tb_deadline, source_debrid='torbox',
                     flat_layout=True,
                 )
-                debrid_movies, debrid_shows = self._merge_alt_debrid_items(
-                    debrid_movies, debrid_shows, tb_movies, tb_shows,
-                )
-                logger.debug(
-                    f"[library] TB scan: {len(tb_movies)} movies, "
-                    f"{len(tb_shows)} shows from {tb_mount}"
-                )
+                tb_incomplete = self._last_scan_mount_truncated
             except Exception as e:
                 logger.warning(f"[library] TB mount scan failed: {e}")
+                tb_movies, tb_shows, tb_incomplete = [], [], True
+
+            # An incomplete TB walk (TorBox 429 / deadline) must not be
+            # treated as the authoritative TB set — otherwise every truncated
+            # scan drops the missing titles to "Wanted". Fall back to the last
+            # COMPLETE scan, unioning the partial over it so newly-grabbed
+            # content still appears. Only a complete scan becomes the new
+            # baseline. Tradeoff: a title genuinely deleted from TB during a
+            # run of truncated scans lingers as "available" until the next
+            # complete scan re-promotes a fresh baseline — cheap next to
+            # flipping the whole TB library to "Wanted" hourly.
+            if tb_incomplete:
+                if self._last_tb_movies is not None or self._last_tb_shows is not None:
+                    tb_movies = self._union_tb_items(self._last_tb_movies or [], tb_movies)
+                    tb_shows = self._union_tb_items(self._last_tb_shows or [], tb_shows)
+                    logger.warning(
+                        "[library] TB scan incomplete (rate-limited/timeout) — "
+                        "merged partial over last-good TB set (%d movies, %d shows) "
+                        "to avoid dropping titles to 'Wanted'",
+                        len(tb_movies), len(tb_shows),
+                    )
+                else:
+                    logger.warning(
+                        "[library] TB scan incomplete and no prior good TB scan "
+                        "to fall back on; using partial result (%d movies, %d shows)",
+                        len(tb_movies), len(tb_shows),
+                    )
+            else:
+                # Deep-copy: the same dicts flow into _merge_alt_debrid_items
+                # (sets has_alt_source/alt_source_debrid in place) and the
+                # downstream dedup/enrichment stages, all of which mutate
+                # items. A shallow list() copy would let those stages silently
+                # corrupt the baseline, so a later truncated scan would carry
+                # over polluted entries. Snapshot independent copies instead.
+                self._last_tb_movies = copy.deepcopy(tb_movies)
+                self._last_tb_shows = copy.deepcopy(tb_shows)
+
+            debrid_movies, debrid_shows = self._merge_alt_debrid_items(
+                debrid_movies, debrid_shows, tb_movies, tb_shows,
+            )
+            logger.debug(
+                f"[library] TB scan: {len(tb_movies)} movies, "
+                f"{len(tb_shows)} shows from {tb_mount}"
+            )
 
         # TMDB-based alias maps: when different sources (or different
         # torrents) use different names for the same title (e.g. "Star
@@ -5119,6 +5193,11 @@ class LibraryScanner:
             from utils.debrid_routing import resolve_primary
             source_debrid = resolve_primary() or 'realdebrid'
 
+        # Reset the per-scan truncation flag; set True below if the walk is
+        # cut short (deadline or a listing error). The caller checks this to
+        # avoid letting a partial scan drop titles.
+        self._last_scan_mount_truncated = False
+
         if flat_layout:
             # Sentinel '' so the join below evaluates to ``mount_path`` itself.
             scan_dirs = ['']
@@ -5132,6 +5211,7 @@ class LibraryScanner:
                             categories.append(entry.name)
             except (PermissionError, OSError) as e:
                 logger.warning(f"[library] Cannot list mount {mount_path}: {e}")
+                self._last_scan_mount_truncated = True
                 return [], []
 
             non_special = [c for c in categories if c not in self._SKIP_CATEGORIES]
@@ -5159,6 +5239,7 @@ class LibraryScanner:
                         if deadline is not None and time.monotonic() > deadline:
                             logger.warning("[library] Timeout during mount scan")
                             timed_out = True
+                            self._last_scan_mount_truncated = True
                             break
                         if not entry.is_dir(follow_symlinks=False):
                             continue
@@ -5262,7 +5343,19 @@ class LibraryScanner:
                                 movie_groups[key]['year'] = year
                                 movie_groups[key]['title'] = title
             except (PermissionError, OSError) as e:
+                # A listing error mid-walk (e.g. a TorBox 429 surfacing as
+                # 'couldn't list files') means the result is incomplete —
+                # flag it so the caller doesn't treat partial data as the
+                # full TB set and drop titles to "Wanted".
+                #
+                # Unlike the deadline branch this does NOT break: a categorized
+                # (RD) mount may have several categories and a transient error
+                # in one shouldn't abandon the others (best-effort scan). For
+                # flat-layout (TB) there's a single category so continue vs.
+                # break is moot, but the truncation flag still routes the TB
+                # caller to the last-good fallback.
                 logger.warning(f"[library] Cannot scan {cat_path}: {e}")
+                self._last_scan_mount_truncated = True
             if timed_out:
                 break
 

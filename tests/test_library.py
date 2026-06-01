@@ -6624,10 +6624,16 @@ class TestScanTorboxViaApi:
              ]},
         ]
         _, _movies, shows = self._scan(torrents)
-        # The leading-slash sub is normalised; the episode path stays under
-        # the mount (or the entry is skipped) — never an absolute escape.
-        for ep in (shows[0]['_episodes'].values() if shows else []):
+        # The "//" collapses to a single separator and the episode is still
+        # produced (not silently skipped) with a path under the mount — never
+        # an absolute escape. assert shows guards against a vacuous pass.
+        assert shows
+        eps = list(shows[0]['_episodes'].values())
+        assert eps
+        for ep in eps:
             assert ep['path'].startswith(self.TB_MOUNT + os.sep)
+            assert ep['path'] == os.path.join(
+                self.TB_MOUNT, 'Weird.Show.S01', 'Weird.Show.S01E01.mkv')
 
     def test_traversal_components_rejected(self):
         torrents = [
@@ -6654,27 +6660,64 @@ class TestScanTorboxViaApi:
         assert shows[0]['_episodes'][(1, 5)]['path'] == os.path.join(
             self.TB_MOUNT, 'Nested.Show', 'Season 1', 'Nested.Show.S01E05.mkv')
 
-    def test_file_name_without_folder_prefix(self):
-        """A file whose name lacks the folder prefix is placed under the
-        folder by basename so the synthesized path still matches FUSE."""
+    def test_bare_root_file_is_skipped(self):
+        """A file with no folder component (bare file at the mount root) is
+        skipped: the on-disk folder is the FIRST path component of the file's
+        mylist name, and the old FUSE walk only enumerated top-level dirs. The
+        entry-level `name` is a sanitized display string and must NOT be used
+        to synthesize a folder (it matches disk for only ~20% of torrents)."""
         torrents = [
             {'name': 'Odd.Movie.2020',
              'files': [{'name': 'odd.mkv', 'size': 3}]},
         ]
+        _, movies, shows = self._scan(torrents)
+        assert movies == []
+        assert shows == []
+
+    def test_folder_derived_from_file_path_not_entry_name(self):
+        """The on-disk folder comes from files[].name's first component, NOT
+        the sanitized entry `name`. Live mylist `name` differs from the rclone
+        folder for ~80% of torrents; keying off it synthesizes dead paths."""
+        torrents = [
+            {'name': 'Big Movie 2021 1080p WEBRip x265',  # sanitized display
+             'files': [{'name': 'Big.Movie.2021.1080p.BluRay.x264-GRP/big.mkv',
+                        'size': 10}]},
+        ]
         _, movies, _shows = self._scan(torrents)
         assert len(movies) == 1
-        assert movies[0]['path'] == os.path.join(self.TB_MOUNT, 'Odd.Movie.2020')
+        # path keyed to the FILE's folder, not the entry name
+        assert movies[0]['path'] == os.path.join(
+            self.TB_MOUNT, 'Big.Movie.2021.1080p.BluRay.x264-GRP')
 
     def test_tv_marker_fallback_classifies_show(self):
-        """Season-pack folder still caching (no SxxExx files) is classified
-        as a show via the folder-name marker, with 0 episodes."""
+        """A season-pack folder whose files aren't yet SxxExx-named (still
+        caching) is classified as a show via the folder-name marker, with 0
+        episodes — provided at least one file exists to reveal the folder."""
         torrents = [
-            {'name': 'Pending.Show.S03.COMPLETE.1080p', 'files': []},
+            {'name': 'Pending.Show.S03.COMPLETE.1080p',
+             'files': [{'name': 'Pending.Show.S03.COMPLETE.1080p/readme.nfo',
+                        'size': 1}]},
         ]
         _, movies, shows = self._scan(torrents)
         assert movies == []
         assert len(shows) == 1
         assert shows[0]['episodes'] == 0
+
+    def test_malformed_entries_skipped_not_fatal(self):
+        """A malformed mylist element (non-dict entry, None files, non-dict
+        file) degrades to a skip rather than aborting the whole scan — one
+        bad entry must not lose all genuinely-new TB content for the cycle."""
+        torrents = [
+            'not-a-dict',
+            {'name': 'Bad.Files', 'files': None},
+            {'name': 'Bad.Inner', 'files': ['nope', 42]},
+            {'name': 'Good.Movie.2022',
+             'files': [{'name': 'Good.Movie.2022.1080p/g.mkv', 'size': 7}]},
+        ]
+        scanner, movies, shows = self._scan(torrents)
+        assert [m['title'] for m in movies] == ['Good Movie']
+        assert shows == []
+        assert scanner._last_scan_mount_truncated is False
 
     def test_api_failure_marks_incomplete(self):
         scanner, movies, shows = self._scan(None)

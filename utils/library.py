@@ -5963,47 +5963,63 @@ class LibraryScanner:
 
         # Build the per-folder structure _collect_episodes_from_webdav
         # expects: folder name -> {'files': [(fname, size, path)],
-        # 'season_files': {subdir: [(fname, size, path)]}}.  File paths are
-        # SYNTHESIZED as <tb_mount>/<folder>/<subpath> to match the rclone
-        # FUSE layout exactly, so _create_debrid_symlinks /
-        # _resolve_symlink_target resolve them identically to a FUSE walk.
+        # 'season_files': {subdir: [(fname, size, path)]}}.
+        #
+        # CRITICAL: the on-disk folder is the FIRST path component of each
+        # file's mylist ``name`` — NOT the torrent-level ``name``.  rclone
+        # lays files out at <mount>/<files[].name>, where files[].name is the
+        # ORIGINAL torrent path (e.g. "Tulsa.King.S02.../ep.mkv").  The
+        # entry-level ``name`` is a SANITIZED display string (spaces for dots,
+        # truncated, & -> and) that matches the on-disk folder for only ~20%
+        # of torrents (live: 102/490).  Keying paths off it would synthesize
+        # non-existent targets for ~80% of TB content.  Deriving the folder
+        # from the file path matches the live mount for 485/490 entries
+        # (1717/1749 files); the handful of stragglers are unicode/special-
+        # char folders rclone renames, which a FUSE walk wouldn't serve either.
         folders = {}
         folder_created = {}
         for t in torrents:
-            tname = t.get('name')
-            if not tname:
+            # list_torbox_torrents normalizes its output, but guard defensively
+            # so one malformed entry degrades to a skip rather than raising and
+            # aborting the whole scan (which would lose all genuinely-new TB
+            # content for the cycle by tripping the last-good fallback).
+            if not isinstance(t, dict):
                 continue
-            bucket = folders.setdefault(tname, {'files': [], 'season_files': {}})
-            folder_created[tname] = max(
-                folder_created.get(tname, 0),
-                _parse_tb_timestamp(t.get('created_at')),
-            )
-            for f in t.get('files', []):
+            created = _parse_tb_timestamp(t.get('created_at'))
+            files = t.get('files')
+            if not isinstance(files, list):
+                continue
+            for f in files:
+                if not isinstance(f, dict):
+                    continue
                 frel = f.get('name')
-                if not frel:
+                if not isinstance(frel, str) or not frel:
                     continue
-                # mylist file names are the full relative path INCLUDING the
-                # torrent folder; strip the leading "<folder>/" so the
-                # remaining depth (1 = flat file, 2 = season subdir) mirrors
-                # the WebDAV grouping consumed below.
-                if frel.startswith(tname + '/'):
-                    sub = frel[len(tname) + 1:]
-                else:
-                    sub = os.path.basename(frel)
-                # Strip leading slashes: a crafted/odd API path that strips to
-                # "/abs/path" would make os.path.join DISCARD tb_mount+tname
-                # (absolute component wins), escaping the mount root. Reject
-                # ".." components for the same reason — synthesized paths must
-                # stay under <tb_mount>/<tname> so _resolve_symlink_target maps
-                # them and nothing points outside the TB mount.
-                sub = sub.lstrip('/')
-                if not sub or '..' in sub.split('/'):
+                # Split into clean path components: drop empties (so a "//"
+                # can't reintroduce an absolute component that os.path.join
+                # would treat as a new root and escape the mount) and reject
+                # any ".." traversal. The synthesized path is rebuilt from the
+                # cleaned components, so it always stays under <tb_mount> and
+                # _resolve_symlink_target can map it back to the TB symlink
+                # base; nothing can point outside the TB mount.
+                parts = [p for p in frel.split('/') if p]
+                if '..' in parts:
                     continue
+                # A bare file at the mount root (no torrent folder) can't be
+                # classified into a title dir; the old FUSE walk only
+                # enumerated top-level DIRS, so skip to match its behavior.
+                if len(parts) < 2:
+                    continue
+                folder_name = parts[0]
+                subparts = parts[1:]
                 size = f.get('size', 0)
                 if not isinstance(size, int) or size < 0:
                     size = 0
-                synth_path = os.path.join(tb_mount, tname, sub)
-                subparts = sub.split('/')
+                synth_path = os.path.join(tb_mount, *parts)
+                bucket = folders.setdefault(
+                    folder_name, {'files': [], 'season_files': {}})
+                folder_created[folder_name] = max(
+                    folder_created.get(folder_name, 0), created)
                 if len(subparts) == 1:
                     bucket['files'].append((subparts[0], size, synth_path))
                 elif len(subparts) == 2:

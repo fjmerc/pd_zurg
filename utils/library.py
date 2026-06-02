@@ -554,6 +554,71 @@ def _collect_episodes(folder_path):
     return episodes
 
 
+def _find_largest_movie_video(mount_dir):
+    """Return ``(relpath, size)`` of the largest video file in a movie folder.
+
+    Searches the top level first and only descends one level of
+    subdirectories when the top level holds no video — some torrents nest
+    the feature inside a release-named subfolder. The descent skips
+    ``_SKIP_FOLDERS`` (sample/extras/featurettes/subs/...), the same set
+    scan-time detection skips, so a featurette isn't picked as the feature.
+    This mirrors the one-level depth scan-time movie detection uses, so a
+    movie that was *detected* as on-debrid can also be *symlinked*.
+
+    ``relpath`` is relative to *mount_dir* (may contain a subdir component).
+    Returns ``(None, -1)`` when no video is found.
+    """
+    try:
+        with os.scandir(mount_dir) as it:
+            entries = list(it)
+    except OSError:
+        return None, -1
+    best_rel = None
+    best_size = -1
+    for entry in entries:
+        if os.path.splitext(entry.name)[1].lower() not in MEDIA_EXTENSIONS:
+            continue
+        try:
+            if not entry.is_file(follow_symlinks=True):
+                continue
+            sz = entry.stat().st_size
+        except OSError:
+            sz = 0
+        if sz > best_size:
+            best_size = sz
+            best_rel = entry.name
+    if best_rel is not None:
+        return best_rel, best_size
+    # No top-level video — descend one level (nested-folder torrents).
+    # Skip extras/sample/subtitle subdirs (same set scan-time detection
+    # skips) so a featurette or sample isn't mistaken for the feature.
+    for entry in entries:
+        if entry.name.lower() in _SKIP_FOLDERS:
+            continue
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+        except OSError:
+            continue
+        try:
+            with os.scandir(entry.path) as sub:
+                for f in sub:
+                    if os.path.splitext(f.name)[1].lower() not in MEDIA_EXTENSIONS:
+                        continue
+                    try:
+                        if not f.is_file(follow_symlinks=True):
+                            continue
+                        sz = f.stat().st_size
+                    except OSError:
+                        sz = 0
+                    if sz > best_size:
+                        best_size = sz
+                        best_rel = os.path.join(entry.name, f.name)
+        except OSError:
+            continue
+    return best_rel, best_size
+
+
 def _build_season_data(episodes_dict, default_source='debrid'):
     """Build sorted season_data list from an episodes dict.
 
@@ -4684,25 +4749,17 @@ class LibraryScanner:
                     if os.path.isdir(target_dir) and self._has_media_files(target_dir):
                         continue
 
-                # Find the largest media file in the torrent folder
-                media_file = None
-                media_size = -1
-                try:
-                    for fname in os.listdir(mount_dir):
-                        ext = os.path.splitext(fname)[1].lower()
-                        if ext in MEDIA_EXTENSIONS:
-                            fpath = os.path.join(mount_dir, fname)
-                            try:
-                                sz = os.path.getsize(fpath)
-                            except OSError:
-                                sz = 0
-                            if sz > media_size:
-                                media_size = sz
-                                media_file = fname
-                except OSError:
+                # Find the largest media file in the torrent folder.  Searches
+                # one level deep so nested-folder torrents (video tucked inside
+                # a release-named subdir) still get symlinked — without this
+                # they're detected as on-debrid but never linkable, showing
+                # "available" in zurgarr yet "missing" in Radarr.
+                media_rel, media_size = _find_largest_movie_video(mount_dir)
+                if not media_rel:
                     continue
-                if not media_file:
-                    continue
+                # Local library uses a flat filename (the basename); the arr
+                # re-imports by content, so the nesting need not be preserved.
+                media_file = os.path.basename(media_rel)
 
                 local_path = os.path.join(
                     self._local_movies_path, movie_dir, media_file
@@ -4718,7 +4775,7 @@ class LibraryScanner:
                 if os.path.islink(local_path) or os.path.exists(local_path):
                     continue
 
-                real_debrid = os.path.realpath(os.path.join(mount_dir, media_file))
+                real_debrid = os.path.realpath(os.path.join(mount_dir, media_rel))
                 symlink_target = _resolve_symlink_target(real_debrid)
                 if symlink_target is None:
                     continue

@@ -178,6 +178,19 @@ def test_tb_cached_alt_grabbed_without_tier_still_renders():
     assert 'TorBox' in s
 
 
+def test_wanted_tb_recovered_names_service():
+    ev = _ev('wanted_tb_recovered', service='torbox')
+    s = format_event(ev)['short']
+    assert 'Recovered Wanted' in s
+    assert 'torbox' in s
+
+
+def test_wanted_tb_recovered_defaults_service_to_torbox():
+    ev = _ev('wanted_tb_recovered')
+    s = format_event(ev)['short']
+    assert 'TorBox' in s
+
+
 def test_terminal_error_shows_status():
     ev = _ev('terminal_error', provider='realdebrid', status='magnet_error')
     assert 'Failed on realdebrid: magnet_error' == format_event(ev)['short']

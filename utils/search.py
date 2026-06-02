@@ -48,6 +48,13 @@ def _get_torrentio_url():
     return (os.environ.get('TORRENTIO_URL') or '').rstrip('/')
 
 
+_SERVICE_KEY_NAMES = {
+    'realdebrid': 'rd_api_key',
+    'alldebrid': 'ad_api_key',
+    'torbox': 'torbox_api_key',
+}
+
+
 def _get_debrid_service():
     """Detect configured debrid service. Returns (service, api_key) or (None, None)."""
     rd = load_secret_or_env('rd_api_key')
@@ -60,6 +67,14 @@ def _get_debrid_service():
     if tb:
         return 'torbox', tb
     return None, None
+
+
+def _resolve_service_key(service):
+    """Resolve the API key for an explicitly-named debrid service, or None."""
+    key_name = _SERVICE_KEY_NAMES.get(service)
+    if not key_name:
+        return None
+    return load_secret_or_env(key_name)
 
 
 def _safe_log_url(url):
@@ -769,8 +784,9 @@ def search_torrents(imdb_id, media_type='movie', season=None, episode=None,
 # F9.3 — Add to debrid
 # ---------------------------------------------------------------------------
 
-def add_to_debrid(info_hash, title='', media_title=None, episode=None):
-    """Add a torrent to the configured debrid provider via magnet.
+def add_to_debrid(info_hash, title='', media_title=None, episode=None,
+                  *, service=None, api_key=None, cause=None, source='search'):
+    """Add a torrent to a debrid provider via magnet.
 
     Args:
         info_hash: 40-char hex info hash
@@ -779,6 +795,15 @@ def add_to_debrid(info_hash, title='', media_title=None, episode=None):
             event surfaces in that show/movie's detail-page Activity panel,
             which exact-matches on title or media_title.
         episode: Optional "SxxEyy" string for episode-scoped adds.
+        service: Explicit debrid service ('realdebrid'/'alldebrid'/'torbox').
+            When omitted, the RD-first auto-detected service is used. Callers
+            that must target a specific provider (e.g. the Wanted→TorBox
+            recovery pass) pass this to bypass the RD-first default.
+        api_key: Explicit API key for ``service``. When omitted but ``service``
+            is given, the key is resolved from env/secrets for that service.
+        cause: Override the success-event ``meta['cause']`` slug. Defaults to
+            ``'debrid_add_via_search'`` for the interactive-search path.
+        source: History event ``source`` field (default ``'search'``).
 
     Returns:
         {'success': bool, 'torrent_id': str, 'service': str, 'error': str,
@@ -787,9 +812,13 @@ def add_to_debrid(info_hash, title='', media_title=None, episode=None):
     if not info_hash or not _HASH_RE.match(info_hash):
         return {'success': False, 'torrent_id': '', 'service': '', 'error': 'Invalid info hash'}
 
-    service, api_key = _get_debrid_service()
-    if not service:
-        return {'success': False, 'torrent_id': '', 'service': '', 'error': 'No debrid service configured'}
+    if service:
+        if not api_key:
+            api_key = _resolve_service_key(service)
+    else:
+        service, api_key = _get_debrid_service()
+    if not service or not api_key:
+        return {'success': False, 'torrent_id': '', 'service': service or '', 'error': 'No debrid service configured'}
 
     lowered = info_hash.lower()
 
@@ -874,10 +903,10 @@ def add_to_debrid(info_hash, title='', media_title=None, episode=None):
                 'debrid_add',
                 title or info_hash[:16],
                 episode=episode,
-                detail=f'Added to {service} via search',
-                source='search',
+                detail=f'Added to {service} via {source}',
+                source=source,
                 media_title=media_title,
-                meta={'cause': 'debrid_add_via_search',
+                meta={'cause': cause or 'debrid_add_via_search',
                       'info_hash': info_hash,
                       'service': service,
                       'torrent_id': result.get('torrent_id', '')},
@@ -889,7 +918,7 @@ def add_to_debrid(info_hash, title='', media_title=None, episode=None):
                 title or info_hash[:16],
                 episode=episode,
                 detail=f'Failed to add to {service}: {err}',
-                source='search',
+                source=source,
                 media_title=media_title,
                 meta={'cause': 'debrid_add_failed',
                       'info_hash': info_hash,
@@ -902,10 +931,11 @@ def add_to_debrid(info_hash, title='', media_title=None, episode=None):
     # Emit notification
     try:
         from utils.notifications import notify
+        _via = 'interactive search' if source == 'search' else source
         if result['success']:
             notify('debrid_add_success',
                    f'Added to {service}',
-                   f'{title or info_hash[:16]} added via interactive search')
+                   f'{title or info_hash[:16]} added via {_via}')
         else:
             notify('debrid_add_failed',
                    f'Failed to add to {service}',

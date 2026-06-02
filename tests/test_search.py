@@ -356,6 +356,63 @@ class TestAddToDebrid:
         assert result['success'] is False
         assert result['error'] != ''
 
+    @patch('utils.search._add_to_tb')
+    @patch('utils.search._add_to_rd')
+    @patch('utils.search._get_debrid_service')
+    def test_explicit_service_overrides_autodetect(self, mock_service, mock_rd, mock_tb):
+        """Passing service= explicitly must bypass the RD-first auto-detect."""
+        mock_service.return_value = ('realdebrid', 'rd_key')  # would pick RD
+        mock_tb.return_value = {'success': True, 'torrent_id': '789'}
+
+        result = add_to_debrid('c' * 40, service='torbox', api_key='tb_key')
+
+        assert result['success'] is True
+        assert result['service'] == 'torbox'
+        mock_tb.assert_called_once()
+        mock_rd.assert_not_called()
+        assert mock_tb.call_args[0][1] == 'tb_key'  # key threaded through
+
+    @patch('utils.search._resolve_service_key')
+    @patch('utils.search._add_to_tb')
+    @patch('utils.search._get_debrid_service')
+    def test_explicit_service_resolves_key_when_omitted(self, mock_service, mock_tb, mock_resolve):
+        """service= without api_key= resolves the key for that service."""
+        mock_service.return_value = ('realdebrid', 'rd_key')
+        mock_resolve.return_value = 'resolved_tb_key'
+        mock_tb.return_value = {'success': True, 'torrent_id': '1'}
+
+        result = add_to_debrid('c' * 40, service='torbox')
+
+        assert result['success'] is True
+        mock_resolve.assert_called_once_with('torbox')
+        assert mock_tb.call_args[0][1] == 'resolved_tb_key'
+
+    @patch('utils.search._resolve_service_key')
+    @patch('utils.search._get_debrid_service')
+    def test_explicit_service_without_resolvable_key_fails(self, mock_service, mock_resolve):
+        """service= whose key can't be resolved fails cleanly, no add attempted."""
+        mock_service.return_value = ('realdebrid', 'rd_key')
+        mock_resolve.return_value = None
+        result = add_to_debrid('c' * 40, service='torbox')
+        assert result['success'] is False
+        assert 'No debrid service' in result['error']
+
+    @patch('utils.history.log_event')
+    @patch('utils.search._add_to_tb')
+    @patch('utils.search._get_debrid_service')
+    def test_cause_and_source_threaded_to_history(self, mock_service, mock_tb, mock_log):
+        """cause/source overrides land in the emitted history event."""
+        mock_service.return_value = ('torbox', 'k')
+        mock_tb.return_value = {'success': True, 'torrent_id': '5'}
+
+        add_to_debrid('d' * 40, service='torbox', api_key='k',
+                      cause='wanted_tb_recovered', source='library')
+
+        assert mock_log.called
+        _, kwargs = mock_log.call_args
+        assert kwargs['source'] == 'library'
+        assert kwargs['meta']['cause'] == 'wanted_tb_recovered'
+
 
 # ---------------------------------------------------------------------------
 # Debrid cache probe (plan 33 Phase 3)

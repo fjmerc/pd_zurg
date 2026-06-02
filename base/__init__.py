@@ -86,6 +86,8 @@ __all__ = [
     'ROUTING_AUTO_TAG_UNTAGGED',
     # Gap-fill reconcile
     'GAP_FILL_ENABLED',
+    # Wanted→TorBox proactive recovery
+    'WANTED_TB_RECOVERY_ENABLED', 'WANTED_TB_RECOVERY_MAX_PER_SCAN',
     # Debrid search
     'TORRENTIO_URL', 'SEARCH_REQUIRE_CACHED', 'SEARCH_DEDUP_ENABLED',
     # Blackhole cache / debrid-account dedup gates
@@ -305,6 +307,10 @@ class Config:
         # Gap-fill reconcile — unconditional missing-episode search across
         # debrid + local.  Also auto-enables verify_symlinks re-search.
         self.GAP_FILL_ENABLED = os.getenv('GAP_FILL_ENABLED', 'true')
+        # Wanted→TorBox proactive recovery — grab TB-cached copies of Wanted
+        # ghosts the arr never grabbed, bounded per scan.
+        self.WANTED_TB_RECOVERY_ENABLED = os.getenv('WANTED_TB_RECOVERY_ENABLED', 'true')
+        self.WANTED_TB_RECOVERY_MAX_PER_SCAN = os.getenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', '10')
         # Debrid search
         self.TORRENTIO_URL = os.getenv('TORRENTIO_URL')
         # Refuse the interactive "Add" button when the chosen hash is not
@@ -455,6 +461,8 @@ DEBRID_HEALTH_AUTO_REMEDIATE = config.DEBRID_HEALTH_AUTO_REMEDIATE
 DEBRID_HEALTH_CROSS_RESCUE = config.DEBRID_HEALTH_CROSS_RESCUE
 ROUTING_AUTO_TAG_UNTAGGED = config.ROUTING_AUTO_TAG_UNTAGGED
 GAP_FILL_ENABLED = config.GAP_FILL_ENABLED
+WANTED_TB_RECOVERY_ENABLED = config.WANTED_TB_RECOVERY_ENABLED
+WANTED_TB_RECOVERY_MAX_PER_SCAN = config.WANTED_TB_RECOVERY_MAX_PER_SCAN
 TORRENTIO_URL = config.TORRENTIO_URL
 SEARCH_REQUIRE_CACHED = config.SEARCH_REQUIRE_CACHED
 SEARCH_DEDUP_ENABLED = config.SEARCH_DEDUP_ENABLED

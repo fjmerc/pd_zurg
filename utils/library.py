@@ -41,6 +41,33 @@ def gap_fill_enabled():
     return os.environ.get('GAP_FILL_ENABLED', 'true').strip().lower() == 'true'
 
 
+def wanted_tb_recovery_enabled():
+    """Return ``True`` when the Wanted→TorBox recovery pass is enabled.
+
+    Default ``true`` — opt-out.  This pass proactively grabs cached TorBox
+    copies of "Wanted" library ghosts (monitored, no file) that the arr's
+    own indexer search never managed to grab.  The arr searches its
+    Prowlarr/Torznab pool, a different population than the Torrentio feed
+    zurgarr queries directly, so cached content can sit in Wanted forever.
+    """
+    return os.environ.get('WANTED_TB_RECOVERY_ENABLED', 'true').strip().lower() == 'true'
+
+
+def wanted_tb_recovery_max_per_scan():
+    """Per-scan cap on Wanted→TorBox recovery adds.  Default 10.
+
+    Bounds TorBox create-API usage (60/hr limit) and keeps a single scan
+    from blowing the whole hourly budget.  Non-integer/<=0 values fall back
+    to the default rather than disabling the pass silently.
+    """
+    raw = os.environ.get('WANTED_TB_RECOVERY_MAX_PER_SCAN', '10')
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return 10
+    return n if n > 0 else 10
+
+
 # Plan 41 phase B.2 — NFS attribute-cache delay between symlink creation
 # and arr rescan trigger.  See ``_create_debrid_symlinks`` for the
 # narrative.  Lifted to a module-level helper so it can be unit-tested
@@ -2120,6 +2147,10 @@ class LibraryScanner:
         self._local_path_index = {}
         self._path_lock = threading.Lock()
         self._search_cooldown = {}  # {(norm, sn): timestamp} — suppress re-search for 1 hour
+        # {imdb_or_imdb:s:e: monotonic ts} — suppress re-probing a Wanted ghost
+        # against Torrentio/TorBox for _WANTED_TB_RECOVERY_COOLDOWN after a miss
+        # or a grab, so a deep backlog isn't re-walked every scan.
+        self._wanted_tb_cooldown = {}
         self._alias_norms = {}     # {norm_title: set of alias norm_titles}
         try:
             self._debrid_unavailable_days = int(os.environ.get('DEBRID_UNAVAILABLE_THRESHOLD_DAYS', '3'))
@@ -3022,6 +3053,7 @@ class LibraryScanner:
         changed = self._enforce_preferences(shows, movies, preferences, path_index,
                                               local_path_index, force=force_enforce)
         self._search_for_missing_episodes(shows, movies, preferences)
+        self._recover_wanted_via_torbox(shows, movies, preferences)
         self._recover_local_fallback_routing(shows, movies)
         self._clear_resolved_pending(shows, movies)
         self._escalate_stuck_pending()
@@ -3584,6 +3616,11 @@ class LibraryScanner:
 
     _SEARCH_BUDGET_SECONDS = 30
     _SEARCH_RETRY_HOURS = 6
+    # Wanted→TorBox recovery: cap Torrentio fan-out per title probed against
+    # TB's cache, and how long a probed-and-missed (or just-grabbed) title is
+    # skipped before being re-probed.  6h matches the arr-search retry window.
+    _WANTED_TB_MAX_PROBES = 12
+    _WANTED_TB_RECOVERY_COOLDOWN = 6 * 3600
 
     def _search_for_missing_episodes(self, shows, movies, preferences):
         """Unconditional episode-completeness reconcile.
@@ -3941,6 +3978,164 @@ class LibraryScanner:
                     logger.error(f"[library] Search error for movie {movie['title']}: {e}")
                     self._search_cooldown[(norm, 0)] = now
                     update_pending_error(pending_norm, f"Radarr: {e}")
+
+    def _recover_wanted_via_torbox(self, shows, movies, preferences):
+        """Proactively grab TorBox-cached copies of "Wanted" ghosts.
+
+        The arr searches its own indexer pool (Prowlarr/Torznab); zurgarr
+        queries the Torrentio feed directly.  These are different populations,
+        so a title can be cached on TorBox yet sit in "Wanted" forever because
+        the arr's search never surfaces a grabbable release.  Empirically ~93%
+        of the live Wanted backlog is already cached on TorBox at full
+        resolution — the gap to 100% recovery is this acquisition path, not TB
+        supply.  This pass closes it: for each Wanted ghost (movie or first
+        missing episode of a show), search Torrentio by ``imdb_id``, probe the
+        top candidates against TorBox's cache, and add the best cached release
+        directly to TorBox.  The scanner's own symlink phase links it on a
+        subsequent scan, and Radarr/Sonarr import it from the mount.
+
+        Default-on (``WANTED_TB_RECOVERY_ENABLED``), bounded per scan
+        (``WANTED_TB_RECOVERY_MAX_PER_SCAN``, default 10) to respect TorBox's
+        60-creates/hour cap, gated on TorBox's account cooldown, and per-title
+        cooldowned so a deep backlog isn't re-probed every scan.
+        """
+        if not wanted_tb_recovery_enabled():
+            return
+        if not os.environ.get('TORRENTIO_URL'):
+            return  # no Torrentio feed to search against
+
+        from base import load_secret_or_env
+        api_key = load_secret_or_env('torbox_api_key')
+        if not api_key:
+            return  # TorBox not configured — nothing to recover against
+
+        # Account-level cooldown gate — reuse the blackhole probe (cached, so
+        # this doesn't add a /user/me round-trip when the blackhole just ran).
+        try:
+            from utils.blackhole import _check_torbox_cooldown
+            tb_cooldown = _check_torbox_cooldown(api_key)
+        except Exception:
+            tb_cooldown = 0
+        if tb_cooldown > 0:
+            logger.info(f"[library] Wanted→TB recovery skipped — TorBox on "
+                        f"cooldown for {int(tb_cooldown)}s")
+            return
+
+        from utils import search as _search
+
+        now = time.monotonic()
+        # Expire per-title cooldown entries.
+        self._wanted_tb_cooldown = {
+            k: t for k, t in self._wanted_tb_cooldown.items()
+            if now - t < self._WANTED_TB_RECOVERY_COOLDOWN
+        }
+
+        budget = wanted_tb_recovery_max_per_scan()
+        deadline = now + self._SEARCH_BUDGET_SECONDS
+        added = 0
+
+        # Build the target list: released movie ghosts + show ghosts (probing
+        # the first still-missing episode, defaulting to S01E01).
+        targets = []  # (media_type, item, season, episode)
+        for m in movies:
+            if m.get('source') != 'wanted':
+                continue
+            if not m.get('is_available', True):
+                continue  # unreleased — Torrentio won't have a real release
+            if not m.get('imdb_id'):
+                continue
+            targets.append(('movie', m, None, None))
+        for s in shows:
+            if s.get('source') != 'wanted':
+                continue
+            if not s.get('imdb_id'):
+                continue
+            # A "wanted" show ghost is a Sonarr-monitored series with ZERO
+            # on-disk episodes (_apply_sonarr_wanted_shows only injects
+            # fully-absent series), so every episode is genuinely missing and
+            # S01E01 is always a legitimate entry point.  We still prefer the
+            # exact first missing episode when TMDB has the episode list —
+            # _compute_missing_episodes returns [] both for "all present"
+            # (impossible here — the ghost has nothing) and for "TMDB cache
+            # miss / don't know", and in either case the S01E01 fallback is
+            # correct for a fully-absent ghost rather than a blind guess.
+            season, episode = 1, 1
+            try:
+                miss = self._compute_missing_episodes(s)
+            except Exception:
+                miss = []
+            if miss:
+                season, episode = miss[0]
+            targets.append(('series', s, season, episode))
+
+        for media_type, item, season, episode in targets:
+            if added >= budget:
+                break
+            if time.monotonic() > deadline:
+                logger.info("[library] Wanted→TB recovery time budget exhausted, "
+                            "deferring remainder to next scan")
+                break
+            imdb = item['imdb_id']
+            key = imdb if media_type == 'movie' else f"{imdb}:{season}:{episode}"
+            if key in self._wanted_tb_cooldown:
+                continue
+
+            try:
+                results = _search.search_torrentio(
+                    imdb, media_type=media_type, season=season, episode=episode)
+            except Exception:
+                results = []
+            if not results:
+                self._wanted_tb_cooldown[key] = time.monotonic()
+                continue
+
+            # Rank by quality score then seeds; cap the TB cache fan-out.
+            results.sort(
+                key=lambda r: ((r.get('quality') or {}).get('score', 0),
+                               r.get('seeds', 0)),
+                reverse=True,
+            )
+            probe = results[:self._WANTED_TB_MAX_PROBES]
+            hashes = [r['info_hash'] for r in probe]
+            try:
+                cmap = _search.check_debrid_cache(
+                    hashes, service='torbox', api_key=api_key)
+            except Exception:
+                cmap = {}
+            cached = next((r for r in probe if cmap.get(r['info_hash'])), None)
+            if not cached:
+                # Probed, nothing cached — cool down so we don't re-walk it.
+                self._wanted_tb_cooldown[key] = time.monotonic()
+                continue
+
+            media_title = item.get('title')
+            ep_str = (f"S{season:02d}E{episode:02d}"
+                      if media_type == 'series' else None)
+            try:
+                result = _search.add_to_debrid(
+                    cached['info_hash'],
+                    title=cached.get('title') or media_title or '',
+                    media_title=media_title,
+                    episode=ep_str,
+                    service='torbox',
+                    api_key=api_key,
+                    cause='wanted_tb_recovered',
+                    source='library',
+                )
+            except Exception as e:
+                logger.error(f"[library] Wanted→TB recovery add failed for "
+                             f"{media_title!r}: {type(e).__name__}")
+                result = {}
+            # Cool the title down regardless of outcome: a success is added
+            # (no need to re-add), a duplicate is already present, and a
+            # transient failure shouldn't be retried until the window elapses.
+            self._wanted_tb_cooldown[key] = time.monotonic()
+            if result.get('success'):
+                added += 1
+
+        if added:
+            logger.info(f"[library] Wanted→TB recovery added {added} cached "
+                        f"release(s) directly to TorBox")
 
     def _clear_resolved_pending(self, shows, movies):
         """Clear pending entries that are resolved or stale.

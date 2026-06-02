@@ -229,6 +229,8 @@ Sweep cadence (`DEBRID_HEALTH_INTERVAL`, default 12h) is a power-user override r
 | `DEBRID_UNAVAILABLE_THRESHOLD_DAYS` | Days of failed searches before marking content debrid-unavailable | `3` |
 | `PENDING_WARNING_HOURS` | Hours before `pending_warning` notification for stuck items (0 disables) | `24` |
 | `GAP_FILL_ENABLED` | Reconcile monitored shows against TMDB and search Sonarr/Radarr for aired episodes missing from both sources. Also auto-enables `verify_symlinks` re-search on broken symlinks | `true` |
+| `WANTED_TB_RECOVERY_ENABLED` | For each "Wanted" title the arr never grabbed, search Torrentio directly, probe TorBox's cache, and add the best cached release straight to TorBox — bypassing the arr's indexer pool. Closes the gap where a title is cached on TorBox but the arr never surfaces a grabbable release. Requires TorBox + `TORRENTIO_URL` | `true` |
+| `WANTED_TB_RECOVERY_MAX_PER_SCAN` | Max Wanted titles the recovery pass adds to TorBox per library scan (bounds TorBox's 60-creates/hour limit) | `10` |
 
 ---
 

@@ -54,6 +54,12 @@ CAUSE_DUPLICATE_SKIPPED = 'duplicate_skipped'
 CAUSE_BLOCKLISTED_HASH = 'blocklisted_hash'
 CAUSE_DEBRID_UNAVAILABLE_MARKED = 'debrid_unavailable_marked'
 CAUSE_DEBRID_ADD_VIA_SEARCH = 'debrid_add_via_search'
+# A "Wanted" library ghost (monitored, no file) that the arr never grabbed was
+# found cached on TorBox and added directly by the library recovery pass —
+# bypassing the arr→indexer search pool entirely.  Distinct from
+# CAUSE_DEBRID_ADD_VIA_SEARCH (user-driven interactive add) because this fires
+# automatically during the scan effects phase against the Wanted backlog.
+CAUSE_WANTED_TB_RECOVERED = 'wanted_tb_recovered'
 
 # Action
 CAUSE_POST_SYMLINK_RESCAN = 'post_symlink_rescan'

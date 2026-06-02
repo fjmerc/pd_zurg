@@ -6802,3 +6802,150 @@ class TestParseTbTimestamp:
         assert _parse_tb_timestamp('') == 0
         assert _parse_tb_timestamp(None) == 0
         assert _parse_tb_timestamp(12345) == 0
+
+
+class TestRecoverWantedViaTorbox:
+    """Wanted→TorBox proactive recovery pass (_recover_wanted_via_torbox)."""
+
+    def _scanner(self):
+        sc = LibraryScanner.__new__(LibraryScanner)
+        sc._wanted_tb_cooldown = {}
+        return sc
+
+    @pytest.fixture
+    def wire(self, monkeypatch):
+        """Stub the external surfaces and capture add_to_debrid calls.
+
+        Returns a dict so each test can tune cache results / torrentio output
+        and assert on the captured adds.
+        """
+        import base
+        import utils.blackhole as bh
+        import utils.search as search
+
+        monkeypatch.setenv('TORRENTIO_URL', 'https://torrentio.example')
+        monkeypatch.setenv('WANTED_TB_RECOVERY_ENABLED', 'true')
+        monkeypatch.delenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', raising=False)
+
+        state = {
+            'adds': [],
+            'cooldown': 0,
+            'cache_cached': True,   # all probed hashes report cached
+            'torrentio': [
+                {'info_hash': 'a' * 40, 'title': 'Rel A',
+                 'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+                {'info_hash': 'b' * 40, 'title': 'Rel B',
+                 'seeds': 5, 'quality': {'label': '720p', 'score': 50}},
+            ],
+        }
+
+        monkeypatch.setattr(base, 'load_secret_or_env',
+                            lambda name: 'tb_key' if name == 'torbox_api_key' else None)
+        monkeypatch.setattr(bh, '_check_torbox_cooldown',
+                            lambda *a, **kw: state['cooldown'])
+        monkeypatch.setattr(search, 'search_torrentio',
+                            lambda *a, **kw: list(state['torrentio']))
+
+        def _cache(hashes, service=None, api_key=None):
+            return {h: state['cache_cached'] for h in hashes}
+        monkeypatch.setattr(search, 'check_debrid_cache', _cache)
+
+        def _add(info_hash, **kw):
+            state['adds'].append({'info_hash': info_hash, **kw})
+            return {'success': True, 'torrent_id': 't', 'service': 'torbox'}
+        monkeypatch.setattr(search, 'add_to_debrid', _add)
+
+        return state
+
+    def test_recovers_cached_wanted_movie(self, wire):
+        sc = self._scanner()
+        movies = [{'title': 'The Substance', 'source': 'wanted',
+                   'imdb_id': 'tt1234567', 'is_available': True}]
+        sc._recover_wanted_via_torbox([], movies, {})
+        assert len(wire['adds']) == 1
+        add = wire['adds'][0]
+        # Highest-score release picked, targeted at TorBox with the new cause.
+        assert add['info_hash'] == 'a' * 40
+        assert add['service'] == 'torbox'
+        assert add['cause'] == 'wanted_tb_recovered'
+        assert add['media_title'] == 'The Substance'
+
+    def test_disabled_flag_noops(self, wire, monkeypatch):
+        monkeypatch.setenv('WANTED_TB_RECOVERY_ENABLED', 'false')
+        sc = self._scanner()
+        movies = [{'title': 'X', 'source': 'wanted',
+                   'imdb_id': 'tt1', 'is_available': True}]
+        sc._recover_wanted_via_torbox([], movies, {})
+        assert wire['adds'] == []
+
+    def test_no_torrentio_url_noops(self, wire, monkeypatch):
+        monkeypatch.delenv('TORRENTIO_URL', raising=False)
+        sc = self._scanner()
+        movies = [{'title': 'X', 'source': 'wanted',
+                   'imdb_id': 'tt1', 'is_available': True}]
+        sc._recover_wanted_via_torbox([], movies, {})
+        assert wire['adds'] == []
+
+    def test_tb_cooldown_skips(self, wire):
+        wire['cooldown'] = 3600
+        sc = self._scanner()
+        movies = [{'title': 'X', 'source': 'wanted',
+                   'imdb_id': 'tt1', 'is_available': True}]
+        sc._recover_wanted_via_torbox([], movies, {})
+        assert wire['adds'] == []
+
+    def test_budget_caps_adds(self, wire, monkeypatch):
+        monkeypatch.setenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', '1')
+        sc = self._scanner()
+        movies = [
+            {'title': 'M1', 'source': 'wanted', 'imdb_id': 'tt1', 'is_available': True},
+            {'title': 'M2', 'source': 'wanted', 'imdb_id': 'tt2', 'is_available': True},
+        ]
+        sc._recover_wanted_via_torbox([], movies, {})
+        assert len(wire['adds']) == 1
+
+    def test_uncached_title_not_added_and_cooled_down(self, wire):
+        wire['cache_cached'] = False
+        sc = self._scanner()
+        movies = [{'title': 'X', 'source': 'wanted',
+                   'imdb_id': 'tt9', 'is_available': True}]
+        sc._recover_wanted_via_torbox([], movies, {})
+        assert wire['adds'] == []
+        assert 'tt9' in sc._wanted_tb_cooldown
+
+    def test_unreleased_movie_skipped(self, wire):
+        sc = self._scanner()
+        movies = [{'title': 'Future', 'source': 'wanted',
+                   'imdb_id': 'tt1', 'is_available': False}]
+        sc._recover_wanted_via_torbox([], movies, {})
+        assert wire['adds'] == []
+
+    def test_movie_without_imdb_skipped(self, wire):
+        sc = self._scanner()
+        movies = [{'title': 'NoId', 'source': 'wanted', 'is_available': True}]
+        sc._recover_wanted_via_torbox([], movies, {})
+        assert wire['adds'] == []
+
+    def test_non_wanted_movie_ignored(self, wire):
+        sc = self._scanner()
+        movies = [{'title': 'Owned', 'source': 'debrid',
+                   'imdb_id': 'tt1', 'is_available': True}]
+        sc._recover_wanted_via_torbox([], movies, {})
+        assert wire['adds'] == []
+
+    def test_per_title_cooldown_skips_reprobe(self, wire):
+        sc = self._scanner()
+        sc._wanted_tb_cooldown = {'tt1': time.monotonic()}
+        movies = [{'title': 'X', 'source': 'wanted',
+                   'imdb_id': 'tt1', 'is_available': True}]
+        sc._recover_wanted_via_torbox([], movies, {})
+        assert wire['adds'] == []
+
+    def test_show_ghost_recovered_with_episode_string(self, wire):
+        sc = self._scanner()
+        shows = [{'title': 'Broadchurch', 'source': 'wanted',
+                  'imdb_id': 'tt2249364', 'season_data': []}]
+        sc._recover_wanted_via_torbox(shows, [], {})
+        assert len(wire['adds']) == 1
+        # Default S01E01 when TMDB has no missing-episode ground truth.
+        assert wire['adds'][0]['episode'] == 'S01E01'

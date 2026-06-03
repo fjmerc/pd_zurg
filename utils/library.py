@@ -646,6 +646,38 @@ def _find_largest_movie_video(mount_dir):
     return best_rel, best_size
 
 
+def _mount_has_content(mount_real, flat=False):
+    """Return True iff *mount_real* looks like a live, populated debrid mount.
+
+    A missing or stalled/throttled FUSE mount makes ``os.path.exists`` return
+    False for every path under it — which the symlink-cleanup pass would read
+    as "all targets gone" and mass-delete valid symlinks.  This guard biases
+    toward safety: when a mount can't be confirmed populated, callers must
+    skip deletion for symlinks routed to it.
+
+    The RD/Zurg mount is categorized (``movies/``, ``shows/``, ``anime/``);
+    Zurg category stubs can persist when all content is gone, so "healthy"
+    means at least one category dir is non-empty.  The TorBox mount is flat
+    (no category dirs), so a non-empty top-level listing is the strongest
+    signal available — pass ``flat=True`` for it.
+    """
+    try:
+        if not os.path.isdir(mount_real) or not os.listdir(mount_real):
+            return False
+        if flat:
+            return True
+        # Single source of truth for the category set, shared with the
+        # verify_symlinks guard and the blackhole scanner.
+        from utils.blackhole import MOUNT_CATEGORIES
+        return any(
+            os.path.isdir(os.path.join(mount_real, c))
+            and os.listdir(os.path.join(mount_real, c))
+            for c in MOUNT_CATEGORIES
+        )
+    except OSError:
+        return False
+
+
 def _build_season_data(episodes_dict, default_source='debrid'):
     """Build sorted season_data list from an episodes dict.
 
@@ -4489,6 +4521,7 @@ class LibraryScanner:
         # when its mount discovers cleanly.  Same pattern as
         # ``_create_debrid_symlinks::_mount_target_pairs``.
         debrid_pair_list = [(os.path.normpath(symlink_base).rstrip(os.sep) + os.sep, rclone_real)]
+        tb_real = None
         try:
             from utils.debrid_routing import TORBOX, symlink_target_base_for_debrid
             tb_base = (symlink_target_base_for_debrid(TORBOX) or '').strip()
@@ -4502,29 +4535,20 @@ class LibraryScanner:
             logger.debug("[library] TB cleanup-pair resolution failed: %s", exc)
         debrid_prefixes_only = tuple(p for p, _m in debrid_pair_list)
 
-        # Guard: verify the rclone mount exists, is responsive, and has content.
-        # A missing or stalled FUSE mount makes os.path.exists() return False
-        # for everything, which would cause mass deletion of valid symlinks.
-        # Zurg category stubs (movies/, shows/) can persist even when all
-        # content is gone, so check that at least one known category dir
-        # is non-empty.  Mirrors the guard in scheduled_tasks.verify_symlinks.
-        try:
-            if not os.path.isdir(rclone_real) or not os.listdir(rclone_real):
-                logger.debug("[library] Rclone mount empty or missing at %s — "
-                             "skipping broken symlink cleanup", rclone_real)
-                return
-            _mount_cats = ('movies', 'shows', 'anime')
-            if not any(
-                os.path.isdir(os.path.join(rclone_real, c))
-                and os.listdir(os.path.join(rclone_real, c))
-                for c in _mount_cats
-            ):
-                logger.debug("[library] Rclone mount categories empty at %s — "
-                             "skipping broken symlink cleanup", rclone_real)
-                return
-        except OSError:
-            logger.debug("[library] Rclone mount not responsive at %s — "
-                         "skipping broken symlink cleanup", rclone_real)
+        # Per-mount health guard.  A missing or stalled/throttled FUSE mount
+        # makes os.path.exists() return False for everything under it, which
+        # would mass-delete valid symlinks.  Compute health PER MOUNT — RD and
+        # TB fail independently (e.g. TB under a 429 read-throttle while RD is
+        # fine), so a global "any mount up" check is not enough: the per-symlink
+        # deletion below must skip symlinks routed to an unhealthy mount.  The
+        # TB mount is flat (no category dirs); RD/Zurg is categorized.
+        mount_health = {
+            _m: _mount_has_content(_m, flat=(_m == tb_real))
+            for _p, _m in debrid_pair_list
+        }
+        if not any(mount_health.values()):
+            logger.debug("[library] No debrid mount has content — "
+                         "skipping broken symlink cleanup")
             return
 
         removed = 0
@@ -4585,6 +4609,13 @@ class LibraryScanner:
                                 )
                                 # Ensure translated path stays within the mount
                                 if not check_path.startswith(matched_mount + os.sep):
+                                    continue
+                                # Skip deletion when this symlink's mount is not
+                                # confirmed healthy — os.path.exists() returns
+                                # False for everything on a throttled/stalled
+                                # mount, so deleting here would tear down valid
+                                # symlinks (the TB-throttle symlink-thrash bug).
+                                if not mount_health.get(matched_mount, False):
                                     continue
                                 if not os.path.exists(check_path):
                                     # Re-verify still a symlink to narrow TOCTOU window

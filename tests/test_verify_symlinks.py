@@ -290,6 +290,24 @@ class TestTorBoxFlatMount:
         assert result['status'] == 'success'
         assert os.path.islink(link), "TB symlink with existing file must NOT be deleted"
 
+    def test_tb_symlink_survives_when_tb_mount_throttled(self, tb_env):
+        """Regression for the TB-throttle symlink-thrash bug: when the Zurg/RD
+        mount is healthy but the TB mount is empty/stalled/throttled
+        (os.path.exists False for every TB target), the global 'any mount up'
+        guard passes — so per-mount gating must SKIP TB symlinks rather than
+        queue them for deletion.  Otherwise every TB link is deleted, then
+        re-created next scan, looping forever.
+        """
+        from utils.scheduled_tasks import verify_symlinks
+        # tb_env leaves tb_mount empty (throttled); zurg_mount has content.
+        link_target = os.path.join(tb_env['tb_target_base'], 'TB.Show.S01E01-NTb', 'ep.mkv')
+        link = _make_symlink(tb_env['completed'], 'ep.mkv', link_target)
+
+        result = verify_symlinks()
+        assert result['status'] == 'success'
+        assert os.path.islink(link), \
+            "TB symlink must survive while the TB mount is unhealthy/throttled"
+
     def test_tb_symlink_repaired_after_release_re_lands_on_flat_mount(self, tb_env):
         """When the TB mount folder changes name (e.g. re-grab with different
         torrent name), repair must find the new folder via the flat-root probe

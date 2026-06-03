@@ -493,6 +493,16 @@ def verify_symlinks():
         logger.error(f"[scheduler] Mount unresponsive — aborting symlink verify to prevent mass deletion: {e}")
         return {'status': 'error', 'message': f'Mount unresponsive, aborted: {e}'}
 
+    # Per-mount health map.  The global guard above only confirms SOME mount is
+    # alive; deletion must be gated per mount because RD and TB fail
+    # independently (e.g. TB under a 429 read-throttle while RD is fine).
+    # Without this, a healthy RD lets the guard pass and every TB symlink —
+    # whose target the throttled TB mount can't serve — gets queued for
+    # deletion, then re-created next scan (the symlink-thrash bug).
+    mount_health = {rclone_mount: zurg_has_content}
+    if tb_mount_real:
+        mount_health[tb_mount_real] = tb_has_content
+
     # Phase 1: Identify broken symlinks (don't delete yet)
     to_delete = []
     checked = 0
@@ -529,6 +539,11 @@ def verify_symlinks():
                         check_target = mnt_real + '/' + target[len(tgt_real):]
                         matched_mount = mnt_real
                         break
+                # Skip symlinks routed to a mount that isn't confirmed healthy:
+                # a throttled/stalled mount fails os.path.exists() for every
+                # target, so queuing them here would mass-delete valid links.
+                if not mount_health.get(matched_mount, False):
+                    continue
                 if not os.path.exists(check_target):
                     to_delete.append((fpath, target, scan_dir, matched_mount))
 

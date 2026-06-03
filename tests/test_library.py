@@ -1089,6 +1089,40 @@ class TestLibraryScannerScanLocal:
         assert result["shows"] == []
 
 
+class TestMountHasContent:
+    """Unit guards for _mount_has_content — the per-mount health check that
+    keeps symlink cleanup from mass-deleting links on a throttled/stalled
+    mount (os.path.exists False for everything)."""
+
+    def test_missing_mount_is_unhealthy(self, tmp_dir):
+        from utils.library import _mount_has_content
+        assert _mount_has_content(os.path.join(tmp_dir, 'nope')) is False
+
+    def test_empty_mount_is_unhealthy(self, tmp_dir):
+        from utils.library import _mount_has_content
+        empty = os.path.join(tmp_dir, 'empty')
+        os.makedirs(empty)
+        assert _mount_has_content(empty) is False
+        assert _mount_has_content(empty, flat=True) is False
+
+    def test_categorized_mount_needs_non_empty_category(self, tmp_dir):
+        from utils.library import _mount_has_content
+        mount = os.path.join(tmp_dir, 'rd')
+        os.makedirs(os.path.join(mount, 'movies'))  # category exists but empty
+        assert _mount_has_content(mount) is False
+        os.makedirs(os.path.join(mount, 'shows', 'A.Release'))
+        assert _mount_has_content(mount) is True
+
+    def test_flat_mount_healthy_when_non_empty(self, tmp_dir):
+        from utils.library import _mount_has_content
+        mount = os.path.join(tmp_dir, 'tb')
+        os.makedirs(os.path.join(mount, 'Some.Release'))
+        # Flat mount has no categories — non-empty top level is enough.
+        assert _mount_has_content(mount, flat=True) is True
+        # Same dir treated as categorized would look unhealthy.
+        assert _mount_has_content(mount, flat=False) is False
+
+
 class TestDebridSymlinkPrefixesDualDebrid:
     """Guards for the dual-debrid symlink-prefix recognition that drives
     local-scanner debrid-vs-local classification.
@@ -1274,8 +1308,12 @@ class TestDebridSymlinkPrefixesDualDebrid:
         # guard doesn't short-circuit the function.
         rd_mount = os.path.join(tmp_dir, 'rd_mount')
         os.makedirs(os.path.join(rd_mount, 'shows', '_keep'))
+        # TB mount must be non-empty (healthy) — the per-mount health gate
+        # skips deletion on an empty/throttled mount.  Add an unrelated release
+        # so the mount is live, but the broken symlink below points at a
+        # DIFFERENT (non-existent) release so it's still removed.
         tb_mount = os.path.join(tmp_dir, 'tb_mount')
-        os.makedirs(tb_mount)
+        os.makedirs(os.path.join(tb_mount, 'Some.Other.Release'))
 
         # Local TV folder with a broken TB symlink (target doesn't exist).
         local_tv = os.path.join(tmp_dir, 'local_tv')
@@ -1335,6 +1373,42 @@ class TestDebridSymlinkPrefixesDualDebrid:
 
         assert os.path.lexists(live_link), \
             'intact RD symlink whose target exists must NOT be removed'
+
+    def test_cleanup_keeps_tb_symlinks_when_tb_mount_unhealthy(self, tmp_dir, monkeypatch):
+        """Regression for the TB-throttle symlink-thrash bug: when the TorBox
+        mount is empty/stalled/throttled (os.path.exists False for everything)
+        but the RD mount is healthy, the old RD-only guard let cleanup proceed
+        and mass-deleted every TB symlink — which the next scan re-created,
+        looping forever.  The per-mount health gate must SKIP deletion for
+        symlinks routed to the unhealthy TB mount."""
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_ENABLED', 'true')
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', os.path.join(tmp_dir, 'rd_mount'))
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+
+        # RD mount healthy (category non-empty); TB mount EMPTY (throttled).
+        rd_mount = os.path.join(tmp_dir, 'rd_mount')
+        os.makedirs(os.path.join(rd_mount, 'shows', '_keep'))
+        tb_mount = os.path.join(tmp_dir, 'tb_mount')
+        os.makedirs(tb_mount)
+
+        local_tv = os.path.join(tmp_dir, 'local_tv')
+        show_dir = os.path.join(local_tv, 'Pagan Peak', 'Season 03')
+        os.makedirs(show_dir)
+        tb_link = os.path.join(show_dir, 'Pagan.Peak.S03E05.mkv')
+        # Target resolves under the throttled TB mount — exists() would be False.
+        os.symlink('/mnt/debrid_torbox/Pagan.Peak.S03E05/Pagan.Peak.S03E05.mkv',
+                   tb_link)
+
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_movies_path = None
+        scanner._local_tv_path = local_tv
+        scanner._discover_torbox_mount = lambda: tb_mount
+        scanner._cleanup_broken_debrid_symlinks()
+
+        assert os.path.lexists(tb_link), \
+            'TB symlink must survive when the TB mount is unhealthy/throttled'
 
     def test_non_debrid_symlink_classified_local(self, tmp_dir, monkeypatch):
         """A *resolving* symlink to a non-debrid path (e.g. NAS mount, secondary

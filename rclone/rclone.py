@@ -430,7 +430,7 @@ def setup():
             if not nfs_mode:
                 if mn == TORBOX_MOUNT_NAME and torbox_remote_written:
                     tps_raw = (os.environ.get('TORBOX_RCLONE_TPSLIMIT') or '5').strip()
-                    burst_raw = (os.environ.get('TORBOX_RCLONE_TPSLIMIT_BURST') or '10').strip()
+                    burst_raw = (os.environ.get('TORBOX_RCLONE_TPSLIMIT_BURST') or '3').strip()
                     try:
                         tps = int(tps_raw)
                         if tps > 0:

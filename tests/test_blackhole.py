@@ -14,6 +14,7 @@ from utils.blackhole import (
     _rate_limit_until,
     _check_torbox_cooldown, _tb_cooldown_cache,
     _is_resolving_video, _dir_has_video, _local_episodes,
+    _coalesced_root_refresh, _ROOT_REFRESH_COALESCE_S,
 )
 
 
@@ -827,6 +828,85 @@ class TestTorboxCooldownProbe:
         # Jump past the cache TTL — should refresh.
         _check_torbox_cooldown('tb-key', _now=now + 999)
         assert call_count['n'] == 2
+
+
+class TestCoalescedRootRefresh:
+    """``_coalesced_root_refresh`` collapses the N-way root-relist burst a
+    landing season pack would otherwise produce (one full-root PROPFIND per
+    episode monitor) into a single re-list per ``_ROOT_REFRESH_COALESCE_S``
+    window — without it the burst trips TorBox's WebDAV listing rate-limit.
+    """
+
+    def setup_method(self):
+        import utils.blackhole as bh
+        bh._root_refresh_ts = 0.0
+
+    def teardown_method(self):
+        import utils.blackhole as bh
+        bh._root_refresh_ts = 0.0
+
+    def _count_refreshes(self, monkeypatch):
+        calls = {'n': 0, 'dirs': []}
+
+        def _fake_refresh_dir(d='', recursive=False):
+            calls['n'] += 1
+            calls['dirs'].append(d)
+        monkeypatch.setattr('utils.rclone_rc.refresh_dir', _fake_refresh_dir)
+        return calls
+
+    def test_first_call_fires_refresh(self, monkeypatch):
+        calls = self._count_refreshes(monkeypatch)
+        assert _coalesced_root_refresh(_now=1000.0) is True
+        assert calls['n'] == 1
+        assert calls['dirs'] == ['']
+
+    def test_burst_within_window_collapses_to_one(self, monkeypatch):
+        """A season pack's N monitors all reaching Phase 2 in the same
+        second must trigger exactly one re-list, not N."""
+        calls = self._count_refreshes(monkeypatch)
+        results = [_coalesced_root_refresh(_now=2000.0 + i * 0.01)
+                   for i in range(8)]
+        assert results[0] is True
+        assert all(r is False for r in results[1:])
+        assert calls['n'] == 1
+
+    def test_call_after_window_fires_again(self, monkeypatch):
+        calls = self._count_refreshes(monkeypatch)
+        assert _coalesced_root_refresh(_now=3000.0) is True
+        # Just past the coalesce window — a genuinely later monitor refreshes.
+        later = 3000.0 + _ROOT_REFRESH_COALESCE_S + 0.01
+        assert _coalesced_root_refresh(_now=later) is True
+        assert calls['n'] == 2
+
+    def test_real_threads_collapse_to_one(self, monkeypatch):
+        """The actual motivation: N real monitor threads hitting the unseamed
+        path concurrently must fire exactly one refresh — this exercises the
+        lock, not the ``_now`` simulation."""
+        import threading
+        calls = self._count_refreshes(monkeypatch)
+        barrier = threading.Barrier(8)
+
+        def _worker():
+            barrier.wait()  # release all threads as simultaneously as possible
+            _coalesced_root_refresh()
+        threads = [threading.Thread(target=_worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert calls['n'] == 1
+
+    def test_refresh_failure_is_swallowed_but_claims_window(self, monkeypatch):
+        """A failed refresh must not raise, and must still claim the window
+        so a retry storm can't bypass the coalesce guard."""
+        import utils.blackhole as bh
+        def _boom(d='', recursive=False):
+            raise RuntimeError('rc down')
+        monkeypatch.setattr('utils.rclone_rc.refresh_dir', _boom)
+        assert _coalesced_root_refresh(_now=4000.0) is True
+        # The window is claimed (timestamp advanced) even though refresh raised.
+        assert bh._root_refresh_ts == 4000.0
+        assert _coalesced_root_refresh(_now=4000.5) is False
 
 
 class TestTorboxAddCooldownGate:

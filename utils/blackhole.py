@@ -128,6 +128,49 @@ _rate_limit_until = {}    # provider -> unix timestamp until which adds wait
 _TB_COOLDOWN_CACHE_TTL = 30  # seconds — short enough to react to manual lift
 _tb_cooldown_cache = {'checked_at': 0.0, 'seconds_until': 0.0}
 
+# Coalesced root re-list.  Phase 2 of ``_process_torrent`` kicks rclone to
+# re-list the mount root via RC ``vfs/refresh`` so a freshly-cached torrent
+# surfaces without waiting for the dir-cache to expire.  On a FLAT TorBox
+# mount that refresh is a full-root PROPFIND — expensive.  When a season
+# pack lands, its N episode monitors each reach Phase 2 within the same
+# second and every one fires its own root refresh, producing an N-way burst
+# of full-root PROPFINDs that trips TorBox's WebDAV listing rate-limit
+# (HTTP 429 "rate limit exceeded" on ``webdav.torbox.app``).  Coalesce them:
+# a refresh fires at most once per ``_ROOT_REFRESH_COALESCE_S`` window across
+# ALL monitor threads, so the season-pack burst collapses to a single
+# re-list that surfaces every sibling episode at once.
+_ROOT_REFRESH_COALESCE_S = 15  # seconds; one TorBox WebDAV listing window
+_root_refresh_lock = threading.Lock()
+_root_refresh_ts = 0.0  # monotonic ts of the last fired root refresh
+
+
+def _coalesced_root_refresh(*, _now=None):
+    """Fire an rclone root re-list at most once per coalesce window.
+
+    Returns ``True`` when this call actually triggered the refresh, ``False``
+    when it was suppressed because another monitor thread already refreshed
+    within ``_ROOT_REFRESH_COALESCE_S``.  The window is claimed *before* the
+    (best-effort) refresh runs so two concurrent callers can't both fire;
+    any refresh failure is swallowed — the readiness probe degrades to
+    polling the existing dir-cache.  Uses a monotonic clock: this is a pure
+    elapsed-time window (unlike ``_check_torbox_cooldown``, which compares
+    against TB's externally-sourced wall-clock ``cooldown_until``), so a
+    backward NTP/VM-resume step can't over-suppress refreshes.  ``_now`` is
+    a test seam.
+    """
+    now = _now if _now is not None else time.monotonic()
+    global _root_refresh_ts
+    with _root_refresh_lock:
+        if now - _root_refresh_ts < _ROOT_REFRESH_COALESCE_S:
+            return False
+        _root_refresh_ts = now
+    try:
+        from utils.rclone_rc import refresh_dir
+        refresh_dir('')
+    except Exception:
+        pass
+    return True
+
 
 def _check_torbox_cooldown(api_key, *, _now=None):
     """Return seconds remaining on TB's account-level ``cooldown_until``.
@@ -2792,15 +2835,15 @@ class BlackholeWatcher:
         except Exception:
             file_names = None
 
-        # Kick rclone to re-list the top-level category dirs immediately so
-        # we don't have to wait for its next --poll-interval tick. Belt and
-        # suspenders: rclone's active polling handles subsequent ticks, so
-        # we only call this once at the start.
-        try:
-            from utils.rclone_rc import refresh_dir
-            refresh_dir('')
-        except Exception:
-            pass
+        # Kick rclone to re-list the mount root immediately so we don't have
+        # to wait for the dir-cache to expire (2h on TorBox WebDAV, which has
+        # no working ChangeNotify polling).  Coalesced across monitor threads:
+        # when a season pack lands, its N episode monitors all reach here at
+        # once — without coalescing each would fire a full-root PROPFIND and
+        # the burst trips TorBox's WebDAV listing rate-limit.  One re-list per
+        # window surfaces every sibling episode, so the suppressed monitors
+        # still find their content on the very next poll.
+        _coalesced_root_refresh()
 
         while not self._stop_event.is_set():
             elapsed_mount = time.time() - mount_start

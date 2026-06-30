@@ -189,7 +189,7 @@ class Config:
         # 5 tps / 10-burst stays under the observed Essential-tier
         # ceiling.  Set either to '0' to omit the flag entirely.
         self.TORBOX_RCLONE_TPSLIMIT = os.getenv('TORBOX_RCLONE_TPSLIMIT', '5')
-        self.TORBOX_RCLONE_TPSLIMIT_BURST = os.getenv('TORBOX_RCLONE_TPSLIMIT_BURST', '10')
+        self.TORBOX_RCLONE_TPSLIMIT_BURST = os.getenv('TORBOX_RCLONE_TPSLIMIT_BURST', '3')
         # TB's dir cache must outlive the hourly library scan. With the
         # default 30m it expires before the next scan, so every scan re-lists
         # all release folders over the throttled (tpslimit) FUSE mount and

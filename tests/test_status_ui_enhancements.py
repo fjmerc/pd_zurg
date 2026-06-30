@@ -139,6 +139,24 @@ class TestReadLogLines:
         assert len(lines) == 1
         assert 'new log' in lines[0]
 
+    def test_prefers_active_file_over_rotation_backup(self, tmp_dir):
+        """The active ``ZURGARR-<date>.log`` must win over a rolled-over
+        ``ZURGARR-<date>_1.log`` backup.  A plain lexicographic max() picks
+        ``_1`` (``_`` > ``.``) and shows stale logs that stop at the last
+        rollover — selection must be by mtime, not name."""
+        import time as _time
+        backup = os.path.join(tmp_dir, 'ZURGARR-2026-03-21_1.log')
+        with open(backup, 'w') as f:
+            f.write('rolled-over backup line\n')
+        # Ensure the active file is strictly newer on disk.
+        _time.sleep(0.01)
+        active = os.path.join(tmp_dir, 'ZURGARR-2026-03-21.log')
+        with open(active, 'w') as f:
+            f.write('live active line\n')
+        lines = read_log_lines(lines=10, log_dir=tmp_dir)
+        assert len(lines) == 1
+        assert 'live active line' in lines[0]
+
     def test_handles_empty_log_file(self, tmp_dir):
         """Should return empty list for empty log file."""
         log_file = os.path.join(tmp_dir, 'ZURGARR-2026-03-21.log')

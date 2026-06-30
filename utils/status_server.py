@@ -202,7 +202,14 @@ def read_log_lines(lines=100, level=None, log_dir='./log'):
         log_files = glob_mod.glob(os.path.join(log_dir, 'ZURGARR-*.log'))
         if not log_files:
             return []
-        log_file = max(log_files)  # Lexicographic sort — date-stamped names sort correctly
+        # Pick the file most recently written, NOT the lexicographically
+        # greatest name.  CustomRotatingFileHandler keeps the *active* file as
+        # ``ZURGARR-<date>.log`` and renames rolled-over content to
+        # ``ZURGARR-<date>_1.log`` (``_2``, ...).  Since ``_`` (0x5F) sorts
+        # after ``.`` (0x2E), a plain ``max()`` would return the frozen ``_1``
+        # backup and the Logs tab would show stale entries that stop at the
+        # last rollover.  mtime always identifies the file still being written.
+        log_file = max(log_files, key=os.path.getmtime)
 
         with open(log_file, 'rb') as f:
             f.seek(0, 2)

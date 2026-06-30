@@ -4897,6 +4897,53 @@ class TestTorboxCachedAlternative:
             fp2, os.path.basename(fp2), self.REJECTED, 'realdebrid') is True
         assert len(adds) == 1
 
+
+class TestTorboxAltGiveUpCap(TestTorboxCachedAlternative):
+    """Persistent give-up cap: after BLACKHOLE_TB_ALT_MAX_ATTEMPTS cached-alt
+    grabs for one (imdb_id, season), decline so the title falls back to Wanted
+    instead of re-arming TorBox's abuse cooldown on every .magnet re-drop."""
+
+    @pytest.fixture(autouse=True)
+    def _ledger(self, tmp_dir):
+        import importlib
+        from utils import attempt_ledger
+        importlib.reload(attempt_ledger)
+        attempt_ledger.init(config_dir=tmp_dir)
+        self.ledger = attempt_ledger
+        yield
+
+    def test_successful_grab_bumps_ledger(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn: ('tt777', 'series', 2, 1))
+        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        monkeypatch.setattr(w, '_add_to_torbox', lambda *a, **k: (True, {}))
+        fp = self._make_file(tmp_dir, 'Show.S02E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is True
+        assert self.ledger.get('tbalt:tt777:s2') == 1
+
+    def test_cap_declines_and_keeps_file(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        w._tb_alt_max_attempts = 2
+        for _ in range(2):
+            self.ledger.bump('tbalt:tt777:s2')
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn: ('tt777', 'series', 2, 1))
+        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        adds = []
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: adds.append(1) or (True, {}))
+        fp = self._make_file(tmp_dir, 'Show.S02E03.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert not adds              # never probed/grabbed
+        assert os.path.exists(fp)    # caller falls through to its own delete
+
     def test_dedup_key_for_movie_uses_none_season(self, tmp_dir, monkeypatch):
         """Movies key on (imdb_id, None).  A successful grab records the key,
         so a re-drop of the same movie is suppressed — and the None season

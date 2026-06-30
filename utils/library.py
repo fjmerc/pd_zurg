@@ -2189,6 +2189,10 @@ class LibraryScanner:
         except (ValueError, TypeError):
             self._debrid_unavailable_days = 3
         try:
+            self._force_grab_max_attempts = int(os.environ.get('FORCE_GRAB_MAX_ATTEMPTS', '12'))
+        except (ValueError, TypeError):
+            self._force_grab_max_attempts = 12
+        try:
             self._pending_warning_hours = int(os.environ.get('PENDING_WARNING_HOURS', '24'))
         except (ValueError, TypeError):
             self._pending_warning_hours = 24
@@ -3684,8 +3688,9 @@ class LibraryScanner:
         """
         gap_fill_on = gap_fill_enabled()
 
-        from utils.library_prefs import get_all_pending, set_pending, touch_pending_searched, update_pending_error
+        from utils.library_prefs import get_all_pending, set_pending, touch_pending_searched, update_pending_error, mark_debrid_unavailable
         from utils.tmdb import search_show as tmdb_search_show, search_movie as tmdb_search_movie
+        from utils import attempt_ledger
 
         # pending is a snapshot; set_pending calls below write new entries
         # that won't be visible in this snapshot — acceptable since each
@@ -3839,7 +3844,22 @@ class LibraryScanner:
 
                 respect_mon = True  # all routes honor Sonarr's monitored flag
                 new_pending = []
+                capped_count = 0
                 for sn, ep_nums in by_season.items():
+                    # Force-grab give-up gate: the prefer_debrid=True path
+                    # re-grabs an already-present file to push it to debrid,
+                    # which re-arms TorBox's abuse cooldown.  After
+                    # FORCE_GRAB_MAX_ATTEMPTS futile grabs on a stuck title,
+                    # stop poking debrid for this season.
+                    fg_key = f"fg:{norm}:s{sn}"
+                    if route is True and attempt_ledger.get(fg_key) >= self._force_grab_max_attempts:
+                        logger.info(
+                            f"[library] Force-grab give-up for {show['title']} S{sn:02d}: "
+                            f"{self._force_grab_max_attempts} attempts exhausted, "
+                            f"stopping debrid re-grab"
+                        )
+                        capped_count += 1
+                        continue
                     try:
                         result = show_client.ensure_and_search(
                             show['title'], show_tmdb_id, sn, ep_nums,
@@ -3849,6 +3869,8 @@ class LibraryScanner:
                         if status in ('sent', 'pending'):
                             for en in ep_nums:
                                 new_pending.append({'season': sn, 'episode': en})
+                            if route is True and result.get('grabbed'):
+                                attempt_ledger.bump(fg_key)
                         elif status == 'skipped':
                             # User-unmonitored episodes — respect intent, don't
                             # cooldown or error-log (would churn retry_count).
@@ -3874,6 +3896,14 @@ class LibraryScanner:
 
                 if new_pending:
                     set_pending(pending_norm, new_pending, direction)
+                elif capped_count and capped_count == len(by_season):
+                    # EVERY actionable season hit the force-grab cap (none were
+                    # sent and none errored transiently) — escalate the title to
+                    # debrid-unavailable so the UI reflects give-up and the loop
+                    # stops re-poking debrid.  A transient error on an un-capped
+                    # season leaves capped_count < len(by_season), so the title
+                    # keeps its to-debrid direction and retries next scan.
+                    mark_debrid_unavailable(pending_norm)
 
         # --- Movies via Radarr ---
         try:
@@ -3962,6 +3992,19 @@ class LibraryScanner:
                 if (norm, 0) in self._search_cooldown:
                     continue  # recently attempted
 
+                # Force-grab give-up gate (mirrors the shows path): after
+                # FORCE_GRAB_MAX_ATTEMPTS futile debrid re-grabs on a stuck
+                # movie, escalate to debrid-unavailable and stop poking debrid.
+                fg_key = f"fg:{norm}"
+                if route is True and attempt_ledger.get(fg_key) >= self._force_grab_max_attempts:
+                    logger.info(
+                        f"[library] Force-grab give-up for movie {movie['title']}: "
+                        f"{self._force_grab_max_attempts} attempts exhausted, "
+                        f"stopping debrid re-grab"
+                    )
+                    mark_debrid_unavailable(pending_norm)
+                    continue
+
                 retry_tag = ' (retry)' if movie_is_retry else ''
                 route_tag = {True: 'debrid', False: 'local', None: 'any'}[route]
                 logger.info(f"[library] Gap-fill search{retry_tag} [{route_tag}] for movie: {movie['title']}")
@@ -3988,6 +4031,8 @@ class LibraryScanner:
                     status = result.get('status', '')
                     if status in ('sent', 'pending'):
                         set_pending(pending_norm, [{'season': 0, 'episode': 0}], direction)
+                        if route is True and result.get('grabbed'):
+                            attempt_ledger.bump(fg_key)
                     elif status == 'skipped':
                         # Respect_monitored short-circuit — user intentionally
                         # unmonitored; don't touch pending or retry_count.
@@ -4183,6 +4228,11 @@ class LibraryScanner:
         Runs unconditionally on every scan.
         """
         from utils.library_prefs import get_all_pending, clear_pending
+        from utils import attempt_ledger
+
+        # Time-decay the give-up ledger once per scan: a title abandoned 30+
+        # days ago gets a fresh budget if it ever flows back through a loop.
+        attempt_ledger.prune(30 * 24 * 3600)
 
         pending = get_all_pending()
         if not pending:
@@ -4237,6 +4287,14 @@ class LibraryScanner:
                 logger.debug(f"[library] Clearing {len(resolved)} pending episode(s) for "
                              f"{norm_title!r} (direction={direction!r})")
                 clear_pending(norm_title, resolved)
+                # Content landed on debrid — drop the force-grab give-up counter
+                # so a future re-acquisition gets a fresh attempt budget. Reset
+                # both key forms (movie `fg:{norm}` and per-season `fg:{norm}:sN`);
+                # a missing key is a safe no-op.
+                if direction in ('to-debrid', 'debrid-unavailable'):
+                    attempt_ledger.reset(f"fg:{norm_title}")
+                    for ep in resolved:
+                        attempt_ledger.reset(f"fg:{norm_title}:s{ep.get('season', 0)}")
 
     def _escalate_stuck_pending(self):
         """Mark to-debrid entries as debrid-unavailable after threshold days.

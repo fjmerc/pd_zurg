@@ -39,6 +39,7 @@ def scanner(monkeypatch):
     s._search_cooldown = {}
     s._SEARCH_RETRY_HOURS = 6
     s._SEARCH_BUDGET_SECONDS = 30
+    s._force_grab_max_attempts = 12
     return s
 
 

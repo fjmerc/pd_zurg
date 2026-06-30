@@ -1242,6 +1242,7 @@ class SonarrClient(_ArrClientBase):
                 return {
                     'status': 'sent',
                     'service': 'sonarr',
+                    'grabbed': grabbed,
                     'message': f'Force-grabbed {grabbed} debrid release(s) for {title} S{season_number:02d}',
                 }
             # All interactive grabs failed — no_file_ids already searched above,
@@ -2146,6 +2147,7 @@ class RadarrClient(_ArrClientBase):
                     return {
                         'status': 'sent',
                         'service': 'radarr',
+                        'grabbed': 1,
                         'message': f'Force-grabbed debrid release for {title}',
                     }
                 # Fall through to normal search as last resort

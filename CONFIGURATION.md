@@ -166,6 +166,7 @@ for recommended settings per provider.
 | `BLACKHOLE_REQUIRE_CACHED` | Refuse `.torrent`/`.magnet` drops that aren't confirmed cached. **RD users leave OFF** (RD deprecated its cache probe Nov 2024); AD/TB users can turn this ON | `false` |
 | `BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT` | When the blackhole gives up waiting for debrid to cache a torrent (`BLACKHOLE_MOUNT_POLL_TIMEOUT`), actively delete it from the debrid account instead of leaving it as a 0%/0-seed entry. **Recommended ON for RD users** — see [TROUBLESHOOTING](TROUBLESHOOTING.md#uncached-torrents-pile-up-on-my-debrid-account-from-the-blackhole) | `false` |
 | `BLACKHOLE_TB_ALT_RECOVERY_ENABLED` | When a grabbed release is uncached and would be rejected, search Torrentio for other releases of the same title cached on **TorBox** (at the same quality tier the arr approved) and grab one instead. Stops well-cached titles falling to "Wanted" because the specific hash Sonarr/Radarr picked is uncached. Requires TorBox configured; no-op without it | `true` |
+| `BLACKHOLE_TB_ALT_MAX_ATTEMPTS` | Cached-alternative grabs for one season before giving up and letting the title fall back to "Wanted". Each grab re-arms TorBox's abuse cooldown, so this caps re-grabbing a never-completing title on every `.magnet` re-drop. Persists across restarts; decays after 30 idle days | `12` |
 
 ### Quality compromise + season-pack fallback (opt-in)
 
@@ -227,6 +228,7 @@ Sweep cadence (`DEBRID_HEALTH_INTERVAL`, default 12h) is a power-user override r
 | `BLOCKLIST_EXPIRY_DAYS` | Auto-expire auto-added blocklist entries after N days (0=never). Manual entries kept forever | `0` |
 | `LIBRARY_PREFERENCE_AUTO_ENFORCE` | Auto-switch sources when content arrives matching a stored preference | `false` |
 | `DEBRID_UNAVAILABLE_THRESHOLD_DAYS` | Days of failed searches before marking content debrid-unavailable | `3` |
+| `FORCE_GRAB_MAX_ATTEMPTS` | Force-grabs of a debrid release for one stuck title before giving up (marks debrid-unavailable). Each force-grab re-arms TorBox's abuse cooldown, so this caps the self-inflicted churn. Persists across restarts; resets when the title lands on debrid or after 30 idle days | `12` |
 | `PENDING_WARNING_HOURS` | Hours before `pending_warning` notification for stuck items (0 disables) | `24` |
 | `GAP_FILL_ENABLED` | Reconcile monitored shows against TMDB and search Sonarr/Radarr for aired episodes missing from both sources. Also auto-enables `verify_symlinks` re-search on broken symlinks | `true` |
 | `WANTED_TB_RECOVERY_ENABLED` | For each "Wanted" title the arr never grabbed, search Torrentio directly, probe TorBox's cache, and add the best cached release straight to TorBox — bypassing the arr's indexer pool. Closes the gap where a title is cached on TorBox but the arr never surfaces a grabbable release. Requires TorBox + `TORRENTIO_URL` | `true` |

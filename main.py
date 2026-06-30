@@ -10,6 +10,7 @@ from utils.processes import shutdown_all_processes, start_process_monitor
 from utils import notifications
 from utils import history
 from utils import recovery
+from utils import attempt_ledger
 from utils import blocklist
 from utils import blackhole
 from utils import ffprobe_monitor
@@ -76,6 +77,7 @@ def main():
 
     history.init()
     recovery.init()
+    attempt_ledger.init()
     blocklist.init()
     notifications.init()
     notifications.notify('startup', 'Zurgarr Started', f'Version {version}')

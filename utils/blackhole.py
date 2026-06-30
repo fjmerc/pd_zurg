@@ -22,6 +22,7 @@ from datetime import datetime
 import requests
 from utils.file_utils import atomic_write
 from utils.logger import get_logger
+from utils import attempt_ledger
 
 logger = get_logger()
 
@@ -1325,6 +1326,14 @@ class BlackholeWatcher:
         # suppresses sibling episode grabs within _TB_ALT_DEDUP_TTL.
         self._tb_alt_recent_grabs = {}  # {(imdb_id, season): epoch}
         self._tb_alt_grabs_lock = threading.Lock()
+        # Persistent give-up cap: after this many cached-alternative grabs for
+        # one (imdb_id, season) across scans/restarts, stop re-grabbing (each
+        # grab re-arms TorBox's abuse cooldown). Survives restart via the
+        # attempt_ledger; the in-memory dedup above only bounds a single burst.
+        try:
+            self._tb_alt_max_attempts = int(os.environ.get('BLACKHOLE_TB_ALT_MAX_ATTEMPTS', '12'))
+        except (ValueError, TypeError):
+            self._tb_alt_max_attempts = 12
         if symlink_enabled:
             self._pending_file = os.path.join(completed_dir, 'pending_monitors.json')
         else:
@@ -3569,6 +3578,19 @@ class BlackholeWatcher:
                             f"skipping redundant grab for {filename}")
                 return False
 
+            # Persistent give-up cap: a never-completing title would otherwise
+            # be re-grabbed every time its .magnet re-drops, re-arming TorBox's
+            # abuse cooldown indefinitely. After _tb_alt_max_attempts grabs for
+            # this (imdb_id, season), decline so the caller deletes and the title
+            # falls back to Wanted instead of churning TorBox.
+            ledger_key = f"tbalt:{imdb_id}:s{season}"
+            if attempt_ledger.get(ledger_key) >= self._tb_alt_max_attempts:
+                logger.info(f"[blackhole] TB-alt: give-up cap "
+                            f"({self._tb_alt_max_attempts}) reached for "
+                            f"{imdb_id} (season={season}); declining grab for "
+                            f"{filename}, falling back to Wanted")
+                return False
+
             results = search_torrentio(
                 imdb_id, media_type=media_type, season=season, episode=episode,
             )
@@ -3680,6 +3702,7 @@ class BlackholeWatcher:
         # fall through the candidate-resolution try block (whose except returns
         # False), and dedup_key is assigned before any code that can do so.
         self._remember_tb_alt_grab(dedup_key)
+        attempt_ledger.bump(ledger_key)
         try:
             os.remove(file_path)
         except OSError as e:

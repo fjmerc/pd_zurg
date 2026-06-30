@@ -34,6 +34,7 @@ def scanner(monkeypatch):
     s._search_cooldown = {}
     s._SEARCH_RETRY_HOURS = 6
     s._SEARCH_BUDGET_SECONDS = 30
+    s._force_grab_max_attempts = 12
     return s
 
 
@@ -392,3 +393,143 @@ class TestMovieGapFill:
         with patch('utils.arr_client.get_download_service', return_value=(mock_radarr, 'radarr')):
             scanner._search_for_missing_episodes([], [movie], {})
         mock_radarr.ensure_and_search.assert_not_called()
+
+
+class TestForceGrabCap:
+    """Persistent force-grab give-up: after FORCE_GRAB_MAX_ATTEMPTS futile
+    debrid re-grabs on a stuck prefer-debrid title, stop poking debrid and
+    escalate to debrid-unavailable so TorBox's abuse cooldown isn't re-armed
+    every scan."""
+
+    @pytest.fixture(autouse=True)
+    def _ledger(self, tmp_dir):
+        import importlib
+        from utils import attempt_ledger
+        importlib.reload(attempt_ledger)
+        attempt_ledger.init(config_dir=tmp_dir)
+        self.ledger = attempt_ledger
+        yield
+
+    def test_bump_on_force_grab(self, scanner, mock_sonarr):
+        """A force-grab ('sent' with grabbed>0) increments the season ledger."""
+        mock_sonarr.ensure_and_search.return_value = {
+            'status': 'sent', 'grabbed': 1, 'service': 'sonarr',
+        }
+        show = {
+            'title': 'Tulsa King', 'year': None,
+            'season_data': [{'number': 1, 'episodes': [{'number': 1, 'source': 'local'}]}],
+        }
+        with _stub_tmdb_episodes([(1, 1)]):
+            with patch('utils.arr_client.get_download_service', return_value=(mock_sonarr, 'sonarr')):
+                with patch('utils.tmdb.search_show', return_value=None):
+                    scanner._search_for_missing_episodes([show], [], {'tulsa king': 'prefer-debrid'})
+        assert self.ledger.get('fg:tulsa king:s1') == 1
+
+    def test_no_bump_when_not_force_grabbed(self, scanner, mock_sonarr):
+        """A plain 'sent' (normal search, no grabbed) must NOT bump the ledger."""
+        mock_sonarr.ensure_and_search.return_value = {'status': 'sent', 'service': 'sonarr'}
+        show = {
+            'title': 'Tulsa King', 'year': None,
+            'season_data': [{'number': 1, 'episodes': [{'number': 1, 'source': 'local'}]}],
+        }
+        with _stub_tmdb_episodes([(1, 1)]):
+            with patch('utils.arr_client.get_download_service', return_value=(mock_sonarr, 'sonarr')):
+                with patch('utils.tmdb.search_show', return_value=None):
+                    scanner._search_for_missing_episodes([show], [], {'tulsa king': 'prefer-debrid'})
+        assert self.ledger.get('fg:tulsa king:s1') == 0
+
+    def _seed_stale_pending(self, norm, episodes, direction):
+        """Write a pending entry whose last_searched is old enough to be a
+        stale retry, so the search loop reaches the force-grab gate instead of
+        short-circuiting on the retry-cooldown path."""
+        old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat(timespec='seconds')
+        with lp._pending_lock:
+            lp._save_pending({norm: {
+                'direction': direction, 'created': old, 'last_searched': old,
+                'episodes': episodes,
+            }})
+
+    def test_show_caps_and_escalates(self, scanner, mock_sonarr):
+        """At the cap, the season is skipped (no ensure_and_search) and the
+        title is marked debrid-unavailable."""
+        scanner._force_grab_max_attempts = 3
+        for _ in range(3):
+            self.ledger.bump('fg:tulsa king:s1')
+        # Seed a STALE to-debrid pending entry so the loop reaches the gate.
+        self._seed_stale_pending('tulsa king', [{'season': 1, 'episode': 1}], 'to-debrid')
+        show = {
+            'title': 'Tulsa King', 'year': None,
+            'season_data': [{'number': 1, 'episodes': [{'number': 1, 'source': 'local'}]}],
+        }
+        with _stub_tmdb_episodes([(1, 1)]):
+            with patch('utils.arr_client.get_download_service', return_value=(mock_sonarr, 'sonarr')):
+                with patch('utils.tmdb.search_show', return_value=None):
+                    scanner._search_for_missing_episodes([show], [], {'tulsa king': 'prefer-debrid'})
+        mock_sonarr.ensure_and_search.assert_not_called()
+        assert lp.get_all_pending()['tulsa king']['direction'] == 'debrid-unavailable'
+
+    def test_partial_cap_does_not_escalate(self, scanner, mock_sonarr):
+        """A multi-season show where only ONE season is capped must NOT be
+        escalated to debrid-unavailable when another season had a transient
+        error — the title keeps its to-debrid direction and retries later."""
+        scanner._force_grab_max_attempts = 3
+        for _ in range(3):
+            self.ledger.bump('fg:tulsa king:s1')  # S1 capped, S2 fresh
+        self._seed_stale_pending(
+            'tulsa king',
+            [{'season': 1, 'episode': 1}, {'season': 2, 'episode': 1}],
+            'to-debrid',
+        )
+        # S2 (the un-capped season) errors transiently.
+        mock_sonarr.ensure_and_search.return_value = {
+            'status': 'error', 'message': 'boom', 'service': 'sonarr',
+        }
+        show = {
+            'title': 'Tulsa King', 'year': None,
+            'season_data': [
+                {'number': 1, 'episodes': [{'number': 1, 'source': 'local'}]},
+                {'number': 2, 'episodes': [{'number': 1, 'source': 'local'}]},
+            ],
+        }
+        with _stub_tmdb_episodes([(1, 1), (2, 1)]):
+            with patch('utils.arr_client.get_download_service', return_value=(mock_sonarr, 'sonarr')):
+                with patch('utils.tmdb.search_show', return_value=None):
+                    scanner._search_for_missing_episodes([show], [], {'tulsa king': 'prefer-debrid'})
+        # Only S2 was searched (S1 was gated); title NOT escalated.
+        mock_sonarr.ensure_and_search.assert_called_once()
+        assert lp.get_all_pending()['tulsa king']['direction'] == 'to-debrid'
+
+    def test_movie_caps_and_escalates(self, scanner, mock_radarr):
+        scanner._force_grab_max_attempts = 2
+        for _ in range(2):
+            self.ledger.bump('fg:dune')
+        self._seed_stale_pending('dune', [{'season': 0, 'episode': 0}], 'to-debrid')
+        movie = {'title': 'Dune', 'year': 2021, 'source': 'local'}  # local-only under prefer-debrid
+        with patch('utils.arr_client.get_download_service', return_value=(mock_radarr, 'radarr')):
+            with patch('utils.tmdb.search_movie', return_value=None):
+                scanner._search_for_missing_episodes([], [movie], {'dune': 'prefer-debrid'})
+        mock_radarr.ensure_and_search.assert_not_called()
+        assert lp.get_all_pending()['dune']['direction'] == 'debrid-unavailable'
+
+    def test_movie_bump_on_force_grab(self, scanner, mock_radarr):
+        mock_radarr.ensure_and_search.return_value = {
+            'status': 'sent', 'grabbed': 1, 'service': 'radarr',
+        }
+        movie = {'title': 'Dune', 'year': 2021, 'source': 'local'}
+        with patch('utils.arr_client.get_download_service', return_value=(mock_radarr, 'radarr')):
+            with patch('utils.tmdb.search_movie', return_value=None):
+                scanner._search_for_missing_episodes([], [movie], {'dune': 'prefer-debrid'})
+        assert self.ledger.get('fg:dune') == 1
+
+    def test_resolution_resets_ledger(self, scanner):
+        """When a to-debrid title lands on debrid, its force-grab counter clears."""
+        self.ledger.bump('fg:foo')
+        self.ledger.bump('fg:foo:s1')
+        lp.set_pending('foo', [{'season': 1, 'episode': 1}], 'to-debrid')
+        shows = [{
+            'title': 'Foo', 'year': None,
+            'season_data': [{'number': 1, 'episodes': [{'number': 1, 'source': 'debrid'}]}],
+        }]
+        scanner._clear_resolved_pending(shows, [])
+        assert self.ledger.get('fg:foo') == 0
+        assert self.ledger.get('fg:foo:s1') == 0

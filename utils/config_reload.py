@@ -141,13 +141,30 @@ def _determine_restarts(changed_vars):
 
 
 _reload_lock = threading.Lock()
+_reload_pending = threading.Event()
 
 
 def _do_reload():
     """Perform the actual reload work. Runs in a separate thread."""
     if not _reload_lock.acquire(blocking=False):
-        logger.info("[reload] Reload already in progress, skipping")
+        # The in-flight reload has likely already snapshotted os.environ,
+        # so env changes behind this trigger would be lost if we just
+        # skipped — queue a follow-up pass instead.
+        _reload_pending.set()
+        logger.info("[reload] Reload already in progress — queued a follow-up reload")
         return
+    try:
+        while True:
+            _reload_pending.clear()
+            _reload_once()
+            if not _reload_pending.is_set():
+                break
+            logger.info("[reload] Running queued follow-up reload")
+    finally:
+        _reload_lock.release()
+
+
+def _reload_once():
     try:
         import utils.processes as _proc_mod
         if _proc_mod._shutting_down:
@@ -229,8 +246,9 @@ def _do_reload():
                     if not (client_id and client_secret):
                         client_id = '0183a05ad97098d87287fe46da4ae286f434f32e8e951caad4cc147c947d79a3'
                         client_secret = '87109ed53fe1b4d6b0239e671f36cd2f17378384fa1ae09888a32643f83b7e6c'
+                    from utils.file_utils import atomic_write
                     env_path = './.env'
-                    with open(env_path, 'w') as f:
+                    with atomic_write(env_path) as f:
                         f.write(f'CLIENT_ID={client_id}\n')
                         f.write(f'CLIENT_SECRET={client_secret}\n')
                     logger.info("[reload] Rewrote plex_debrid Trakt .env")
@@ -298,8 +316,6 @@ def _do_reload():
 
     except Exception as e:
         logger.error(f"[reload] Reload failed: {e}")
-    finally:
-        _reload_lock.release()
 
 
 def _notify_reload(changed, services):

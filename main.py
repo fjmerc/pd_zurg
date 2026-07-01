@@ -38,9 +38,17 @@ def shutdown(signum, frame):
 
     for mount_point in os.listdir('/data'):
         full_path = os.path.join('/data', mount_point)
-        if os.path.ismount(full_path):
+        try:
+            # ismount raises OSError (ENOTCONN) on a dead FUSE mount — that
+            # still needs unmounting, so treat the error as "is a mount".
+            needs_umount = os.path.ismount(full_path)
+        except OSError:
+            needs_umount = True
+        if needs_umount:
             logger.info(f"Unmounting {full_path}...")
             umount = subprocess.run(['umount', full_path], capture_output=True, text=True)
+            if umount.returncode != 0:
+                umount = subprocess.run(['umount', '-l', full_path], capture_output=True, text=True)
             if umount.returncode == 0:
                 logger.info(f"Successfully unmounted {full_path}")
             else:

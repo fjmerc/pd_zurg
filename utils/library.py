@@ -2664,9 +2664,14 @@ class LibraryScanner:
                         self._webdav_unsupported_logged = True
                 try:
                     from utils.rclone_rc import refresh_dir
-                    refresh_dir('', recursive=True)
-                except Exception:
-                    pass
+                    from base import TORBOX_MOUNT_NAME
+                    # Skip the TorBox mount: it's enumerated below via the
+                    # mylist API, so a recursive PROPFIND walk over it here is
+                    # pure collateral and trips WebDAV listing rate-limits.
+                    refresh_dir('', recursive=True,
+                                exclude_mounts={TORBOX_MOUNT_NAME})
+                except Exception as e:
+                    logger.debug(f"[library] RC refresh before FUSE scan failed: {e}")
                 debrid_movies, debrid_shows = self._scan_mount(self._mount_path, deadline)
 
         # Plan 39 phase 4 — second-pass scan against the TorBox mount.
@@ -5441,8 +5446,8 @@ class LibraryScanner:
                         try:
                             from utils import retry_counter as _rc
                             _rc.reset('sonarr', info['id'])
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"[library] retry_counter reset failed for sonarr:{info['id']}: {e}")
                         logger.info(f"[library] Triggered Sonarr rescan for {title}")
                     except Exception as e:
                         logger.warning(f"[library] Sonarr rescan failed for {title}: {e}")
@@ -5501,8 +5506,8 @@ class LibraryScanner:
                         try:
                             from utils import retry_counter as _rc
                             _rc.reset('radarr', info['id'])
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"[library] retry_counter reset failed for radarr:{info['id']}: {e}")
                         logger.info(f"[library] Triggered Radarr rescan for {title}")
                     except Exception as e:
                         logger.warning(f"[library] Radarr rescan failed for {title}: {e}")

@@ -150,7 +150,18 @@ def get_all_rc_urls():
     """Return all registered RC URLs."""
     return list(_rc_urls.values())
 
-def get_port_from_config(config_file_path, key_type):
+def get_rc_urls_excluding(exclude_names):
+    """Return registered RC URLs for all mounts except those named in ``exclude_names``.
+
+    Used to steer expensive recursive ``vfs/refresh`` calls away from mounts
+    that don't benefit — e.g. the TorBox mount, which is enumerated via the
+    mylist API rather than a FUSE walk, so a recursive PROPFIND over it is pure
+    collateral (and trips WebDAV listing rate-limits).
+    """
+    exclude = set(exclude_names or ())
+    return [url for name, url in _rc_urls.items() if name not in exclude]
+
+def get_port_from_config(config_file_path):
     try:
         with open(config_file_path, 'r') as file:
             for line in file:
@@ -162,13 +173,74 @@ def get_port_from_config(config_file_path, key_type):
     return '9999'
 
 def obscure_password(password):
-    """Obscure the password using rclone."""
+    """Obscure the password using rclone.
+
+    The password is piped via stdin (``rclone obscure -``) rather than passed
+    as an argv element, so the plaintext never appears in /proc/*/cmdline or
+    in stringified CalledProcessError messages.
+    """
     try:
-        result = subprocess.run(["rclone", "obscure", password], check=True, stdout=subprocess.PIPE)
+        result = subprocess.run(["rclone", "obscure", "-"], check=True,
+                                input=password.encode(), stdout=subprocess.PIPE)
         return result.stdout.decode().strip()
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Error obscuring password: {e}")
+    except (subprocess.CalledProcessError, OSError) as e:
+        logger.error(f"Error obscuring password: rclone obscure exited with "
+                     f"{getattr(e, 'returncode', e.__class__.__name__)}")
         return None
+
+def _write_zurg_remote(file_handle, section_name, zurg_config_path):
+    """Write one Zurg-backed WebDAV remote stanza. Returns the Zurg port."""
+    port = get_port_from_config(zurg_config_path)
+    file_handle.write(f"[{section_name}]\n")
+    file_handle.write("type = webdav\n")
+    file_handle.write(f"url = http://localhost:{port}/dav\n")
+    file_handle.write("vendor = other\n")
+    file_handle.write("pacer_min_sleep = 0\n")
+    if ZURGUSER and ZURGPASS:
+        obscured_password = obscure_password(ZURGPASS)
+        if obscured_password:
+            file_handle.write(f"user = {ZURGUSER}\n")
+            file_handle.write(f"pass = {obscured_password}\n")
+    return port
+
+
+def _write_rclone_config(rclone_config_path, mn_rd, mn_ad,
+                         config_file_path_rd, config_file_path_ad):
+    """Write rclone.config (backing up any existing file first).
+
+    Shared by setup() and regenerate_config() so the remote stanzas can't
+    drift between first start and SIGHUP regeneration.
+
+    Returns (rd_port, ad_port, torbox_remote_written).
+    """
+    if os.path.exists(rclone_config_path):
+        backup_path = rclone_config_path + ".bak"
+        shutil.copy2(rclone_config_path, backup_path)
+        logger.info(f"Backed up existing rclone config to {backup_path}")
+
+    rd_port = ad_port = None
+    torbox_remote_written = False
+    with atomic_write(rclone_config_path) as f:
+        if RDAPIKEY:
+            rd_port = _write_zurg_remote(f, mn_rd, config_file_path_rd)
+        if ADAPIKEY:
+            ad_port = _write_zurg_remote(f, mn_ad, config_file_path_ad)
+
+        # TorBox co-debrid (plan 39).  Written only when fully configured.
+        if _torbox_mount_configured():
+            torbox_remote_written = _write_torbox_remote(f, TORBOX_MOUNT_NAME)
+        elif TORBOXAPIKEY:
+            logger.warning(
+                "[rclone] TORBOX_API_KEY is set but TORBOX_WEBDAV_USER "
+                "and/or TORBOX_WEBDAV_PASS is missing — TorBox mount "
+                "will be skipped.  Generate a WebDAV-only password in "
+                "the TorBox dashboard (Settings → Integrations → WebDAV) "
+                "and set both env vars to enable the mount.  Non-mount "
+                "TorBox features (cache probes, search add) still work "
+                "with just the API key."
+            )
+    return rd_port, ad_port, torbox_remote_written
+
 
 def regenerate_config():
     """Regenerate rclone.config from current config values.
@@ -183,53 +255,14 @@ def regenerate_config():
     if not RDAPIKEY and not ADAPIKEY:
         raise Exception("Please set the API Key for the rclone mount")
 
-    config_file_path_rd = '/zurg/RD/config.yml'
-    config_file_path_ad = '/zurg/AD/config.yml'
-
     if RDAPIKEY and ADAPIKEY:
-        RCLONEMN_RD = f"{RCLONEMN}_RD"
-        RCLONEMN_AD = f"{RCLONEMN}_AD"
+        mn_rd = f"{RCLONEMN}_RD"
+        mn_ad = f"{RCLONEMN}_AD"
     else:
-        RCLONEMN_RD = RCLONEMN_AD = RCLONEMN
+        mn_rd = mn_ad = RCLONEMN
 
-    rclone_config_path = "/config/rclone.config"
-    if os.path.exists(rclone_config_path):
-        backup_path = rclone_config_path + ".bak"
-        shutil.copy2(rclone_config_path, backup_path)
-
-    with atomic_write(rclone_config_path) as f:
-        if RDAPIKEY:
-            rd_port = get_port_from_config(config_file_path_rd, 'RDAPIKEY')
-            f.write(f"[{RCLONEMN_RD}]\n")
-            f.write("type = webdav\n")
-            f.write(f"url = http://localhost:{rd_port}/dav\n")
-            f.write("vendor = other\n")
-            f.write("pacer_min_sleep = 0\n")
-            if ZURGUSER and ZURGPASS:
-                obscured_password = obscure_password(ZURGPASS)
-                if obscured_password:
-                    f.write(f"user = {ZURGUSER}\n")
-                    f.write(f"pass = {obscured_password}\n")
-
-        if ADAPIKEY:
-            ad_port = get_port_from_config(config_file_path_ad, 'ADAPIKEY')
-            f.write(f"[{RCLONEMN_AD}]\n")
-            f.write("type = webdav\n")
-            f.write(f"url = http://localhost:{ad_port}/dav\n")
-            f.write("vendor = other\n")
-            f.write("pacer_min_sleep = 0\n")
-            if ZURGUSER and ZURGPASS:
-                obscured_password = obscure_password(ZURGPASS)
-                if obscured_password:
-                    f.write(f"user = {ZURGUSER}\n")
-                    f.write(f"pass = {obscured_password}\n")
-
-        # TorBox co-debrid (plan 39).  Written only when fully configured;
-        # incomplete TorBox config logs a warning at setup() time and the
-        # mount is skipped.
-        if _torbox_mount_configured():
-            _write_torbox_remote(f, TORBOX_MOUNT_NAME)
-
+    _write_rclone_config("/config/rclone.config", mn_rd, mn_ad,
+                         '/zurg/RD/config.yml', '/zurg/AD/config.yml')
     logger.info("Regenerated rclone.config")
 
 
@@ -256,52 +289,9 @@ def setup():
         config_file_path_ad = '/zurg/AD/config.yml'
 
         rclone_config_path = "/config/rclone.config"
-        if os.path.exists(rclone_config_path):
-            backup_path = rclone_config_path + ".bak"
-            shutil.copy2(rclone_config_path, backup_path)
-            logger.info(f"Backed up existing rclone config to {backup_path}")
-
-        with atomic_write(rclone_config_path) as f:
-            if RDAPIKEY:
-                rd_port = get_port_from_config(config_file_path_rd, 'RDAPIKEY')
-                f.write(f"[{RCLONEMN_RD}]\n")
-                f.write("type = webdav\n")
-                f.write(f"url = http://localhost:{rd_port}/dav\n")
-                f.write("vendor = other\n")
-                f.write("pacer_min_sleep = 0\n")
-                if ZURGUSER and ZURGPASS:
-                    obscured_password = obscure_password(ZURGPASS)
-                    if obscured_password:
-                        f.write(f"user = {ZURGUSER}\n")
-                        f.write(f"pass = {obscured_password}\n")
-
-            if ADAPIKEY:
-                ad_port = get_port_from_config(config_file_path_ad, 'ADAPIKEY')
-                f.write(f"[{RCLONEMN_AD}]\n")
-                f.write("type = webdav\n")
-                f.write(f"url = http://localhost:{ad_port}/dav\n")
-                f.write("vendor = other\n")
-                f.write("pacer_min_sleep = 0\n")
-                if ZURGUSER and ZURGPASS:
-                    obscured_password = obscure_password(ZURGPASS)
-                    if obscured_password:
-                        f.write(f"user = {ZURGUSER}\n")
-                        f.write(f"pass = {obscured_password}\n")
-
-            # TorBox co-debrid (plan 39).
-            torbox_remote_written = False
-            if _torbox_mount_configured():
-                torbox_remote_written = _write_torbox_remote(f, TORBOX_MOUNT_NAME)
-            elif TORBOXAPIKEY:
-                logger.warning(
-                    "[rclone] TORBOX_API_KEY is set but TORBOX_WEBDAV_USER "
-                    "and/or TORBOX_WEBDAV_PASS is missing — TorBox mount "
-                    "will be skipped.  Generate a WebDAV-only password in "
-                    "the TorBox dashboard (Settings → Integrations → WebDAV) "
-                    "and set both env vars to enable the mount.  Non-mount "
-                    "TorBox features (cache probes, search add) still work "
-                    "with just the API key."
-                )
+        rd_port, ad_port, torbox_remote_written = _write_rclone_config(
+            rclone_config_path, RCLONEMN_RD, RCLONEMN_AD,
+            config_file_path_rd, config_file_path_ad)
 
         with open("/etc/fuse.conf", "a") as f:
             f.write("user_allow_other\n")

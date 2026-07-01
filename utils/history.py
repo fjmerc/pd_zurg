@@ -278,26 +278,41 @@ def rotate():
 
 
 def _read_all_events():
-    """Read all events from the JSONL file. Thread-safe."""
+    """Read all events from the JSONL file. Thread-safe.
+
+    Holds the lock only for the raw file read; JSON parsing (the expensive
+    part on large histories) happens outside it so log_event() writers
+    aren't stalled while the UI paginates.
+    """
     with _lock:
-        return _read_all_events_unlocked()
+        lines = _read_lines()
+    return _parse_lines(lines)
 
 
 def _read_all_events_unlocked():
     """Read all events from the JSONL file. Caller must hold _lock."""
-    events = []
+    return _parse_lines(_read_lines())
+
+
+def _read_lines():
     try:
         with open(_file_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    events.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue  # skip corrupted lines
+            return f.readlines()
     except FileNotFoundError:
-        pass
+        return []
     except OSError as e:
         logger.error(f"[history] Failed to read history: {e}")
+        return []
+
+
+def _parse_lines(lines):
+    events = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue  # skip corrupted lines
     return events

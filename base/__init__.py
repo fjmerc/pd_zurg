@@ -117,6 +117,9 @@ def load_secret_or_env(secret_name, default=None):
 
 def is_port_available(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        # SO_REUSEADDR matches how the Go services (zurg/rclone) bind, so a
+        # port lingering in TIME_WAIT isn't falsely reported as unavailable.
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(('', port))
             return True

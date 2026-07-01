@@ -113,10 +113,20 @@ class DebridClientBase:
         return matches
 
     def _sanitize_error(self, error):
-        """Remove API key from error messages to prevent log leakage."""
+        """Remove API key from error messages to prevent log leakage.
+
+        Exact-string replacement alone misses urlencoded variants of the key
+        embedded in request URLs (requests exceptions echo the full URL, and
+        AllDebrid carries the key as an ``apikey=`` query param), so also
+        redact credential-looking query params and bearer headers by regex.
+        """
         msg = str(error)
         if self._api_key:
             msg = msg.replace(self._api_key, '***')
+        msg = re.sub(r'(apikey|api_key|token|key|bearer)=[^&\s]+',
+                     r'\1=***', msg, flags=re.IGNORECASE)
+        msg = re.sub(r'(Authorization:\s*Bearer\s+)\S+', r'\1***', msg,
+                     flags=re.IGNORECASE)
         return msg
 
 

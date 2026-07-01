@@ -1949,6 +1949,76 @@ def _find_canonical_tmdb_via_prefix(parsed_title, parsed_year, is_tv,
     return best
 
 
+def _match_arr_entry(title, year, parsed_title, arr_map, arr_map_norm,
+                     arr_by_tmdb, cached_tmdb, is_tv, max_season=0,
+                     _tmdb_cache=None):
+    """Resolve a library title to an arr library entry (Sonarr/Radarr).
+
+    The single implementation of the title-match cascade documented in
+    CLAUDE.md — used by movie/show symlink dir selection and movie/show
+    post-symlink rescan triggers.  Order:
+
+    1. Year-qualified exact match — disambiguates same-title
+       different-year entries (e.g. "The Bridge" 2011 vs 2013).
+    2. Bare exact match, then fuzzy ``_norm_for_matching`` match.
+    3. TMDB-cache key lookup.  The cache is keyed by the parsed-folder
+       norm — callers pass ``parsed_title`` (preserved when the display
+       title was upgraded to canonical) so renamed items still resolve.
+       For TV, a season-aware sub-step uses the item's max season to
+       disambiguate reboots/revivals sharing a title.
+    4. Token-aligned prefix match against the TMDB cache — recovers
+       parsed titles with appended actor/genre tokens (e.g. "Gattaca
+       Ethan Hawke Sci Fi" → "Gattaca").
+
+    Args:
+        title: display title of the library item.
+        year: item year int, or None.
+        parsed_title: parsed-from-folder title (falls back to ``title``
+            when falsy).
+        arr_map: {lowercase title: arr info} exact-match map.
+        arr_map_norm: {_norm_for_matching key: arr info} fuzzy map.
+        arr_by_tmdb: {tmdb_id: arr info} map.
+        cached_tmdb: {normalized title: tmdb_id} section from
+            ``get_cached_tmdb_ids()`` (movies or shows).
+        is_tv: True for shows, False for movies.
+        max_season: (TV only) max season number for the season-aware
+            fallback; 0/None skips that sub-step.
+        _tmdb_cache: pre-loaded full TMDB cache for the prefix-match
+            step (avoids per-call disk reads).
+
+    Returns the arr info dict, or None if nothing matched.
+    """
+    if year:
+        arr_info = arr_map.get(f"{title} ({year})".lower())
+        if arr_info:
+            return arr_info
+    arr_info = arr_map.get(title.lower()) or arr_map_norm.get(_norm_for_matching(title))
+    if arr_info:
+        return arr_info
+
+    parsed = parsed_title or title
+    norm = _normalize_title(parsed)
+    tmdb_id = (cached_tmdb.get(f"{norm} ({year})") if year else None) or cached_tmdb.get(norm)
+    if tmdb_id:
+        arr_info = arr_by_tmdb.get(tmdb_id)
+        if arr_info:
+            return arr_info
+    if is_tv and max_season:
+        from utils.tmdb import find_show_tmdb_id_by_season
+        alt_id = find_show_tmdb_id_by_season(norm, max_season, year)
+        if alt_id and alt_id != tmdb_id:
+            arr_info = arr_by_tmdb.get(alt_id)
+            if arr_info:
+                return arr_info
+
+    canonical = _find_canonical_tmdb_via_prefix(
+        parsed, year, is_tv=is_tv, _tmdb_cache=_tmdb_cache,
+    )
+    if canonical:
+        return arr_by_tmdb.get(canonical['tmdb_id'])
+    return None
+
+
 # Public aliases for cross-module reuse (e.g., debrid_client title matching)
 parse_folder_name = _parse_folder_name
 normalize_title = _normalize_title
@@ -3663,6 +3733,93 @@ class LibraryScanner:
     _WANTED_TB_MAX_PROBES = 12
     _WANTED_TB_RECOVERY_COOLDOWN = 6 * 3600
 
+    def _check_pending_freshness(self, norm, pending, direction):
+        """Resolve a title's pending entry and decide retry-vs-wait.
+
+        Shared by the shows and movies paths of
+        ``_search_for_missing_episodes`` (previously two copy-pasted blocks
+        that had already drifted).
+
+        Returns ``(pending_norm, verdict, pending_keys)``:
+          * ``pending_norm`` — the key the entry actually lives under (the
+            title's norm, or an alias norm).
+          * ``verdict`` — one of:
+              - ``'give-up'``: escalated to ``debrid-unavailable``; caller
+                must skip the title entirely.
+              - ``'retry'``: a same-direction entry exists but its last
+                search is older than ``_SEARCH_RETRY_HOURS``; caller may
+                re-search.
+              - ``'wait'``: a fresh same-direction entry exists; a
+                "Waiting for retry" status (with ``next_retry_at``) has
+                already been recorded on it.  The shows caller filters
+                ``pending_keys`` out of its candidates and falls through;
+                the movies caller skips the title.
+              - ``'none'``: no same-direction entry — either the title was
+                never pending, or a stale-direction entry was just cleared
+                (so ``touch_pending_searched``/``update_pending_error``
+                can't mutate a wrong-direction entry that would zombify
+                when the search loop errors out).
+          * ``pending_keys`` — the entry's ``(season, episode)`` set; only
+            populated for ``'wait'``.
+        """
+        from utils.library_prefs import clear_pending, update_pending_error
+
+        pending_entry = pending.get(norm)
+        pending_norm = norm  # key under which the entry lives
+        if not pending_entry:
+            for _pa in self._alias_norms.get(norm, ()):
+                pending_entry = pending.get(_pa)
+                if pending_entry:
+                    pending_norm = _pa
+                    break
+        pending_entry = pending_entry or {}
+        pe_dir = pending_entry.get('direction', '')
+        if pe_dir == 'debrid-unavailable':
+            return pending_norm, 'give-up', set()
+        if pe_dir and pe_dir != direction:
+            # Direction changed (e.g., user flipped from prefer-debrid to
+            # unset).  Clear the stale-direction entry.
+            clear_pending(pending_norm)
+            return pending_norm, 'none', set()
+        if pe_dir != direction:
+            return pending_norm, 'none', set()  # no entry for this direction
+
+        # Same-direction entry: retry only if the last search is stale.
+        last_ts = pending_entry.get('last_searched') or pending_entry.get('created')
+        stale = True
+        ls_dt = None
+        age_hours = 0.0
+        if last_ts:
+            try:
+                ls_dt = datetime.fromisoformat(last_ts)
+                if ls_dt.tzinfo is None:
+                    ls_dt = ls_dt.replace(tzinfo=timezone.utc)
+                age_hours = (datetime.now(timezone.utc) - ls_dt).total_seconds() / 3600
+                if age_hours < self._SEARCH_RETRY_HOURS:
+                    stale = False
+            except (ValueError, TypeError):
+                pass
+        if stale:
+            return pending_norm, 'retry', set()
+
+        # Fresh entry — record "waiting" status with next retry time.
+        remaining_h = self._SEARCH_RETRY_HOURS - age_hours
+        retry_dt = ls_dt + timedelta(hours=self._SEARCH_RETRY_HOURS)
+        update_pending_error(
+            pending_norm,
+            f"Waiting for retry ({remaining_h:.1f}h remaining)",
+            next_retry_at=retry_dt.isoformat(timespec='seconds'),
+            increment_retry=False,
+        )
+        # Tolerate malformed persisted entries (legacy schema / hand edits):
+        # a missing season/episode key must not abort the whole search loop.
+        pending_keys = {
+            (e['season'], e['episode'])
+            for e in pending_entry.get('episodes', [])
+            if isinstance(e, dict) and e.get('season') is not None and e.get('episode') is not None
+        }
+        return pending_norm, 'wait', pending_keys
+
     def _search_for_missing_episodes(self, shows, movies, preferences):
         """Unconditional episode-completeness reconcile.
 
@@ -3739,61 +3896,15 @@ class LibraryScanner:
                 direction = {True: 'to-debrid', False: 'to-local', None: 'to-any'}[route]
 
                 # Check pending state — skip debrid-unavailable, allow retries
-                # for stale entries whose direction matches the current route
-                pending_entry = pending.get(norm)
-                pending_norm = norm  # key under which the entry lives
-                if not pending_entry:
-                    for _pa in self._alias_norms.get(norm, ()):
-                        pending_entry = pending.get(_pa)
-                        if pending_entry:
-                            pending_norm = _pa
-                            break
-                pending_entry = pending_entry or {}
-                pe_dir = pending_entry.get('direction', '')
-                if pe_dir == 'debrid-unavailable':
+                # for stale entries whose direction matches the current route.
+                # 'wait' deliberately falls through: candidates are filtered
+                # by pending_keys below, so non-pending episodes of the same
+                # show can still be searched.
+                pending_norm, verdict, pending_keys = \
+                    self._check_pending_freshness(norm, pending, direction)
+                if verdict == 'give-up':
                     continue  # escalated — stop retrying
-                pending_keys = set()
-                is_retry = False
-                if pe_dir and pe_dir != direction:
-                    # Direction changed (e.g., user flipped from prefer-debrid
-                    # to unset).  Clear the stale-direction entry so
-                    # touch_pending_searched / update_pending_error below don't
-                    # mutate a wrong-direction entry that would then zombify
-                    # when the whole season loop errors out.
-                    from utils.library_prefs import clear_pending
-                    clear_pending(pending_norm)
-                    pending_entry = {}
-                    pe_dir = ''
-                if pe_dir == direction:
-                    # Check if the last search attempt is recent enough to skip
-                    last_ts = pending_entry.get('last_searched') or pending_entry.get('created')
-                    stale = True
-                    if last_ts:
-                        try:
-                            ls_dt = datetime.fromisoformat(last_ts)
-                            if ls_dt.tzinfo is None:
-                                ls_dt = ls_dt.replace(tzinfo=timezone.utc)
-                            age_hours = (datetime.now(timezone.utc) - ls_dt).total_seconds() / 3600
-                            if age_hours < self._SEARCH_RETRY_HOURS:
-                                stale = False
-                        except (ValueError, TypeError):
-                            pass
-                    if stale:
-                        is_retry = True  # allow retry — pending_keys stays empty
-                    else:
-                        pending_keys = {
-                            (e['season'], e['episode'])
-                            for e in pending_entry.get('episodes', [])
-                        }
-                        # Record "waiting" status with next retry time
-                        remaining_h = self._SEARCH_RETRY_HOURS - age_hours
-                        retry_dt = ls_dt + timedelta(hours=self._SEARCH_RETRY_HOURS)
-                        update_pending_error(
-                            pending_norm,
-                            f"Waiting for retry ({remaining_h:.1f}h remaining)",
-                            next_retry_at=retry_dt.isoformat(timespec='seconds'),
-                            increment_retry=False,
-                        )
+                is_retry = verdict == 'retry'
 
                 # Build the candidate set:
                 #   - Missing-anywhere (aired TMDB episodes absent from all sources).
@@ -3948,52 +4059,16 @@ class LibraryScanner:
                     if src in ('debrid', 'local', 'both'):
                         continue  # already available somewhere
 
-                pending_entry = pending.get(norm)
-                pending_norm = norm
-                if not pending_entry:
-                    for _pa in self._alias_norms.get(norm, ()):
-                        pending_entry = pending.get(_pa)
-                        if pending_entry:
-                            pending_norm = _pa
-                            break
-                pending_entry = pending_entry or {}
-                pe_dir = pending_entry.get('direction', '')
-                if pe_dir == 'debrid-unavailable':
+                # A movie has no per-episode granularity, so a fresh pending
+                # entry ('wait') skips the whole title — unlike the shows
+                # path, which falls through and filters by pending_keys.
+                pending_norm, verdict, _ = \
+                    self._check_pending_freshness(norm, pending, direction)
+                if verdict == 'give-up':
                     continue  # escalated — stop retrying
-                movie_is_retry = False
-                if pe_dir and pe_dir != direction:
-                    # Direction changed (preference flipped) — clear stale-direction
-                    # entry so touch / update_pending_error below don't zombify it.
-                    from utils.library_prefs import clear_pending
-                    clear_pending(pending_norm)
-                    pending_entry = {}
-                    pe_dir = ''
-                if pe_dir == direction:
-                    # Allow retry if last search is stale
-                    last_ts = pending_entry.get('last_searched') or pending_entry.get('created')
-                    stale = True
-                    if last_ts:
-                        try:
-                            ls_dt = datetime.fromisoformat(last_ts)
-                            if ls_dt.tzinfo is None:
-                                ls_dt = ls_dt.replace(tzinfo=timezone.utc)
-                            age_hours = (datetime.now(timezone.utc) - ls_dt).total_seconds() / 3600
-                            if age_hours < self._SEARCH_RETRY_HOURS:
-                                stale = False
-                        except (ValueError, TypeError):
-                            pass
-                    if not stale:
-                        # Record "waiting" status with next retry time
-                        remaining_h = self._SEARCH_RETRY_HOURS - age_hours
-                        retry_dt = ls_dt + timedelta(hours=self._SEARCH_RETRY_HOURS)
-                        update_pending_error(
-                            pending_norm,
-                            f"Waiting for retry ({remaining_h:.1f}h remaining)",
-                            next_retry_at=retry_dt.isoformat(timespec='seconds'),
-                            increment_retry=False,
-                        )
-                        continue  # recent search — skip
-                    movie_is_retry = True
+                if verdict == 'wait':
+                    continue  # recent search — skip
+                movie_is_retry = verdict == 'retry'
                 if (norm, 0) in self._search_cooldown:
                     continue  # recently attempted
 
@@ -4951,7 +5026,7 @@ class LibraryScanner:
             if tid:
                 sonarr_by_tmdb[tid] = info
         # Load cached TMDB IDs so we can translate Zurgarr titles → TMDB IDs
-        from utils.tmdb import get_cached_tmdb_ids, find_show_tmdb_id_by_season
+        from utils.tmdb import get_cached_tmdb_ids
         cached_tmdb_ids = get_cached_tmdb_ids()
         cached_tmdb_movies = cached_tmdb_ids.get('movies', {})
         cached_tmdb_shows = cached_tmdb_ids.get('shows', {})
@@ -4993,37 +5068,12 @@ class LibraryScanner:
                     if _blocklist.is_blocked_title(mount_folder):
                         continue
 
-                # Year-qualified exact match first to disambiguate same-title
-                # different-year entries (e.g. "The Bridge" 2011 vs 2013)
-                arr_info = None
-                if year:
-                    arr_info = radarr_map.get(f"{title} ({year})".lower())
-                if not arr_info:
-                    arr_info = radarr_map.get(title.lower()) or radarr_map_norm.get(_norm_for_matching(title))
-                # Fallback: match via TMDB ID when title differs.  The TMDB
-                # cache is keyed by the parsed-folder norm — use _parsed_title
-                # (preserved when the display title was upgraded to canonical)
-                # so renamed items still resolve via cache.
-                if not arr_info:
-                    _norm = _normalize_title(movie.get('_parsed_title') or title)
-                    tmdb_id = (cached_tmdb_movies.get(f"{_norm} ({year})") if year else None) or cached_tmdb_movies.get(_norm)
-                    if tmdb_id:
-                        arr_info = radarr_by_tmdb.get(tmdb_id)
-                # Final TMDB fallback: token-aligned prefix match.  Recovers
-                # parsed titles where extra tokens (actor name, genre tag)
-                # were appended before the year — e.g. "Gattaca Ethan
-                # Hawke Sci Fi" → cache entry "Gattaca" → Radarr id.
-                # Without this, the cascade falls through to a parsed-title
-                # folder name and creates an orphan symlink dir alongside
-                # the canonical one.
-                if not arr_info:
-                    parsed_t = movie.get('_parsed_title') or title
-                    canonical = _find_canonical_tmdb_via_prefix(
-                        parsed_t, year, is_tv=False,
-                        _tmdb_cache=_tmdb_full_cache,
-                    )
-                    if canonical:
-                        arr_info = radarr_by_tmdb.get(canonical['tmdb_id'])
+                arr_info = _match_arr_entry(
+                    title, year, movie.get('_parsed_title'),
+                    radarr_map, radarr_map_norm, radarr_by_tmdb,
+                    cached_tmdb_movies, is_tv=False,
+                    _tmdb_cache=_tmdb_full_cache,
+                )
                 if arr_info and arr_info['folder']:
                     movie_dir = arr_info['folder']
                 else:
@@ -5117,39 +5167,13 @@ class LibraryScanner:
                 norm = _normalize_title(show['title'])
                 title = show['title']
                 year = show.get('year')
-                # Year-qualified exact match first to disambiguate same-title
-                # different-year entries (e.g. "The Bridge" 2011 vs 2013)
-                arr_info = None
-                if year:
-                    arr_info = sonarr_map.get(f"{title} ({year})".lower())
-                if not arr_info:
-                    arr_info = sonarr_map.get(title.lower()) or sonarr_map_norm.get(_norm_for_matching(title))
-                if not arr_info:
-                    # Season-aware TMDB fallback: use the show's max season
-                    # to disambiguate reboots/revivals with the same title.
-                    # The TMDB cache is keyed by parsed-folder norm — use
-                    # _parsed_title so renamed items still resolve via cache.
-                    show_max_sn = _show_max_season.get(title)
-                    parsed_norm = _normalize_title(show.get('_parsed_title') or title)
-                    tmdb_id = (cached_tmdb_shows.get(f"{parsed_norm} ({year})") if year else None) or cached_tmdb_shows.get(parsed_norm)
-                    if tmdb_id:
-                        arr_info = sonarr_by_tmdb.get(tmdb_id)
-                    if not arr_info and show_max_sn:
-                        alt_id = find_show_tmdb_id_by_season(parsed_norm, show_max_sn, year)
-                        if alt_id and alt_id != tmdb_id:
-                            arr_info = sonarr_by_tmdb.get(alt_id)
-                # Final TMDB fallback: token-aligned prefix match.
-                # Symmetric with the movies cascade — recovers parsed
-                # titles with appended actor/genre/role tokens that
-                # prevent direct cache key match.
-                if not arr_info:
-                    parsed_t = show.get('_parsed_title') or title
-                    canonical = _find_canonical_tmdb_via_prefix(
-                        parsed_t, year, is_tv=True,
-                        _tmdb_cache=_tmdb_full_cache,
-                    )
-                    if canonical:
-                        arr_info = sonarr_by_tmdb.get(canonical['tmdb_id'])
+                arr_info = _match_arr_entry(
+                    title, year, show.get('_parsed_title'),
+                    sonarr_map, sonarr_map_norm, sonarr_by_tmdb,
+                    cached_tmdb_shows, is_tv=True,
+                    max_season=_show_max_season.get(title, 0),
+                    _tmdb_cache=_tmdb_full_cache,
+                )
                 if arr_info and arr_info['folder']:
                     show_dir = arr_info['folder']
                 else:
@@ -5404,36 +5428,13 @@ class LibraryScanner:
                         "Set SONARR_URL and SONARR_API_KEY for automatic rescans."
                     )
             for title in symlinked_shows:
-                # Year-qualified exact match first (symmetric with show dir selection)
-                info = None
-                _yr = _symlink_years.get(title)
-                if _yr:
-                    info = sonarr_map.get(f"{title} ({_yr})".lower())
-                if not info:
-                    info = sonarr_map.get(title.lower()) or sonarr_map_norm.get(_norm_for_matching(title))
-                if not info:
-                    # TMDB cache is keyed by parsed-folder norm — use the
-                    # stashed parsed title so renamed items still resolve.
-                    norm_t = _normalize_title(_symlink_parsed.get(title) or title)
-                    tmdb_id = (cached_tmdb_shows.get(f"{norm_t} ({_yr})") if _yr else None) or cached_tmdb_shows.get(norm_t)
-                    if tmdb_id:
-                        info = sonarr_by_tmdb.get(tmdb_id)
-                    if not info:
-                        max_sn = _show_max_season.get(title, 0)
-                        if max_sn:
-                            alt_id = find_show_tmdb_id_by_season(norm_t, max_sn, _yr)
-                            if alt_id and alt_id != tmdb_id:
-                                info = sonarr_by_tmdb.get(alt_id)
-                if not info:
-                    # Final TMDB fallback: token-aligned prefix match —
-                    # symmetric with the show dir-selection cascade.
-                    parsed_t = _symlink_parsed.get(title) or title
-                    canonical = _find_canonical_tmdb_via_prefix(
-                        parsed_t, _yr, is_tv=True,
-                        _tmdb_cache=_tmdb_full_cache,
-                    )
-                    if canonical:
-                        info = sonarr_by_tmdb.get(canonical['tmdb_id'])
+                info = _match_arr_entry(
+                    title, _symlink_years.get(title), _symlink_parsed.get(title),
+                    sonarr_map, sonarr_map_norm, sonarr_by_tmdb,
+                    cached_tmdb_shows, is_tv=True,
+                    max_season=_show_max_season.get(title, 0),
+                    _tmdb_cache=_tmdb_full_cache,
+                )
                 if info and info.get('id') and info.get('client'):
                     try:
                         prior = (getattr(self, '_pending_rescan_prior_ids', {}) or {}).get(title)
@@ -5471,32 +5472,12 @@ class LibraryScanner:
                         "Set RADARR_URL and RADARR_API_KEY for automatic rescans."
                     )
             for title in symlinked_movies:
-                # Year-qualified exact match first (symmetric with movie dir selection)
-                info = None
-                _yr = _symlink_years.get(title)
-                if _yr:
-                    info = radarr_map.get(f"{title} ({_yr})".lower())
-                if not info:
-                    info = radarr_map.get(title.lower()) or radarr_map_norm.get(_norm_for_matching(title))
-                if not info:
-                    # TMDB cache is keyed by parsed-folder norm — use the
-                    # stashed parsed title so renamed items still resolve.
-                    _norm_t = _normalize_title(_symlink_parsed.get(title) or title)
-                    tmdb_id = (cached_tmdb_movies.get(f"{_norm_t} ({_yr})") if _yr else None) or cached_tmdb_movies.get(_norm_t)
-                    if tmdb_id:
-                        info = radarr_by_tmdb.get(tmdb_id)
-                if not info:
-                    # Final TMDB fallback: token-aligned prefix match —
-                    # symmetric with the movie dir-selection cascade.
-                    # (no season-aware sub-step for movies —
-                    # find_show_tmdb_id_by_season is TV-only.)
-                    parsed_t = _symlink_parsed.get(title) or title
-                    canonical = _find_canonical_tmdb_via_prefix(
-                        parsed_t, _yr, is_tv=False,
-                        _tmdb_cache=_tmdb_full_cache,
-                    )
-                    if canonical:
-                        info = radarr_by_tmdb.get(canonical['tmdb_id'])
+                info = _match_arr_entry(
+                    title, _symlink_years.get(title), _symlink_parsed.get(title),
+                    radarr_map, radarr_map_norm, radarr_by_tmdb,
+                    cached_tmdb_movies, is_tv=False,
+                    _tmdb_cache=_tmdb_full_cache,
+                )
                 if info and info.get('id') and info.get('client'):
                     try:
                         prior = (getattr(self, '_pending_rescan_prior_ids', {}) or {}).get(title)

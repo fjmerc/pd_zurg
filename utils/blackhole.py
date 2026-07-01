@@ -3389,7 +3389,7 @@ class BlackholeWatcher:
         )
         return True
 
-    def _try_alternative_release(self, filename, file_path, debrid_handler, label=None):
+    def _try_alternative_release(self, filename, file_path, debrid_handler, label=None, debrid=None):
         """On debrid rejection, query Sonarr/Radarr for an alternative release.
 
         Parses the episode/movie info from the filename, fetches available
@@ -3401,6 +3401,10 @@ class BlackholeWatcher:
 
         *label* preserves per-arr routing — if the file was staged from
         ``/watch/sonarr/.alt_pending/``, failures land in ``/watch/sonarr/failed/``.
+
+        *debrid* names the provider behind *debrid_handler* so torrent-ID
+        extraction and the symlink monitor use the matching schema/API.
+        None defaults to the primary service (legacy callers).
         """
         alt_ok = False
         try:
@@ -3411,9 +3415,11 @@ class BlackholeWatcher:
                 logger.debug(f"[blackhole] Cannot parse release name for alt-retry: {filename}")
             elif is_tv and season is not None and _parse_episodes(filename):
                 alt_ok = self._try_alt_episode(name, season, _parse_episodes(filename),
-                                               debrid_handler, filename, file_path, label=label)
+                                               debrid_handler, filename, file_path, label=label,
+                                               debrid=debrid)
             elif not is_tv:
-                alt_ok = self._try_alt_movie(name, debrid_handler, filename, file_path, label=label)
+                alt_ok = self._try_alt_movie(name, debrid_handler, filename, file_path, label=label,
+                                             debrid=debrid)
             else:
                 logger.debug(f"[blackhole] Cannot determine content type for alt-retry: {filename}")
         except Exception as e:
@@ -3455,7 +3461,7 @@ class BlackholeWatcher:
                                    meta={'cause': 'alts_exhausted'},
                                    media_title=_mt)
 
-    def _try_alt_episode(self, series_name, season, episodes, debrid_handler, orig_filename, orig_path, label=None):
+    def _try_alt_episode(self, series_name, season, episodes, debrid_handler, orig_filename, orig_path, label=None, debrid=None):
         """Try alternative releases for a TV episode via Sonarr."""
         from utils.arr_client import SonarrClient
 
@@ -3483,7 +3489,8 @@ class BlackholeWatcher:
             releases = []
 
         self._seed_tier_state(client, 'series', series, orig_path)
-        if self._try_releases(releases, debrid_handler, orig_filename, orig_path, label=label):
+        if self._try_releases(releases, debrid_handler, orig_filename, orig_path, label=label,
+                              debrid=debrid):
             return True
         return self._try_compromise(
             client, 'series', series,
@@ -3491,9 +3498,10 @@ class BlackholeWatcher:
                      'series_id': series.get('id')},
             debrid_handler=debrid_handler,
             orig_filename=orig_filename, orig_path=orig_path, label=label,
+            debrid=debrid,
         )
 
-    def _try_alt_movie(self, movie_name, debrid_handler, orig_filename, orig_path, label=None):
+    def _try_alt_movie(self, movie_name, debrid_handler, orig_filename, orig_path, label=None, debrid=None):
         """Try alternative releases for a movie via Radarr."""
         from utils.arr_client import RadarrClient
 
@@ -3512,13 +3520,15 @@ class BlackholeWatcher:
             releases = []
 
         self._seed_tier_state(client, 'movie', movie, orig_path)
-        if self._try_releases(releases, debrid_handler, orig_filename, orig_path, label=label):
+        if self._try_releases(releases, debrid_handler, orig_filename, orig_path, label=label,
+                              debrid=debrid):
             return True
         return self._try_compromise(
             client, 'movie', movie,
             context={'media_type': 'movie'},
             debrid_handler=debrid_handler,
             orig_filename=orig_filename, orig_path=orig_path, label=label,
+            debrid=debrid,
         )
 
     @staticmethod
@@ -3891,7 +3901,8 @@ class BlackholeWatcher:
             logger.debug(f"[blackhole] Could not seed tier_state for {file_path}: {e}")
 
     def _try_compromise(self, arr_client, media_type, record, context,
-                        debrid_handler, orig_filename, orig_path, label=None):
+                        debrid_handler, orig_filename, orig_path, label=None,
+                        debrid=None):
         """On arr-alt exhaustion, attempt a cache-aware tier drop.
 
         Returns True iff a compromise candidate was successfully
@@ -3996,6 +4007,7 @@ class BlackholeWatcher:
                                 f"{orig_filename}")
                     submitted = self._submit_compromise_candidate(
                         pack, debrid_handler, orig_filename, orig_path, label,
+                        debrid=debrid,
                         compromise_meta={
                             'preferred_tier': preferred_tier,
                             'grabbed_tier': preferred_tier,
@@ -4042,6 +4054,7 @@ class BlackholeWatcher:
                         f"(dropped from {preferred_tier})")
             return self._submit_compromise_candidate(
                 candidate, debrid_handler, orig_filename, orig_path, label,
+                debrid=debrid,
                 compromise_meta={
                     'preferred_tier': preferred_tier,
                     'grabbed_tier': next_tier,
@@ -4063,7 +4076,8 @@ class BlackholeWatcher:
 
     def _submit_compromise_candidate(self, candidate, debrid_handler,
                                      orig_filename, orig_path, label,
-                                     compromise_meta, advance_state):
+                                     compromise_meta, advance_state,
+                                     debrid=None):
         """Submit the candidate's magnet via *debrid_handler*.
 
         Mirrors the magnet-submission shape of ``_try_releases``'s inner
@@ -4122,10 +4136,10 @@ class BlackholeWatcher:
             )
 
         if self.symlink_enabled:
-            torrent_id = self._extract_torrent_id(result)
+            torrent_id = self._extract_torrent_id(result, debrid=debrid)
             if torrent_id:
                 self._start_monitor(torrent_id, orig_filename, label=label,
-                                    compromise=compromise_meta)
+                                    compromise=compromise_meta, debrid=debrid)
 
         title = candidate.get('title', '?')
         preferred = compromise_meta['preferred_tier']
@@ -4154,12 +4168,16 @@ class BlackholeWatcher:
             )
         return True
 
-    def _try_releases(self, releases, debrid_handler, orig_filename, orig_path, label=None):
+    def _try_releases(self, releases, debrid_handler, orig_filename, orig_path, label=None, debrid=None):
         """Try magnet releases one by one until one succeeds on the debrid service.
 
         Only tries releases with magnet links (direct hashes) to avoid
         the 404 problem with torrent file download URLs.
         Skips the original release's info hash.
+
+        *debrid* names the provider behind *debrid_handler* — without it,
+        ID extraction and the monitor default to the primary service and
+        misparse/mispoll when the handler is the routed alternative.
         """
         import tempfile
 
@@ -4212,9 +4230,10 @@ class BlackholeWatcher:
                         logger.warning(f"[blackhole] Could not remove original after alt-retry: {e}")
                     # Start symlink monitoring
                     if self.symlink_enabled:
-                        torrent_id = self._extract_torrent_id(result)
+                        torrent_id = self._extract_torrent_id(result, debrid=debrid)
                         if torrent_id:
-                            self._start_monitor(torrent_id, orig_filename, label=label)
+                            self._start_monitor(torrent_id, orig_filename, label=label,
+                                                debrid=debrid)
                     if _notify:
                         _notify('download_complete', 'Blackhole: Alt Release Found',
                                 f'Original rejected, using: {alt_title[:60]}')
@@ -4622,7 +4641,7 @@ class BlackholeWatcher:
                     else:
                         threading.Thread(
                             target=self._try_alternative_release,
-                            args=(filename, staged_path, handler, label),
+                            args=(filename, staged_path, handler, label, debrid),
                             daemon=True,
                             name=f'alt-retry-{filename[:30]}',
                         ).start()
@@ -4847,11 +4866,22 @@ class BlackholeWatcher:
                 dest = os.path.join(error_dir, f"{base}_{int(time.time())}{fext}")
             try:
                 os.rename(src, dest)
-                # Mark alt_exhausted via the centralised helper so
-                # tier_state on the recovered sidecar is preserved.
-                RetryMeta.mark_alt_exhausted(dest)
+                is_rescue_orphan = recovered_filename != filename
+                if not is_rescue_orphan:
+                    # Alt-release staging: the original hash is debrid-blocked
+                    # and the alt search was interrupted — mark alt_exhausted
+                    # via the centralised helper so tier_state on the
+                    # recovered sidecar is preserved.
+                    #
+                    # Rescue-staged orphans (``.rescue-`` prefix) must NOT be
+                    # marked: they were staged by the add-time cross-rescue,
+                    # which never ran an alt-release search — flagging them
+                    # exhausted makes _retry_failed skip the file forever.
+                    # Leaving the sidecar alone lets the normal retry
+                    # schedule re-submit (and re-rescue) the release.
+                    RetryMeta.mark_alt_exhausted(dest)
                 tag = f" [label={label}]" if label else ""
-                origin = " [rescue-orphan]" if recovered_filename != filename else ""
+                origin = " [rescue-orphan]" if is_rescue_orphan else ""
                 logger.warning(f"[blackhole] Recovered stranded alt-pending file: {recovered_filename}{origin}{tag}")
             except OSError as e:
                 logger.warning(f"[blackhole] Could not recover {filename} from alt_pending: {e}")

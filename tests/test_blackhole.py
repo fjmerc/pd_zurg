@@ -4307,6 +4307,75 @@ class TestRescueOrphanRecovery:
             f"non-prefixed orphan should recover unchanged; failed/ contents: " \
             f"{os.listdir(os.path.join(watch_dir, 'failed'))}"
 
+    def test_recover_alt_pending_rescue_orphan_not_alt_exhausted(self, tmp_dir):
+        """A rescue orphan never ran an alt-release search, so it must NOT
+        be marked alt_exhausted on recovery — that flag makes _retry_failed
+        skip the file forever (permanent dead-end). Alt-release orphans
+        (no prefix) keep the exhausted marker."""
+        from utils.blackhole import RetryMeta
+        watch_dir = os.path.join(tmp_dir, 'watch')
+        alt_pending = os.path.join(watch_dir, '.alt_pending')
+        os.makedirs(alt_pending)
+
+        rescue_orphan = os.path.join(alt_pending, '.rescue-deadbeef-Andor.S02E01.magnet')
+        with open(rescue_orphan, 'w') as f:
+            f.write('magnet:?xt=urn:btih:' + 'a' * 40)
+        legacy_orphan = os.path.join(alt_pending, 'Old.Style.Release.magnet')
+        with open(legacy_orphan, 'w') as f:
+            f.write('magnet:?xt=urn:btih:' + 'b' * 40)
+
+        watcher = BlackholeWatcher(watch_dir, 'rd-key', 'realdebrid')
+        watcher._recover_alt_pending()
+
+        failed_dir = os.path.join(watch_dir, 'failed')
+        recovered_rescue = os.path.join(failed_dir, 'Andor.S02E01.magnet')
+        recovered_legacy = os.path.join(failed_dir, 'Old.Style.Release.magnet')
+        assert os.path.isfile(recovered_rescue)
+        assert os.path.isfile(recovered_legacy)
+        assert not RetryMeta.is_alt_exhausted(recovered_rescue), \
+            "rescue orphan wrongly marked alt_exhausted — _retry_failed would skip it forever"
+        assert RetryMeta.is_alt_exhausted(recovered_legacy), \
+            "alt-release orphan lost its alt_exhausted marker"
+
+
+class TestAltReleaseProviderBinding:
+    """The alt-release / compromise chain must bind torrent-ID extraction
+    and the symlink monitor to the ROUTED provider, not the primary.
+    Regression: with RD primary and the handler routed to TorBox,
+    _extract_torrent_id defaulted to RD's schema (str(result)) and the
+    monitor polled RD for a TorBox torrent — content landed on TorBox
+    but was never symlinked."""
+
+    def test_try_releases_binds_routed_debrid(self, tmp_dir, monkeypatch):
+        watch_dir = os.path.join(tmp_dir, 'watch')
+        os.makedirs(watch_dir)
+        watcher = BlackholeWatcher(watch_dir, 'rd-key', 'realdebrid',
+                                   symlink_enabled=True)
+
+        orig_path = os.path.join(tmp_dir, 'orig.magnet')
+        with open(orig_path, 'w') as f:
+            f.write('magnet:?xt=urn:btih:' + 'c' * 40)
+
+        tb_result = {'success': True, 'data': {'torrent_id': 999}}
+        captured = {}
+        monkeypatch.setattr(
+            watcher, '_start_monitor',
+            lambda tid, fn, label=None, debrid=None, **_: captured.update(
+                {'tid': tid, 'debrid': debrid}),
+        )
+
+        releases = [{'guid': 'magnet:?xt=urn:btih:' + 'd' * 40,
+                     'title': 'Alt.Release.1080p'}]
+        ok = watcher._try_releases(
+            releases, lambda path: (True, tb_result),
+            'orig.magnet', orig_path, label=None, debrid='torbox',
+        )
+        assert ok is True
+        assert captured['tid'] == '999', \
+            f"TorBox result parsed with wrong provider schema: {captured['tid']!r}"
+        assert captured['debrid'] == 'torbox', \
+            "monitor not bound to the routed provider"
+
 
 class TestRescueStagingFilenameLength:
     """Plan 41 phase A second-pass reviewer fix-up: long multi-byte

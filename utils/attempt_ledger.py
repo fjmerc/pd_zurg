@@ -114,6 +114,25 @@ def get(key):
         return int(entry.get('count', 0))
 
 
+def last_seen_epoch(key):
+    """Return ``key``'s ``last_ts`` as a Unix epoch float, or None.
+
+    Lets callers use the ledger as a restart-survivable "when did this
+    last happen" store (e.g. the TB-alt sibling-grab dedup TTL), not just
+    a counter.  None means unknown/never — callers must not treat it as 0
+    (epoch 0 would look infinitely old and pass any TTL check).
+    """
+    with _lock:
+        entry = _state.get(key)
+        ts = (entry.get('last_ts') or entry.get('first_ts')) if isinstance(entry, dict) else None
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
 def reset(key):
     """Drop the counter for ``key`` and persist. No-op if absent."""
     if _file_path is None:

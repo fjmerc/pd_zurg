@@ -1367,6 +1367,8 @@ class BlackholeWatcher:
         # Dedup for TorBox cached-alternative recovery: one grabbed pack
         # recovers a whole season, so the first grab for an (imdb_id, season)
         # suppresses sibling episode grabs within _TB_ALT_DEDUP_TTL.
+        # Mirrored into attempt_ledger (``tbaltdedup:`` keys) so the TTL
+        # survives a container restart mid-backfill.
         self._tb_alt_recent_grabs = {}  # {(imdb_id, season): epoch}
         self._tb_alt_grabs_lock = threading.Lock()
         # Persistent give-up cap: after this many cached-alternative grabs for
@@ -3000,6 +3002,32 @@ class BlackholeWatcher:
         name = re.sub(r'\s*\(\d{4}\)\s*', '', name)
         return name.lower().strip()
 
+    def _dedup_names_match(self, folder, name_norm, name_fuzzy):
+        """True when an on-disk library folder matches the parsed release name.
+
+        Strict compare first, then a punctuation-insensitive fallback:
+        ``parse_release_name`` strips punctuation from the release side
+        (dots→spaces), while arr folders on disk keep it ("What's Eating
+        Gilbert Grape (1993)") — a strict-only compare misses every
+        punctuation-bearing title and lets a duplicate import through.
+        Both sides are year-stripped (``_normalize_name``) BEFORE fuzzing
+        because ``norm_for_matching`` keeps digits, so "(1993)" would
+        otherwise survive as a token on the folder side only.  Empty fuzzy
+        forms (non-ASCII titles that collapse under transliteration) never
+        match fuzzily — two distinct CJK titles must not dedup each other.
+        """
+        folder_norm = self._normalize_name(folder)
+        if folder_norm == name_norm:
+            return True
+        if not name_fuzzy:
+            return False
+        try:
+            from utils.library import norm_for_matching
+        except ImportError:
+            return False
+        folder_fuzzy = norm_for_matching(folder_norm)
+        return bool(folder_fuzzy) and folder_fuzzy == name_fuzzy
+
     def _check_local_library(self, filename):
         """Check if content from this torrent already exists locally.
 
@@ -3015,6 +3043,13 @@ class BlackholeWatcher:
             return False
 
         name_norm = self._normalize_name(name)
+        # Fuzzy form for the folder loops below (computed once; see
+        # _dedup_names_match for why year-strip precedes fuzzing).
+        try:
+            from utils.library import norm_for_matching as _nfm
+            dedup_fuzzy = _nfm(name_norm)
+        except Exception:
+            dedup_fuzzy = ''
 
         # Skip dedup for prefer-debrid titles — user wants the debrid copy.
         # Pref keys come from canonical titles via _normalize_title (lowercase
@@ -3057,7 +3092,7 @@ class BlackholeWatcher:
 
         if is_tv and self.local_library_tv and os.path.isdir(self.local_library_tv):
             for folder in os.listdir(self.local_library_tv):
-                if self._normalize_name(folder) != name_norm:
+                if not self._dedup_names_match(folder, name_norm, dedup_fuzzy):
                     continue
                 show_path = os.path.join(self.local_library_tv, folder)
                 if season is not None:
@@ -3082,7 +3117,7 @@ class BlackholeWatcher:
 
         if not is_tv and self.local_library_movies and os.path.isdir(self.local_library_movies):
             for folder in os.listdir(self.local_library_movies):
-                if self._normalize_name(folder) != name_norm:
+                if not self._dedup_names_match(folder, name_norm, dedup_fuzzy):
                     continue
                 movie_path = os.path.join(self.local_library_movies, folder)
                 if _dir_has_video(movie_path):
@@ -3793,10 +3828,27 @@ class BlackholeWatcher:
                            f"{filename}: {e}")
         return True
 
+    @staticmethod
+    def _tb_alt_dedup_ledger_key(key):
+        """attempt_ledger key for a (imdb_id, season) sibling-grab dedup entry.
+
+        Distinct ``tbaltdedup:`` family so it can't collide with the
+        ``tbalt:`` give-up counters, which share the same (imdb, season)
+        identity but different semantics (TTL'd dedup vs. capped count).
+        """
+        imdb_id, season = key
+        return f"tbaltdedup:{imdb_id}:s{season}"
+
     def _tb_alt_recently_grabbed(self, key):
         """True if a cached alternative was grabbed for this (imdb_id, season)
         within _TB_ALT_DEDUP_TTL.  Prunes expired entries opportunistically so
-        the dict stays bounded over a long-running process."""
+        the dict stays bounded over a long-running process.
+
+        The in-memory dict is the fast path; the attempt_ledger mirror makes
+        the answer restart-survivable — without it, a container restart
+        mid-backfill re-enables sibling season-pack grabs, and each redundant
+        TB create is exactly the volume event that arms TB Essential's ~24h
+        abuse cooldown."""
         now = time.time()
         with self._tb_alt_grabs_lock:
             expired = [k for k, ts in self._tb_alt_recent_grabs.items()
@@ -3804,13 +3856,18 @@ class BlackholeWatcher:
             for k in expired:
                 del self._tb_alt_recent_grabs[k]
             # Anything still present is, by construction, within the TTL.
-            return key in self._tb_alt_recent_grabs
+            if key in self._tb_alt_recent_grabs:
+                return True
+        last = attempt_ledger.last_seen_epoch(self._tb_alt_dedup_ledger_key(key))
+        return last is not None and (now - last) < _TB_ALT_DEDUP_TTL
 
     def _remember_tb_alt_grab(self, key):
         """Record that a cached alternative was grabbed for this (imdb_id,
-        season) so sibling-episode grabs in the same burst are suppressed."""
+        season) so sibling-episode grabs in the same burst are suppressed —
+        including across a container restart (ledger mirror)."""
         with self._tb_alt_grabs_lock:
             self._tb_alt_recent_grabs[key] = time.time()
+        attempt_ledger.bump(self._tb_alt_dedup_ledger_key(key))
 
     @staticmethod
     def _compromise_enabled():

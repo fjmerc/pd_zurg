@@ -1906,6 +1906,51 @@ class TestCheckLocalLibrary:
         watcher, _, _ = self._make_watcher(tmp_dir)
         assert watcher._check_local_library('Gattaca.1997.1080p.BluRay.torrent') is False
 
+    def test_skips_punctuation_movie(self, tmp_dir):
+        """Apostrophe in the on-disk folder must not defeat dedup.
+
+        parse_release_name strips punctuation from the release side
+        (dots→spaces), but arr folders keep it — a strict compare misses
+        "Whats Eating Gilbert Grape" vs "What's Eating Gilbert Grape (1993)"
+        and lets a duplicate import through.
+        """
+        watcher, _, movies_dir = self._make_watcher(tmp_dir)
+        movie_dir = os.path.join(movies_dir, "What's Eating Gilbert Grape (1993)")
+        os.makedirs(movie_dir)
+        with open(os.path.join(movie_dir, 'movie.mkv'), 'w') as f:
+            f.write('data')
+
+        assert watcher._check_local_library(
+            'Whats.Eating.Gilbert.Grape.1993.1080p.BluRay.torrent') is True
+
+    def test_skips_punctuation_tv_episode(self, tmp_dir):
+        """Same punctuation tolerance on the TV side."""
+        watcher, tv_dir, _ = self._make_watcher(tmp_dir)
+        season_dir = os.path.join(tv_dir, "Schitt's Creek (2015)", 'Season 01')
+        os.makedirs(season_dir)
+        with open(os.path.join(season_dir, "Schitt's Creek - S01E01.mkv"), 'w') as f:
+            f.write('data')
+
+        assert watcher._check_local_library('Schitts.Creek.S01E01.1080p.WEB.torrent') is True
+
+    def test_dedup_empty_fuzzy_forms_never_match(self, tmp_dir):
+        """Two distinct non-ASCII titles that both collapse to '' under
+        transliteration must not fuzzy-match each other; identical names
+        still match via the strict path."""
+        watcher, _, _ = self._make_watcher(tmp_dir)
+        assert watcher._dedup_names_match('妖猫伝 (2017)', '悪人', '') is False
+        assert watcher._dedup_names_match('悪人 (2010)', '悪人', '') is True
+
+    def test_fuzzy_does_not_conflate_distinct_titles(self, tmp_dir):
+        """Fuzzy fallback must not match a genuinely different movie."""
+        watcher, _, movies_dir = self._make_watcher(tmp_dir)
+        movie_dir = os.path.join(movies_dir, 'Gattaca (1997)')
+        os.makedirs(movie_dir)
+        with open(os.path.join(movie_dir, 'movie.mkv'), 'w') as f:
+            f.write('data')
+
+        assert watcher._check_local_library('Attack.1997.1080p.BluRay.torrent') is False
+
     def test_disabled_by_default(self, tmp_dir):
         """Should always return False when dedup is disabled."""
         watcher = BlackholeWatcher(os.path.join(tmp_dir, 'watch'), 'key', 'realdebrid')
@@ -4745,6 +4790,21 @@ class TestTorboxCachedAlternative:
     REJECTED = 'a' * 40   # the uncached hash the arr picked
     CACHED_ALT = 'b' * 40  # a same-title release cached on TorBox
 
+    @pytest.fixture(autouse=True)
+    def _ledger(self):
+        """Reset attempt_ledger to the pristine uninitialized state.
+
+        The sibling-grab dedup now mirrors into the module-global
+        attempt_ledger, so a ledger initialized by an unrelated earlier
+        test would leak tbaltdedup keys across tests in this class.
+        Subclasses that WANT a live ledger (TestTorboxAltGiveUpCap)
+        override this fixture with one that reloads AND initializes.
+        """
+        import importlib
+        from utils import attempt_ledger
+        importlib.reload(attempt_ledger)
+        yield
+
     def _make_watcher(self, tmp_dir, tb_key='tbkey', symlink_enabled=False):
         return BlackholeWatcher(
             os.path.join(tmp_dir, 'watch'), tb_key, 'torbox',
@@ -5120,3 +5180,38 @@ class TestTorboxAltGiveUpCap(TestTorboxCachedAlternative):
         assert w._try_torbox_cached_alternative(
             fp3, os.path.basename(fp3), self.REJECTED, 'realdebrid') is True
         assert len(adds) == 2
+
+    def test_sibling_dedup_survives_restart(self, tmp_dir):
+        """The 6h sibling-grab suppression must survive a container restart.
+
+        Pre-fix it lived only in an in-memory dict, so a restart
+        mid-backfill re-enabled sibling season-pack grabs — each redundant
+        TB create being the volume event that arms TB Essential's cooldown.
+        """
+        import importlib
+        from utils import attempt_ledger
+        w = self._make_watcher(tmp_dir)
+        w._remember_tb_alt_grab(('tt777', 2))
+
+        # "Restart": reload the ledger from the same file, fresh watcher
+        # (empty in-memory dedup dict).
+        importlib.reload(attempt_ledger)
+        attempt_ledger.init(config_dir=tmp_dir)
+        w2 = self._make_watcher(tmp_dir)
+        assert w2._tb_alt_recently_grabbed(('tt777', 2)) is True
+        assert w2._tb_alt_recently_grabbed(('tt777', 3)) is False
+        assert w2._tb_alt_recently_grabbed(('tt888', 2)) is False
+
+    def test_sibling_dedup_ledger_entry_expires(self, tmp_dir):
+        """A ledger-mirrored dedup entry older than the TTL does not suppress."""
+        from datetime import datetime, timezone, timedelta
+        from utils.blackhole import _TB_ALT_DEDUP_TTL
+        w = self._make_watcher(tmp_dir)
+        key = ('tt777', 2)
+        w._remember_tb_alt_grab(key)
+        with w._tb_alt_grabs_lock:
+            w._tb_alt_recent_grabs.clear()  # drop the in-memory fast path
+        old = (datetime.now(timezone.utc)
+               - timedelta(seconds=_TB_ALT_DEDUP_TTL + 60)).isoformat(timespec='seconds')
+        self.ledger._state['tbaltdedup:tt777:s2']['last_ts'] = old
+        assert w._tb_alt_recently_grabbed(key) is False

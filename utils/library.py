@@ -54,18 +54,23 @@ def wanted_tb_recovery_enabled():
 
 
 def wanted_tb_recovery_max_per_scan():
-    """Per-scan cap on Wanted→TorBox recovery adds.  Default 10.
+    """Per-scan cap on Wanted→TorBox recovery adds.  Default 2.
 
-    Bounds TorBox create-API usage (60/hr limit) and keeps a single scan
-    from blowing the whole hourly budget.  Non-integer/<=0 values fall back
-    to the default rather than disabling the pass silently.
+    Bounds TorBox create-API usage (60/hr limit) — but the binding
+    constraint in practice is TB Essential's abuse system, which arms a
+    ~24h account cooldown on create-volume *bursts* (observed live: a
+    5-creates-in-one-minute burst armed it minutes later, capping
+    throughput at ~5/day).  A trickle of 2 per scan (~11 min apart) works
+    the same backlog at up to ~250/day without presenting as a burst.
+    Non-integer/<=0 values fall back to the default rather than disabling
+    the pass silently.
     """
-    raw = os.environ.get('WANTED_TB_RECOVERY_MAX_PER_SCAN', '10')
+    raw = os.environ.get('WANTED_TB_RECOVERY_MAX_PER_SCAN', '2')
     try:
         n = int(str(raw).strip())
     except (TypeError, ValueError):
-        return 10
-    return n if n > 0 else 10
+        return 2
+    return n if n > 0 else 2
 
 
 # Plan 41 phase B.2 — NFS attribute-cache delay between symlink creation
@@ -3888,7 +3893,9 @@ class LibraryScanner:
                 # ghost would (a) fire redundant Sonarr search commands and
                 # (b) write a set_pending entry that suppresses the ghost on
                 # the next scan — the same self-erase regression the movie
-                # path guards against below.
+                # path guards against below.  This gate is also one half of
+                # the inverse-gate invariant with _recover_wanted_via_torbox
+                # (see the comment there) that prevents dual acquisition.
                 if show.get('source') == 'wanted':
                     continue
                 norm = _normalize_title(show['title'])
@@ -4039,7 +4046,9 @@ class LibraryScanner:
                 # redundant /command/MoviesSearch calls, (b) write a
                 # set_pending entry which would suppress the ghost on
                 # the next scan (the bug surfaced in the 071ba5d review:
-                # Wanted view self-erases after one scan cycle).
+                # Wanted view self-erases after one scan cycle).  Also one
+                # half of the inverse-gate invariant with
+                # _recover_wanted_via_torbox (see the comment there).
                 if movie.get('source') == 'wanted':
                     continue
                 norm = _normalize_title(movie['title'])
@@ -4152,9 +4161,10 @@ class LibraryScanner:
         subsequent scan, and Radarr/Sonarr import it from the mount.
 
         Default-on (``WANTED_TB_RECOVERY_ENABLED``), bounded per scan
-        (``WANTED_TB_RECOVERY_MAX_PER_SCAN``, default 10) to respect TorBox's
-        60-creates/hour cap, gated on TorBox's account cooldown, and per-title
-        cooldowned so a deep backlog isn't re-probed every scan.
+        (``WANTED_TB_RECOVERY_MAX_PER_SCAN``, default 2 — a trickle, because
+        create-volume bursts arm TB Essential's ~24h abuse cooldown), gated
+        on TorBox's account cooldown, and per-title cooldowned so a deep
+        backlog isn't re-probed every scan.
         """
         if not wanted_tb_recovery_enabled():
             return
@@ -4193,6 +4203,13 @@ class LibraryScanner:
 
         # Build the target list: released movie ghosts + show ghosts (probing
         # the first still-missing episode, defaulting to S01E01).
+        #
+        # INVARIANT: this pass and _search_for_missing_episodes have inverse
+        # source gates — that pass skips source == 'wanted' items, this one
+        # processes ONLY them.  The complementary gates are what prevent the
+        # two acquisition paths (arr search vs. direct TB add) from
+        # double-acquiring the same title in one scan; if either gate
+        # changes, re-check the other.
         targets = []  # (media_type, item, season, episode)
         for m in movies:
             if m.get('source') != 'wanted':

@@ -313,7 +313,7 @@ class Config:
         # Wanted→TorBox proactive recovery — grab TB-cached copies of Wanted
         # ghosts the arr never grabbed, bounded per scan.
         self.WANTED_TB_RECOVERY_ENABLED = os.getenv('WANTED_TB_RECOVERY_ENABLED', 'true')
-        self.WANTED_TB_RECOVERY_MAX_PER_SCAN = os.getenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', '10')
+        self.WANTED_TB_RECOVERY_MAX_PER_SCAN = os.getenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', '2')
         # Debrid search
         self.TORRENTIO_URL = os.getenv('TORRENTIO_URL')
         # Refuse the interactive "Add" button when the chosen hash is not

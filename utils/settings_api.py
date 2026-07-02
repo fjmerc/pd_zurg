@@ -217,7 +217,7 @@ ENV_SCHEMA = [
             ('PENDING_WARNING_HOURS', 'Pending Warning After (hours)', 'number:0-168', False, 'Hours before sending a warning notification for stuck pending items (default: 24, 0 to disable)'),
             ('GAP_FILL_ENABLED', 'Gap-Fill Missing Episodes', 'boolean', False, 'Reconcile every monitored show against TMDB and search Sonarr/Radarr for aired episodes missing from both debrid and local, regardless of source preference. Also auto-enables re-search for broken symlinks during verify_symlinks. Set OFF to opt out (default: true)'),
             ('WANTED_TB_RECOVERY_ENABLED', 'Wanted → TorBox Recovery', 'boolean', False, 'For every "Wanted" title (monitored, no file) that Sonarr/Radarr never grabbed, search Torrentio directly, probe candidates against TorBox\'s cache, and add the best cached release straight to TorBox — bypassing the arr\'s own indexer pool. Closes the acquisition gap where a title is cached on TorBox but the arr\'s Prowlarr/Torznab search never surfaces a grabbable release, leaving it stuck in Wanted. The next library scan symlinks it and the arr imports it. Requires TorBox + Torrentio configured (default: ON).'),
-            ('WANTED_TB_RECOVERY_MAX_PER_SCAN', 'Wanted Recovery Max Per Scan', 'number:1-100', False, 'Cap on how many Wanted titles the recovery pass adds to TorBox per library scan. Bounds TorBox create-API usage (60/hour limit) so a deep backlog is worked through gradually rather than all at once. Default 10.'),
+            ('WANTED_TB_RECOVERY_MAX_PER_SCAN', 'Wanted Recovery Max Per Scan', 'number:1-100', False, 'Cap on how many Wanted titles the recovery pass adds to TorBox per library scan. Kept small (default 2) so creates trickle out across scans instead of bursting — TorBox Essential\'s abuse system arms a ~24h account cooldown on create-volume bursts, which starves recovery far more than a low per-scan cap does.'),
             ('LIBRARY_RESCAN_NFS_DELAY', 'NFS Rescan Delay (seconds)', 'number:0-300', False,
              'Sleep this many seconds between creating new debrid symlinks and firing Sonarr/Radarr rescans. Default 0 (no delay) — bump to 30 if Sonarr/Radarr reads the symlink directory over NFS and you see "hasFile=false" right after a scan that later imports cleanly on its own. The arr-side kernel attribute cache (default 30-60s TTL on most NFS mounts) hides freshly-created symlinks from the rescan walk; this delay lets the cache expire first. Clamped to [0, 300] (default: 0).'),
         ],
@@ -310,7 +310,7 @@ _ENV_DEFAULTS = {
     # Wanted→TorBox recovery is on by default; matches
     # utils/library.py::wanted_tb_recovery_enabled() and base/__init__.py Config.
     'WANTED_TB_RECOVERY_ENABLED': 'true',
-    'WANTED_TB_RECOVERY_MAX_PER_SCAN': '10',
+    'WANTED_TB_RECOVERY_MAX_PER_SCAN': '2',
     # Debrid health detection is on by default; matches
     # utils/debrid_health.py::_enabled() and base/__init__.py Config.
     'DEBRID_HEALTH_ENABLED': 'true',

@@ -306,59 +306,90 @@ function fmtAge(epoch){
   if(s<86400)return Math.floor(s/3600)+'h ago';
   return Math.floor(s/86400)+'d ago';
 }
+function _dhDetails(rows,note){
+  return '<details class="dh-details"><summary>Details</summary>'+rows.join('')+(note||'')+'</details>';
+}
 function _dhRenderRdBody(s,card){
   var c=card.counts||{};
+  var headline;
+  if(!c.total){
+    headline=''
+      +'<div class="dh-rate-wrap">'
+      +'<span class="dh-rate dh-rate-na">&ndash;</span>'
+      +'<span class="dh-rate-label">no sweep data yet<br>run a sweep to probe your library</span>'
+      +'</div>';
+  }else{
+    var blocked=c.blocked||0;
+    var cls=blocked>0?' dh-rate-low':'';
+    headline=''
+      +'<div class="dh-rate-wrap">'
+      +'<span class="dh-rate'+cls+'">'+esc(String(blocked))+'</span>'
+      +'<span class="dh-rate-label">blocked by the RD filter<br>'
+      +esc(String(c.healthy||0))+' of '+esc(String(c.total))+' probed healthy &middot; last sweep '+esc(fmtAge(card.last_probe_ts))+'</span>'
+      +'</div>';
+  }
   var parts=[];
-  parts.push((c.total||0)+' total');
-  parts.push('<span class="dh-good">'+(c.healthy||0)+' healthy</span>');
-  var blockedPart=(c.blocked||0)+' blocked';
+  parts.push(esc(String(c.total||0))+' total');
+  parts.push('<span class="dh-good">'+esc(String(c.healthy||0))+' healthy</span>');
+  var blockedPart=esc(String(c.blocked||0))+' blocked';
   if(c.blocked)blockedPart='<span class="dh-bad">'+blockedPart+'</span>';
   parts.push(blockedPart);
-  if(c.unknown)parts.push((c.unknown||0)+' unknown');
-  return ''
-    +'<div class="dh-row"><span class="dh-label">Last sweep:</span><span>'+esc(fmtAge(card.last_probe_ts))+'</span></div>'
-    +'<div class="dh-row"><span class="dh-label">Probed torrents:</span><span>'+parts.join(' · ')+'</span></div>'
-    +'<div class="dh-row"><span class="dh-label">Remediated (24h):</span><span>'+esc(String(s.remediated_24h||0))+'</span></div>'
-    +'<div class="dh-note">The sweep asks Real-Debrid whether it will still serve each torrent. '
+  if(c.unknown)parts.push(esc(String(c.unknown))+' unknown');
+  var cfg=s.enabled
+    ?('Auto-remediate '+(s.auto_remediate?'ON':'OFF')+(s.cross_rescue?' · Cross-rescue ON':''))
+    :'Sweep disabled';
+  var rows=[
+    '<div class="dh-row"><span class="dh-label">Last sweep:</span><span>'+esc(fmtAge(card.last_probe_ts))+'</span></div>',
+    '<div class="dh-row"><span class="dh-label">Probed torrents:</span><span>'+parts.join(' · ')+'</span></div>',
+    '<div class="dh-row"><span class="dh-label">Remediated (24h):</span><span>'+esc(String(s.remediated_24h||0))+'</span></div>',
+    '<div class="dh-row"><span class="dh-label">Config:</span><span>'+esc(cfg)+'</span></div>'
+  ];
+  var note='<div class="dh-note">The sweep asks Real-Debrid whether it will still serve each torrent. '
     +'<b>Blocked</b> = RD refuses it (the filter-gate). <b>Remediated</b> = a blocked item removed '
     +'from RD &amp; re-queued for download in the last 24h.</div>';
+  return headline+_dhDetails(rows,note);
 }
 function _dhRenderTbBody(s,card){
   var rescued=(card.counts||{}).rescued||0;
   var blocked=(s.counts||{}).blocked||0;
   var denom=rescued+blocked;
-  var rateHtml='';
+  var headline;
   if(s.rd_configured&&denom>0){
     var pct=Math.round(rescued/denom*1000)/10;
     var lowCls=pct<50?' dh-rate-low':'';
-    rateHtml=''
+    headline=''
       +'<div class="dh-rate-wrap">'
       +'<span class="dh-rate'+lowCls+'" title="rescued ÷ (rescued + still-blocked)">'+esc(String(pct))+'%</span>'
-      +'<span class="dh-rate-label">of RD filter-blocks<br>re-served via TorBox</span>'
+      +'<span class="dh-rate-label">of RD filter-blocks re-served via TorBox<br>'
+      +esc(String(rescued))+' rescued &middot; '+esc(String(s.rescued_24h||0))+' in 24h</span>'
+      +'</div>';
+  }else{
+    headline=''
+      +'<div class="dh-rate-wrap">'
+      +'<span class="dh-rate'+(rescued?'':' dh-rate-na')+'">'+esc(String(rescued))+'</span>'
+      +'<span class="dh-rate-label">rescued via TorBox<br>'+esc(String(s.rescued_24h||0))+' in 24h</span>'
       +'</div>';
   }
   var notRescued=blocked?'<span class="dh-bad">'+esc(String(blocked))+'</span>':esc(String(blocked));
-  return ''
-    +rateHtml
-    +'<div class="dh-row"><span class="dh-label">Rescued via TorBox:</span><span>'+esc(String(rescued))+' total · '+esc(String(s.rescued_24h||0))+' in 24h</span></div>'
-    +(s.rd_configured?'<div class="dh-row"><span class="dh-label">Not rescued (blocked):</span><span>'+notRescued+'</span></div>':'')
-    +'<div class="dh-row"><span class="dh-label">WebDAV mount:</span><span>'+(card.configured?'configured':'not configured')+'</span></div>'
-    +(s.rd_configured&&denom===0?'<div class="dh-note">No RD filter-blocks recorded yet — the rescue rate appears once a sweep finds one.</div>'
-      :'<div class="dh-note"><b>Rescue rate</b> = share of RD filter-blocks that TorBox could re-serve instead of leaving them blocked. This is the core TorBox-viability signal.</div>');
+  var rows=[
+    '<div class="dh-row"><span class="dh-label">Rescued via TorBox:</span><span>'+esc(String(rescued))+' total · '+esc(String(s.rescued_24h||0))+' in 24h</span></div>'
+  ];
+  if(s.rd_configured)rows.push('<div class="dh-row"><span class="dh-label">Not rescued (blocked):</span><span>'+notRescued+'</span></div>');
+  rows.push('<div class="dh-row"><span class="dh-label">WebDAV mount:</span><span>'+(card.configured?'configured':'not configured')+'</span></div>');
+  var note='';
+  if(s.rd_configured&&denom>0){
+    note='<div class="dh-note"><b>Rescue rate</b> = share of RD filter-blocks that TorBox could re-serve instead of leaving them blocked. This is the core TorBox-viability signal.</div>';
+  }else if(s.rd_configured){
+    note='<div class="dh-note">No RD filter-blocks recorded yet — the rescue rate appears once a sweep finds one.</div>';
+  }
+  return headline+_dhDetails(rows,note);
 }
 function _dhRenderCardHtml(s,card){
   var bodyHtml=card.service==='torbox'?_dhRenderTbBody(s,card):_dhRenderRdBody(s,card);
   var pills=[];
   pills.push('<span class="dh-pill '+(card.service==='torbox'?'dh-pill-tb':'dh-pill-rd')+'">'+esc(card.label)+'</span>');
-  if(card.service==='realdebrid'){
-    if(!s.enabled){
-      pills.push('<span class="dh-pill dh-pill-off">Disabled</span>');
-    }else{
-      pills.push('<span class="dh-pill '+(s.auto_remediate?'dh-pill-on':'dh-pill-off')+'">Auto-remediate: '+(s.auto_remediate?'ON':'OFF')+'</span>');
-      if(s.cross_rescue){
-        pills.push('<span class="dh-pill dh-pill-on">Cross-rescue: ON</span>');
-      }
-    }
+  if(card.service==='realdebrid'&&!s.enabled){
+    pills.push('<span class="dh-pill dh-pill-off">Disabled</span>');
   }
   var actionsHtml='';
   if(card.service==='realdebrid'){
@@ -525,8 +556,14 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .dh-rate-wrap{display:flex;align-items:baseline;gap:10px;margin-bottom:8px}
 .dh-rate{font-size:1.9em;font-weight:700;line-height:1;color:var(--green)}
 .dh-rate.dh-rate-low{color:var(--red)}
+.dh-rate.dh-rate-na{color:var(--text3)}
 .dh-rate-label{font-size:.74em;color:var(--text2);line-height:1.3}
 .dh-note{font-size:.7em;color:var(--text3);margin-top:4px;line-height:1.45}
+.dh-details{margin-top:2px}
+.dh-details summary{font-size:.72em;color:var(--text3);cursor:pointer;user-select:none;text-transform:uppercase;letter-spacing:.04em}
+.dh-details summary:hover{color:var(--text2)}
+.dh-details[open] summary{margin-bottom:6px}
+.dh-details .dh-row{margin-bottom:4px}
 .dh-card-actions{display:flex;gap:8px;flex-wrap:wrap}
 .rec-headline{display:flex;align-items:center;gap:16px;margin-bottom:10px;flex-wrap:wrap}
 .rec-pct{font-size:2.1em;font-weight:700;color:var(--green);line-height:1}

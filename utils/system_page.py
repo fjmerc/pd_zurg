@@ -359,28 +359,28 @@ function _dhRenderTbBody(s,card){
     var lowCls=pct<50?' dh-rate-low':'';
     headline=''
       +'<div class="dh-rate-wrap">'
-      +'<span class="dh-rate'+lowCls+'" title="rescued ÷ (rescued + still-blocked)">'+esc(String(pct))+'%</span>'
-      +'<span class="dh-rate-label">of RD filter-blocks re-served via TorBox<br>'
-      +esc(String(rescued))+' rescued &middot; '+esc(String(s.rescued_24h||0))+' in 24h</span>'
+      +'<span class="dh-rate'+lowCls+'" title="rescued in 30d ÷ (rescued in 30d + currently blocked on RD)">'+esc(String(pct))+'%</span>'
+      +'<span class="dh-rate-label">of RD-stuck titles recovered via TorBox<br>'
+      +esc(String(rescued))+' rescued in 30d &middot; '+esc(String(s.rescued_24h||0))+' in 24h</span>'
       +'</div>';
   }else{
     headline=''
       +'<div class="dh-rate-wrap">'
       +'<span class="dh-rate'+(rescued?'':' dh-rate-na')+'">'+esc(String(rescued))+'</span>'
-      +'<span class="dh-rate-label">rescued via TorBox<br>'+esc(String(s.rescued_24h||0))+' in 24h</span>'
+      +'<span class="dh-rate-label">rescued via TorBox in 30d<br>'+esc(String(s.rescued_24h||0))+' in 24h</span>'
       +'</div>';
   }
   var notRescued=blocked?'<span class="dh-bad">'+esc(String(blocked))+'</span>':esc(String(blocked));
   var rows=[
-    '<div class="dh-row"><span class="dh-label">Rescued via TorBox:</span><span>'+esc(String(rescued))+' total · '+esc(String(s.rescued_24h||0))+' in 24h</span></div>'
+    '<div class="dh-row"><span class="dh-label">Rescued via TorBox:</span><span>'+esc(String(rescued))+' in 30d · '+esc(String(s.rescued_24h||0))+' in 24h</span></div>'
   ];
-  if(s.rd_configured)rows.push('<div class="dh-row"><span class="dh-label">Not rescued (blocked):</span><span>'+notRescued+'</span></div>');
+  if(s.rd_configured)rows.push('<div class="dh-row"><span class="dh-label">Still blocked on RD:</span><span>'+notRescued+'</span></div>');
   rows.push('<div class="dh-row"><span class="dh-label">WebDAV mount:</span><span>'+(card.configured?'configured':'not configured')+'</span></div>');
   var note='';
   if(s.rd_configured&&denom>0){
-    note='<div class="dh-note"><b>Rescue rate</b> = share of RD filter-blocks that TorBox could re-serve instead of leaving them blocked. This is the core TorBox-viability signal.</div>';
+    note='<div class="dh-note"><b>Rescue rate</b> = rescues in the 30-day history window (sweep rescues, blackhole cached-alternative grabs, Wanted-backlog recoveries) vs. titles the latest sweep still reports blocked on RD. This is the core TorBox-viability signal.</div>';
   }else if(s.rd_configured){
-    note='<div class="dh-note">No RD filter-blocks recorded yet — the rescue rate appears once a sweep finds one.</div>';
+    note='<div class="dh-note">No TorBox rescues or RD filter-blocks recorded yet — the rescue rate appears once either happens.</div>';
   }
   return headline+_dhDetails(rows,note);
 }

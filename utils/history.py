@@ -210,6 +210,45 @@ def query(type=None, title=None, start=None, end=None, page=1, limit=50):
     }
 
 
+def count_by_cause(causes, start=None):
+    """Count events whose ``meta['cause']`` is one of ``causes``.
+
+    Args:
+        causes: iterable of cause slugs to count
+        start: ISO datetime string — only events at or after this time
+
+    Returns:
+        dict mapping each requested cause to its event count (0 when absent)
+    """
+    _, recent = count_by_cause_windows(causes, start=start or '')
+    return recent
+
+
+def count_by_cause_windows(causes, start=''):
+    """Count matching events over the full file and a recent window in one pass.
+
+    Args:
+        causes: iterable of cause slugs to count
+        start: ISO datetime string bounding the recent window ('' counts all)
+
+    Returns:
+        (total, recent) — two dicts mapping each cause to its count; ``total``
+        covers every event on file, ``recent`` only those with ts >= start
+    """
+    total = {c: 0 for c in causes}
+    recent = {c: 0 for c in causes}
+    if _file_path is None:
+        return total, recent
+    for e in _read_all_events():
+        cause = (e.get('meta') or {}).get('cause')
+        if cause not in total:
+            continue
+        total[cause] += 1
+        if e.get('ts', '') >= start:
+            recent[cause] += 1
+    return total, recent
+
+
 def query_by_show(title, limit=20):
     """Return last N events for a specific show title (case-insensitive exact match).
 
@@ -296,7 +335,8 @@ def _read_all_events_unlocked():
 
 def _read_lines():
     try:
-        with open(_file_path, 'r', encoding='utf-8') as f:
+        # errors='replace': a torn multibyte write must not poison every read
+        with open(_file_path, 'r', encoding='utf-8', errors='replace') as f:
             return f.readlines()
     except FileNotFoundError:
         return []

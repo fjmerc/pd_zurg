@@ -1106,7 +1106,8 @@ class TestGetSummary:
         # Plan 39 phase 5: providers[] is always present so the dual-card
         # UI can render even when only TB is configured; rd_configured
         # stays for back-compat with the original RD-only UI gate.
-        assert summary == {'rd_configured': False, 'providers': []}
+        assert summary == {'rd_configured': False, 'providers': [],
+                           'rescued_24h': 0}
 
     def test_empty_state_returns_zero_counts(self, state_path, rd_creds, rd_enabled):
         summary = debrid_health.get_summary()
@@ -1147,30 +1148,28 @@ class TestGetSummary:
         assert summary['enabled'] is False
         assert summary['rd_configured'] is True
 
-    def test_remediated_24h_filters_by_cause(self, state_path, rd_creds, rd_enabled, monkeypatch):
-        """remediated_24h counts only debrid history events whose
-        meta.cause == 'debrid_filtered'. Other debrid-type events (if
-        any get added in future) MUST NOT be counted."""
-        mock_query = MagicMock(return_value={'events': [
-            {'meta': {'cause': 'debrid_filtered'}, 'title': 'A'},
-            {'meta': {'cause': 'debrid_filtered'}, 'title': 'B'},
-            {'meta': {'cause': 'debrid_filtered'}, 'title': 'C'},
-            {'meta': {'cause': 'something_else'}, 'title': 'D'},
-            {'meta': None, 'title': 'E'},
-            {},  # no meta key at all
-        ]})
-        monkeypatch.setattr('utils.history.query', mock_query)
+    def test_remediated_24h_filters_by_cause(self, state_path, rd_creds, rd_enabled, tmp_path, monkeypatch):
+        """remediated_24h counts only history events whose meta.cause ==
+        'debrid_filtered'. Other events MUST NOT be counted."""
+        from utils import history
+        monkeypatch.setattr(history, '_file_path', str(tmp_path / 'history.jsonl'))
+        history.log_event('debrid', 'A', meta={'cause': 'debrid_filtered'})
+        history.log_event('debrid', 'B', meta={'cause': 'debrid_filtered'})
+        history.log_event('debrid', 'C', meta={'cause': 'debrid_filtered'})
+        history.log_event('debrid', 'D', meta={'cause': 'something_else'})
+        history.log_event('debrid', 'E')  # no cause
         summary = debrid_health.get_summary()
         assert summary['remediated_24h'] == 3
 
     def test_remediated_24h_swallows_history_error(self, state_path, rd_creds, rd_enabled, monkeypatch):
-        """A history.query failure must not break the summary endpoint —
+        """A history failure must not break the summary endpoint —
         the card silently degrades to 0 rather than 500ing the response."""
-        def boom(**kw):
+        def boom(*a, **kw):
             raise RuntimeError('history broken')
-        monkeypatch.setattr('utils.history.query', boom)
+        monkeypatch.setattr('utils.history.count_by_cause_windows', boom)
         summary = debrid_health.get_summary()
         assert summary['remediated_24h'] == 0
+        assert summary['rescued_24h'] == 0
         # other fields still populated
         assert summary['rd_configured'] is True
 
@@ -1215,6 +1214,8 @@ class TestDualDebridDashboard:
         services = [p['service'] for p in summary.get('providers', [])]
         assert services == ['torbox']
         assert summary['rd_configured'] is False
+        # TB-only setups still get a rescue counter for the card.
+        assert summary['rescued_24h'] == 0
 
     def test_neither_configured_returns_empty(self, state_path, monkeypatch):
         monkeypatch.delenv('RD_API_KEY', raising=False)
@@ -1225,39 +1226,52 @@ class TestDualDebridDashboard:
             lambda p: False if p == '/run/secrets/rd_api_key' else real_isfile(p),
         )
         summary = debrid_health.get_summary()
-        assert summary == {'rd_configured': False, 'providers': []}
+        assert summary == {'rd_configured': False, 'providers': [],
+                           'rescued_24h': 0}
 
     def test_rescued_24h_separate_from_remediated_24h(
-            self, state_path, monkeypatch):
+            self, state_path, tmp_path, monkeypatch):
+        """rescued_24h counts ALL rescue paths (sweep cross-rescue,
+        blackhole cached-alt grab, Wanted recovery) — these span three
+        different event types; remediated_24h stays debrid_filtered-only."""
         monkeypatch.setenv('RD_API_KEY', 'rd')
         monkeypatch.setenv('DEBRID_HEALTH_ENABLED', 'true')
-        mock_query = MagicMock(return_value={'events': [
-            {'meta': {'cause': 'debrid_filtered'}, 'title': 'A'},
-            {'meta': {'cause': 'debrid_rescued'}, 'title': 'B'},
-            {'meta': {'cause': 'debrid_rescued'}, 'title': 'C'},
-        ]})
-        monkeypatch.setattr('utils.history.query', mock_query)
+        from utils import history
+        monkeypatch.setattr(history, '_file_path', str(tmp_path / 'history.jsonl'))
+        history.log_event('debrid', 'A', meta={'cause': 'debrid_filtered'})
+        history.log_event('debrid', 'B', meta={'cause': 'debrid_rescued'})
+        history.log_event('tb_cached_alt_grabbed', 'C',
+                          meta={'cause': 'tb_cached_alt_grabbed'})
+        history.log_event('debrid_add', 'D',
+                          meta={'cause': 'wanted_tb_recovered'})
         summary = debrid_health.get_summary()
         assert summary['remediated_24h'] == 1
-        assert summary['rescued_24h'] == 2
+        assert summary['rescued_24h'] == 3
 
-    def test_tb_card_surfaces_rescue_count(self, state_path, monkeypatch):
-        """TB doesn't have its own probed-state set; the card counts
-        entries from the RD state file whose ``rescued=True`` flag
-        confirms TB hosted a re-add."""
+    def test_tb_card_rescue_count_from_history(self, state_path, tmp_path, monkeypatch):
+        """TB card counts.rescued is history-derived across all rescue
+        paths — NOT the sweep-state ``rescued=True`` flag, which
+        structurally undercounts (only sweep rescues set it, and a
+        re-probe rebuilds the entry without it)."""
         monkeypatch.setenv('RD_API_KEY', 'rd')
         monkeypatch.setenv('TORBOX_API_KEY', 'tb')
+        from utils import history
+        monkeypatch.setattr(history, '_file_path', str(tmp_path / 'history.jsonl'))
+        history.log_event('debrid', 'A', meta={'cause': 'debrid_rescued'})
+        history.log_event('tb_cached_alt_grabbed', 'B',
+                          meta={'cause': 'tb_cached_alt_grabbed'})
+        history.log_event('debrid_add', 'C',
+                          meta={'cause': 'wanted_tb_recovered'})
+        # A state-flag entry must not add to the history-derived count.
         state_path.write_text(json.dumps({
             'version': 1,
             'probed': {
                 'A': {'status': 'unknown', 'ts': time.time(), 'rescued': True},
-                'B': {'status': 'unknown', 'ts': time.time(), 'rescued': True},
-                'C': {'status': 'healthy', 'ts': time.time()},
             },
         }))
         summary = debrid_health.get_summary()
         tb_card = next(p for p in summary['providers'] if p['service'] == 'torbox')
-        assert tb_card['counts']['rescued'] == 2
+        assert tb_card['counts']['rescued'] == 3
 
 
 class TestRemediateFilenameSanitisation:

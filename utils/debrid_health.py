@@ -255,18 +255,21 @@ def get_summary():
     # itself is still RD-side only (plan 38 scope) but the dashboard
     # surfaces TB cache-rescue + configured-vs-not signals so users see
     # both providers' status at a glance.
+    rescued_total, rescued_24h, remediated_24h = _summary_history_counts()
+
     providers = []
     if rd_configured:
         providers.append(_provider_card('realdebrid'))
     if tb_configured:
-        providers.append(_provider_card('torbox'))
+        providers.append(_provider_card('torbox', tb_rescued_total=rescued_total))
 
     if not rd_configured:
         # Preserve the original empty response so the existing UI's
         # ``!s.rd_configured → hide`` check stays valid.  ``providers``
         # is exposed unconditionally so the dual-card view works even
         # when only TB is configured.
-        return {'rd_configured': False, 'providers': providers}
+        return {'rd_configured': False, 'providers': providers,
+                'rescued_24h': rescued_24h}
 
     counts = {'healthy': 0, 'blocked': 0, 'unknown': 0, 'total': 0}
     last_sweep_ts = None
@@ -283,26 +286,6 @@ def get_summary():
             if isinstance(ts, (int, float)):
                 if last_sweep_ts is None or ts > last_sweep_ts:
                     last_sweep_ts = ts
-
-    remediated_24h = 0
-    rescued_24h = 0
-    try:
-        from datetime import datetime, timedelta, timezone
-        from utils import history as _history
-        start = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat(timespec='seconds')
-        # type='debrid' is the only event type the reconciler emits;
-        # filter by cause client-side because history.query has no
-        # native meta-filter parameter.
-        result = _history.query(type='debrid', start=start, limit=500)
-        for ev in result.get('events', []):
-            meta = ev.get('meta') or {}
-            cause = meta.get('cause')
-            if cause == 'debrid_filtered':
-                remediated_24h += 1
-            elif cause == 'debrid_rescued':
-                rescued_24h += 1
-    except Exception as e:
-        logger.debug(f"[debrid_health] summary history query failed: {e}")
 
     return {
         'rd_configured': True,
@@ -324,14 +307,46 @@ _PROVIDER_LABELS = {
 }
 
 
-def _provider_card(service):
+def _summary_history_counts():
+    """(rescued_total, rescued_24h, remediated_24h) from one history pass.
+
+    Rescues span ALL rescue paths — sweep cross-rescues, blackhole
+    cached-alternative grabs, and Wanted-backlog recoveries.  The
+    sweep-state ``rescued=True`` flag structurally undercounts: it only
+    sees sweep-time rescues (blackhole/library paths rescue blocked
+    content upstream, before a sweep ever probes it), and a re-probe
+    rebuilds the state entry without the flag.  History is the source of
+    truth; totals are bounded by the history retention window (default
+    30 days).  Best-effort — zeros on any history error.
+    """
+    try:
+        from datetime import datetime, timedelta, timezone
+        from utils import history as _history
+        rescue_causes = (
+            _history.CAUSE_DEBRID_RESCUED,
+            _history.CAUSE_TB_CACHED_ALT_GRABBED,
+            _history.CAUSE_WANTED_TB_RECOVERED,
+        )
+        start = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat(timespec='seconds')
+        total, recent = _history.count_by_cause_windows(
+            rescue_causes + (_history.CAUSE_DEBRID_FILTERED,), start=start,
+        )
+        rescued_total = sum(total[c] for c in rescue_causes)
+        rescued_24h = sum(recent[c] for c in rescue_causes)
+        return rescued_total, rescued_24h, recent[_history.CAUSE_DEBRID_FILTERED]
+    except Exception as e:
+        logger.warning(f"[debrid_health] summary history counts failed: {e}")
+        return 0, 0, 0
+
+
+def _provider_card(service, tb_rescued_total=0):
     """Per-provider card data for the dashboard.
 
     Today only RD has a real probed-state set; TB's card reflects the
-    rescue-side state (entries in the state file flagged
-    ``rescued=True`` for the TB side) plus the configured signal.
-    AD support is structurally present but reports an empty counts
-    block until a probe path lands.
+    history-derived rescue count (``tb_rescued_total``, spanning the
+    retention window) plus the configured signal.  AD support is
+    structurally present but reports an empty counts block until a
+    probe path lands.
     """
     label = _PROVIDER_LABELS.get(service, service)
     if service == 'realdebrid':
@@ -355,9 +370,10 @@ def _provider_card(service):
             'counts': counts, 'last_probe_ts': last_probe,
         }
     if service == 'torbox':
-        # TB doesn't have a probed-state set yet — surface the rescue
-        # cache count (entries written to RD state with rescued=True).
-        rescued = 0
+        # TB doesn't have a probed-state set — the rescue count comes
+        # from history (all rescue paths, retention-window-bounded).
+        # The state loop survives only to surface the most recent
+        # sweep-rescue timestamp.
         last_probe = None
         state = _get_state()
         with _lock:
@@ -365,14 +381,13 @@ def _provider_card(service):
                 if not isinstance(entry, dict):
                     continue
                 if entry.get('rescued') is True:
-                    rescued += 1
                     ts = entry.get('ts')
                     if isinstance(ts, (int, float)):
                         if last_probe is None or ts > last_probe:
                             last_probe = ts
         return {
             'service': service, 'label': label, 'configured': True,
-            'counts': {'rescued': rescued},
+            'counts': {'rescued': tb_rescued_total},
             'last_probe_ts': last_probe,
         }
     return {

@@ -257,6 +257,72 @@ class TestQueryTitleFilter:
         assert 'Bad Boys' in titles
 
 
+class TestCountByCause:
+    """count_by_cause — cause-slug counting across event types (feeds the
+    Debrid Health TB rescue counters, which span three event types)."""
+
+    def test_counts_across_event_types(self, tmp_dir):
+        history.init(tmp_dir)
+        history.log_event('debrid', 'A', meta={'cause': 'debrid_rescued'})
+        history.log_event('tb_cached_alt_grabbed', 'B',
+                          meta={'cause': 'tb_cached_alt_grabbed'})
+        history.log_event('debrid_add', 'C',
+                          meta={'cause': 'wanted_tb_recovered'})
+        history.log_event('debrid_add', 'D',
+                          meta={'cause': 'wanted_tb_recovered'})
+        history.log_event('debrid', 'E', meta={'cause': 'debrid_filtered'})
+        history.log_event('grabbed', 'F', source='blackhole')  # no cause
+
+        counts = history.count_by_cause(
+            ('debrid_rescued', 'tb_cached_alt_grabbed', 'wanted_tb_recovered'))
+        assert counts == {'debrid_rescued': 1,
+                          'tb_cached_alt_grabbed': 1,
+                          'wanted_tb_recovered': 2}
+
+    def test_start_filter(self, tmp_dir):
+        history.init(tmp_dir)
+        history.log_event('debrid', 'old', meta={'cause': 'debrid_rescued'})
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(timespec='seconds')
+        counts = history.count_by_cause(('debrid_rescued',), start=future)
+        assert counts == {'debrid_rescued': 0}
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec='seconds')
+        counts = history.count_by_cause(('debrid_rescued',), start=past)
+        assert counts == {'debrid_rescued': 1}
+
+    def test_uninitialized_returns_zeros(self):
+        assert history.count_by_cause(('debrid_rescued',)) == {'debrid_rescued': 0}
+
+    def test_windows_single_pass_totals_and_recent(self, tmp_dir):
+        history.init(tmp_dir)
+        history.log_event('debrid', 'A', meta={'cause': 'debrid_rescued'})
+        history.log_event('debrid', 'B', meta={'cause': 'debrid_filtered'})
+        history.log_event('debrid', 'C', meta={'cause': 'debrid_filtered'})
+
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(timespec='seconds')
+        total, recent = history.count_by_cause_windows(
+            ('debrid_rescued', 'debrid_filtered'), start=future)
+        assert total == {'debrid_rescued': 1, 'debrid_filtered': 2}
+        assert recent == {'debrid_rescued': 0, 'debrid_filtered': 0}
+
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec='seconds')
+        total, recent = history.count_by_cause_windows(
+            ('debrid_rescued', 'debrid_filtered'), start=past)
+        assert total == recent == {'debrid_rescued': 1, 'debrid_filtered': 2}
+
+    def test_windows_uninitialized_returns_zeros(self):
+        total, recent = history.count_by_cause_windows(('debrid_rescued',))
+        assert total == {'debrid_rescued': 0}
+        assert recent == {'debrid_rescued': 0}
+
+    def test_torn_multibyte_write_does_not_poison_reads(self, tmp_dir):
+        history.init(tmp_dir)
+        history.log_event('debrid', 'A', meta={'cause': 'debrid_rescued'})
+        with open(history._file_path, 'ab') as f:
+            f.write(b'{"type":"debrid","title":"caf\xc3')  # torn UTF-8 seq
+        counts = history.count_by_cause(('debrid_rescued',))
+        assert counts == {'debrid_rescued': 1}
+
+
 class TestMediaTitle:
     """Tests for media_title field — canonical show/movie name for detail page matching."""
 

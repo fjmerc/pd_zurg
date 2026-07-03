@@ -130,6 +130,13 @@ class DebridClientBase:
         return msg
 
 
+# RD /torrents page size. list_torrents() does not paginate, so a
+# response of exactly this length may be truncated — consumers that
+# treat absence-from-list as "deleted on RD" (debrid_health pruning)
+# must refuse to act on a possibly-incomplete list.
+RD_LIST_LIMIT = 2500
+
+
 class RealDebridClient(DebridClientBase):
     """Real-Debrid API client for torrent management."""
 
@@ -147,13 +154,16 @@ class RealDebridClient(DebridClientBase):
             self._name, requests.get,
             f'{self._BASE}/torrents',
             headers=self._headers(),
-            params={'limit': 2500},
+            params={'limit': RD_LIST_LIMIT},
             timeout=_TIMEOUT,
         )
         resp.raise_for_status()
         data = resp.json()
         if not isinstance(data, list):
-            return []
+            # RD can return HTTP 200 with an error dict (auth degradation)
+            # — a silent [] here would read as "account is empty" to
+            # consumers like debrid_health's stale-entry pruning.
+            raise ValueError(f'RD /torrents returned non-list payload ({type(data).__name__})')
         return [
             {
                 'id': str(t.get('id', '')),

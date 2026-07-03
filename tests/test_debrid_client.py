@@ -327,6 +327,15 @@ class TestRealDebrid:
         with pytest.raises(req.HTTPError):
             rd.list_torrents()
 
+    @patch('utils.debrid_client.requests.get')
+    def test_list_torrents_non_list_payload_raises(self, mock_get, rd):
+        """RD can return HTTP 200 with an error dict — a silent [] would
+        read as 'account is empty' to consumers like debrid_health's
+        stale-entry pruning, so it must raise instead."""
+        mock_get.return_value = _mock_response({'error': 'bad_token'})
+        with pytest.raises(ValueError):
+            rd.list_torrents()
+
     @patch('utils.debrid_client.requests.delete')
     def test_delete_success(self, mock_del, rd):
         mock_del.return_value = _mock_response(status_code=204)

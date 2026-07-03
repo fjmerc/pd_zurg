@@ -471,6 +471,115 @@ class TestDisabledAndErrors:
 
 
 # ---------------------------------------------------------------------------
+# Stale-entry pruning
+# ---------------------------------------------------------------------------
+
+class TestStalePruning:
+    """Sweep prunes state entries whose torrent is gone from RD.
+
+    Remediation deletes the torrent from RD but the probe loop only
+    iterates list_torrents(), so before pruning a deleted-while-blocked
+    entry was never revisited and counted as 'blocked' on the dashboard
+    (and in get_blocked_hashes()) forever."""
+
+    def test_deleted_torrent_entry_pruned_on_next_sweep(self, state_path, no_sleep, rd_enabled):
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000'), _torrent('T2', 'BBBB1111')],
+            probe_results={
+                'T1': {'status': 'healthy'},
+                'T2': {'status': 'blocked', 'reason': 'infringing_file', 'http': 403},
+            },
+        )
+        with _patch_client(client):
+            debrid_health.run_sweep()
+        assert debrid_health.get_blocked_hashes() == {'BBBB1111'}
+
+        # T2 deleted from RD (e.g. by auto-remediation) — the next sweep
+        # drops its ghost entry; the surviving torrent's entry stays.
+        client2 = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000')],
+            probe_results={'T1': {'status': 'healthy'}},
+        )
+        with _patch_client(client2):
+            debrid_health.run_sweep()
+
+        assert debrid_health.get_blocked_hashes() == set()
+        with open(state_path) as f:
+            saved = json.load(f)
+        assert 'BBBB1111' not in saved['probed']
+        assert 'AAAA0000' in saved['probed']
+
+    def test_empty_list_does_not_prune(self, state_path, no_sleep, rd_enabled):
+        """An empty list_torrents() response is indistinguishable from a
+        soft failure (rate-limit / partial outage returning []) — the
+        prune must refuse to wipe state on it. A truly empty account has
+        no state worth pruning anyway."""
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000')],
+            probe_results={'T1': {'status': 'blocked', 'reason': 'infringing_file', 'http': 403}},
+        )
+        with _patch_client(client):
+            debrid_health.run_sweep()
+
+        client2 = _mock_client(torrents=[])
+        with _patch_client(client2):
+            debrid_health.run_sweep()
+
+        assert debrid_health.get_blocked_hashes() == {'AAAA0000'}
+
+    def test_list_at_page_limit_does_not_prune(self, state_path, no_sleep, rd_enabled, monkeypatch):
+        """A response of exactly RD_LIST_LIMIT torrents may be truncated
+        (list_torrents doesn't paginate) — treating page-2 torrents as
+        deleted would mass-wipe valid state."""
+        monkeypatch.setattr(debrid_health, 'RD_LIST_LIMIT', 2)
+        monkeypatch.setattr(debrid_health, '_MAX_PER_SWEEP', 2)
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000'), _torrent('T2', 'BBBB1111')],
+            probe_results={
+                'T1': {'status': 'healthy'},
+                'T2': {'status': 'healthy'},
+            },
+        )
+        with _patch_client(client):
+            debrid_health.run_sweep()
+
+        # T1 "missing" from a response that sits at the page limit —
+        # could be truncation, so its entry must survive.
+        client2 = _mock_client(
+            torrents=[_torrent('T2', 'BBBB1111'), _torrent('T3', 'CCCC2222')],
+            probe_results={'T3': {'status': 'healthy'}},
+        )
+        with _patch_client(client2):
+            debrid_health.run_sweep()
+
+        with open(state_path) as f:
+            saved = json.load(f)
+        assert 'AAAA0000' in saved['probed']
+
+    def test_prune_persists_even_when_all_survivors_skipped(self, state_path, no_sleep, rd_enabled):
+        """The prune must hit disk even when the sweep then probes
+        nothing (all remaining entries healthy within TTL)."""
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000'), _torrent('T2', 'BBBB1111')],
+            probe_results={
+                'T1': {'status': 'healthy'},
+                'T2': {'status': 'healthy'},
+            },
+        )
+        with _patch_client(client):
+            debrid_health.run_sweep()
+
+        client2 = _mock_client(torrents=[_torrent('T1', 'AAAA0000')])
+        with _patch_client(client2):
+            result = debrid_health.run_sweep()
+        assert result['items'] == 0  # survivor skipped via TTL
+
+        with open(state_path) as f:
+            saved = json.load(f)
+        assert set(saved['probed']) == {'AAAA0000'}
+
+
+# ---------------------------------------------------------------------------
 # Auto-remediation (Phase 4)
 # ---------------------------------------------------------------------------
 

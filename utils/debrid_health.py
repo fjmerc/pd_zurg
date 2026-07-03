@@ -18,7 +18,7 @@ import os
 import threading
 import time
 
-from utils.debrid_client import get_debrid_client
+from utils.debrid_client import get_debrid_client, RD_LIST_LIMIT
 from utils.file_utils import atomic_write
 from utils.logger import get_logger
 
@@ -812,6 +812,34 @@ def run_sweep():
         return {'status': 'error', 'message': f'list_torrents failed: {e}'}
 
     state = _get_state()
+
+    # Prune entries for torrents no longer on RD. Remediation deletes
+    # the torrent but the state entry lived on forever (the probe loop
+    # only iterates list_torrents(), so a deleted hash is never
+    # re-visited) — deleted-while-blocked ghosts inflated the
+    # dashboard's blocked count and get_blocked_hashes() indefinitely.
+    # Only prune from a provably-complete list: an empty response can't
+    # be distinguished from a soft failure (and a truly empty account
+    # has nothing worth pruning), and a response at the client's page
+    # limit may be truncated — treating page-2 torrents as deleted
+    # would mass-wipe valid state.
+    if torrents and len(torrents) < RD_LIST_LIMIT:
+        current_hashes = {
+            (t.get('hash') or '').upper()
+            for t in torrents if isinstance(t, dict)
+        }
+        with _lock:
+            stale = [h for h in state['probed'] if h not in current_hashes]
+            for h in stale:
+                del state['probed'][h]
+            if stale:
+                _save_state(state)
+        if stale:
+            logger.info(
+                f"[debrid_health] pruned {len(stale)} state entries for "
+                f"torrents no longer on RD"
+            )
+
     now = time.time()
     counts = {'probed': 0, 'healthy': 0, 'blocked': 0,
               'unknown': 0, 'skipped': 0, 'remediated': 0, 'rescued': 0}

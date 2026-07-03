@@ -79,6 +79,7 @@ __NAV_HTML__
        plan 39 phase 5 to render side-by-side RD + TB cards when both
        providers are configured; collapses to one card when only one is.
        Hidden entirely when no provider is configured. -->
+  <div id="dh-heading" style="display:none;font-size:.85em;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Debrid Health</div>
   <div id="dh-providers" class="dh-providers" style="display:none"></div>
   <div style="margin-bottom:8px">
     <button class="btn btn-ghost btn-sm" data-kb="refresh" onclick="updateTasks()">Refresh</button>
@@ -386,8 +387,10 @@ function _dhRenderTbBody(s,card){
 }
 function _dhRenderCardHtml(s,card){
   var bodyHtml=card.service==='torbox'?_dhRenderTbBody(s,card):_dhRenderRdBody(s,card);
+  var title=card.service==='torbox'?'TorBox Rescues'
+    :card.service==='realdebrid'?'RD Filter Blocks'
+    :esc(card.label);
   var pills=[];
-  pills.push('<span class="dh-pill '+(card.service==='torbox'?'dh-pill-tb':'dh-pill-rd')+'">'+esc(card.label)+'</span>');
   if(card.service==='realdebrid'&&!s.enabled){
     pills.push('<span class="dh-pill dh-pill-off">Disabled</span>');
   }
@@ -402,7 +405,7 @@ function _dhRenderCardHtml(s,card){
   return ''
     +'<div class="dh-card">'
     +'<div class="dh-card-head">'
-    +'<span class="dh-card-title">Debrid Health</span>'
+    +'<span class="dh-card-title">'+title+'</span>'
     +'<span class="dh-card-pills">'+pills.join('')+'</span>'
     +'</div>'
     +'<div class="dh-card-body">'+bodyHtml+'</div>'
@@ -412,7 +415,8 @@ function _dhRenderCardHtml(s,card){
 function updateDebridHealth(){
   fetch('/api/debrid_health/summary').then(function(r){return r.json()}).then(function(s){
     var container=document.getElementById('dh-providers');
-    if(!s){container.style.display='none';return;}
+    var heading=document.getElementById('dh-heading');
+    if(!s){container.style.display='none';heading.style.display='none';return;}
     var providers=s.providers||[];
     if(!providers.length){
       // Back-compat fallback: synthesize a card from the legacy
@@ -420,10 +424,11 @@ function updateDebridHealth(){
       if(s.rd_configured){
         providers=[{service:'realdebrid',label:'Real-Debrid',configured:true,counts:s.counts||{},last_probe_ts:s.last_sweep_ts}];
       }else{
-        container.style.display='none';return;
+        container.style.display='none';heading.style.display='none';return;
       }
     }
     container.style.display='';
+    heading.style.display='';
     container.className='dh-providers'+(providers.length>=2?' dh-providers-pair':'');
     container.innerHTML=providers.map(function(p){return _dhRenderCardHtml(s,p);}).join('');
   }).catch(function(){});

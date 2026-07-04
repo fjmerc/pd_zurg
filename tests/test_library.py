@@ -1792,6 +1792,96 @@ class TestExtractTmdbEntryYear:
         assert _extract_tmdb_entry_year({'release_date': ['1997']}) is None
 
 
+class TestCreateDebridSymlinksSkipsObfuscated:
+    """_create_debrid_symlinks must NOT import anti-DMCA obfuscated payloads
+    (hex mount folder + tracker tag, e.g. EZTV) as junk hex 'movies'/'shows'.
+    The blackhole monitor handles their real identity via the .magnet name."""
+
+    def _make_scanner(self, tmp_dir, monkeypatch):
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_ENABLED', 'true')
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', os.path.join(tmp_dir, 'mount'))
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_movies_path = os.path.join(tmp_dir, 'local_movies')
+        scanner._local_tv_path = os.path.join(tmp_dir, 'local_tv')
+        os.makedirs(scanner._local_movies_path)
+        os.makedirs(scanner._local_tv_path)
+        scanner._last_had_local = True
+        scanner._local_drop_alerted = False
+        scanner._last_symlinked_files = {}
+        scanner._pending_rescan_prior_ids = {}
+        scanner._discover_torbox_mount = lambda: None
+        return scanner
+
+    def test_obfuscated_movie_not_imported(self, tmp_dir, monkeypatch):
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        mount = os.path.join(tmp_dir, 'mount')
+
+        hexname = '050bd19ee9934249a2ce4c9762c0d710[EZTVx.to]'
+        mdir = os.path.join(mount, hexname)
+        os.makedirs(mdir)
+        # A real media file — absent the guard, a symlink WOULD be created.
+        open(os.path.join(mdir, hexname + '.mkv'), 'w').close()
+
+        movies = [
+            # Local companion keeps the "library appears empty" guard happy so
+            # the debrid loop actually runs (and can try to import the hex one).
+            {'title': 'Anchor', 'year': 2020, 'source': 'local', 'path': None},
+            {'title': hexname, 'year': None, 'source': 'debrid',
+             'path': mdir, '_parsed_title': hexname},
+        ]
+        scanner._create_debrid_symlinks([], movies, {})
+
+        # Nothing imported into the local movie library.
+        assert os.listdir(scanner._local_movies_path) == []
+
+    def test_normal_movie_still_imported(self, tmp_dir, monkeypatch):
+        """Control: a non-obfuscated movie in the same setup IS imported —
+        proves the guard, not a broken setup, is what skips the hex one."""
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        mount = os.path.join(tmp_dir, 'mount')
+
+        rel = 'Real.Movie.2024.1080p-GROUP'
+        mdir = os.path.join(mount, rel)
+        os.makedirs(mdir)
+        open(os.path.join(mdir, rel + '.mkv'), 'w').close()
+
+        movies = [
+            {'title': 'Anchor', 'year': 2020, 'source': 'local', 'path': None},
+            {'title': 'Real Movie', 'year': 2024, 'source': 'debrid',
+             'path': mdir, '_parsed_title': 'Real Movie'},
+        ]
+        scanner._create_debrid_symlinks([], movies, {})
+
+        entries = os.listdir(scanner._local_movies_path)
+        assert entries and entries[0].startswith('Real Movie')
+
+    def test_obfuscated_show_not_imported(self, tmp_dir, monkeypatch):
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        mount = os.path.join(tmp_dir, 'mount')
+
+        hexname = '1f9da83faaf847949e043d0dae9684aa[eztv.re]'
+        sdir = os.path.join(mount, hexname)
+        os.makedirs(sdir)
+        open(os.path.join(sdir, hexname + '.mkv'), 'w').close()
+
+        from utils.library import _normalize_title
+        norm = _normalize_title(hexname)
+        shows = [
+            {'title': 'Anchor Show', 'year': 2020, 'source': 'local',
+             'season_data': []},
+            {'title': hexname, 'year': None, 'source': 'debrid',
+             'season_data': [{'number': 5, 'episodes': [
+                 {'number': 3, 'source': 'debrid'}]}]},
+        ]
+        path_index = {(norm, 5, 3): os.path.join(sdir, hexname + '.mkv')}
+        scanner._create_debrid_symlinks(shows, [], path_index)
+
+        assert os.listdir(scanner._local_tv_path) == []
+
+
 class TestFindCanonicalTmdbViaPrefix:
     """Tests for _find_canonical_tmdb_via_prefix — token-aligned prefix
     lookup against the TMDB cache, used as the final fallback in the

@@ -5469,6 +5469,9 @@ class LibraryScanner:
             logger.debug("[library] full TMDB cache load for prefix-match failed: %s", e)
             _tmdb_full_cache = {}
 
+        # Lazy import (module-level would re-form the library ↔ blackhole cycle)
+        from utils.blackhole import is_obfuscated_name as _is_obfuscated_name
+
         # --- Movies ---
         if self._local_movies_path:
             real_movies_root = os.path.realpath(self._local_movies_path)
@@ -5481,6 +5484,13 @@ class LibraryScanner:
 
                 title = movie['title']
                 year = movie.get('year')
+
+                # Anti-DMCA obfuscated payloads (hex name + tracker tag, e.g.
+                # EZTV) parse into junk hex "movies" — never import them.
+                # The blackhole monitor handles their real identity via the
+                # .magnet-derived display name.
+                if _is_obfuscated_name(title) or _is_obfuscated_name(os.path.basename(mount_dir)):
+                    continue
 
                 # Skip blocklisted items by mount folder name (full release name).
                 # Only match on the release folder — not the parsed title — so
@@ -5590,6 +5600,10 @@ class LibraryScanner:
                 norm = _normalize_title(show['title'])
                 title = show['title']
                 year = show.get('year')
+                # Same obfuscated-payload guard as the movie loop above
+                # (title AND mount folder, for Sonarr/Radarr parity).
+                if _is_obfuscated_name(title) or _is_obfuscated_name(os.path.basename(show.get('path', ''))):
+                    continue
                 arr_info = _match_arr_entry(
                     title, year, show.get('_parsed_title'),
                     sonarr_map, sonarr_map_norm, sonarr_by_tmdb,

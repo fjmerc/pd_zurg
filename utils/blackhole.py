@@ -350,6 +350,35 @@ def _is_safe_mount_name(name):
         return False
     return True
 
+# Anti-DMCA obfuscated payload names: some indexers (EZTV notably) upload
+# torrents whose folder and media files are a random hex string plus a
+# tracker tag, e.g. "1f9da83faaf847949e043d0dae9684aa[eztv.re].mkv".  The
+# real release name exists only in the indexer listing / .magnet filename.
+_OBFUSCATED_STEM_RE = re.compile(r'^[0-9a-fA-F]{32,64}$')
+_BRACKET_TAG_RE = re.compile(r'\[[^\]]*\]')
+_KNOWN_STRIP_EXTS = MEDIA_EXTENSIONS | {'.magnet', '.torrent'}
+
+
+def is_obfuscated_name(name):
+    """Return True when *name* looks like an anti-DMCA obfuscated payload name.
+
+    Detection: take the basename, drop a known media/.magnet/.torrent
+    extension if present, strip ``[tracker.tag]`` bracket groups and
+    surrounding separator junk, and check whether what remains is a bare
+    32-64 char hex string (md5/sha1-length — the observed EZTV schemes).
+    Real release names always contain non-hex words (codec, resolution,
+    group), so false positives require a title that is literally nothing
+    but a 32+ char hex run — acceptable.
+    """
+    stem = os.path.basename(name or '')
+    root, ext = os.path.splitext(stem)
+    if ext.lower() in _KNOWN_STRIP_EXTS:
+        stem = root
+    stem = _BRACKET_TAG_RE.sub('', stem)
+    stem = stem.strip(' .-_')
+    return bool(_OBFUSCATED_STEM_RE.match(stem))
+
+
 # Label routing: subdir names in watch_dir that are NOT labels
 # (retry staging and alt-retry staging — handled by dedicated logic)
 _RESERVED_LABELS = {'failed', '.alt_pending'}
@@ -1966,7 +1995,8 @@ class BlackholeWatcher:
             return os.path.join(base, label)
         return base
 
-    def _create_symlinks(self, release_name, category, mount_path, label=None, debrid=None):
+    def _create_symlinks(self, release_name, category, mount_path, label=None, debrid=None,
+                         display_name=None):
         """Create symlinks in the completed directory for media files.
 
         Symlink targets use the per-debrid base resolved via
@@ -1981,23 +2011,44 @@ class BlackholeWatcher:
         When *label* is set, output is nested under ``completed_dir/<label>/``
         so each arr only sees its own items (see ``.plans/31-blackhole-per-arr-routing.md``).
 
+        *display_name* is the human-readable release name (from the watch-dir
+        .magnet/.torrent filename).  It is only used when *release_name* is an
+        anti-DMCA obfuscated hex payload name: the completed dir (and, for a
+        single-file payload, the link basename) get the display name so the
+        arr can parse the import, while symlink TARGETS keep the real mount
+        folder name so they still resolve.
+
         Returns the number of symlinks created.
         """
         debrid = debrid or self.debrid_service
         if not _is_safe_mount_name(release_name):
             logger.error(f"[blackhole] Refusing symlink creation for unsafe release_name: {release_name!r}")
             return 0
-        is_multi, _, _ = _is_multi_season_pack(release_name)
+
+        # Obfuscated payload: name the completed dir after the real release.
+        link_name = release_name
+        if (display_name and display_name != release_name
+                and is_obfuscated_name(release_name)
+                and _is_safe_mount_name(display_name)):
+            logger.info(f"[blackhole] Obfuscated payload {release_name!r}: "
+                        f"naming completed symlinks {display_name!r}")
+            link_name = display_name
+
+        is_multi, _, _ = _is_multi_season_pack(link_name)
 
         if is_multi:
-            split_count = self._create_split_season_symlinks(release_name, category, mount_path, label=label, debrid=debrid)
+            # Season detection + dir naming key off link_name (the human name);
+            # symlink targets still resolve against the real mount folder.
+            split_count = self._create_split_season_symlinks(
+                release_name, category, mount_path, label=label, debrid=debrid,
+                link_name=link_name)
             if split_count is not None:
                 return split_count
             logger.debug(f"[blackhole] Could not split {release_name} by season, using single dir")
 
         # Single-dir logic (original behavior, now label-aware)
         completed_base = self._completed_base(label)
-        completed_release_dir = os.path.normpath(os.path.join(completed_base, release_name))
+        completed_release_dir = os.path.normpath(os.path.join(completed_base, link_name))
         completed_real = os.path.normpath(completed_base)
         # Defense-in-depth: even with _is_safe_mount_name above, normpath the
         # full join and verify the result stays under completed_base. Matches
@@ -2009,6 +2060,7 @@ class BlackholeWatcher:
         symlink_target_base = self._symlink_target_base_for(debrid)
         count = 0
 
+        media_rels = []
         for root, _dirs, files in os.walk(mount_path):
             for f in files:
                 ext = os.path.splitext(f)[1].lower()
@@ -2016,32 +2068,45 @@ class BlackholeWatcher:
                     continue
                 if 'sample' in f.lower():
                     continue
+                media_rels.append(os.path.relpath(os.path.join(root, f), mount_path))
 
-                rel = os.path.relpath(os.path.join(root, f), mount_path)
-                symlink_path = os.path.normpath(os.path.join(completed_release_dir, rel))
-                target = os.path.join(symlink_target_base, category, release_name, rel)
+        # Single obfuscated media file: rename the link basename too, so the
+        # arr's file-level parse sees the release name instead of hex junk.
+        rename_single = (
+            link_name != release_name and len(media_rels) == 1
+            and is_obfuscated_name(os.path.basename(media_rels[0]))
+        )
 
-                # Guard against path traversal from adversarial release names
-                if not symlink_path.startswith(completed_release_dir + os.sep):
-                    logger.warning(f"[blackhole] Skipping path traversal attempt: {rel}")
-                    continue
+        for rel in media_rels:
+            if rename_single:
+                link_rel = link_name + os.path.splitext(rel)[1].lower()
+            else:
+                link_rel = rel
+            symlink_path = os.path.normpath(os.path.join(completed_release_dir, link_rel))
+            target = os.path.join(symlink_target_base, category, release_name, rel)
 
-                os.makedirs(os.path.dirname(symlink_path), exist_ok=True)
+            # Guard against path traversal from adversarial release names
+            if not symlink_path.startswith(completed_release_dir + os.sep):
+                logger.warning(f"[blackhole] Skipping path traversal attempt: {rel}")
+                continue
 
-                if os.path.islink(symlink_path) or os.path.exists(symlink_path):
-                    logger.debug(f"[blackhole] Symlink already exists: {symlink_path}")
-                    continue
+            os.makedirs(os.path.dirname(symlink_path), exist_ok=True)
 
-                try:
-                    os.symlink(target, symlink_path)
-                    logger.info(f"[blackhole] Symlink: {rel} -> {target}")
-                    count += 1
-                except OSError as e:
-                    logger.error(f"[blackhole] Failed to create symlink {symlink_path}: {e}")
+            if os.path.islink(symlink_path) or os.path.exists(symlink_path):
+                logger.debug(f"[blackhole] Symlink already exists: {symlink_path}")
+                continue
+
+            try:
+                os.symlink(target, symlink_path)
+                logger.info(f"[blackhole] Symlink: {link_rel} -> {target}")
+                count += 1
+            except OSError as e:
+                logger.error(f"[blackhole] Failed to create symlink {symlink_path}: {e}")
 
         return count
 
-    def _create_split_season_symlinks(self, release_name, category, mount_path, label=None, debrid=None):
+    def _create_split_season_symlinks(self, release_name, category, mount_path, label=None, debrid=None,
+                                      link_name=None):
         """Split a multi-season pack into per-season symlink directories.
 
         Groups media files by season, creates a separate completed directory
@@ -2051,8 +2116,15 @@ class BlackholeWatcher:
 
         When *label* is set, season dirs are nested under ``completed_dir/<label>/``.
         ``debrid`` (plan 39 phase 2) selects the symlink target base.
+
+        *link_name* is the human-readable release name used to CONSTRUCT the
+        per-season completed dir names — for an obfuscated payload it is the
+        .magnet-derived name so Sonarr/Radarr can parse the seasons.  Symlink
+        TARGETS still use *release_name* (the real mount folder) so they
+        resolve.  Defaults to *release_name* (non-obfuscated path).
         """
         debrid = debrid or self.debrid_service
+        name_for_dirs = link_name or release_name
         symlink_target_base = self._symlink_target_base_for(debrid)
         season_files = {}
 
@@ -2078,10 +2150,10 @@ class BlackholeWatcher:
         count = 0
         completed_base = self._completed_base(label)
         completed_real = os.path.normpath(completed_base)
-        logger.info(f"[blackhole] Multi-season pack: {release_name} → splitting into {len(season_files)} seasons")
+        logger.info(f"[blackhole] Multi-season pack: {name_for_dirs} → splitting into {len(season_files)} seasons")
 
         for season_num, rel_list in sorted(season_files.items()):
-            season_name = _build_season_release_name(release_name, season_num)
+            season_name = _build_season_release_name(name_for_dirs, season_num)
             season_dir = os.path.normpath(os.path.join(completed_base, season_name))
 
             # Guard against path traversal in the constructed season dir name
@@ -2168,6 +2240,7 @@ class BlackholeWatcher:
             return  # pack or unparseable — rely on library reconcile
 
         delivered = set()
+        media_names = []
         try:
             for root, _dirs, files in os.walk(mount_path):
                 for f in files:
@@ -2176,6 +2249,7 @@ class BlackholeWatcher:
                         continue
                     if 'sample' in f.lower():
                         continue
+                    media_names.append(f)
                     delivered |= _parse_episodes(f)
         except OSError as e:
             logger.debug(f"[blackhole] Completeness audit: walk failed for {release_name}: {e}")
@@ -2183,6 +2257,15 @@ class BlackholeWatcher:
 
         missing = sorted(claimed - delivered)
         if not missing:
+            return
+
+        # Obfuscated payloads (hex-named files, e.g. EZTV anti-DMCA releases)
+        # carry no episode info in their file names, so "missing" here is a
+        # parsing artifact, not a short delivery.  Blocklisting/re-searching
+        # would loop forever on a release that actually delivered fine.
+        if media_names and all(is_obfuscated_name(f) for f in media_names):
+            logger.info(f"[blackhole] Completeness audit skipped for {release_name}: "
+                        f"obfuscated payload file names ({len(media_names)} media file(s))")
             return
 
         info_hash = ''
@@ -2901,7 +2984,8 @@ class BlackholeWatcher:
 
         # Phase 3: Create symlinks
         try:
-            count = self._create_symlinks(matched_name, category, mount_path, label=label, debrid=debrid)
+            count = self._create_symlinks(matched_name, category, mount_path, label=label, debrid=debrid,
+                                          display_name=os.path.splitext(filename)[0])
             if count > 0:
                 logger.info(f"[blackhole] Created {count} symlink(s) for {release_name}")
                 if _history:

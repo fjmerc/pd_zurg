@@ -1429,6 +1429,185 @@ class TestCreateSymlinks:
         assert not os.path.exists(os.path.join(completed, 'escape'))
 
 
+class TestIsObfuscatedName:
+
+    def test_hex_folder_with_tracker_tag_is_obfuscated(self):
+        from utils.blackhole import is_obfuscated_name
+        assert is_obfuscated_name('1f9da83faaf847949e043d0dae9684aa[eztv.re]')
+        assert is_obfuscated_name('050bd19ee9934249a2ce4c9762c0d710[EZTVx.to]')
+
+    def test_hex_media_file_is_obfuscated(self):
+        from utils.blackhole import is_obfuscated_name
+        assert is_obfuscated_name('1f9da83faaf847949e043d0dae9684aa[eztv.re].mkv')
+
+    def test_hex_magnet_file_is_obfuscated(self):
+        from utils.blackhole import is_obfuscated_name
+        assert is_obfuscated_name('06bc5039b73b477f83c1e6750991d607[EZTVx.to].magnet')
+
+    def test_bare_hex_is_obfuscated(self):
+        from utils.blackhole import is_obfuscated_name
+        assert is_obfuscated_name('050bd19ee9934249a2ce4c9762c0d710')
+
+    def test_real_release_is_not_obfuscated(self):
+        from utils.blackhole import is_obfuscated_name
+        assert not is_obfuscated_name(
+            'What We Do in the Shadows S05E03 1080p DSNP WEB-DL DDP5 1 H 264-NTb')
+        assert not is_obfuscated_name('Movie.2024.1080p.BluRay.x264-GROUP')
+        assert not is_obfuscated_name('My.Show.S01E01.mkv')
+
+    def test_short_hex_is_not_obfuscated(self):
+        # Below the 16-char floor — could be a legit short title fragment.
+        from utils.blackhole import is_obfuscated_name
+        assert not is_obfuscated_name('deadbeef')
+
+    def test_empty_and_none_are_not_obfuscated(self):
+        from utils.blackhole import is_obfuscated_name
+        assert not is_obfuscated_name('')
+        assert not is_obfuscated_name(None)
+
+
+class TestCreateSymlinksObfuscated:
+
+    def _make_watcher(self, tmp_dir):
+        completed = os.path.join(tmp_dir, 'completed')
+        mount = os.path.join(tmp_dir, 'mount')
+        os.makedirs(completed)
+        os.makedirs(mount)
+        watcher = BlackholeWatcher(
+            os.path.join(tmp_dir, 'watch'), 'key', 'realdebrid',
+            symlink_enabled=True,
+            completed_dir=completed,
+            rclone_mount=mount,
+            symlink_target_base='/mnt/debrid',
+        )
+        return watcher, completed, mount
+
+    def test_obfuscated_payload_uses_display_name(self, tmp_dir):
+        """Hex mount folder + single hex media file: completed dir and link
+        basename take the display name; target keeps the hex mount name."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        matched = '1f9da83faaf847949e043d0dae9684aa[eztv.re]'
+        release_dir = os.path.join(mount, matched)
+        os.makedirs(release_dir)
+        with open(os.path.join(release_dir, matched + '.mkv'), 'w') as f:
+            f.write('data')
+
+        display = 'What We Do in the Shadows S05E03 1080p DSNP WEB-DL DDP5 1 H 264-NTb'
+        count = watcher._create_symlinks(matched, '', release_dir, display_name=display)
+        assert count == 1
+
+        symlink = os.path.join(completed, display, display + '.mkv')
+        assert os.path.islink(symlink)
+        # Target still points at the real (hex) mount folder + file
+        target = os.readlink(symlink)
+        assert target == f'/mnt/debrid/{matched}/{matched}.mkv'
+
+    def test_non_obfuscated_ignores_display_name(self, tmp_dir):
+        """A normal release name must keep its own folder/file names even
+        when a display_name is passed."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        release = 'My.Show.S01E01.1080p-GROUP'
+        release_dir = os.path.join(mount, release)
+        os.makedirs(release_dir)
+        with open(os.path.join(release_dir, 'episode.mkv'), 'w') as f:
+            f.write('data')
+
+        count = watcher._create_symlinks(release, 'shows', release_dir,
+                                         display_name='Something Else')
+        assert count == 1
+        assert os.path.islink(os.path.join(completed, release, 'episode.mkv'))
+
+    def test_obfuscated_multi_file_keeps_original_basenames(self, tmp_dir):
+        """When the payload has >1 media file we can't safely rename any single
+        one to the release title — completed dir is renamed, files are not."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        matched = 'abcdef0123456789abcdef0123456789[eztv.re]'
+        release_dir = os.path.join(mount, matched)
+        os.makedirs(release_dir)
+        for name in ['aaaa1111bbbb2222aaaa1111bbbb2222.mkv',
+                     'cccc3333dddd4444cccc3333dddd4444.mkv']:
+            with open(os.path.join(release_dir, name), 'w') as f:
+                f.write('data')
+
+        display = 'Some Show S01 1080p WEB-DL-GRP'
+        count = watcher._create_symlinks(matched, '', release_dir, display_name=display)
+        assert count == 2
+        # Dir renamed to display; files keep their (hex) basenames
+        assert os.path.isdir(os.path.join(completed, display))
+        assert os.path.islink(os.path.join(
+            completed, display, 'aaaa1111bbbb2222aaaa1111bbbb2222.mkv'))
+
+    def test_obfuscated_multiseason_uses_display_name_for_season_dirs(self, tmp_dir):
+        """Obfuscated mount folder + season-parseable files + multi-season
+        display name: per-season completed dirs must be built from the
+        display name (so Sonarr parses them), targets from the hex folder."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        matched = 'abcdef0123456789abcdef0123456789[eztv.re]'
+        release_dir = os.path.join(mount, matched)
+        os.makedirs(release_dir)
+        # Real season/episode names inside a hex folder (partial obfuscation).
+        for name in ['Show.S01E01.mkv', 'Show.S02E01.mkv']:
+            with open(os.path.join(release_dir, name), 'w') as f:
+                f.write('data')
+
+        display = 'Show.S01-S02.1080p.WEB-DL-GRP'
+        count = watcher._create_symlinks(matched, '', release_dir, display_name=display)
+        assert count == 2
+        # Season dirs derive from the display name, not the hex folder.
+        s1 = os.path.join(completed, 'Show.S01.1080p.WEB-DL-GRP', 'Show.S01E01.mkv')
+        s2 = os.path.join(completed, 'Show.S02.1080p.WEB-DL-GRP', 'Show.S02E01.mkv')
+        assert os.path.islink(s1)
+        assert os.path.islink(s2)
+        # Target still points at the real (hex) mount folder.
+        assert os.readlink(s1) == f'/mnt/debrid/{matched}/Show.S01E01.mkv'
+
+
+class TestAuditReleaseCompleteness:
+
+    def _make_watcher(self, tmp_dir):
+        completed = os.path.join(tmp_dir, 'completed')
+        mount = os.path.join(tmp_dir, 'mount')
+        os.makedirs(completed)
+        os.makedirs(mount)
+        return BlackholeWatcher(
+            os.path.join(tmp_dir, 'watch'), 'key', 'realdebrid',
+            symlink_enabled=True,
+            completed_dir=completed,
+            rclone_mount=mount,
+            symlink_target_base='/mnt/debrid',
+        )
+
+    def test_obfuscated_payload_skips_audit(self, tmp_dir, monkeypatch):
+        """An obfuscated payload's hex file names carry no episode info, so a
+        parse-derived 'missing' must NOT trigger blocklist/history/re-search."""
+        import utils.blackhole as bh
+        watcher = self._make_watcher(tmp_dir)
+
+        matched = '1f9da83faaf847949e043d0dae9684aa[eztv.re]'
+        mount_path = os.path.join(tmp_dir, 'mount', matched)
+        os.makedirs(mount_path)
+        with open(os.path.join(mount_path, matched + '.mkv'), 'w') as f:
+            f.write('data')
+
+        events = []
+        fake_history = type('H', (), {'log_event': lambda self, *a, **k: events.append((a, k))})()
+        blocked = []
+        fake_blocklist = type('B', (), {'add': lambda self, *a, **k: blocked.append((a, k))})()
+        monkeypatch.setattr(bh, '_history', fake_history, raising=False)
+        monkeypatch.setattr(bh, '_blocklist', fake_blocklist, raising=False)
+
+        # filename is the REAL release name (claims S05E03)
+        filename = 'What.We.Do.in.the.Shadows.S05E03.1080p.mkv'
+        watcher._audit_release_completeness(filename, matched, mount_path, {})
+
+        assert events == []
+        assert blocked == []
+
+
 class TestPendingMonitors:
 
     def test_add_and_load_pending(self, tmp_dir):

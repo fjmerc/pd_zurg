@@ -86,8 +86,9 @@ __all__ = [
     'ROUTING_AUTO_TAG_UNTAGGED',
     # Gap-fill reconcile
     'GAP_FILL_ENABLED',
-    # Wanted→TorBox proactive recovery
+    # Wanted proactive recovery (TorBox + RealDebrid legs)
     'WANTED_TB_RECOVERY_ENABLED', 'WANTED_TB_RECOVERY_MAX_PER_SCAN',
+    'WANTED_RD_RECOVERY_ENABLED', 'WANTED_RD_RECOVERY_MAX_PER_SCAN',
     # Debrid search
     'TORRENTIO_URL', 'SEARCH_REQUIRE_CACHED', 'SEARCH_DEDUP_ENABLED',
     # Blackhole cache / debrid-account dedup gates
@@ -314,6 +315,10 @@ class Config:
         # ghosts the arr never grabbed, bounded per scan.
         self.WANTED_TB_RECOVERY_ENABLED = os.getenv('WANTED_TB_RECOVERY_ENABLED', 'true')
         self.WANTED_TB_RECOVERY_MAX_PER_SCAN = os.getenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', '2')
+        # RD leg: RD's cache probe is dead, so the add is the probe — add,
+        # keep if instantly ready, delete + fall back to the TB leg if not.
+        self.WANTED_RD_RECOVERY_ENABLED = os.getenv('WANTED_RD_RECOVERY_ENABLED', 'true')
+        self.WANTED_RD_RECOVERY_MAX_PER_SCAN = os.getenv('WANTED_RD_RECOVERY_MAX_PER_SCAN', '4')
         # Debrid search
         self.TORRENTIO_URL = os.getenv('TORRENTIO_URL')
         # Refuse the interactive "Add" button when the chosen hash is not
@@ -466,6 +471,8 @@ ROUTING_AUTO_TAG_UNTAGGED = config.ROUTING_AUTO_TAG_UNTAGGED
 GAP_FILL_ENABLED = config.GAP_FILL_ENABLED
 WANTED_TB_RECOVERY_ENABLED = config.WANTED_TB_RECOVERY_ENABLED
 WANTED_TB_RECOVERY_MAX_PER_SCAN = config.WANTED_TB_RECOVERY_MAX_PER_SCAN
+WANTED_RD_RECOVERY_ENABLED = config.WANTED_RD_RECOVERY_ENABLED
+WANTED_RD_RECOVERY_MAX_PER_SCAN = config.WANTED_RD_RECOVERY_MAX_PER_SCAN
 TORRENTIO_URL = config.TORRENTIO_URL
 SEARCH_REQUIRE_CACHED = config.SEARCH_REQUIRE_CACHED
 SEARCH_DEDUP_ENABLED = config.SEARCH_DEDUP_ENABLED

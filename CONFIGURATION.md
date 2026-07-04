@@ -233,6 +233,8 @@ Sweep cadence (`DEBRID_HEALTH_INTERVAL`, default 12h) is a power-user override r
 | `GAP_FILL_ENABLED` | Reconcile monitored shows against TMDB and search Sonarr/Radarr for aired episodes missing from both sources. Also auto-enables `verify_symlinks` re-search on broken symlinks | `true` |
 | `WANTED_TB_RECOVERY_ENABLED` | For each "Wanted" title the arr never grabbed, search Torrentio directly, probe TorBox's cache, and add the best cached release straight to TorBox — bypassing the arr's indexer pool. Closes the gap where a title is cached on TorBox but the arr never surfaces a grabbable release. Requires TorBox + `TORRENTIO_URL` | `true` |
 | `WANTED_TB_RECOVERY_MAX_PER_SCAN` | Max Wanted titles the recovery pass adds to TorBox per library scan. Kept small so creates trickle across scans — create-volume bursts arm TorBox Essential's ~24h abuse cooldown, which starves recovery far more than a low cap | `2` |
+| `WANTED_RD_RECOVERY_ENABLED` | RD leg of the Wanted recovery pass. RD's cache probe is dead, so the add is the probe: add the top release to RealDebrid, keep it if it goes instantly ready (cached), delete it and fall back to the TorBox leg otherwise. Filter-blocked releases are detected at add time and routed to TorBox. Requires RealDebrid + `TORRENTIO_URL` | `true` |
+| `WANTED_RD_RECOVERY_MAX_PER_SCAN` | Max RealDebrid probe-adds per library scan (attempts, not successes). RD has no create-volume cooldown, so this can sit higher than the TorBox cap; each uncached attempt burns up to ~20s of ready-polling | `4` |
 
 ---
 

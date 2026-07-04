@@ -60,6 +60,15 @@ CAUSE_DEBRID_ADD_VIA_SEARCH = 'debrid_add_via_search'
 # CAUSE_DEBRID_ADD_VIA_SEARCH (user-driven interactive add) because this fires
 # automatically during the scan effects phase against the Wanted backlog.
 CAUSE_WANTED_TB_RECOVERED = 'wanted_tb_recovered'
+# RD leg of the same Wanted-recovery pass.  RD's cache probe is dead
+# (deprecated Nov 2024) so the add itself is the probe: add the magnet,
+# keep it if it goes instantly ready (cached), delete and fall back to
+# the TorBox trickle otherwise.  RECOVERED = kept; UNCACHED = probe add
+# deleted (never ready / dead state / filter-blocked at add time — see
+# meta['reason']).  Together the two causes are the RD cache-hit-rate
+# measurement on the Wanted backlog.
+CAUSE_WANTED_RD_RECOVERED = 'wanted_rd_recovered'
+CAUSE_WANTED_RD_UNCACHED = 'wanted_rd_uncached'
 
 # Action
 CAUSE_POST_SYMLINK_RESCAN = 'post_symlink_rescan'

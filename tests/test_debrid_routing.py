@@ -649,6 +649,62 @@ class TestAttemptAddRescue:
         assert result['rescued'] is True
         assert result['to'] == REALDEBRID
 
+    def test_fail_state_short_circuits_and_cleans_up(self):
+        # A terminal state listed in fail_states aborts immediately —
+        # the 'downloaded' that would have followed is never observed.
+        client = _FakeAltClient(add_returns='alt-tid-1',
+                                statuses=['magnet_error', 'downloaded'])
+        result = attempt_add_rescue(
+            'AAAA' * 10, TORBOX,
+            alt_debrid=REALDEBRID,
+            alt_client=client,
+            cache_probe=lambda s, h: True,
+            ready_states={'downloaded'},
+            fail_states={'magnet_error', 'dead'},
+            ready_timeout=5,
+            poll_interval=0.01,
+        )
+        assert result['rescued'] is False
+        assert result['reason'] == 'failed_state'
+        assert result['state'] == 'magnet_error'
+        assert client.delete_calls == ['alt-tid-1']
+        # Short-circuited on the first poll — no second status call.
+        assert len(client.status_calls) == 1
+
+    def test_fail_state_not_configured_keeps_polling(self):
+        # Legacy behaviour: without fail_states, magnet_error is just
+        # "not ready yet" and the later 'downloaded' wins.
+        client = _FakeAltClient(add_returns='alt-tid-1',
+                                statuses=['magnet_error', 'downloaded'])
+        result = attempt_add_rescue(
+            'AAAA' * 10, TORBOX,
+            alt_debrid=REALDEBRID,
+            alt_client=client,
+            cache_probe=lambda s, h: True,
+            ready_states={'downloaded'},
+            ready_timeout=5,
+            poll_interval=0.01,
+        )
+        assert result['rescued'] is True
+        assert client.delete_calls == []
+
+    def test_fail_states_normalised_case(self):
+        client = _FakeAltClient(add_returns='alt-tid-1',
+                                statuses=['DEAD'])
+        result = attempt_add_rescue(
+            'AAAA' * 10, TORBOX,
+            alt_debrid=REALDEBRID,
+            alt_client=client,
+            cache_probe=lambda s, h: True,
+            ready_states={'downloaded'},
+            fail_states={'Dead'},
+            ready_timeout=5,
+            poll_interval=0.01,
+        )
+        assert result['rescued'] is False
+        assert result['reason'] == 'failed_state'
+        assert result['state'] == 'dead'
+
 
 # ---------------------------------------------------------------------------
 # build_tb_lookup_candidates — Cyrillic / non-English tracker bridge

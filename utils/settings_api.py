@@ -218,6 +218,8 @@ ENV_SCHEMA = [
             ('GAP_FILL_ENABLED', 'Gap-Fill Missing Episodes', 'boolean', False, 'Reconcile every monitored show against TMDB and search Sonarr/Radarr for aired episodes missing from both debrid and local, regardless of source preference. Also auto-enables re-search for broken symlinks during verify_symlinks. Set OFF to opt out (default: true)'),
             ('WANTED_TB_RECOVERY_ENABLED', 'Wanted → TorBox Recovery', 'boolean', False, 'For every "Wanted" title (monitored, no file) that Sonarr/Radarr never grabbed, search Torrentio directly, probe candidates against TorBox\'s cache, and add the best cached release straight to TorBox — bypassing the arr\'s own indexer pool. Closes the acquisition gap where a title is cached on TorBox but the arr\'s Prowlarr/Torznab search never surfaces a grabbable release, leaving it stuck in Wanted. The next library scan symlinks it and the arr imports it. Requires TorBox + Torrentio configured (default: ON).'),
             ('WANTED_TB_RECOVERY_MAX_PER_SCAN', 'Wanted Recovery Max Per Scan', 'number:1-100', False, 'Cap on how many Wanted titles the recovery pass adds to TorBox per library scan. Kept small (default 2) so creates trickle out across scans instead of bursting — TorBox Essential\'s abuse system arms a ~24h account cooldown on create-volume bursts, which starves recovery far more than a low per-scan cap does.'),
+            ('WANTED_RD_RECOVERY_ENABLED', 'Wanted → RealDebrid Recovery', 'boolean', False, 'RD leg of the Wanted recovery pass. RD\'s cache-query endpoint is dead (deprecated Nov 2024), so the add itself is the probe: the top Torrentio release is added to RealDebrid and kept only if it goes instantly ready (= cached); otherwise the probe add is deleted and the title falls back to the TorBox leg. RD has no create-volume cooldown, so this leg drains the Wanted backlog much faster whenever RD has the content. Filter-blocked releases are detected at add time and routed to TorBox instead. Requires RealDebrid + Torrentio configured (default: ON).'),
+            ('WANTED_RD_RECOVERY_MAX_PER_SCAN', 'Wanted RD Probes Per Scan', 'number:1-100', False, 'Cap on RealDebrid probe-adds per library scan — counts attempts, not successes (each attempt is addMagnet + selectFiles + status polls + a delete on miss). RD has no create-volume abuse cooldown, so this can sit higher than the TorBox cap; each uncached attempt burns up to ~20s of polling, so very high values just eat the pass\'s time budget (default 4).'),
             ('LIBRARY_RESCAN_NFS_DELAY', 'NFS Rescan Delay (seconds)', 'number:0-300', False,
              'Sleep this many seconds between creating new debrid symlinks and firing Sonarr/Radarr rescans. Default 0 (no delay) — bump to 30 if Sonarr/Radarr reads the symlink directory over NFS and you see "hasFile=false" right after a scan that later imports cleanly on its own. The arr-side kernel attribute cache (default 30-60s TTL on most NFS mounts) hides freshly-created symlinks from the rescan walk; this delay lets the cache expire first. Clamped to [0, 300] (default: 0).'),
         ],
@@ -311,6 +313,10 @@ _ENV_DEFAULTS = {
     # utils/library.py::wanted_tb_recovery_enabled() and base/__init__.py Config.
     'WANTED_TB_RECOVERY_ENABLED': 'true',
     'WANTED_TB_RECOVERY_MAX_PER_SCAN': '2',
+    # RD leg — matches utils/library.py::wanted_rd_recovery_enabled()/_max_per_scan()
+    # and base/__init__.py Config.
+    'WANTED_RD_RECOVERY_ENABLED': 'true',
+    'WANTED_RD_RECOVERY_MAX_PER_SCAN': '4',
     # Debrid health detection is on by default; matches
     # utils/debrid_health.py::_enabled() and base/__init__.py Config.
     'DEBRID_HEALTH_ENABLED': 'true',

@@ -73,6 +73,39 @@ def wanted_tb_recovery_max_per_scan():
     return n if n > 0 else 2
 
 
+def wanted_rd_recovery_enabled():
+    """Return ``True`` when the RD leg of Wanted recovery is enabled.
+
+    Default ``true`` — opt-out.  RD's cache-query endpoint is dead
+    (deprecated Nov 2024), so the RD leg probes by adding: magnet add →
+    instantly ready means cached (keep it), anything else means uncached
+    (delete the probe add and fall back to the TorBox trickle).  RD has
+    no create-volume cooldown, so whenever RD has the content cached this
+    leg drains the Wanted backlog far faster than the TB trickle.
+    """
+    return os.environ.get('WANTED_RD_RECOVERY_ENABLED', 'true').strip().lower() == 'true'
+
+
+def wanted_rd_recovery_max_per_scan():
+    """Per-scan cap on RD probe-adds.  Default 4.
+
+    Counts ATTEMPTS (adds), not successes — the add itself is the
+    expensive unit here (addMagnet + selectFiles + status polls + a
+    delete on miss).  RD has no create-volume abuse cooldown, so this
+    can safely sit higher than the TorBox trickle cap; the binding
+    constraint is the pass's own time budget (each uncached attempt
+    burns up to ``_WANTED_RD_READY_TIMEOUT`` seconds of polling).
+    Non-integer/<=0 values fall back to the default rather than
+    disabling the leg silently.
+    """
+    raw = os.environ.get('WANTED_RD_RECOVERY_MAX_PER_SCAN', '4')
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return 4
+    return n if n > 0 else 4
+
+
 # Plan 41 phase B.2 — NFS attribute-cache delay between symlink creation
 # and arr rescan trigger.  See ``_create_debrid_symlinks`` for the
 # narrative.  Lifted to a module-level helper so it can be unit-tested
@@ -2258,6 +2291,17 @@ class LibraryScanner:
         # against Torrentio/TorBox for _WANTED_TB_RECOVERY_COOLDOWN after a miss
         # or a grab, so a deep backlog isn't re-walked every scan.
         self._wanted_tb_cooldown = {}
+        # {imdb_or_imdb:s:e: monotonic ts} — titles whose RD probe-add came
+        # back uncached (or filter-blocked).  Longer-lived than the TB
+        # cooldown (_WANTED_RD_MISS_TTL) so the same title isn't add/delete
+        # churned against RD every few hours; a miss usually means RD lacks
+        # the content family, not just that one release.
+        self._wanted_rd_miss = {}
+        # {imdb_or_imdb:s:e: monotonic ts} — Torrentio returned no usable
+        # results for the title.  Leg-independent (nothing for either leg to
+        # add), so it gates the pass before the per-leg memos; expires on the
+        # short TB cooldown TTL so newly-released content isn't held back.
+        self._wanted_no_results = {}
         self._alias_norms = {}     # {norm_title: set of alias norm_titles}
         try:
             self._debrid_unavailable_days = int(os.environ.get('DEBRID_UNAVAILABLE_THRESHOLD_DAYS', '3'))
@@ -3169,7 +3213,7 @@ class LibraryScanner:
         changed = self._enforce_preferences(shows, movies, preferences, path_index,
                                               local_path_index, force=force_enforce)
         self._search_for_missing_episodes(shows, movies, preferences)
-        self._recover_wanted_via_torbox(shows, movies, preferences)
+        self._recover_wanted_via_debrid(shows, movies, preferences)
         self._recover_local_fallback_routing(shows, movies)
         self._clear_resolved_pending(shows, movies)
         self._escalate_stuck_pending()
@@ -3737,6 +3781,22 @@ class LibraryScanner:
     # skipped before being re-probed.  6h matches the arr-search retry window.
     _WANTED_TB_MAX_PROBES = 12
     _WANTED_TB_RECOVERY_COOLDOWN = 6 * 3600
+    # RD leg of the Wanted recovery pass.  The ready timeout is short on
+    # purpose: cached content reaches ``downloaded`` within seconds of
+    # selectFiles; anything still converting/downloading after 20s is an
+    # uncached miss and the probe add is deleted.  The miss TTL is long
+    # (7 days vs the 6h TB cooldown) because a miss usually means RD
+    # doesn't have the content family cached at all — re-probing a
+    # different release of the same title every 6h would just churn
+    # add/delete cycles against RD's API.
+    _WANTED_RD_READY_TIMEOUT = 20
+    _WANTED_RD_POLL_INTERVAL = 2
+    _WANTED_RD_MISS_TTL = 7 * 24 * 3600
+    # Time budget for the whole Wanted recovery pass.  Wider than
+    # _SEARCH_BUDGET_SECONDS (30s) because each uncached RD probe-add can
+    # legitimately burn _WANTED_RD_READY_TIMEOUT seconds of polling — a
+    # 30s ceiling would cap the pass at ~1 RD attempt per scan.
+    _WANTED_RECOVERY_BUDGET_SECONDS = 120
 
     def _check_pending_freshness(self, norm, pending, direction):
         """Resolve a title's pending entry and decide retry-vs-wait.
@@ -3894,7 +3954,7 @@ class LibraryScanner:
                 # (b) write a set_pending entry that suppresses the ghost on
                 # the next scan — the same self-erase regression the movie
                 # path guards against below.  This gate is also one half of
-                # the inverse-gate invariant with _recover_wanted_via_torbox
+                # the inverse-gate invariant with _recover_wanted_via_debrid
                 # (see the comment there) that prevents dual acquisition.
                 if show.get('source') == 'wanted':
                     continue
@@ -4048,7 +4108,7 @@ class LibraryScanner:
                 # the next scan (the bug surfaced in the 071ba5d review:
                 # Wanted view self-erases after one scan cycle).  Also one
                 # half of the inverse-gate invariant with
-                # _recover_wanted_via_torbox (see the comment there).
+                # _recover_wanted_via_debrid (see the comment there).
                 if movie.get('source') == 'wanted':
                     continue
                 norm = _normalize_title(movie['title'])
@@ -4145,61 +4205,104 @@ class LibraryScanner:
                     self._search_cooldown[(norm, 0)] = now
                     update_pending_error(pending_norm, f"Radarr: {e}")
 
-    def _recover_wanted_via_torbox(self, shows, movies, preferences):
-        """Proactively grab TorBox-cached copies of "Wanted" ghosts.
+    def _recover_wanted_via_debrid(self, shows, movies, preferences):
+        """Proactively grab debrid-cached copies of "Wanted" ghosts.
 
         The arr searches its own indexer pool (Prowlarr/Torznab); zurgarr
         queries the Torrentio feed directly.  These are different populations,
-        so a title can be cached on TorBox yet sit in "Wanted" forever because
-        the arr's search never surfaces a grabbable release.  Empirically ~93%
-        of the live Wanted backlog is already cached on TorBox at full
-        resolution — the gap to 100% recovery is this acquisition path, not TB
-        supply.  This pass closes it: for each Wanted ghost (movie or first
-        missing episode of a show), search Torrentio by ``imdb_id``, probe the
-        top candidates against TorBox's cache, and add the best cached release
-        directly to TorBox.  The scanner's own symlink phase links it on a
-        subsequent scan, and Radarr/Sonarr import it from the mount.
+        so a title can be cached on a debrid yet sit in "Wanted" forever
+        because the arr's search never surfaces a grabbable release.
+        Empirically ~93% of the live Wanted backlog is already cached on
+        TorBox at full resolution — the gap to 100% recovery is this
+        acquisition path, not supply.  This pass closes it, in two legs per
+        Wanted ghost (movie or first missing episode of a show), both fed by
+        a single Torrentio search per title:
 
-        Default-on (``WANTED_TB_RECOVERY_ENABLED``), bounded per scan
-        (``WANTED_TB_RECOVERY_MAX_PER_SCAN``, default 2 — a trickle, because
-        create-volume bursts arm TB Essential's ~24h abuse cooldown), gated
-        on TorBox's account cooldown, and per-title cooldowned so a deep
-        backlog isn't re-probed every scan.
+        * **RD leg** (``WANTED_RD_RECOVERY_ENABLED``): RD's cache probe is
+          dead, so the add IS the probe — add the top release, keep it if
+          it goes instantly ready (cached), delete it and fall through to
+          the TB leg otherwise.  RD has no create-volume cooldown, so this
+          leg caps only on attempts per scan
+          (``WANTED_RD_RECOVERY_MAX_PER_SCAN``).  Every attempt doubles as
+          an RD cache-hit measurement (``wanted_rd_recovered`` vs
+          ``wanted_rd_uncached`` history causes).
+        * **TB leg** (``WANTED_TB_RECOVERY_ENABLED``): probe candidates
+          against TorBox's still-working cache endpoint and add the best
+          cached release.  Bounded per scan
+          (``WANTED_TB_RECOVERY_MAX_PER_SCAN``, default 2 — a trickle,
+          because create-volume bursts arm TB Essential's ~24h abuse
+          cooldown) and gated on TorBox's account cooldown.  A TB cooldown
+          only disables this leg — the RD leg keeps draining.
+
+        The scanner's own symlink phase links recovered content on a
+        subsequent scan, and Radarr/Sonarr import it from the mount.
+        Per-title cooldowns keep a deep backlog from being re-probed every
+        scan (6h for the TB leg, 7 days for RD misses — see
+        ``_wanted_rd_miss``).
         """
-        if not wanted_tb_recovery_enabled():
-            return
         if not os.environ.get('TORRENTIO_URL'):
             return  # no Torrentio feed to search against
 
         from base import load_secret_or_env
-        api_key = load_secret_or_env('torbox_api_key')
-        if not api_key:
-            return  # TorBox not configured — nothing to recover against
-
-        # Account-level cooldown gate — reuse the blackhole probe (cached, so
-        # this doesn't add a /user/me round-trip when the blackhole just ran).
-        try:
-            from utils.blackhole import _check_torbox_cooldown
-            tb_cooldown = _check_torbox_cooldown(api_key)
-        except Exception:
-            tb_cooldown = 0
-        if tb_cooldown > 0:
-            logger.info(f"[library] Wanted→TB recovery skipped — TorBox on "
-                        f"cooldown for {int(tb_cooldown)}s")
-            return
-
         from utils import search as _search
 
+        # --- TB leg availability -------------------------------------
+        tb_key = load_secret_or_env('torbox_api_key')
+        tb_ok = bool(tb_key) and wanted_tb_recovery_enabled()
+        if tb_ok:
+            # Account-level cooldown gate — reuse the blackhole probe
+            # (cached, so this doesn't add a /user/me round-trip when the
+            # blackhole just ran).
+            try:
+                from utils.blackhole import _check_torbox_cooldown
+                tb_cooldown = _check_torbox_cooldown(tb_key)
+            except Exception:
+                tb_cooldown = 0
+            if tb_cooldown > 0:
+                logger.info(f"[library] Wanted→TB leg skipped — TorBox on "
+                            f"cooldown for {int(tb_cooldown)}s")
+                tb_ok = False
+
+        # --- RD leg availability -------------------------------------
+        rd_key = load_secret_or_env('rd_api_key')
+        rd_ok = bool(rd_key) and wanted_rd_recovery_enabled()
+        rd_client = None
+        if rd_ok:
+            try:
+                from utils.debrid_client import get_debrid_client
+                rd_client, _svc = get_debrid_client(
+                    service='realdebrid', api_key=rd_key)
+            except Exception as e:
+                logger.warning(f"[library] Wanted→RD leg disabled — client "
+                               f"init failed: {type(e).__name__}")
+                rd_client = None
+            if rd_client is None or not getattr(rd_client, 'configured', False):
+                rd_ok = False
+
+        if not tb_ok and not rd_ok:
+            return
+
         now = time.monotonic()
-        # Expire per-title cooldown entries.
+        # Expire per-title cooldown/miss entries.
         self._wanted_tb_cooldown = {
             k: t for k, t in self._wanted_tb_cooldown.items()
             if now - t < self._WANTED_TB_RECOVERY_COOLDOWN
         }
+        self._wanted_rd_miss = {
+            k: t for k, t in self._wanted_rd_miss.items()
+            if now - t < self._WANTED_RD_MISS_TTL
+        }
+        self._wanted_no_results = {
+            k: t for k, t in self._wanted_no_results.items()
+            if now - t < self._WANTED_TB_RECOVERY_COOLDOWN
+        }
 
-        budget = wanted_tb_recovery_max_per_scan()
-        deadline = now + self._SEARCH_BUDGET_SECONDS
-        added = 0
+        tb_budget = wanted_tb_recovery_max_per_scan()
+        rd_budget = wanted_rd_recovery_max_per_scan()
+        deadline = now + self._WANTED_RECOVERY_BUDGET_SECONDS
+        tb_added = 0
+        rd_added = 0
+        rd_attempts = 0
 
         # Build the target list: released movie ghosts + show ghosts (probing
         # the first still-missing episode, defaulting to S01E01).
@@ -4242,16 +4345,34 @@ class LibraryScanner:
                 season, episode = miss[0]
             targets.append(('series', s, season, episode))
 
+        try:
+            from utils.blocklist import is_blocked as _is_blocked
+        except ImportError:
+            _is_blocked = None
+
         for media_type, item, season, episode in targets:
-            if added >= budget:
+            tb_active = tb_ok and tb_added < tb_budget
+            rd_active = rd_ok and rd_attempts < rd_budget
+            if not tb_active and not rd_active:
                 break
-            if time.monotonic() > deadline:
-                logger.info("[library] Wanted→TB recovery time budget exhausted, "
+            now_loop = time.monotonic()
+            if now_loop > deadline:
+                logger.info("[library] Wanted recovery time budget exhausted, "
                             "deferring remainder to next scan")
                 break
             imdb = item['imdb_id']
             key = imdb if media_type == 'movie' else f"{imdb}:{season}:{episode}"
-            if key in self._wanted_tb_cooldown:
+            if key in self._wanted_no_results:
+                continue
+            # Per-leg gates — a TB cooldown must never suppress the RD leg
+            # (or vice versa); each leg answers only to its own memo.  The
+            # RD leg also needs a full poll window of headroom left in the
+            # pass budget: starting a probe with a clamped-short window
+            # would misclassify cached titles as 7-day misses.
+            rd_try = (rd_active and key not in self._wanted_rd_miss
+                      and deadline - now_loop >= self._WANTED_RD_READY_TIMEOUT)
+            tb_try = tb_active and key not in self._wanted_tb_cooldown
+            if not rd_try and not tb_try:
                 continue
 
             try:
@@ -4259,8 +4380,17 @@ class LibraryScanner:
                     imdb, media_type=media_type, season=season, episode=episode)
             except Exception:
                 results = []
+            # Blocklisted hashes were rejected for a reason (bad release,
+            # prior filter block, ...) — never re-add them via this pass.
+            if results and _is_blocked is not None:
+                try:
+                    results = [r for r in results
+                               if not _is_blocked(r.get('info_hash', ''))]
+                except Exception:
+                    logger.warning("[library] Wanted recovery blocklist "
+                                   "filter failed — using unfiltered results")
             if not results:
-                self._wanted_tb_cooldown[key] = time.monotonic()
+                self._wanted_no_results[key] = time.monotonic()
                 continue
 
             # Rank by quality score then seeds; cap the TB cache fan-out.
@@ -4269,11 +4399,34 @@ class LibraryScanner:
                                r.get('seeds', 0)),
                 reverse=True,
             )
+
+            media_title = item.get('title')
+            ep_str = (f"S{season:02d}E{episode:02d}"
+                      if media_type == 'series' else None)
+
+            # ---- RD leg: the add IS the probe -----------------------
+            if rd_try:
+                outcome = self._wanted_rd_probe_add(
+                    rd_client, rd_key, results[0],
+                    media_title, ep_str, key)
+                if outcome != 'skipped':
+                    # Only real add attempts count against the budget —
+                    # local skips (dedup hit, listing unavailable) cost
+                    # no RD API adds.
+                    rd_attempts += 1
+                if outcome == 'recovered':
+                    rd_added += 1
+                    self._wanted_tb_cooldown[key] = time.monotonic()
+                    continue  # recovered on RD — no TB add needed
+
+            # ---- TB leg: cache probe + add ---------------------------
+            if not tb_try:
+                continue
             probe = results[:self._WANTED_TB_MAX_PROBES]
             hashes = [r['info_hash'] for r in probe]
             try:
                 cmap = _search.check_debrid_cache(
-                    hashes, service='torbox', api_key=api_key)
+                    hashes, service='torbox', api_key=tb_key)
             except Exception:
                 cmap = {}
             cached = next((r for r in probe if cmap.get(r['info_hash'])), None)
@@ -4282,9 +4435,6 @@ class LibraryScanner:
                 self._wanted_tb_cooldown[key] = time.monotonic()
                 continue
 
-            media_title = item.get('title')
-            ep_str = (f"S{season:02d}E{episode:02d}"
-                      if media_type == 'series' else None)
             try:
                 result = _search.add_to_debrid(
                     cached['info_hash'],
@@ -4292,7 +4442,7 @@ class LibraryScanner:
                     media_title=media_title,
                     episode=ep_str,
                     service='torbox',
-                    api_key=api_key,
+                    api_key=tb_key,
                     cause='wanted_tb_recovered',
                     source='library',
                 )
@@ -4305,11 +4455,171 @@ class LibraryScanner:
             # transient failure shouldn't be retried until the window elapses.
             self._wanted_tb_cooldown[key] = time.monotonic()
             if result.get('success'):
-                added += 1
+                tb_added += 1
 
-        if added:
-            logger.info(f"[library] Wanted→TB recovery added {added} cached "
-                        f"release(s) directly to TorBox")
+        if rd_added or tb_added:
+            logger.info(f"[library] Wanted recovery added {rd_added} release(s) "
+                        f"to RealDebrid and {tb_added} to TorBox")
+
+    def _wanted_rd_probe_add(self, rd_client, rd_key, release,
+                             media_title, ep_str, key):
+        """RD leg of the Wanted recovery pass — the add IS the cache probe.
+
+        Adds ``release`` to RD and polls briefly for ``downloaded``
+        (instantly ready = cached).  On a hit the torrent is kept, verified
+        against the May-2026 keyword filter via ``probe_file``, and a
+        ``wanted_rd_recovered`` history event is logged.  On a miss the
+        probe add is deleted (by ``attempt_add_rescue``), the title is
+        memoized in ``_wanted_rd_miss``, and a ``wanted_rd_uncached``
+        event records the measurement.
+
+        Returns a tri-state string — the caller uses it for both flow
+        and budget accounting:
+
+        * ``'recovered'`` — kept, filter-clean recovery; skip the TB leg.
+        * ``'attempted'`` — an RD add actually fired but didn't stick
+          (miss, terminal state, filter block, add error).  Counts
+          against the per-scan budget; falls through to the TB leg.
+        * ``'skipped'`` — no RD API add happened (no hash, dedup hit,
+          account listing unavailable).  Free — doesn't burn budget.
+
+        Never raises.
+        """
+        from utils import search as _search
+        from utils.debrid_routing import attempt_add_rescue
+        from utils.debrid_client import RD_READY_STATES, RD_FAIL_STATES
+
+        info_hash = (release.get('info_hash') or '').lower()
+        title = release.get('title') or media_title or ''
+        if not info_hash:
+            return 'skipped'
+
+        # Dedup against the RD account listing.  Two distinct outcomes:
+        #
+        # * Listing unavailable (API blip): bail without adding.  RD hands
+        #   back the PRE-EXISTING torrent's id when the hash is already on
+        #   the account, so an add we can't dedup risks polling a torrent
+        #   we didn't create — and then deleting a user's in-flight
+        #   download on "miss".  Transient, no memo.
+        # * Hash already on the account (parked blocked entry, or content
+        #   the mount has under a mismatched name): skip and memoize —
+        #   re-adding won't change anything within the miss window.
+        try:
+            existing = _search._existing_hashes('realdebrid', rd_key)
+        except Exception:
+            existing = None
+        if existing is None:
+            logger.info(f"[library] Wanted→RD probe skipped for "
+                        f"{media_title!r} — RD account listing unavailable")
+            return 'skipped'
+        if info_hash in existing:
+            logger.info(f"[library] Wanted→RD probe skipped for "
+                        f"{media_title!r} — hash already on RD account")
+            self._wanted_rd_miss[key] = time.monotonic()
+            return 'skipped'
+
+        # Re-issue selectFiles (once) if the add's own selection fired
+        # during magnet conversion and didn't stick — otherwise a cached
+        # torrent can park in waiting_files_selection until the timeout.
+        reselected = []
+
+        def _status_fn(client, tid):
+            st = (client.torrent_status(tid) or '').strip().lower()
+            if st == 'waiting_files_selection' and not reselected:
+                reselected.append(True)
+                client.select_files(tid)
+            return st
+
+        core = attempt_add_rescue(
+            info_hash, 'torbox',
+            alt_debrid='realdebrid',
+            # RD's cache endpoint is dead — bypass the probe; the add
+            # itself (instant-ready or not) is the cache check.
+            cache_probe=lambda *_: True,
+            alt_client=rd_client,
+            status_fn=_status_fn,
+            ready_states=RD_READY_STATES,
+            fail_states=RD_FAIL_STATES,
+            ready_timeout=self._WANTED_RD_READY_TIMEOUT,
+            poll_interval=self._WANTED_RD_POLL_INTERVAL,
+            logger_prefix='library.wanted_rd',
+        )
+
+        if not core.get('rescued'):
+            reason = core.get('reason', 'error')
+            if reason in ('never_ready', 'failed_state'):
+                # Genuine cache miss — memoize + log the measurement.
+                self._wanted_rd_miss[key] = time.monotonic()
+                self._log_wanted_rd_miss(
+                    title, media_title, ep_str, info_hash,
+                    reason=core.get('state') or reason)
+            # add_error/add_failed are transient RD-side failures — no
+            # memo, the title gets another shot on a later scan.
+            return 'attempted'
+
+        tid = core.get('alt_torrent_id', '')
+
+        # Add-time filter-block check: RD accepts and instantly "readies"
+        # filter-gated content, then 451s the actual file.  Catch it now so
+        # a blocked add is never counted as a recovery (and the TB leg gets
+        # its chance immediately instead of after the next health sweep).
+        try:
+            probe = rd_client.probe_file(tid)
+        except Exception:
+            probe = {'status': 'unknown'}
+        if probe.get('status') == 'blocked':
+            try:
+                rd_client.delete_torrent(tid)
+            except Exception:
+                pass
+            self._wanted_rd_miss[key] = time.monotonic()
+            self._log_wanted_rd_miss(
+                title, media_title, ep_str, info_hash,
+                reason=probe.get('reason', 'blocked'))
+            return 'attempted'
+        # 'unknown' (network blip, 5xx) → keep the torrent; the health
+        # sweep re-probes it on its own cycle.
+
+        try:
+            _search.remember_added_hash('realdebrid', info_hash)
+        except Exception:
+            pass
+        try:
+            from utils import history as _hist
+            _hist.log_event(
+                'debrid_add', title,
+                episode=ep_str,
+                detail='Recovered Wanted — instantly ready on realdebrid',
+                source='library',
+                media_title=media_title,
+                meta={'cause': _hist.CAUSE_WANTED_RD_RECOVERED,
+                      'info_hash': info_hash,
+                      'service': 'realdebrid',
+                      'torrent_id': tid},
+            )
+        except Exception:
+            pass
+        logger.info(f"[library] Wanted→RD recovery: {media_title!r} "
+                    f"instantly ready on RealDebrid ({info_hash[:8]}…)")
+        return 'recovered'
+
+    def _log_wanted_rd_miss(self, title, media_title, ep_str, info_hash,
+                            reason):
+        try:
+            from utils import history as _hist
+            _hist.log_event(
+                'debrid_add_failed', title,
+                episode=ep_str,
+                detail=f'Wanted recovery probe — {reason}',
+                source='library',
+                media_title=media_title,
+                meta={'cause': _hist.CAUSE_WANTED_RD_UNCACHED,
+                      'info_hash': info_hash,
+                      'service': 'realdebrid',
+                      'reason': reason},
+            )
+        except Exception:
+            pass
 
     def _clear_resolved_pending(self, shows, movies):
         """Clear pending entries that are resolved or stale.

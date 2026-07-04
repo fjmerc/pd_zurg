@@ -534,6 +534,7 @@ def attempt_add_rescue(info_hash, source_debrid, *,
                        alt_add_fn=None,
                        status_fn=None,
                        ready_states=None,
+                       fail_states=None,
                        stop_event=None,
                        ready_timeout=None,
                        poll_interval=None,
@@ -573,6 +574,13 @@ def attempt_add_rescue(info_hash, source_debrid, *,
       ready_states: iterable of lowercase status strings that count as
         "ready" (e.g. ``{'cached', 'completed', 'uploading'}`` for TB).
         REQUIRED — no safe default since vocabularies differ per provider.
+      fail_states: optional iterable of lowercase status strings that are
+        terminal failures (e.g. ``{'magnet_error', 'error', 'virus',
+        'dead'}`` for RD).  Observing one short-circuits the poll loop —
+        the alt entry is deleted and the result is
+        ``reason='failed_state'`` (with the observed state in ``state``)
+        instead of burning the full ``ready_timeout`` on a dead magnet.
+        Default ``None`` — no short-circuit, existing callers unchanged.
       stop_event: optional ``threading.Event``.  When set during the
         poll loop, the helper aborts and cleans up the alt entry.
       ready_timeout / poll_interval: override the module defaults
@@ -601,6 +609,8 @@ def attempt_add_rescue(info_hash, source_debrid, *,
       - ``stop_requested``: stop_event fired mid-rescue; alt entry cleaned.
       - ``never_ready``: alt accepted the add but didn't reach a ready
         state within ``ready_timeout``; alt entry cleaned.
+      - ``failed_state``: the torrent hit a state listed in
+        ``fail_states``; alt entry cleaned, observed state in ``state``.
       - ``misconfigured``: ``ready_states`` was omitted (developer error,
         not a runtime condition — see argument docs above).
 
@@ -615,6 +625,7 @@ def attempt_add_rescue(info_hash, source_debrid, *,
                 'alt_torrent_id': None,
                 'detail': 'ready_states required'}
     ready_states = {s.lower() for s in ready_states}
+    fail_states = {s.lower() for s in fail_states} if fail_states else set()
     ready_timeout = ready_timeout if ready_timeout is not None else _DEFAULT_RESCUE_READY_TIMEOUT
     poll_interval = poll_interval if poll_interval is not None else _DEFAULT_RESCUE_POLL_INTERVAL
 
@@ -724,6 +735,7 @@ def attempt_add_rescue(info_hash, source_debrid, *,
 
     deadline = time.time() + ready_timeout
     is_ready = False
+    failed_state = None
     while time.time() < deadline:
         if stop_event is not None and stop_event.is_set():
             break
@@ -731,8 +743,12 @@ def attempt_add_rescue(info_hash, source_debrid, *,
             state_str = status_fn(alt_client, alt_tid)
         except Exception:
             state_str = ''
-        if (state_str or '').strip().lower() in ready_states:
+        state_norm = (state_str or '').strip().lower()
+        if state_norm in ready_states:
             is_ready = True
+            break
+        if state_norm in fail_states:
+            failed_state = state_norm
             break
         # Use stop_event.wait() instead of time.sleep so SIGTERM aborts
         # within one poll interval rather than stalling on a 3s sleep.
@@ -747,6 +763,9 @@ def attempt_add_rescue(info_hash, source_debrid, *,
             alt_client.delete_torrent(alt_tid)
         except Exception:
             pass
+        if failed_state:
+            return {'rescued': False, 'reason': 'failed_state',
+                    'alt_torrent_id': alt_tid, 'state': failed_state}
         # Honour stop-event observed mid-poll loop so the caller can
         # distinguish a SIGTERM-driven abort from a genuine timeout.
         reason = 'stop_requested' if (stop_event is not None and stop_event.is_set()) else 'never_ready'

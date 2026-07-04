@@ -368,6 +368,53 @@ class TestRealDebrid:
         rd.list_torrents()
         assert mock_get.call_args[1]['params']['limit'] == 2500
 
+    @patch('utils.debrid_client.requests.get')
+    def test_torrent_status_returns_status(self, mock_get, rd):
+        mock_get.return_value = _mock_response(
+            {'id': 'ABC123', 'status': 'downloaded'})
+        assert rd.torrent_status('ABC123') == 'downloaded'
+        assert '/torrents/info/ABC123' in mock_get.call_args[0][0]
+
+    @patch('utils.debrid_client.requests.get')
+    def test_torrent_status_non_200_is_empty(self, mock_get, rd):
+        mock_get.return_value = _mock_response({}, status_code=404)
+        assert rd.torrent_status('ABC123') == ''
+
+    @patch('utils.debrid_client.requests.get')
+    def test_torrent_status_non_dict_payload_is_empty(self, mock_get, rd):
+        mock_get.return_value = _mock_response(['not', 'a', 'dict'])
+        assert rd.torrent_status('ABC123') == ''
+
+    @patch('utils.debrid_client.requests.get')
+    def test_torrent_status_network_error_is_empty(self, mock_get, rd):
+        import requests as req
+        mock_get.side_effect = req.ConnectionError('timeout')
+        assert rd.torrent_status('ABC123') == ''
+
+    def test_torrent_status_invalid_id_is_empty(self, rd):
+        assert rd.torrent_status('../../etc/passwd') == ''
+
+    @patch('utils.debrid_client.requests.post')
+    def test_select_files_success(self, mock_post, rd):
+        mock_post.return_value = _mock_response(status_code=204)
+        assert rd.select_files('ABC123') is True
+        assert '/torrents/selectFiles/ABC123' in mock_post.call_args[0][0]
+        assert mock_post.call_args[1]['data'] == {'files': 'all'}
+
+    @patch('utils.debrid_client.requests.post')
+    def test_select_files_failure_status(self, mock_post, rd):
+        mock_post.return_value = _mock_response(status_code=400)
+        assert rd.select_files('ABC123') is False
+
+    @patch('utils.debrid_client.requests.post')
+    def test_select_files_network_error(self, mock_post, rd):
+        import requests as req
+        mock_post.side_effect = req.ConnectionError('timeout')
+        assert rd.select_files('ABC123') is False
+
+    def test_select_files_invalid_id(self, rd):
+        assert rd.select_files('../../etc/passwd') is False
+
 
 # ---------------------------------------------------------------------------
 # RealDebrid probe_file — debrid health reconcile detection primitive

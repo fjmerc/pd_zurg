@@ -136,6 +136,13 @@ class DebridClientBase:
 # must refuse to act on a possibly-incomplete list.
 RD_LIST_LIMIT = 2500
 
+# RD torrent lifecycle states, for pollers that watch a torrent after
+# ``RealDebridClient.add_magnet``.  ``downloaded`` is the only "on RD
+# storage, mountable" state; the fail set are terminal — waiting longer
+# never rescues them.
+RD_READY_STATES = frozenset({'downloaded'})
+RD_FAIL_STATES = frozenset({'magnet_error', 'error', 'virus', 'dead'})
+
 
 class RealDebridClient(DebridClientBase):
     """Real-Debrid API client for torrent management."""
@@ -265,6 +272,66 @@ class RealDebridClient(DebridClientBase):
                 )
             return None
         return str(torrent_id)
+
+    def torrent_status(self, torrent_id):
+        """Return the ``status`` of an RD torrent (or '' on error).
+
+        Symmetric with ``TorBoxClient.torrent_status`` — used by the
+        Wanted-recovery RD path to poll for ``downloaded`` after
+        ``add_magnet``.  RD vocabulary: ``magnet_conversion``,
+        ``waiting_files_selection``, ``queued``, ``downloading``,
+        ``downloaded``, ``error``, ``magnet_error``, ``virus``, ``dead``,
+        ``uploading``, ``compressing``.
+        """
+        if not _SAFE_ID.match(str(torrent_id)):
+            return ''
+        try:
+            resp = tracked_request(
+                self._name, requests.get,
+                f'{self._BASE}/torrents/info/{torrent_id}',
+                headers=self._headers(),
+                timeout=_TIMEOUT,
+            )
+            if resp.status_code != 200:
+                return ''
+            data = resp.json()
+            if not isinstance(data, dict):
+                return ''
+            return str(data.get('status') or '')
+        except (requests.RequestException, ValueError) as e:
+            logger.warning(
+                f"[debrid] RD torrent_status failed for {torrent_id}: "
+                f"{self._sanitize_error(e)}"
+            )
+            return ''
+
+    def select_files(self, torrent_id):
+        """POST ``selectFiles files=all`` for a torrent.  True on 2xx.
+
+        RD occasionally ignores the selectFiles that ``add_magnet``
+        fires while the magnet is still in ``magnet_conversion``,
+        leaving the torrent parked in ``waiting_files_selection``.
+        Pollers that observe that state call this to re-issue the
+        selection instead of timing out on a torrent that would have
+        been instantly ready.
+        """
+        if not _SAFE_ID.match(str(torrent_id)):
+            return False
+        try:
+            resp = tracked_request(
+                self._name, requests.post,
+                f'{self._BASE}/torrents/selectFiles/{torrent_id}',
+                headers=self._headers(),
+                data={'files': 'all'},
+                timeout=_TIMEOUT,
+            )
+            return 200 <= resp.status_code < 300
+        except (requests.RequestException, ValueError) as e:
+            logger.warning(
+                f"[debrid] RD select_files failed for {torrent_id}: "
+                f"{self._sanitize_error(e)}"
+            )
+            return False
 
     def probe_file(self, torrent_id, sample_file_link=None):
         """Probe a torrent for RD-side filter blocks.

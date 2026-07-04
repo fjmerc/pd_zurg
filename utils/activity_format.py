@@ -413,6 +413,20 @@ def _fmt_wanted_tb_recovered(ev, meta):
     return msg, msg
 
 
+def _fmt_wanted_rd_recovered(ev, meta):
+    svc = meta.get('service', 'RealDebrid')
+    msg = f'Recovered Wanted — added cached copy on {svc}'
+    return msg, msg
+
+
+def _fmt_wanted_rd_uncached(ev, meta):
+    if meta.get('reason') == 'infringing_file':
+        msg = 'Wanted recovery — release is filter-blocked on RealDebrid'
+    else:
+        msg = 'Wanted recovery — not cached on RealDebrid (probe add removed)'
+    return msg, msg
+
+
 def _fmt_symlink_create_failed(ev, meta):
     err = meta.get('error', 'unknown error')
     return f'Symlink creation failed — {err}', f'Symlink creation failed — {err}'
@@ -513,6 +527,8 @@ _CAUSE_FORMATTERS = {
     'debrid_add_failed': _fmt_debrid_add_failed,
     'debrid_add_via_search': _fmt_debrid_add_via_search,
     'wanted_tb_recovered': _fmt_wanted_tb_recovered,
+    'wanted_rd_recovered': _fmt_wanted_rd_recovered,
+    'wanted_rd_uncached': _fmt_wanted_rd_uncached,
     'symlink_create_failed': _fmt_symlink_create_failed,
     'task_library_scan': _fmt_task_library_scan,
     'task_housekeeping': _fmt_task_housekeeping,
@@ -708,6 +724,8 @@ FORMATTER_JS = r"""
     debrid_add_failed: function(ev,m){ return 'Debrid add failed — ' + (m.error || 'unknown error'); },
     debrid_add_via_search: function(ev,m){ return 'Added to ' + (m.service || 'debrid') + ' via search'; },
     wanted_tb_recovered: function(ev,m){ return 'Recovered Wanted — added cached copy on ' + (m.service || 'TorBox'); },
+    wanted_rd_recovered: function(ev,m){ return 'Recovered Wanted — added cached copy on ' + (m.service || 'RealDebrid'); },
+    wanted_rd_uncached: function(ev,m){ return m.reason === 'infringing_file' ? 'Wanted recovery — release is filter-blocked on RealDebrid' : 'Wanted recovery — not cached on RealDebrid (probe add removed)'; },
     symlink_create_failed: function(ev,m){ return 'Symlink creation failed — ' + (m.error || 'unknown error'); },
     task_library_scan: function(ev,m){
       var parts = [(m.movies||0) + ' movies', (m.shows||0) + ' shows'];

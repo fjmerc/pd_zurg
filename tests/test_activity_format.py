@@ -191,6 +191,32 @@ def test_wanted_tb_recovered_defaults_service_to_torbox():
     assert 'TorBox' in s
 
 
+def test_wanted_rd_recovered_names_service():
+    ev = _ev('wanted_rd_recovered', service='realdebrid')
+    s = format_event(ev)['short']
+    assert 'Recovered Wanted' in s
+    assert 'realdebrid' in s
+
+
+def test_wanted_rd_recovered_defaults_service_display_case():
+    # Default matches the TB formatter's display-cased 'TorBox'.
+    ev = _ev('wanted_rd_recovered')
+    assert 'RealDebrid' in format_event(ev)['short']
+
+
+def test_wanted_rd_uncached_plain_miss():
+    ev = _ev('wanted_rd_uncached', reason='never_ready')
+    s = format_event(ev)['short']
+    assert 'not cached on RealDebrid' in s
+
+
+def test_wanted_rd_uncached_filter_block():
+    ev = _ev('wanted_rd_uncached', reason='infringing_file')
+    s = format_event(ev)['short']
+    assert 'filter-blocked' in s
+    assert 'RealDebrid' in s
+
+
 def test_terminal_error_shows_status():
     ev = _ev('terminal_error', provider='realdebrid', status='magnet_error')
     assert 'Failed on realdebrid: magnet_error' == format_event(ev)['short']

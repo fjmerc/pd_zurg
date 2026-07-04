@@ -6879,11 +6879,13 @@ class TestParseTbTimestamp:
 
 
 class TestRecoverWantedViaTorbox:
-    """Wanted→TorBox proactive recovery pass (_recover_wanted_via_torbox)."""
+    """Wanted→TorBox proactive recovery pass (_recover_wanted_via_debrid)."""
 
     def _scanner(self):
         sc = LibraryScanner.__new__(LibraryScanner)
         sc._wanted_tb_cooldown = {}
+        sc._wanted_rd_miss = {}
+        sc._wanted_no_results = {}
         return sc
 
     @pytest.fixture
@@ -6935,7 +6937,7 @@ class TestRecoverWantedViaTorbox:
         sc = self._scanner()
         movies = [{'title': 'The Substance', 'source': 'wanted',
                    'imdb_id': 'tt1234567', 'is_available': True}]
-        sc._recover_wanted_via_torbox([], movies, {})
+        sc._recover_wanted_via_debrid([], movies, {})
         assert len(wire['adds']) == 1
         add = wire['adds'][0]
         # Highest-score release picked, targeted at TorBox with the new cause.
@@ -6949,7 +6951,7 @@ class TestRecoverWantedViaTorbox:
         sc = self._scanner()
         movies = [{'title': 'X', 'source': 'wanted',
                    'imdb_id': 'tt1', 'is_available': True}]
-        sc._recover_wanted_via_torbox([], movies, {})
+        sc._recover_wanted_via_debrid([], movies, {})
         assert wire['adds'] == []
 
     def test_no_torrentio_url_noops(self, wire, monkeypatch):
@@ -6957,7 +6959,7 @@ class TestRecoverWantedViaTorbox:
         sc = self._scanner()
         movies = [{'title': 'X', 'source': 'wanted',
                    'imdb_id': 'tt1', 'is_available': True}]
-        sc._recover_wanted_via_torbox([], movies, {})
+        sc._recover_wanted_via_debrid([], movies, {})
         assert wire['adds'] == []
 
     def test_tb_cooldown_skips(self, wire):
@@ -6965,7 +6967,7 @@ class TestRecoverWantedViaTorbox:
         sc = self._scanner()
         movies = [{'title': 'X', 'source': 'wanted',
                    'imdb_id': 'tt1', 'is_available': True}]
-        sc._recover_wanted_via_torbox([], movies, {})
+        sc._recover_wanted_via_debrid([], movies, {})
         assert wire['adds'] == []
 
     def test_budget_caps_adds(self, wire, monkeypatch):
@@ -6975,7 +6977,7 @@ class TestRecoverWantedViaTorbox:
             {'title': 'M1', 'source': 'wanted', 'imdb_id': 'tt1', 'is_available': True},
             {'title': 'M2', 'source': 'wanted', 'imdb_id': 'tt2', 'is_available': True},
         ]
-        sc._recover_wanted_via_torbox([], movies, {})
+        sc._recover_wanted_via_debrid([], movies, {})
         assert len(wire['adds']) == 1
 
     def test_uncached_title_not_added_and_cooled_down(self, wire):
@@ -6983,7 +6985,7 @@ class TestRecoverWantedViaTorbox:
         sc = self._scanner()
         movies = [{'title': 'X', 'source': 'wanted',
                    'imdb_id': 'tt9', 'is_available': True}]
-        sc._recover_wanted_via_torbox([], movies, {})
+        sc._recover_wanted_via_debrid([], movies, {})
         assert wire['adds'] == []
         assert 'tt9' in sc._wanted_tb_cooldown
 
@@ -6991,20 +6993,20 @@ class TestRecoverWantedViaTorbox:
         sc = self._scanner()
         movies = [{'title': 'Future', 'source': 'wanted',
                    'imdb_id': 'tt1', 'is_available': False}]
-        sc._recover_wanted_via_torbox([], movies, {})
+        sc._recover_wanted_via_debrid([], movies, {})
         assert wire['adds'] == []
 
     def test_movie_without_imdb_skipped(self, wire):
         sc = self._scanner()
         movies = [{'title': 'NoId', 'source': 'wanted', 'is_available': True}]
-        sc._recover_wanted_via_torbox([], movies, {})
+        sc._recover_wanted_via_debrid([], movies, {})
         assert wire['adds'] == []
 
     def test_non_wanted_movie_ignored(self, wire):
         sc = self._scanner()
         movies = [{'title': 'Owned', 'source': 'debrid',
                    'imdb_id': 'tt1', 'is_available': True}]
-        sc._recover_wanted_via_torbox([], movies, {})
+        sc._recover_wanted_via_debrid([], movies, {})
         assert wire['adds'] == []
 
     def test_per_title_cooldown_skips_reprobe(self, wire):
@@ -7012,14 +7014,312 @@ class TestRecoverWantedViaTorbox:
         sc._wanted_tb_cooldown = {'tt1': time.monotonic()}
         movies = [{'title': 'X', 'source': 'wanted',
                    'imdb_id': 'tt1', 'is_available': True}]
-        sc._recover_wanted_via_torbox([], movies, {})
+        sc._recover_wanted_via_debrid([], movies, {})
         assert wire['adds'] == []
 
     def test_show_ghost_recovered_with_episode_string(self, wire):
         sc = self._scanner()
         shows = [{'title': 'Broadchurch', 'source': 'wanted',
                   'imdb_id': 'tt2249364', 'season_data': []}]
-        sc._recover_wanted_via_torbox(shows, [], {})
+        sc._recover_wanted_via_debrid(shows, [], {})
         assert len(wire['adds']) == 1
         # Default S01E01 when TMDB has no missing-episode ground truth.
         assert wire['adds'][0]['episode'] == 'S01E01'
+
+
+class _FakeRdClient:
+    """RD client stub for the Wanted RD leg — records probe/delete calls."""
+
+    def __init__(self):
+        self.configured = True
+        self.probe_result = {'status': 'healthy'}
+        self.probe_calls = []
+        self.delete_calls = []
+
+    def probe_file(self, tid):
+        self.probe_calls.append(tid)
+        return dict(self.probe_result)
+
+    def delete_torrent(self, tid):
+        self.delete_calls.append(tid)
+        return True
+
+
+class TestWantedRdRecovery:
+    """RD leg of the Wanted recovery pass — the add IS the cache probe."""
+
+    def _scanner(self):
+        sc = LibraryScanner.__new__(LibraryScanner)
+        sc._wanted_tb_cooldown = {}
+        sc._wanted_rd_miss = {}
+        sc._wanted_no_results = {}
+        return sc
+
+    def _movie(self, title='The Substance', imdb='tt1234567'):
+        return [{'title': title, 'source': 'wanted',
+                 'imdb_id': imdb, 'is_available': True}]
+
+    @pytest.fixture
+    def wire(self, monkeypatch):
+        """Stub both legs' external surfaces; capture RD rescue attempts,
+        TB adds, and history events."""
+        import base
+        import utils.blackhole as bh
+        import utils.search as search
+        import utils.debrid_client as dc
+        import utils.debrid_routing as routing
+        import utils.history as history
+
+        monkeypatch.setenv('TORRENTIO_URL', 'https://torrentio.example')
+        monkeypatch.setenv('WANTED_TB_RECOVERY_ENABLED', 'true')
+        monkeypatch.setenv('WANTED_RD_RECOVERY_ENABLED', 'true')
+        monkeypatch.delenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', raising=False)
+        monkeypatch.delenv('WANTED_RD_RECOVERY_MAX_PER_SCAN', raising=False)
+
+        rd_client = _FakeRdClient()
+        state = {
+            'tb_adds': [],
+            'events': [],
+            'rescue_calls': [],
+            'cooldown': 0,
+            'cache_cached': True,   # TB cache probe result
+            'existing': set(),      # hashes "already on the RD account"
+            'remembered': [],
+            'rd_client': rd_client,
+            'rd_core': {'rescued': True, 'to': 'realdebrid',
+                        'alt_torrent_id': 'RDTID1', 'alt_client': rd_client},
+            'torrentio': [
+                {'info_hash': 'a' * 40, 'title': 'Rel A',
+                 'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+                {'info_hash': 'b' * 40, 'title': 'Rel B',
+                 'seeds': 5, 'quality': {'label': '720p', 'score': 50}},
+            ],
+        }
+
+        monkeypatch.setattr(base, 'load_secret_or_env',
+                            lambda name: {'torbox_api_key': 'tb_key',
+                                          'rd_api_key': 'rd_key'}.get(name))
+        monkeypatch.setattr(bh, '_check_torbox_cooldown',
+                            lambda *a, **kw: state['cooldown'])
+        monkeypatch.setattr(search, 'search_torrentio',
+                            lambda *a, **kw: list(state['torrentio']))
+
+        def _cache(hashes, service=None, api_key=None):
+            return {h: state['cache_cached'] for h in hashes}
+        monkeypatch.setattr(search, 'check_debrid_cache', _cache)
+
+        def _add(info_hash, **kw):
+            state['tb_adds'].append({'info_hash': info_hash, **kw})
+            return {'success': True, 'torrent_id': 't', 'service': 'torbox'}
+        monkeypatch.setattr(search, 'add_to_debrid', _add)
+
+        monkeypatch.setattr(search, '_existing_hashes',
+                            lambda svc, key, **kw: state['existing'])
+        monkeypatch.setattr(search, 'remember_added_hash',
+                            lambda svc, h: state['remembered'].append((svc, h)))
+
+        monkeypatch.setattr(
+            dc, 'get_debrid_client',
+            lambda service=None, api_key=None: (rd_client, service))
+
+        def _rescue(info_hash, source, **kw):
+            state['rescue_calls'].append({'info_hash': info_hash, **kw})
+            return dict(state['rd_core'])
+        monkeypatch.setattr(routing, 'attempt_add_rescue', _rescue)
+
+        def _log(ev_type, title, **kw):
+            state['events'].append({'type': ev_type, 'title': title, **kw})
+        monkeypatch.setattr(history, 'log_event', _log)
+
+        return state
+
+    def _causes(self, wire):
+        return [(e['type'], (e.get('meta') or {}).get('cause'))
+                for e in wire['events']]
+
+    def test_rd_hit_recovers_without_tb_add(self, wire):
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert len(wire['rescue_calls']) == 1
+        assert wire['rescue_calls'][0]['info_hash'] == 'a' * 40
+        assert wire['tb_adds'] == []  # RD won — TB leg skipped
+        assert ('debrid_add', 'wanted_rd_recovered') in self._causes(wire)
+        assert ('realdebrid', 'a' * 40) in wire['remembered']
+        assert 'tt1234567' in sc._wanted_tb_cooldown
+        assert sc._wanted_rd_miss == {}
+
+    def test_rd_hit_targets_top_quality_release(self, wire):
+        # Results arrive unsorted; the RD probe must get the ranked top.
+        wire['torrentio'] = list(reversed(wire['torrentio']))
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'][0]['info_hash'] == 'a' * 40
+
+    def test_rd_miss_falls_back_to_tb(self, wire):
+        wire['rd_core'] = {'rescued': False, 'reason': 'never_ready',
+                           'alt_torrent_id': 'RDTID1'}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert len(wire['tb_adds']) == 1  # TB leg took over
+        assert 'tt1234567' in sc._wanted_rd_miss
+        causes = self._causes(wire)
+        assert ('debrid_add_failed', 'wanted_rd_uncached') in causes
+        assert ('debrid_add', 'wanted_rd_recovered') not in causes
+
+    def test_rd_failed_state_records_state_as_reason(self, wire):
+        wire['rd_core'] = {'rescued': False, 'reason': 'failed_state',
+                           'state': 'magnet_error',
+                           'alt_torrent_id': 'RDTID1'}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        miss = [e for e in wire['events']
+                if (e.get('meta') or {}).get('cause') == 'wanted_rd_uncached']
+        assert len(miss) == 1
+        assert miss[0]['meta']['reason'] == 'magnet_error'
+
+    def test_rd_transient_add_error_not_memoized(self, wire):
+        wire['rd_core'] = {'rescued': False, 'reason': 'add_error',
+                           'alt_torrent_id': None}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        # Transient RD failure: no miss memo, no measurement event —
+        # the title gets another RD shot on a later scan.
+        assert sc._wanted_rd_miss == {}
+        assert ('debrid_add_failed', 'wanted_rd_uncached') not in self._causes(wire)
+        assert len(wire['tb_adds']) == 1  # TB fallback still ran
+
+    def test_add_time_filter_block_deletes_and_falls_back(self, wire):
+        wire['rd_client'].probe_result = {
+            'status': 'blocked', 'reason': 'infringing_file', 'http': 451}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rd_client'].delete_calls == ['RDTID1']
+        assert 'tt1234567' in sc._wanted_rd_miss
+        miss = [e for e in wire['events']
+                if (e.get('meta') or {}).get('cause') == 'wanted_rd_uncached']
+        assert len(miss) == 1
+        assert miss[0]['meta']['reason'] == 'infringing_file'
+        assert ('debrid_add', 'wanted_rd_recovered') not in self._causes(wire)
+        assert len(wire['tb_adds']) == 1  # TB leg got its chance immediately
+
+    def test_probe_unknown_keeps_recovery(self, wire):
+        # Network blip on the filter probe must not throw away a good add —
+        # the health sweep re-probes on its own cycle.
+        wire['rd_client'].probe_result = {'status': 'unknown', 'error': 'x'}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rd_client'].delete_calls == []
+        assert ('debrid_add', 'wanted_rd_recovered') in self._causes(wire)
+        assert wire['tb_adds'] == []
+
+    def test_tb_cooldown_only_disables_tb_leg(self, wire):
+        # Previously a TB cooldown aborted the whole pass.
+        wire['cooldown'] = 999
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert len(wire['rescue_calls']) == 1
+        assert ('debrid_add', 'wanted_rd_recovered') in self._causes(wire)
+        assert wire['tb_adds'] == []
+
+    def test_rd_disabled_leaves_legacy_tb_behavior(self, wire, monkeypatch):
+        monkeypatch.setenv('WANTED_RD_RECOVERY_ENABLED', 'false')
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'] == []
+        assert len(wire['tb_adds']) == 1
+
+    def test_no_rd_key_disables_rd_leg(self, wire, monkeypatch):
+        import base
+        monkeypatch.setattr(base, 'load_secret_or_env',
+                            lambda name: 'tb_key' if name == 'torbox_api_key' else None)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'] == []
+        assert len(wire['tb_adds']) == 1
+
+    def test_rd_budget_counts_attempts_not_successes(self, wire, monkeypatch):
+        monkeypatch.setenv('WANTED_RD_RECOVERY_MAX_PER_SCAN', '1')
+        wire['rd_core'] = {'rescued': False, 'reason': 'never_ready',
+                           'alt_torrent_id': 'RDTID1'}
+        wire['cache_cached'] = False  # TB leg probes but never adds
+        movies = self._movie() + self._movie(title='Other', imdb='tt7654321')
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], movies, {})
+        assert len(wire['rescue_calls']) == 1  # budget spent on the miss
+
+    def test_duplicate_hash_on_rd_account_skips_probe(self, wire):
+        wire['existing'] = {'a' * 40}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'] == []  # never added
+        assert 'tt1234567' in sc._wanted_rd_miss
+        assert len(wire['tb_adds']) == 1  # TB fallback still ran
+
+    def test_rd_miss_memo_skips_reprobe(self, wire):
+        sc = self._scanner()
+        sc._wanted_rd_miss['tt1234567'] = time.monotonic()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'] == []
+        assert len(wire['tb_adds']) == 1
+
+    def test_blocklisted_hash_excluded_from_both_legs(self, wire, monkeypatch):
+        import utils.blocklist as blocklist
+        monkeypatch.setattr(blocklist, 'is_blocked',
+                            lambda h: h == 'a' * 40)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        # RD probe got the next-best non-blocklisted release.
+        assert wire['rescue_calls'][0]['info_hash'] == 'b' * 40
+
+    def test_all_results_blocklisted_cools_down(self, wire, monkeypatch):
+        import utils.blocklist as blocklist
+        monkeypatch.setattr(blocklist, 'is_blocked', lambda h: True)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'] == []
+        assert wire['tb_adds'] == []
+        # An empty (or fully-blocklisted) result set is leg-independent —
+        # it lands in the shared no-results memo, not the TB cooldown.
+        assert 'tt1234567' in sc._wanted_no_results
+
+    def test_tb_per_title_cooldown_does_not_block_rd_leg(self, wire):
+        # A prior TB miss cools the TB leg only — RD must still probe.
+        sc = self._scanner()
+        sc._wanted_tb_cooldown['tt1234567'] = time.monotonic()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert len(wire['rescue_calls']) == 1
+        assert ('debrid_add', 'wanted_rd_recovered') in self._causes(wire)
+        assert wire['tb_adds'] == []
+
+    def test_rd_listing_unavailable_skips_add_entirely(self, wire, monkeypatch):
+        # _existing_hashes → None means we can't prove the hash isn't
+        # already on the account; RD returns the PRE-EXISTING torrent id
+        # for a duplicate add, so a probe-miss delete could destroy a
+        # user's in-flight download.  The probe must bail before adding.
+        import utils.search as search
+        monkeypatch.setattr(search, '_existing_hashes',
+                            lambda svc, key, **kw: None)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'] == []   # no add attempted
+        assert sc._wanted_rd_miss == {}     # transient — no memo
+        assert len(wire['tb_adds']) == 1    # TB fallback still ran
+
+    def test_local_skips_do_not_burn_rd_budget(self, wire, monkeypatch):
+        # Movie 1's hash is already on the account (local skip, no API
+        # add); with a budget of 1 the probe slot must survive to movie 2.
+        monkeypatch.setenv('WANTED_RD_RECOVERY_MAX_PER_SCAN', '1')
+        wire['existing'] = {'a' * 40}
+
+        def _torrentio(imdb, **kw):
+            if imdb == 'tt7654321':
+                return [{'info_hash': 'c' * 40, 'title': 'Rel C', 'seeds': 3,
+                         'quality': {'label': '1080p', 'score': 90}}]
+            return list(wire['torrentio'])
+        import utils.search as search
+        monkeypatch.setattr(search, 'search_torrentio', _torrentio)
+        movies = self._movie() + self._movie(title='Other', imdb='tt7654321')
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], movies, {})
+        assert len(wire['rescue_calls']) == 1
+        assert wire['rescue_calls'][0]['info_hash'] == 'c' * 40

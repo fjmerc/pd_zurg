@@ -726,6 +726,36 @@ class TestLibraryScannerScanDebrid:
         assert show["episodes"] == 2
         assert show["source"] == "debrid"
 
+    def test_scan_debrid_skips_obfuscated_folders(self, tmp_dir, monkeypatch):
+        movies_dir = os.path.join(tmp_dir, "movies")
+        os.makedirs(os.path.join(movies_dir, "050bd19ee9934249a2ce4c9762c0d710[EZTVx.to]"))
+        os.makedirs(os.path.join(movies_dir, "Inception (2010)"))
+        shows_dir = os.path.join(tmp_dir, "shows")
+        os.makedirs(os.path.join(
+            shows_dir, "1f9da83faaf847949e043d0dae9684aa[eztv.re]"))
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        result = scanner.scan()
+
+        titles = ({m["title"] for m in result["movies"]}
+                  | {s["title"] for s in result["shows"]})
+        assert "Inception" in titles
+        assert not any("050bd19" in t.lower() or "1f9da83" in t.lower()
+                       for t in titles)
+
+    def test_scan_mount_flat_layout_skips_obfuscated(self, tmp_dir, monkeypatch):
+        os.makedirs(os.path.join(
+            tmp_dir, "050bd19ee9934249a2ce4c9762c0d710[EZTVx.to]"))
+        os.makedirs(os.path.join(tmp_dir, "Inception (2010)"))
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        movies, shows = scanner._scan_mount(
+            tmp_dir, flat_layout=True, source_debrid='torbox')
+
+        titles = {m["title"] for m in movies} | {s["title"] for s in shows}
+        assert "Inception" in titles
+        assert not any("050bd19" in t.lower() for t in titles)
+
     def test_scan_result_has_required_keys(self, tmp_dir, monkeypatch):
         os.makedirs(os.path.join(tmp_dir, "movies"))
         scanner = self._make_scanner(tmp_dir, monkeypatch)
@@ -5234,6 +5264,83 @@ class TestWebDAVUnsupportedMemoization:
         assert scanner._webdav_unsupported_logged is False
 
 
+class TestWebDAVScanSkipsObfuscated:
+
+    def test_obfuscated_folder_excluded_from_webdav_scan(self, monkeypatch):
+        scanner = TestWebDAVUnsupportedMemoization._make_scanner(
+            TestWebDAVUnsupportedMemoization())
+        monkeypatch.setattr(library, '_discover_zurg_url',
+                            lambda mp: 'http://zurg:9999')
+        monkeypatch.setattr(library, '_get_zurg_auth', lambda: None)
+
+        hex_dir = '050bd19ee9934249a2ce4c9762c0d710[EZTVx.to]'
+
+        def fake_propfind(url, depth, auth, timeout):
+            if depth == 1:
+                return [
+                    {'href': '/dav/', 'name': '', 'is_collection': True, 'size': 0},
+                    {'href': '/dav/movies/', 'name': 'movies',
+                     'is_collection': True, 'size': 0},
+                ]
+            return [
+                {'href': '/dav/movies/', 'name': 'movies',
+                 'is_collection': True, 'size': 0},
+                {'href': f'/dav/movies/{hex_dir}/', 'name': hex_dir,
+                 'is_collection': True, 'size': 0},
+                {'href': f'/dav/movies/{hex_dir}/{hex_dir}.mkv',
+                 'name': f'{hex_dir}.mkv', 'is_collection': False,
+                 'size': 900_000_000},
+                {'href': '/dav/movies/Inception (2010)/', 'name': 'Inception (2010)',
+                 'is_collection': True, 'size': 0},
+                {'href': '/dav/movies/Inception (2010)/Inception.mkv',
+                 'name': 'Inception.mkv', 'is_collection': False,
+                 'size': 800_000_000},
+            ]
+        monkeypatch.setattr('utils.webdav.propfind', fake_propfind)
+
+        movies, shows = scanner._webdav_scan_mount()
+
+        titles = {m['title'] for m in movies} | {s['title'] for s in shows}
+        assert 'Inception' in titles
+        assert not any('050bd19' in t.lower() for t in titles)
+
+    def test_only_obfuscated_category_does_not_poison_memoization(self, monkeypatch):
+        """A category containing ONLY obfuscated folders yields an empty
+        folders dict, so it must not count toward the folders-but-no-files
+        detection that memoizes WebDAV as unsupported."""
+        scanner = TestWebDAVUnsupportedMemoization._make_scanner(
+            TestWebDAVUnsupportedMemoization())
+        monkeypatch.setattr(library, '_discover_zurg_url',
+                            lambda mp: 'http://zurg:9999')
+        monkeypatch.setattr(library, '_get_zurg_auth', lambda: None)
+
+        hex_dir = '050bd19ee9934249a2ce4c9762c0d710[EZTVx.to]'
+
+        def fake_propfind(url, depth, auth, timeout):
+            if depth == 1:
+                return [
+                    {'href': '/dav/', 'name': '', 'is_collection': True, 'size': 0},
+                    {'href': '/dav/movies/', 'name': 'movies',
+                     'is_collection': True, 'size': 0},
+                ]
+            return [
+                {'href': '/dav/movies/', 'name': 'movies',
+                 'is_collection': True, 'size': 0},
+                {'href': f'/dav/movies/{hex_dir}/', 'name': hex_dir,
+                 'is_collection': True, 'size': 0},
+                {'href': f'/dav/movies/{hex_dir}/{hex_dir}.mkv',
+                 'name': f'{hex_dir}.mkv', 'is_collection': False,
+                 'size': 900_000_000},
+            ]
+        monkeypatch.setattr('utils.webdav.propfind', fake_propfind)
+
+        movies, shows = scanner._webdav_scan_mount()
+
+        assert movies == []
+        assert shows == []
+        assert scanner._webdav_unsupported is False
+
+
 # ---------------------------------------------------------------------------
 # Phase 2: persist the WebDAV-unsupported memoization across container
 # restarts so the doomed Depth: infinity probe isn't re-attempted on every
@@ -6819,6 +6926,20 @@ class TestScanTorboxViaApi:
         _, movies, _shows = self._scan(torrents)
         assert movies[0]['quality']['resolution'] == '1080p'
         assert movies[0]['size_bytes'] == 1_000_000
+
+    def test_obfuscated_folder_skipped(self):
+        hex_dir = '050bd19ee9934249a2ce4c9762c0d710[EZTVx.to]'
+        torrents = [
+            {'name': hex_dir, 'hash': 'c' * 40,
+             'created_at': '2026-07-03T00:25:14Z',
+             'files': [{'name': f'{hex_dir}/{hex_dir}.mkv', 'size': 900}]},
+            {'name': 'Big.Movie.2021.1080p',
+             'files': [{'name': 'Big.Movie.2021.1080p/big.mkv', 'size': 10}]},
+        ]
+        _, movies, shows = self._scan(torrents)
+        titles = {m['title'] for m in movies} | {s['title'] for s in shows}
+        assert 'Big Movie' in titles
+        assert not any('050bd19' in t.lower() for t in titles)
 
     def test_absolute_subpath_does_not_escape_mount(self):
         """A file whose stripped sub-path is absolute must not escape the

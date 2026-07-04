@@ -5965,6 +5965,7 @@ class LibraryScanner:
         if source_debrid is None:
             from utils.debrid_routing import resolve_primary
             source_debrid = resolve_primary() or 'realdebrid'
+        from utils.blackhole import is_obfuscated_name as _is_obfuscated_name
 
         # Reset the per-scan truncation flag; set True below if the walk is
         # cut short (deadline or a listing error). The caller checks this to
@@ -6017,6 +6018,11 @@ class LibraryScanner:
                         if not entry.is_dir(follow_symlinks=False):
                             continue
                         if entry.name.lower() in _SKIP_FOLDERS:
+                            continue
+                        if _is_obfuscated_name(entry.name):
+                            logger.debug(
+                                f"[library] Skipping obfuscated mount folder: {entry.name}"
+                            )
                             continue
                         title, year = _parse_folder_name(entry.name)
                         if not title:
@@ -6398,6 +6404,7 @@ class LibraryScanner:
             )
 
         from utils.webdav import propfind
+        from utils.blackhole import is_obfuscated_name as _is_obfuscated_name
 
         zurg_url = _discover_zurg_url(self._mount_path)
         if not zurg_url:
@@ -6480,6 +6487,8 @@ class LibraryScanner:
                 parts = rel.split('/')
                 folder_name = parts[0]
                 if folder_name.lower() in _SKIP_FOLDERS:
+                    continue
+                if _is_obfuscated_name(folder_name):
                     continue
 
                 if folder_name not in folders:
@@ -6703,6 +6712,7 @@ class LibraryScanner:
 
         from base import load_secret_or_env
         from utils import search
+        from utils.blackhole import is_obfuscated_name as _is_obfuscated_name
 
         api_key = load_secret_or_env('torbox_api_key')
         if not api_key:
@@ -6775,6 +6785,11 @@ class LibraryScanner:
                 if len(parts) < 2:
                     continue
                 folder_name = parts[0]
+                if _is_obfuscated_name(folder_name):
+                    logger.debug(
+                        f"[library] Skipping obfuscated TB folder: {folder_name}"
+                    )
+                    continue
                 subparts = parts[1:]
                 size = f.get('size', 0)
                 if not isinstance(size, int) or size < 0:
@@ -6885,6 +6900,7 @@ class LibraryScanner:
             logger.warning(f"[library] Local movies path not found: {self._local_movies_path}")
             return items
         symlink_prefixes = _all_debrid_symlink_prefixes()
+        from utils.blackhole import is_obfuscated_name as _is_obfuscated_name
         try:
             with os.scandir(self._local_movies_path) as it:
                 for entry in it:
@@ -6892,6 +6908,8 @@ class LibraryScanner:
                         continue
                     # Skip known non-media folders before any I/O
                     if entry.name.lower() in _SKIP_FOLDERS:
+                        continue
+                    if _is_obfuscated_name(entry.name):
                         continue
                     # Skip folders that only contain debrid symlinks
                     if symlink_prefixes and self._is_debrid_symlink_dir(entry.path, symlink_prefixes):
@@ -7043,6 +7061,7 @@ class LibraryScanner:
             logger.warning(f"[library] Local TV path not found: {self._local_tv_path}")
             return items
         symlink_prefixes = _all_debrid_symlink_prefixes()
+        from utils.blackhole import is_obfuscated_name as _is_obfuscated_name
         try:
             with os.scandir(self._local_tv_path) as it:
                 for entry in it:
@@ -7050,6 +7069,8 @@ class LibraryScanner:
                         continue
                     # Skip known non-media folders before any I/O
                     if entry.name.lower() in _SKIP_FOLDERS:
+                        continue
+                    if _is_obfuscated_name(entry.name):
                         continue
                     # Skip show folders that are entirely debrid symlinks
                     if symlink_prefixes and self._is_debrid_symlink_only(entry.path, symlink_prefixes):

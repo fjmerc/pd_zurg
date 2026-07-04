@@ -4836,7 +4836,7 @@ class TestTorboxCachedAlternative:
                    title=None):
         score = {'2160p': 4, '1080p': 3, '720p': 2}.get(tier, 0)
         return {
-            'title': title or f'Movie.{tier}.WEB.x264-GRP',
+            'title': title or f'Sing.2.{tier}.WEB.x264-GRP',
             'info_hash': info_hash,
             'size_bytes': size,
             'seeds': seeds,
@@ -4919,6 +4919,26 @@ class TestTorboxCachedAlternative:
         fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
         assert w._try_torbox_cached_alternative(
             fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert os.path.exists(fp)
+
+    def test_mislabeled_same_tier_candidate_excluded(self, tmp_dir, monkeypatch):
+        """A same-tier cached candidate whose release name doesn't match the
+        arr-approved title is a mislabeled Torrentio upload — grabbing it
+        would park the wrong movie under this title."""
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn: ('tt1234567', 'movie', None, None))
+        self._stub_search(monkeypatch, [self._candidate(
+            self.CACHED_ALT, title='Fight.Club.1999.1080p.WEB.x264-JUNK')])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        adds = []
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: adds.append(1) or (True, {}))
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert not adds
         assert os.path.exists(fp)
 
     def test_rejected_hash_excluded_from_candidates(self, tmp_dir, monkeypatch):
@@ -5039,7 +5059,8 @@ class TestTorboxCachedAlternative:
         w = self._make_watcher(tmp_dir)
         monkeypatch.setattr(w, '_resolve_arr_identity',
                             lambda fn: ('tt999', 'series', 2, 1))
-        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        self._stub_search(monkeypatch, [self._candidate(
+            self.CACHED_ALT, title='Show.S02.1080p.WEB.x264-GRP')])
         self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
         adds = []
         monkeypatch.setattr(w, '_add_to_torbox',
@@ -5063,7 +5084,8 @@ class TestTorboxCachedAlternative:
         ident = {'season': 2}
         monkeypatch.setattr(w, '_resolve_arr_identity',
                             lambda fn: ('tt999', 'series', ident['season'], 1))
-        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        self._stub_search(monkeypatch, [self._candidate(
+            self.CACHED_ALT, title='Show.S02.1080p.WEB.x264-GRP')])
         self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
         adds = []
         monkeypatch.setattr(w, '_add_to_torbox',
@@ -5085,7 +5107,8 @@ class TestTorboxCachedAlternative:
         w = self._make_watcher(tmp_dir)
         monkeypatch.setattr(w, '_resolve_arr_identity',
                             lambda fn: ('tt999', 'series', 2, 1))
-        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        self._stub_search(monkeypatch, [self._candidate(
+            self.CACHED_ALT, title='Show.S02.1080p.WEB.x264-GRP')])
         cache = {self.CACHED_ALT: False}  # uncached on first attempt
         import utils.search as search
         monkeypatch.setattr(search, 'check_debrid_cache',
@@ -5126,7 +5149,8 @@ class TestTorboxAltGiveUpCap(TestTorboxCachedAlternative):
         w = self._make_watcher(tmp_dir)
         monkeypatch.setattr(w, '_resolve_arr_identity',
                             lambda fn: ('tt777', 'series', 2, 1))
-        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        self._stub_search(monkeypatch, [self._candidate(
+            self.CACHED_ALT, title='Show.S02.1080p.WEB.x264-GRP')])
         self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
         monkeypatch.setattr(w, '_add_to_torbox', lambda *a, **k: (True, {}))
         fp = self._make_file(tmp_dir, 'Show.S02E01.1080p.WEB.x264-GRP.mkv.magnet')
@@ -5142,7 +5166,8 @@ class TestTorboxAltGiveUpCap(TestTorboxCachedAlternative):
             self.ledger.bump('tbalt:tt777:s2')
         monkeypatch.setattr(w, '_resolve_arr_identity',
                             lambda fn: ('tt777', 'series', 2, 1))
-        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        self._stub_search(monkeypatch, [self._candidate(
+            self.CACHED_ALT, title='Show.S02.1080p.WEB.x264-GRP')])
         self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
         adds = []
         monkeypatch.setattr(w, '_add_to_torbox',
@@ -5162,8 +5187,12 @@ class TestTorboxAltGiveUpCap(TestTorboxCachedAlternative):
         imdb = {'id': 'tt111'}
         monkeypatch.setattr(w, '_resolve_arr_identity',
                             lambda fn: (imdb['id'], 'movie', None, None))
-        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
-        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        alt_b = 'c' * 40
+        self._stub_search(monkeypatch, [
+            self._candidate(self.CACHED_ALT, title='Movie.A.1080p.WEB.x264-GRP'),
+            self._candidate(alt_b, title='Movie.B.1080p.WEB.x264-GRP'),
+        ])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True, alt_b: True})
         adds = []
         monkeypatch.setattr(w, '_add_to_torbox',
                             lambda *a, **k: adds.append(1) or (True, {}))

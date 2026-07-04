@@ -13,6 +13,7 @@ from utils.library import (
     _build_season_data,
     _discover_mount,
     _norm_for_matching,
+    _release_matches_title,
     get_wanted_counts,
     compute_library_stats,
     LibraryScanner,
@@ -6908,9 +6909,9 @@ class TestRecoverWantedViaTorbox:
             'cooldown': 0,
             'cache_cached': True,   # all probed hashes report cached
             'torrentio': [
-                {'info_hash': 'a' * 40, 'title': 'Rel A',
+                {'info_hash': 'a' * 40, 'title': 'The.Substance.2024.1080p.WEB-DL.RelA',
                  'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
-                {'info_hash': 'b' * 40, 'title': 'Rel B',
+                {'info_hash': 'b' * 40, 'title': 'The.Substance.2024.720p.WEB-DL.RelB',
                  'seeds': 5, 'quality': {'label': '720p', 'score': 50}},
             ],
         }
@@ -6974,8 +6975,8 @@ class TestRecoverWantedViaTorbox:
         monkeypatch.setenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', '1')
         sc = self._scanner()
         movies = [
-            {'title': 'M1', 'source': 'wanted', 'imdb_id': 'tt1', 'is_available': True},
-            {'title': 'M2', 'source': 'wanted', 'imdb_id': 'tt2', 'is_available': True},
+            {'title': 'The Substance', 'source': 'wanted', 'imdb_id': 'tt1', 'is_available': True},
+            {'title': 'The Substance', 'source': 'wanted', 'imdb_id': 'tt2', 'is_available': True},
         ]
         sc._recover_wanted_via_debrid([], movies, {})
         assert len(wire['adds']) == 1
@@ -6983,7 +6984,7 @@ class TestRecoverWantedViaTorbox:
     def test_uncached_title_not_added_and_cooled_down(self, wire):
         wire['cache_cached'] = False
         sc = self._scanner()
-        movies = [{'title': 'X', 'source': 'wanted',
+        movies = [{'title': 'The Substance', 'source': 'wanted',
                    'imdb_id': 'tt9', 'is_available': True}]
         sc._recover_wanted_via_debrid([], movies, {})
         assert wire['adds'] == []
@@ -7019,6 +7020,10 @@ class TestRecoverWantedViaTorbox:
 
     def test_show_ghost_recovered_with_episode_string(self, wire):
         sc = self._scanner()
+        wire['torrentio'] = [
+            {'info_hash': 'a' * 40, 'title': 'Broadchurch.S01E01.1080p.WEB',
+             'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+        ]
         shows = [{'title': 'Broadchurch', 'source': 'wanted',
                   'imdb_id': 'tt2249364', 'season_data': []}]
         sc._recover_wanted_via_debrid(shows, [], {})
@@ -7089,9 +7094,9 @@ class TestWantedRdRecovery:
             'rd_core': {'rescued': True, 'to': 'realdebrid',
                         'alt_torrent_id': 'RDTID1', 'alt_client': rd_client},
             'torrentio': [
-                {'info_hash': 'a' * 40, 'title': 'Rel A',
+                {'info_hash': 'a' * 40, 'title': 'The.Substance.2024.1080p.WEB-DL.RelA',
                  'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
-                {'info_hash': 'b' * 40, 'title': 'Rel B',
+                {'info_hash': 'b' * 40, 'title': 'The.Substance.2024.720p.WEB-DL.RelB',
                  'seeds': 5, 'quality': {'label': '720p', 'score': 50}},
             ],
         }
@@ -7313,7 +7318,8 @@ class TestWantedRdRecovery:
 
         def _torrentio(imdb, **kw):
             if imdb == 'tt7654321':
-                return [{'info_hash': 'c' * 40, 'title': 'Rel C', 'seeds': 3,
+                return [{'info_hash': 'c' * 40,
+                         'title': 'Other.2024.1080p.WEB.RelC', 'seeds': 3,
                          'quality': {'label': '1080p', 'score': 90}}]
             return list(wire['torrentio'])
         import utils.search as search
@@ -7323,3 +7329,108 @@ class TestWantedRdRecovery:
         sc._recover_wanted_via_debrid([], movies, {})
         assert len(wire['rescue_calls']) == 1
         assert wire['rescue_calls'][0]['info_hash'] == 'c' * 40
+
+    def test_mislabeled_top_result_filtered_out(self, wire):
+        # Torrentio's imdb-keyed lists are polluted: a mislabeled 2160p
+        # junk entry outscores the real release.  The title filter must
+        # drop it so the RD probe targets the real release's hash — this
+        # is the live "Fight Club added in The Fountain's slot" bug.
+        wire['torrentio'] = [
+            {'info_hash': 'f' * 40,
+             'title': 'Fight Club (1999) AI UHD - 10th Anniversary Edition',
+             'seeds': 3, 'quality': {'label': '2160p', 'score': 200}},
+        ] + list(wire['torrentio'])
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert len(wire['rescue_calls']) == 1
+        assert wire['rescue_calls'][0]['info_hash'] == 'a' * 40
+
+    def test_all_results_mislabeled_memoizes_no_results(self, wire):
+        wire['torrentio'] = [
+            {'info_hash': 'f' * 40,
+             'title': 'Fight Club (1999) AI UHD - 10th Anniversary Edition',
+             'seeds': 3, 'quality': {'label': '2160p', 'score': 200}},
+        ]
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'] == []
+        assert wire['tb_adds'] == []
+        assert 'tt1234567' in sc._wanted_no_results
+
+
+class TestReleaseMatchesTitle:
+    """Golden cases for the Torrentio auto-add title sanity check."""
+
+    def test_exact_with_year_and_quality_tail(self):
+        assert _release_matches_title(
+            'The Fountain 2006 1080p BluRay x264', 'The Fountain')
+
+    def test_mislabeled_release_rejected(self):
+        assert not _release_matches_title(
+            'Fight Club (1999) AI UHD - 10th Anniversary Edition + Extras '
+            '(PROPER) FIX', 'The Fountain')
+
+    def test_unicode_transliteration_matches(self):
+        assert _release_matches_title(
+            'Amelie.2001.1080p.BluRay.x264', 'Amélie')
+
+    def test_media_title_as_prefix_of_release(self):
+        assert _release_matches_title('F1.The.Movie.2025.2160p.WEB-DL', 'F1')
+
+    def test_reverse_prefix_rejected(self):
+        # A short junk release name must not claim a longer media title.
+        assert not _release_matches_title('The 2006 1080p', 'The Fountain')
+
+    def test_tv_episode_release_matches(self):
+        assert _release_matches_title(
+            'Paradise 2025 S01E01 1080p WEB', 'Paradise (2025)')
+
+    def test_media_year_suffix_stripped(self):
+        assert _release_matches_title(
+            'Broadchurch.S01E01.1080p.WEB', 'Broadchurch')
+
+    def test_numeric_title_with_parenthesized_year(self):
+        assert _release_matches_title('1917 (2019) 1080p', '1917')
+
+    def test_empty_norms_rejected(self):
+        assert not _release_matches_title('', 'The Fountain')
+        assert not _release_matches_title('The Fountain 2006 1080p', '')
+        # Titles that collapse to nothing after ASCII transliteration.
+        assert not _release_matches_title('愛.2011.1080p', '愛')
+
+    def test_scene_release_dropping_leading_article_matches(self):
+        # Scene names routinely omit the "The" the arr keeps.
+        assert _release_matches_title(
+            'Big.Bang.Theory.S03E12.1080p.WEB', 'The Big Bang Theory')
+
+    def test_article_only_release_rejected(self):
+        assert not _release_matches_title('The 2006 1080p', 'The Fountain')
+
+    def test_sequel_rejected_by_year_check(self):
+        # "Dune Part Two" passes the prefix rule for "Dune" — the year
+        # cross-check is what rejects it.
+        assert not _release_matches_title(
+            'Dune.Part.Two.2024.1080p.WEB', 'Dune', media_year=2021)
+        assert _release_matches_title(
+            'Dune.2021.1080p.WEB', 'Dune', media_year=2021)
+
+    def test_remake_rejected_by_year_check(self):
+        assert not _release_matches_title(
+            'It.2017.1080p.BluRay', 'It', media_year=1990)
+        assert _release_matches_title(
+            'It.1990.1080p', 'It', media_year=1990)
+
+    def test_year_in_title_not_counted_as_release_year(self):
+        # "1917" the token is the title, not release-year evidence — a
+        # release without an explicit year must still match.
+        assert _release_matches_title(
+            '1917.1080p.BluRay', '1917', media_year=2019)
+
+    def test_year_tolerance_plus_minus_one(self):
+        # Release-date vs production-year tagging is commonly off by one.
+        assert _release_matches_title(
+            'The Fountain 2007 1080p', 'The Fountain', media_year=2006)
+
+    def test_no_years_anywhere_skips_year_check(self):
+        assert _release_matches_title(
+            'Sing.2.1080p.WEB.x264-GRP', 'Sing 2', media_year=2021)

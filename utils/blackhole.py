@@ -3638,6 +3638,7 @@ class BlackholeWatcher:
         try:
             from utils.search import search_torrentio, check_debrid_cache, parse_quality
             from utils.quality_compromise import _filter_candidates, _rank_within_tier
+            from utils.library import release_matches_title
 
             # Stay within the arr's already-approved ceiling: only accept
             # alternatives at the SAME quality tier as the rejected release
@@ -3695,9 +3696,21 @@ class BlackholeWatcher:
             # uncached — defeating the recovery.  Probing only the best-seeded
             # same-tier slice also bounds worst-case latency on this serial
             # path (each probe can block up to _CACHE_PROBE_TIMEOUT).
+            # The arr-approved release name is the trusted title reference —
+            # Torrentio's imdb-keyed lists contain mislabeled uploads, and
+            # grabbing one would park the wrong movie under this title.
+            approved_title = parse_release_name(filename)[0]
+            title_toks = set(approved_title.lower().split())
+            years = [y for y in re.findall(r'(?<!\d)(?:19|20)\d{2}(?!\d)',
+                                           filename)
+                     if y not in title_toks]
+            approved_year = int(years[0]) if years else None
             candidates = [r for r in results
                           if (r.get('info_hash') or '').lower() != rejected
-                          and (r.get('quality') or {}).get('label') == target_tier]
+                          and (r.get('quality') or {}).get('label') == target_tier
+                          and release_matches_title(r.get('title') or '',
+                                                    approved_title,
+                                                    media_year=approved_year)]
             if not candidates:
                 logger.debug(f"[blackhole] TB-alt: no same-tier "
                              f"({target_tier}) alternative for {filename}")

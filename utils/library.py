@@ -1886,6 +1886,65 @@ def _norm_for_matching(title):
 _BARE_YEAR_RE = re.compile(r'\s*\(\d{4}\)\s*$')
 
 
+_ANY_YEAR_RE = re.compile(r'(?<!\d)(?:19|20)\d{2}(?!\d)')
+
+_LEADING_ARTICLES = ('the', 'a', 'an')
+
+
+def _release_matches_title(release_title, media_title, media_year=None):
+    """True when a torrent release name plausibly belongs to *media_title*.
+
+    Torrentio stream lists are keyed by IMDb id but polluted with
+    mislabeled uploads (e.g. a "Fight Club" release inside The Fountain's
+    list), so auto-add paths must sanity-check the release name before
+    adding.  Accepts an exact normalized match or the media title as a
+    token-aligned prefix of the parsed release name ("F1" → "F1 The
+    Movie") — never the reverse, so a short junk name can't claim a
+    longer title.  A leading article is stripped on both sides (scene
+    names routinely drop the "The" the arr keeps).  When *media_year*
+    is known (or embedded as "(YYYY)" in the media title), a release
+    whose years ALL sit >1 away is rejected — this catches sequels
+    riding the prefix rule ("Dune Part Two 2024" claiming "Dune" 2021)
+    and same-name remakes.
+    """
+    from utils.blackhole import parse_release_name
+    raw_release = str(release_title or '')
+    parsed, _season, _is_tv = parse_release_name(raw_release)
+    media_raw = str(media_title or '')
+    media = _BARE_YEAR_RE.sub('', media_raw)
+    rel_norm = _norm_for_matching(parsed)
+    media_norm = _norm_for_matching(media)
+    if not rel_norm or not media_norm:
+        return False
+    rel_tokens = rel_norm.split()
+    media_tokens = media_norm.split()
+    if rel_tokens and rel_tokens[0] in _LEADING_ARTICLES:
+        rel_tokens = rel_tokens[1:]
+    if media_tokens and media_tokens[0] in _LEADING_ARTICLES:
+        media_tokens = media_tokens[1:]
+    if not rel_tokens or not media_tokens:
+        return False
+    if rel_tokens[:len(media_tokens)] != media_tokens:
+        return False
+    if media_year is None:
+        m = _BARE_YEAR_RE.search(media_raw)
+        if m:
+            media_year = int(re.search(r'\d{4}', m.group(0)).group(0))
+    if media_year:
+        try:
+            year = int(media_year)
+        except (TypeError, ValueError):
+            return True
+        # Years that are part of the title itself (e.g. "1917") don't
+        # count as release-year evidence; ±1 tolerance for release-date
+        # vs production-year tagging.
+        years = [int(y) for y in _ANY_YEAR_RE.findall(raw_release)
+                 if y not in media_tokens]
+        if years and all(abs(y - year) > 1 for y in years):
+            return False
+    return True
+
+
 def _extract_tmdb_entry_year(entry):
     """Pull a 4-digit year from a TMDB cache entry. Movies use
     ``release_date``, shows use ``first_air_date``. Returns int or None.
@@ -2061,6 +2120,7 @@ def _match_arr_entry(title, year, parsed_title, arr_map, arr_map_norm,
 parse_folder_name = _parse_folder_name
 normalize_title = _normalize_title
 norm_for_matching = _norm_for_matching
+release_matches_title = _release_matches_title
 
 
 def _build_tmdb_aliases():
@@ -4375,6 +4435,7 @@ class LibraryScanner:
             if not rd_try and not tb_try:
                 continue
 
+            media_title = item.get('title')
             try:
                 results = _search.search_torrentio(
                     imdb, media_type=media_type, season=season, episode=episode)
@@ -4389,6 +4450,32 @@ class LibraryScanner:
                 except Exception:
                     logger.warning("[library] Wanted recovery blocklist "
                                    "filter failed — using unfiltered results")
+            # Torrentio stream lists are imdb-keyed but polluted with
+            # mislabeled uploads; without this check a 2160p "Fight Club"
+            # junk entry outranks the real 1080p release and gets added
+            # in the wrong title's slot.
+            if results:
+                if not media_title:
+                    logger.warning(
+                        f"[library] Wanted recovery: no title on ghost "
+                        f"{key} — skipping title-match filter")
+                else:
+                    try:
+                        kept = [r for r in results
+                                if _release_matches_title(
+                                    r.get('title') or '', media_title,
+                                    media_year=item.get('year'))]
+                        dropped = len(results) - len(kept)
+                        if dropped:
+                            logger.info(
+                                f"[library] Wanted recovery dropped {dropped}"
+                                f"/{len(results)} title-mismatched result(s) "
+                                f"for '{media_title}'")
+                        results = kept
+                    except Exception:
+                        logger.warning(
+                            "[library] Wanted recovery title-match filter "
+                            "failed — using unfiltered results")
             if not results:
                 self._wanted_no_results[key] = time.monotonic()
                 continue
@@ -4400,7 +4487,6 @@ class LibraryScanner:
                 reverse=True,
             )
 
-            media_title = item.get('title')
             ep_str = (f"S{season:02d}E{episode:02d}"
                       if media_type == 'series' else None)
 

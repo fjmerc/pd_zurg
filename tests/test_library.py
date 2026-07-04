@@ -7193,6 +7193,36 @@ class TestWantedRdRecovery:
         assert ('debrid_add_failed', 'wanted_rd_uncached') not in self._causes(wire)
         assert len(wire['tb_adds']) == 1  # TB fallback still ran
 
+    def test_rd_451_at_add_time_memoizes_infringing_add(self, wire):
+        # RD's keyword filter can reject at addMagnet time — permanent,
+        # not transient: memoize + log so the title isn't retried forever.
+        wire['rd_core'] = {'rescued': False, 'reason': 'add_failed',
+                           'http_status': 451, 'alt_torrent_id': None}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert 'tt1234567' in sc._wanted_rd_miss
+        miss = [e for e in wire['events']
+                if (e.get('meta') or {}).get('cause') == 'wanted_rd_uncached']
+        assert len(miss) == 1
+        assert miss[0]['meta']['reason'] == 'infringing_add'
+        assert len(wire['tb_adds']) == 1  # TB fallback still ran
+
+    def test_rd_403_add_error_also_memoizes(self, wire):
+        wire['rd_core'] = {'rescued': False, 'reason': 'add_error',
+                           'http_status': 403, 'alt_torrent_id': None}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert 'tt1234567' in sc._wanted_rd_miss
+        assert ('debrid_add_failed', 'wanted_rd_uncached') in self._causes(wire)
+
+    def test_rd_5xx_add_failure_stays_transient(self, wire):
+        wire['rd_core'] = {'rescued': False, 'reason': 'add_failed',
+                           'http_status': 503, 'alt_torrent_id': None}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert sc._wanted_rd_miss == {}
+        assert ('debrid_add_failed', 'wanted_rd_uncached') not in self._causes(wire)
+
     def test_add_time_filter_block_deletes_and_falls_back(self, wire):
         wire['rd_client'].probe_result = {
             'status': 'blocked', 'reason': 'infringing_file', 'http': 451}

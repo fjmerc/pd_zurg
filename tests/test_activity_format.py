@@ -217,6 +217,13 @@ def test_wanted_rd_uncached_filter_block():
     assert 'RealDebrid' in s
 
 
+def test_wanted_rd_uncached_add_time_filter_block():
+    ev = _ev('wanted_rd_uncached', reason='infringing_add')
+    s = format_event(ev)['short']
+    assert 'filter-blocked' in s
+    assert 'RealDebrid' in s
+
+
 def test_terminal_error_shows_status():
     ev = _ev('terminal_error', provider='realdebrid', status='magnet_error')
     assert 'Failed on realdebrid: magnet_error' == format_event(ev)['short']

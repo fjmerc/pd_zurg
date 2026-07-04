@@ -713,9 +713,14 @@ def attempt_add_rescue(info_hash, source_debrid, *,
             f"{type(e).__name__}"
         )
         return {'rescued': False, 'reason': 'add_error',
+                'http_status': getattr(alt_client, 'last_add_status', None),
                 'alt_torrent_id': None}
     if not alt_tid:
+        # Surface the add's HTTP status (if the client recorded one) so
+        # callers can tell a permanent filter block (403/451) from a
+        # transient failure without reaching into client internals.
         return {'rescued': False, 'reason': 'add_failed',
+                'http_status': getattr(alt_client, 'last_add_status', None),
                 'alt_torrent_id': None}
     alt_tid = str(alt_tid)
 

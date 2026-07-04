@@ -4639,8 +4639,18 @@ class LibraryScanner:
                 self._log_wanted_rd_miss(
                     title, media_title, ep_str, info_hash,
                     reason=core.get('state') or reason)
-            # add_error/add_failed are transient RD-side failures — no
-            # memo, the title gets another shot on a later scan.
+            elif core.get('http_status') in (403, 451):
+                # RD's keyword filter can reject at addMagnet time (HTTP
+                # 451/403) — permanent for this title, same class as the
+                # post-add probe_file block below.  Without this branch
+                # the title would be retried every scan forever and never
+                # counted in the hit-rate measurement.
+                self._wanted_rd_miss[key] = time.monotonic()
+                self._log_wanted_rd_miss(
+                    title, media_title, ep_str, info_hash,
+                    reason='infringing_add')
+            # Other add_error/add_failed are transient RD-side failures —
+            # no memo, the title gets another shot on a later scan.
             return 'attempted'
 
         tid = core.get('alt_torrent_id', '')

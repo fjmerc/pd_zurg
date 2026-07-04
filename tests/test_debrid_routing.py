@@ -543,6 +543,24 @@ class TestAttemptAddRescue:
         )
         assert result['rescued'] is False
         assert result['reason'] == 'add_failed'
+        # Client recorded no HTTP status → surfaced as None (transient).
+        assert result['http_status'] is None
+
+    def test_add_failed_surfaces_client_http_status(self):
+        # RD's keyword filter rejects at addMagnet time with 451; the
+        # client records it as last_add_status and the rescue result
+        # must surface it so callers can classify the block as permanent.
+        client = _FakeAltClient(add_returns=None)
+        client.last_add_status = 451
+        result = attempt_add_rescue(
+            'AAAA' * 10, REALDEBRID,
+            alt_client=client,
+            cache_probe=lambda s, h: True,
+            ready_states={'cached'},
+        )
+        assert result['rescued'] is False
+        assert result['reason'] == 'add_failed'
+        assert result['http_status'] == 451
 
     def test_add_raises_is_add_error(self):
         client = _FakeAltClient(add_raises=ValueError('malformed'))
@@ -554,6 +572,7 @@ class TestAttemptAddRescue:
         )
         assert result['rescued'] is False
         assert result['reason'] == 'add_error'
+        assert result['http_status'] is None
 
     def test_never_ready_cleans_up_alt_add(self):
         # Add succeeded but no status ever reached 'cached'.

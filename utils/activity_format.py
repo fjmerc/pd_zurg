@@ -420,7 +420,7 @@ def _fmt_wanted_rd_recovered(ev, meta):
 
 
 def _fmt_wanted_rd_uncached(ev, meta):
-    if meta.get('reason') == 'infringing_file':
+    if meta.get('reason') in ('infringing_file', 'infringing_add'):
         msg = 'Wanted recovery — release is filter-blocked on RealDebrid'
     else:
         msg = 'Wanted recovery — not cached on RealDebrid (probe add removed)'
@@ -725,7 +725,7 @@ FORMATTER_JS = r"""
     debrid_add_via_search: function(ev,m){ return 'Added to ' + (m.service || 'debrid') + ' via search'; },
     wanted_tb_recovered: function(ev,m){ return 'Recovered Wanted — added cached copy on ' + (m.service || 'TorBox'); },
     wanted_rd_recovered: function(ev,m){ return 'Recovered Wanted — added cached copy on ' + (m.service || 'RealDebrid'); },
-    wanted_rd_uncached: function(ev,m){ return m.reason === 'infringing_file' ? 'Wanted recovery — release is filter-blocked on RealDebrid' : 'Wanted recovery — not cached on RealDebrid (probe add removed)'; },
+    wanted_rd_uncached: function(ev,m){ return (m.reason === 'infringing_file' || m.reason === 'infringing_add') ? 'Wanted recovery — release is filter-blocked on RealDebrid' : 'Wanted recovery — not cached on RealDebrid (probe add removed)'; },
     symlink_create_failed: function(ev,m){ return 'Symlink creation failed — ' + (m.error || 'unknown error'); },
     task_library_scan: function(ev,m){
       var parts = [(m.movies||0) + ' movies', (m.shows||0) + ' shows'];

@@ -213,6 +213,11 @@ class RealDebridClient(DebridClientBase):
         Returns the RD torrent ID string on success, or ``None`` on
         failure.  Errors are logged with the API key masked.
         """
+        # Callers can't see the HTTP status through the None return, but
+        # a 403/451 here means RD's keyword filter rejected the content —
+        # a permanent condition, not a transient blip.  Record it so
+        # attempt_add_rescue can surface it to callers as 'http_status'.
+        self.last_add_status = None
         if not info_hash:
             return None
         magnet = f'magnet:?xt=urn:btih:{info_hash.upper()}'
@@ -225,6 +230,7 @@ class RealDebridClient(DebridClientBase):
                 timeout=_TIMEOUT,
             )
             if add_resp.status_code not in (200, 201):
+                self.last_add_status = add_resp.status_code
                 logger.warning(
                     f"[debrid] RD addMagnet failed for {info_hash[:8]}…: "
                     f"HTTP {add_resp.status_code}"
@@ -232,6 +238,9 @@ class RealDebridClient(DebridClientBase):
                 return None
             torrent_id = add_resp.json().get('id')
             if not torrent_id:
+                # 200 with no id: last_add_status stays None on purpose —
+                # this is a malformed success, not a filter block, so
+                # callers classify it as transient.
                 return None
         except (requests.RequestException, ValueError) as e:
             logger.warning(

@@ -7,8 +7,10 @@ title-level records an operator can act on:
   ``PENDING_WARNING_HOURS`` (a grab handed to a debrid that never
   completed the monitor loop);
 * **wanted** — library "Wanted" ghosts the recovery legs have memoized
-  against (Torrentio empty, RD probe missed, TB cooled down) or whose
-  give-up caps (``fg:``/``tbalt:`` attempt-ledger keys) are exhausted;
+  against (Torrentio empty, RD probe missed, TB cooled down), whose
+  give-up caps (``fg:``/``tbalt:`` attempt-ledger keys) are exhausted, or
+  which the recovery legs have terminally given up on (``wantedblock:``
+  strike — filter-blocked on RD and uncached on TB across enough passes);
 * **history** — titles whose recent event stream is an unbroken failure
   streak (N+ failure-cause events with no progress-cause event after
   them, spanning at least a day).
@@ -53,6 +55,7 @@ _FAILURE_CAUSES = frozenset((
     'terminal_error', 'uncached_timeout', 'uncached_rejected',
     'incomplete_release', 'alts_exhausted', 'blocklisted_hash',
     'debrid_unavailable_marked', 'debrid_filtered', 'wanted_rd_uncached',
+    'wanted_filter_giveup',
 ))
 
 # Cause slugs that mean "the title made real progress" — they reset a
@@ -73,6 +76,7 @@ REASON_LABELS = {
     'tb_cooldown': 'TB probe cooled down',
     'grab_capped': 'Force-grab give-up cap hit',
     'alt_capped': 'TB-alt give-up cap hit',
+    'filter_giveup': 'Filter-blocked everywhere — recovery gave up',
     'failure_streak': 'Repeated failures, no progress',
     'inflight_stale': 'Grab pending too long',
     'compromised': 'Compromise-quality grab',
@@ -230,6 +234,10 @@ def _collect_wanted(records, ledger):
         alt_cap = int(os.environ.get('BLACKHOLE_TB_ALT_MAX_ATTEMPTS', '12'))
     except (ValueError, TypeError):
         alt_cap = 12
+    try:
+        from utils.library import WANTED_FILTER_GIVEUP_STRIKES as _giveup
+    except Exception:
+        _giveup = 3
 
     now_iso = _now_iso()
 
@@ -268,6 +276,10 @@ def _collect_wanted(records, ledger):
                         oldest_age = age
         attempts = 0
         fg_prefix = f"fg:{norm}"
+        # wantedblock strikes are per-probe: ``wantedblock:<imdb>`` for movies
+        # but ``wantedblock:<imdb>:<season>:<episode>`` for shows, so match the
+        # bare key OR any episode-scoped suffix under it.
+        wb_prefix = f"wantedblock:{imdb}" if imdb else None
         for k, entry in ledger.items():
             count = int(entry.get('count', 0)) if isinstance(entry, dict) else 0
             if k == fg_prefix or k.startswith(fg_prefix + ':'):
@@ -278,6 +290,11 @@ def _collect_wanted(records, ledger):
                 attempts = max(attempts, count)
                 if count >= alt_cap:
                     reasons.append('alt_capped')
+            elif wb_prefix and (k == wb_prefix or k.startswith(wb_prefix + ':')):
+                if count >= _giveup:
+                    if 'filter_giveup' not in reasons:
+                        reasons.append('filter_giveup')
+                    attempts = max(attempts, count)
         if not reasons:
             continue  # merely wanted — the queue will get to it
 
@@ -424,7 +441,7 @@ def clear_retry_state(key, title=None, imdb_id=None):
     """Reset the give-up state that suppresses retries for a stuck record.
 
     Clears the scanner's Wanted-recovery memos for ``imdb_id``, resets the
-    ``fg:``/``tbalt:`` attempt-ledger counters, and drops any dismissal —
+    ``fg:``/``tbalt:``/``wantedblock:`` attempt-ledger counters, and drops any dismissal —
     the next scan (and any operator-triggered arr search) gets a clean
     slate.  Returns a summary dict of what was cleared.
     """
@@ -445,6 +462,7 @@ def clear_retry_state(key, title=None, imdb_id=None):
             prefixes.append(f"fg:{norm}")
     if imdb_id:
         prefixes.append(f"tbalt:{imdb_id}:")
+        prefixes.append(f"wantedblock:{imdb_id}")
     if prefixes:
         for k in attempt_ledger.snapshot():
             for p in prefixes:

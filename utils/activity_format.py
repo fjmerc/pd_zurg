@@ -427,6 +427,12 @@ def _fmt_wanted_rd_uncached(ev, meta):
     return msg, msg
 
 
+def _fmt_wanted_filter_giveup(ev, meta):
+    msg = ('Recovery gave up — filter-blocked on RealDebrid and uncached '
+           'on TorBox')
+    return msg, msg
+
+
 def _fmt_symlink_create_failed(ev, meta):
     err = meta.get('error', 'unknown error')
     return f'Symlink creation failed — {err}', f'Symlink creation failed — {err}'
@@ -529,6 +535,7 @@ _CAUSE_FORMATTERS = {
     'wanted_tb_recovered': _fmt_wanted_tb_recovered,
     'wanted_rd_recovered': _fmt_wanted_rd_recovered,
     'wanted_rd_uncached': _fmt_wanted_rd_uncached,
+    'wanted_filter_giveup': _fmt_wanted_filter_giveup,
     'symlink_create_failed': _fmt_symlink_create_failed,
     'task_library_scan': _fmt_task_library_scan,
     'task_housekeeping': _fmt_task_housekeeping,
@@ -726,6 +733,7 @@ FORMATTER_JS = r"""
     wanted_tb_recovered: function(ev,m){ return 'Recovered Wanted — added cached copy on ' + (m.service || 'TorBox'); },
     wanted_rd_recovered: function(ev,m){ return 'Recovered Wanted — added cached copy on ' + (m.service || 'RealDebrid'); },
     wanted_rd_uncached: function(ev,m){ return (m.reason === 'infringing_file' || m.reason === 'infringing_add') ? 'Wanted recovery — release is filter-blocked on RealDebrid' : 'Wanted recovery — not cached on RealDebrid (probe add removed)'; },
+    wanted_filter_giveup: function(){ return 'Recovery gave up — filter-blocked on RealDebrid and uncached on TorBox'; },
     symlink_create_failed: function(ev,m){ return 'Symlink creation failed — ' + (m.error || 'unknown error'); },
     task_library_scan: function(ev,m){
       var parts = [(m.movies||0) + ' movies', (m.shows||0) + ' shows'];

@@ -69,6 +69,12 @@ CAUSE_WANTED_TB_RECOVERED = 'wanted_tb_recovered'
 # measurement on the Wanted backlog.
 CAUSE_WANTED_RD_RECOVERED = 'wanted_rd_recovered'
 CAUSE_WANTED_RD_UNCACHED = 'wanted_rd_uncached'
+# Terminal give-up for a Wanted ghost: its top releases were confirmed
+# filter-blocked on RealDebrid AND uncached on TorBox across
+# WANTED_FILTER_GIVEUP_STRIKES recovery passes, so the recovery legs stop
+# probing it (persisted as a ``wantedblock:<imdb>`` attempt-ledger strike).
+# Surfaced on the Stuck tab; cleared by an operator Retry or ledger prune.
+CAUSE_WANTED_FILTER_GIVEUP = 'wanted_filter_giveup'
 
 # Action
 CAUSE_POST_SYMLINK_RESCAN = 'post_symlink_rescan'

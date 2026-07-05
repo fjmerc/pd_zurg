@@ -7371,6 +7371,81 @@ class _FakeRdClient:
         return True
 
 
+def _wire_wanted_recovery(monkeypatch):
+    """Stub both legs' external surfaces; capture RD rescue attempts, TB
+    adds, and history events.  Shared by TestWantedRdRecovery and
+    TestWantedFilterGiveup so the wiring stays identical."""
+    import base
+    import utils.blackhole as bh
+    import utils.search as search
+    import utils.debrid_client as dc
+    import utils.debrid_routing as routing
+    import utils.history as history
+
+    monkeypatch.setenv('TORRENTIO_URL', 'https://torrentio.example')
+    monkeypatch.setenv('WANTED_TB_RECOVERY_ENABLED', 'true')
+    monkeypatch.setenv('WANTED_RD_RECOVERY_ENABLED', 'true')
+    monkeypatch.delenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', raising=False)
+    monkeypatch.delenv('WANTED_RD_RECOVERY_MAX_PER_SCAN', raising=False)
+
+    rd_client = _FakeRdClient()
+    state = {
+        'tb_adds': [],
+        'events': [],
+        'rescue_calls': [],
+        'cooldown': 0,
+        'cache_cached': True,   # TB cache probe result
+        'existing': set(),      # hashes "already on the RD account"
+        'remembered': [],
+        'rd_client': rd_client,
+        'rd_core': {'rescued': True, 'to': 'realdebrid',
+                    'alt_torrent_id': 'RDTID1', 'alt_client': rd_client},
+        'torrentio': [
+            {'info_hash': 'a' * 40, 'title': 'The.Substance.2024.1080p.WEB-DL.RelA',
+             'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+            {'info_hash': 'b' * 40, 'title': 'The.Substance.2024.720p.WEB-DL.RelB',
+             'seeds': 5, 'quality': {'label': '720p', 'score': 50}},
+        ],
+    }
+
+    monkeypatch.setattr(base, 'load_secret_or_env',
+                        lambda name: {'torbox_api_key': 'tb_key',
+                                      'rd_api_key': 'rd_key'}.get(name))
+    monkeypatch.setattr(bh, '_check_torbox_cooldown',
+                        lambda *a, **kw: state['cooldown'])
+    monkeypatch.setattr(search, 'search_torrentio',
+                        lambda *a, **kw: list(state['torrentio']))
+
+    def _cache(hashes, service=None, api_key=None):
+        return {h: state['cache_cached'] for h in hashes}
+    monkeypatch.setattr(search, 'check_debrid_cache', _cache)
+
+    def _add(info_hash, **kw):
+        state['tb_adds'].append({'info_hash': info_hash, **kw})
+        return {'success': True, 'torrent_id': 't', 'service': 'torbox'}
+    monkeypatch.setattr(search, 'add_to_debrid', _add)
+
+    monkeypatch.setattr(search, '_existing_hashes',
+                        lambda svc, key, **kw: state['existing'])
+    monkeypatch.setattr(search, 'remember_added_hash',
+                        lambda svc, h: state['remembered'].append((svc, h)))
+
+    monkeypatch.setattr(
+        dc, 'get_debrid_client',
+        lambda service=None, api_key=None: (rd_client, service))
+
+    def _rescue(info_hash, source, **kw):
+        state['rescue_calls'].append({'info_hash': info_hash, **kw})
+        return dict(state['rd_core'])
+    monkeypatch.setattr(routing, 'attempt_add_rescue', _rescue)
+
+    def _log(ev_type, title, **kw):
+        state['events'].append({'type': ev_type, 'title': title, **kw})
+    monkeypatch.setattr(history, 'log_event', _log)
+
+    return state
+
+
 class TestWantedRdRecovery:
     """RD leg of the Wanted recovery pass — the add IS the cache probe."""
 
@@ -7387,77 +7462,7 @@ class TestWantedRdRecovery:
 
     @pytest.fixture
     def wire(self, monkeypatch):
-        """Stub both legs' external surfaces; capture RD rescue attempts,
-        TB adds, and history events."""
-        import base
-        import utils.blackhole as bh
-        import utils.search as search
-        import utils.debrid_client as dc
-        import utils.debrid_routing as routing
-        import utils.history as history
-
-        monkeypatch.setenv('TORRENTIO_URL', 'https://torrentio.example')
-        monkeypatch.setenv('WANTED_TB_RECOVERY_ENABLED', 'true')
-        monkeypatch.setenv('WANTED_RD_RECOVERY_ENABLED', 'true')
-        monkeypatch.delenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', raising=False)
-        monkeypatch.delenv('WANTED_RD_RECOVERY_MAX_PER_SCAN', raising=False)
-
-        rd_client = _FakeRdClient()
-        state = {
-            'tb_adds': [],
-            'events': [],
-            'rescue_calls': [],
-            'cooldown': 0,
-            'cache_cached': True,   # TB cache probe result
-            'existing': set(),      # hashes "already on the RD account"
-            'remembered': [],
-            'rd_client': rd_client,
-            'rd_core': {'rescued': True, 'to': 'realdebrid',
-                        'alt_torrent_id': 'RDTID1', 'alt_client': rd_client},
-            'torrentio': [
-                {'info_hash': 'a' * 40, 'title': 'The.Substance.2024.1080p.WEB-DL.RelA',
-                 'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
-                {'info_hash': 'b' * 40, 'title': 'The.Substance.2024.720p.WEB-DL.RelB',
-                 'seeds': 5, 'quality': {'label': '720p', 'score': 50}},
-            ],
-        }
-
-        monkeypatch.setattr(base, 'load_secret_or_env',
-                            lambda name: {'torbox_api_key': 'tb_key',
-                                          'rd_api_key': 'rd_key'}.get(name))
-        monkeypatch.setattr(bh, '_check_torbox_cooldown',
-                            lambda *a, **kw: state['cooldown'])
-        monkeypatch.setattr(search, 'search_torrentio',
-                            lambda *a, **kw: list(state['torrentio']))
-
-        def _cache(hashes, service=None, api_key=None):
-            return {h: state['cache_cached'] for h in hashes}
-        monkeypatch.setattr(search, 'check_debrid_cache', _cache)
-
-        def _add(info_hash, **kw):
-            state['tb_adds'].append({'info_hash': info_hash, **kw})
-            return {'success': True, 'torrent_id': 't', 'service': 'torbox'}
-        monkeypatch.setattr(search, 'add_to_debrid', _add)
-
-        monkeypatch.setattr(search, '_existing_hashes',
-                            lambda svc, key, **kw: state['existing'])
-        monkeypatch.setattr(search, 'remember_added_hash',
-                            lambda svc, h: state['remembered'].append((svc, h)))
-
-        monkeypatch.setattr(
-            dc, 'get_debrid_client',
-            lambda service=None, api_key=None: (rd_client, service))
-
-        def _rescue(info_hash, source, **kw):
-            state['rescue_calls'].append({'info_hash': info_hash, **kw})
-            return dict(state['rd_core'])
-        monkeypatch.setattr(routing, 'attempt_add_rescue', _rescue)
-
-        def _log(ev_type, title, **kw):
-            state['events'].append({'type': ev_type, 'title': title, **kw})
-        monkeypatch.setattr(history, 'log_event', _log)
-
-        return state
+        return _wire_wanted_recovery(monkeypatch)
 
     def _causes(self, wire):
         return [(e['type'], (e.get('meta') or {}).get('cause'))
@@ -7514,26 +7519,29 @@ class TestWantedRdRecovery:
         assert ('debrid_add_failed', 'wanted_rd_uncached') not in self._causes(wire)
         assert len(wire['tb_adds']) == 1  # TB fallback still ran
 
-    def test_rd_451_at_add_time_memoizes_infringing_add(self, wire):
-        # RD's keyword filter can reject at addMagnet time — permanent,
-        # not transient: memoize + log so the title isn't retried forever.
+    def test_rd_451_at_add_time_is_filter_block_not_miss(self, wire):
+        # RD's keyword filter rejects at addMagnet time — deterministic and
+        # permanent, NOT a cache miss.  It no longer lands in the 7-day
+        # _wanted_rd_miss memo (that would re-probe a blocked release
+        # forever); the measurement event still fires.  Here TB has it
+        # cached, so the title is recovered on TB.
         wire['rd_core'] = {'rescued': False, 'reason': 'add_failed',
                            'http_status': 451, 'alt_torrent_id': None}
         sc = self._scanner()
         sc._recover_wanted_via_debrid([], self._movie(), {})
-        assert 'tt1234567' in sc._wanted_rd_miss
+        assert sc._wanted_rd_miss == {}
         miss = [e for e in wire['events']
                 if (e.get('meta') or {}).get('cause') == 'wanted_rd_uncached']
         assert len(miss) == 1
         assert miss[0]['meta']['reason'] == 'infringing_add'
-        assert len(wire['tb_adds']) == 1  # TB fallback still ran
+        assert len(wire['tb_adds']) == 1  # TB recovered it
 
-    def test_rd_403_add_error_also_memoizes(self, wire):
+    def test_rd_403_add_error_is_filter_block(self, wire):
         wire['rd_core'] = {'rescued': False, 'reason': 'add_error',
                            'http_status': 403, 'alt_torrent_id': None}
         sc = self._scanner()
         sc._recover_wanted_via_debrid([], self._movie(), {})
-        assert 'tt1234567' in sc._wanted_rd_miss
+        assert sc._wanted_rd_miss == {}  # filter block, not a cache miss
         assert ('debrid_add_failed', 'wanted_rd_uncached') in self._causes(wire)
 
     def test_rd_5xx_add_failure_stays_transient(self, wire):
@@ -7550,7 +7558,8 @@ class TestWantedRdRecovery:
         sc = self._scanner()
         sc._recover_wanted_via_debrid([], self._movie(), {})
         assert wire['rd_client'].delete_calls == ['RDTID1']
-        assert 'tt1234567' in sc._wanted_rd_miss
+        # Post-add filter block: same permanent class — no cache-miss memo.
+        assert sc._wanted_rd_miss == {}
         miss = [e for e in wire['events']
                 if (e.get('meta') or {}).get('cause') == 'wanted_rd_uncached']
         assert len(miss) == 1
@@ -7707,6 +7716,128 @@ class TestWantedRdRecovery:
         assert wire['rescue_calls'] == []
         assert wire['tb_adds'] == []
         assert 'tt1234567' in sc._wanted_no_results
+
+
+class TestWantedFilterGiveup:
+    """Terminal give-up when a Wanted ghost is RD-filter-blocked AND
+    TorBox-uncached across WANTED_FILTER_GIVEUP_STRIKES recovery passes."""
+
+    def _scanner(self):
+        sc = LibraryScanner.__new__(LibraryScanner)
+        sc._wanted_tb_cooldown = {}
+        sc._wanted_rd_miss = {}
+        sc._wanted_no_results = {}
+        return sc
+
+    def _movie(self, title='The Substance', imdb='tt1234567'):
+        return [{'title': title, 'source': 'wanted',
+                 'imdb_id': imdb, 'is_available': True}]
+
+    def _show(self, title='Some Show', imdb='tt7654321'):
+        return [{'title': title, 'source': 'wanted',
+                 'imdb_id': imdb, 'is_available': True}]
+
+    def _causes(self, wire):
+        return [(e['type'], (e.get('meta') or {}).get('cause'))
+                for e in wire['events']]
+
+    @pytest.fixture
+    def wire(self, monkeypatch):
+        return _wire_wanted_recovery(monkeypatch)
+
+    @pytest.fixture
+    def ledger(self, tmp_path):
+        import importlib
+        from utils import attempt_ledger
+        importlib.reload(attempt_ledger)
+        attempt_ledger.init(config_dir=str(tmp_path))
+        yield attempt_ledger
+        attempt_ledger._file_path = None
+        attempt_ledger._state = {}
+
+    def _filter_block(self, wire):
+        # RD keyword-filters the add; TB has nothing cached.
+        wire['rd_core'] = {'rescued': False, 'reason': 'add_failed',
+                           'http_status': 451, 'alt_torrent_id': None}
+        wire['cache_cached'] = False
+
+    def test_filter_block_plus_tb_uncached_bumps_strike(self, wire, ledger):
+        self._filter_block(wire)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert ledger.get('wantedblock:tt1234567') == 1
+        # A confirmed both-provider failure is NOT a cache miss — it accrues
+        # a persistent strike instead of the transient 7-day RD memo.
+        assert sc._wanted_rd_miss == {}
+        assert wire['tb_adds'] == []
+        # Below the threshold: no terminal event yet.
+        assert ('debrid_add_failed', 'wanted_filter_giveup') not in self._causes(wire)
+
+    def test_three_strikes_logs_terminal_giveup_once_then_skips(self, wire, ledger):
+        self._filter_block(wire)
+        sc = self._scanner()
+        for _ in range(4):
+            sc._recover_wanted_via_debrid([], self._movie(), {})
+        # Strike caps at the threshold — the 4th pass is skipped by the guard
+        # before it can probe, so the count never climbs past 3.
+        assert ledger.get('wantedblock:tt1234567') == 3
+        assert len(wire['rescue_calls']) == 3
+        giveups = [e for e in wire['events']
+                   if (e.get('meta') or {}).get('cause') == 'wanted_filter_giveup']
+        assert len(giveups) == 1  # logged exactly once, on the crossing pass
+        assert giveups[0]['meta']['imdb_id'] == 'tt1234567'
+
+    def test_giveup_guard_skips_probing_both_legs(self, wire, ledger):
+        for _ in range(3):
+            ledger.bump('wantedblock:tt1234567')
+        self._filter_block(wire)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'] == []   # RD leg never ran
+        assert wire['tb_adds'] == []         # TB leg never ran
+
+    def test_tb_unavailable_filter_block_falls_back_to_rd_miss(self, wire, ledger):
+        # TB on cooldown → the "uncached" half can't be confirmed, so no
+        # strike; fall back to the 7-day RD-miss memo instead of hammering RD.
+        self._filter_block(wire)
+        wire['cooldown'] = 999
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert ledger.get('wantedblock:tt1234567') == 0
+        assert 'tt1234567' in sc._wanted_rd_miss
+        assert wire['tb_adds'] == []
+
+    def test_tb_probe_error_filter_block_no_strike(self, wire, ledger, monkeypatch):
+        # A TorBox cache-probe error can't confirm "uncached" — be
+        # conservative: no strike, memo RD-miss so RD isn't re-probed hourly.
+        self._filter_block(wire)
+        import utils.search as search
+
+        def _boom(*a, **kw):
+            raise RuntimeError('tb api down')
+        monkeypatch.setattr(search, 'check_debrid_cache', _boom)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert ledger.get('wantedblock:tt1234567') == 0
+        assert 'tt1234567' in sc._wanted_rd_miss
+
+    def test_show_strike_is_episode_scoped(self, wire, ledger, monkeypatch):
+        # A blocked show episode strikes under wantedblock:<imdb>:<s>:<e>, NOT
+        # the bare imdb — so if miss[0] shifts to a different episode later
+        # (e.g. this one gets recovered elsewhere), that episode isn't already
+        # abandoned by strikes accrued against a sibling episode.
+        self._filter_block(wire)
+        wire['torrentio'] = [
+            {'info_hash': 'a' * 40, 'title': 'The.Substance.S02E05.1080p.WEB',
+             'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+        ]
+        monkeypatch.setattr(LibraryScanner, '_compute_missing_episodes',
+                            lambda self, s: [(2, 5)])
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid(
+            self._show(title='The Substance', imdb='tt7654321'), [], {})
+        assert ledger.get('wantedblock:tt7654321:2:5') == 1
+        assert ledger.get('wantedblock:tt7654321') == 0
 
 
 class TestReleaseMatchesTitle:

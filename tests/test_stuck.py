@@ -254,6 +254,48 @@ class TestCollectWanted:
         assert 'alt_capped' in rec['reasons']
         assert rec['media_type'] == 'show'
 
+    def test_filter_giveup_surfaces_ghost(self, stores, monkeypatch):
+        from utils.library import WANTED_FILTER_GIVEUP_STRIKES
+        self._scanner(monkeypatch, data={
+            'movies': [{'title': 'Doomed Film', 'source': 'wanted',
+                        'imdb_id': 'tt9999999'}],
+            'shows': [],
+        })
+        for _ in range(WANTED_FILTER_GIVEUP_STRIKES):
+            attempt_ledger.bump('wantedblock:tt9999999')
+        records = {}
+        stuck._collect_wanted(records, attempt_ledger.snapshot())
+        rec = next(iter(records.values()))
+        assert 'filter_giveup' in rec['reasons']
+        assert rec['attempts'] == WANTED_FILTER_GIVEUP_STRIKES
+
+    def test_filter_giveup_episode_scoped_surfaces_show(self, stores, monkeypatch):
+        from utils.library import WANTED_FILTER_GIVEUP_STRIKES
+        self._scanner(monkeypatch, data={
+            'movies': [],
+            'shows': [{'title': 'Doomed Show', 'source': 'wanted',
+                       'imdb_id': 'tt8888888'}],
+        })
+        for _ in range(WANTED_FILTER_GIVEUP_STRIKES):
+            attempt_ledger.bump('wantedblock:tt8888888:2:5')
+        records = {}
+        stuck._collect_wanted(records, attempt_ledger.snapshot())
+        rec = next(iter(records.values()))
+        assert 'filter_giveup' in rec['reasons']
+        assert rec['media_type'] == 'show'
+        assert rec['attempts'] == WANTED_FILTER_GIVEUP_STRIKES
+
+    def test_filter_giveup_below_threshold_skipped(self, stores, monkeypatch):
+        self._scanner(monkeypatch, data={
+            'movies': [{'title': 'Doomed Film', 'source': 'wanted',
+                        'imdb_id': 'tt9999999'}],
+            'shows': [],
+        })
+        attempt_ledger.bump('wantedblock:tt9999999')
+        records = {}
+        stuck._collect_wanted(records, attempt_ledger.snapshot())
+        assert records == {}
+
     def test_ghost_without_signals_skipped(self, stores, monkeypatch):
         self._scanner(monkeypatch, data={
             'movies': [{'title': 'Merely Wanted', 'source': 'wanted',
@@ -331,16 +373,18 @@ class TestDismissAndClear:
         attempt_ledger.bump('fg:old film')
         attempt_ledger.bump('fg:old film:s1')
         attempt_ledger.bump('tbalt:tt1234567:s3')
+        attempt_ledger.bump('wantedblock:tt1234567')
         attempt_ledger.bump('fg:other title')          # must survive
         attempt_ledger.bump('stuckdismiss:title:old film')
 
         cleared = stuck.clear_retry_state('title:old film', title='Old Film',
                                           imdb_id='tt1234567')
-        assert cleared == {'memos': 2, 'ledger_keys': 3}
+        assert cleared == {'memos': 2, 'ledger_keys': 4}
         assert sc.cleared == ['tt1234567']
         assert attempt_ledger.get('fg:old film') == 0
         assert attempt_ledger.get('fg:old film:s1') == 0
         assert attempt_ledger.get('tbalt:tt1234567:s3') == 0
+        assert attempt_ledger.get('wantedblock:tt1234567') == 0
         assert attempt_ledger.get('fg:other title') == 1
         assert attempt_ledger.get('stuckdismiss:title:old film') == 0
 

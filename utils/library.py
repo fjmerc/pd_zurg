@@ -31,6 +31,14 @@ except ImportError:
 
 MEDIA_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m4v', '.webm'}
 
+# Wanted-recovery terminal give-up: after this many recovery passes where a
+# title's top release is confirmed RD-filter-blocked AND TorBox-uncached in
+# the SAME pass, stop probing it entirely (persisted in the attempt ledger as
+# ``wantedblock:<imdb>``).  Without this a title doomed on both providers is
+# re-probed on the 7-day RD-miss timer forever.  Read by the /api/stuck
+# collector too, so it stays a single source of truth.
+WANTED_FILTER_GIVEUP_STRIKES = 3
+
 
 def gap_fill_enabled():
     """Return ``True`` when the unconditional episode-completeness reconcile is
@@ -4367,6 +4375,7 @@ class LibraryScanner:
 
         from base import load_secret_or_env
         from utils import search as _search
+        from utils import attempt_ledger as _ledger
 
         # --- TB leg availability -------------------------------------
         tb_key = load_secret_or_env('torbox_api_key')
@@ -4485,6 +4494,18 @@ class LibraryScanner:
                 break
             imdb = item['imdb_id']
             key = imdb if media_type == 'movie' else f"{imdb}:{season}:{episode}"
+            # Terminal give-up: this title's top releases are confirmed
+            # doomed on BOTH providers (RD filter-blocked + TB uncached)
+            # across WANTED_FILTER_GIVEUP_STRIKES passes.  Stop probing —
+            # re-probing a filter-blocked release never changes.  The strike
+            # is keyed per-probe (``key`` is the imdb for movies but
+            # ``imdb:season:episode`` for shows), so one blocked episode
+            # never abandons the whole series and per-episode strikes climb
+            # independently — one bump per pass, not one per episode.  An
+            # operator Retry (clear_retry_state) or the ledger prune sweep
+            # clears the strike and gives the title a fresh chance.
+            if imdb and _ledger.get(f'wantedblock:{key}') >= WANTED_FILTER_GIVEUP_STRIKES:
+                continue
             if key in self._wanted_no_results:
                 continue
             # Per-leg gates — a TB cooldown must never suppress the RD leg
@@ -4554,34 +4575,61 @@ class LibraryScanner:
                       if media_type == 'series' else None)
 
             # ---- RD leg: the add IS the probe -----------------------
+            rd_outcome = None
             if rd_try:
-                outcome = self._wanted_rd_probe_add(
+                rd_outcome = self._wanted_rd_probe_add(
                     rd_client, rd_key, results[0],
                     media_title, ep_str, key)
-                if outcome != 'skipped':
+                if rd_outcome != 'skipped':
                     # Only real add attempts count against the budget —
                     # local skips (dedup hit, listing unavailable) cost
                     # no RD API adds.
                     rd_attempts += 1
-                if outcome == 'recovered':
+                if rd_outcome == 'recovered':
                     rd_added += 1
                     self._memo_wanted(self._wanted_tb_cooldown, key)
                     continue  # recovered on RD — no TB add needed
 
             # ---- TB leg: cache probe + add ---------------------------
             if not tb_try:
+                # RD filter-blocked but the TB leg can't run this pass (TB on
+                # cooldown/disabled): we can't confirm the "uncached" half of
+                # the give-up signature, so don't accrue a strike.  Fall back
+                # to the 7-day RD-miss memo so the blocked release isn't
+                # re-probed against RD every scan while TB is unavailable.
+                if rd_outcome == 'filter_blocked':
+                    self._memo_wanted(self._wanted_rd_miss, key)
                 continue
             probe = results[:self._WANTED_TB_MAX_PROBES]
             hashes = [r['info_hash'] for r in probe]
+            tb_probe_ok = True
             try:
                 cmap = _search.check_debrid_cache(
                     hashes, service='torbox', api_key=tb_key)
             except Exception:
                 cmap = {}
+                tb_probe_ok = False
             cached = next((r for r in probe if cmap.get(r['info_hash'])), None)
             if not cached:
-                # Probed, nothing cached — cool down so we don't re-walk it.
-                self._memo_wanted(self._wanted_tb_cooldown, key)
+                if rd_outcome == 'filter_blocked' and imdb and tb_probe_ok:
+                    # Both providers confirmed failing THIS pass — accrue a
+                    # terminal give-up strike.  Deliberately DON'T cool the
+                    # title down: leaving both memos clear lets each leg
+                    # re-confirm on the next scan so the strike count can
+                    # climb to WANTED_FILTER_GIVEUP_STRIKES (a few passes),
+                    # after which the top-of-loop guard skips it for good.
+                    self._record_wanted_filter_giveup(
+                        key, imdb, media_title, ep_str)
+                elif rd_outcome == 'filter_blocked' and imdb:
+                    # TB probe errored — can't confirm uncached, so no strike;
+                    # cool down + memo RD-miss to avoid re-probing the blocked
+                    # release every scan while TB's cache state is unknown.
+                    self._memo_wanted(self._wanted_tb_cooldown, key)
+                    self._memo_wanted(self._wanted_rd_miss, key)
+                else:
+                    # Plain TB miss (RD didn't filter-block) — cool down so we
+                    # don't re-walk it before the window elapses.
+                    self._memo_wanted(self._wanted_tb_cooldown, key)
                 continue
 
             try:
@@ -4610,6 +4658,46 @@ class LibraryScanner:
             logger.info(f"[library] Wanted recovery added {rd_added} release(s) "
                         f"to RealDebrid and {tb_added} to TorBox")
 
+    def _record_wanted_filter_giveup(self, key, imdb, media_title, ep_str):
+        """Bump the persistent both-providers give-up strike for a Wanted
+        ghost, logging the terminal event exactly once when the count first
+        reaches ``WANTED_FILTER_GIVEUP_STRIKES`` (after which the loop's top
+        guard skips the probe, so no further strikes accrue).
+
+        ``key`` is the per-probe key (imdb for movies, ``imdb:season:episode``
+        for shows) so a series accrues strikes per-episode and one blocked
+        episode never terminates the whole show."""
+        from utils import attempt_ledger as _ledger
+        try:
+            strikes = _ledger.bump(f'wantedblock:{key}')
+        except Exception:
+            return
+        if strikes != WANTED_FILTER_GIVEUP_STRIKES:
+            # Below threshold: still accruing.  Once it equals the threshold
+            # the top-of-loop guard skips the probe on every later pass, so the
+            # count freezes here and this event fires exactly once — until the
+            # prune sweep expires the key, after which it re-climbs from 1 and
+            # re-crosses at ``==`` again (never ``>``).
+            return
+        logger.info(f"[library] Wanted recovery gave up on {media_title!r} "
+                    f"({imdb}) — filter-blocked on RD and uncached on TorBox "
+                    f"across {strikes} passes")
+        try:
+            from utils import history as _hist
+            _hist.log_event(
+                'debrid_add_failed', media_title or imdb,
+                episode=ep_str,
+                detail='Recovery gave up — filter-blocked on RealDebrid and '
+                       'uncached on TorBox',
+                source='library',
+                media_title=media_title,
+                meta={'cause': _hist.CAUSE_WANTED_FILTER_GIVEUP,
+                      'imdb_id': imdb,
+                      'strikes': strikes},
+            )
+        except Exception:
+            pass
+
     def _wanted_rd_probe_add(self, rd_client, rd_key, release,
                              media_title, ep_str, key):
         """RD leg of the Wanted recovery pass — the add IS the cache probe.
@@ -4617,18 +4705,25 @@ class LibraryScanner:
         Adds ``release`` to RD and polls briefly for ``downloaded``
         (instantly ready = cached).  On a hit the torrent is kept, verified
         against the May-2026 keyword filter via ``probe_file``, and a
-        ``wanted_rd_recovered`` history event is logged.  On a miss the
-        probe add is deleted (by ``attempt_add_rescue``), the title is
-        memoized in ``_wanted_rd_miss``, and a ``wanted_rd_uncached``
+        ``wanted_rd_recovered`` history event is logged.  On a genuine cache
+        miss the probe add is deleted (by ``attempt_add_rescue``), the title
+        is memoized in ``_wanted_rd_miss``, and a ``wanted_rd_uncached``
         event records the measurement.
 
-        Returns a tri-state string — the caller uses it for both flow
-        and budget accounting:
+        Returns a state string — the caller uses it for flow, budget
+        accounting, and terminal give-up strike counting:
 
         * ``'recovered'`` — kept, filter-clean recovery; skip the TB leg.
-        * ``'attempted'`` — an RD add actually fired but didn't stick
-          (miss, terminal state, filter block, add error).  Counts
-          against the per-scan budget; falls through to the TB leg.
+        * ``'filter_blocked'`` — RD's keyword filter rejected this release
+          (add-time 403/451, or an instant-ready add whose file 451s).
+          Deterministic and permanent for this release, so — unlike a plain
+          cache miss — it is NOT memoized here; the caller pairs it with the
+          TB leg's result to bump the ``wantedblock:<imdb>`` give-up strike.
+          Counts against the per-scan budget; falls through to the TB leg.
+        * ``'attempted'`` — an RD add fired but didn't stick for a
+          retry-worthy reason (genuine cache miss, add error).  Memoized in
+          ``_wanted_rd_miss`` when it's a miss.  Counts against the budget;
+          falls through to the TB leg.
         * ``'skipped'`` — no RD API add happened (no hash, dedup hit,
           account listing unavailable).  Free — doesn't burn budget.
 
@@ -4703,15 +4798,16 @@ class LibraryScanner:
                     title, media_title, ep_str, info_hash,
                     reason=core.get('state') or reason)
             elif core.get('http_status') in (403, 451):
-                # RD's keyword filter can reject at addMagnet time (HTTP
-                # 451/403) — permanent for this title, same class as the
-                # post-add probe_file block below.  Without this branch
-                # the title would be retried every scan forever and never
-                # counted in the hit-rate measurement.
-                self._memo_wanted(self._wanted_rd_miss, key)
+                # RD's keyword filter rejected at addMagnet time (HTTP
+                # 451/403) — deterministic and permanent for this release.
+                # Report it as a filter block (not a plain miss) so the
+                # caller can pair it with the TB leg and bump the terminal
+                # give-up strike; the 7-day _wanted_rd_miss memo is wrong
+                # here (re-probing a filter-blocked release never changes).
                 self._log_wanted_rd_miss(
                     title, media_title, ep_str, info_hash,
                     reason='infringing_add')
+                return 'filter_blocked'
             # Other add_error/add_failed are transient RD-side failures —
             # no memo, the title gets another shot on a later scan.
             return 'attempted'
@@ -4731,11 +4827,13 @@ class LibraryScanner:
                 rd_client.delete_torrent(tid)
             except Exception:
                 pass
-            self._memo_wanted(self._wanted_rd_miss, key)
+            # Same permanent-filter class as the add-time 403/451 branch —
+            # report as a filter block (no _wanted_rd_miss memo) so the
+            # caller can accrue the terminal give-up strike.
             self._log_wanted_rd_miss(
                 title, media_title, ep_str, info_hash,
                 reason=probe.get('reason', 'blocked'))
-            return 'attempted'
+            return 'filter_blocked'
         # 'unknown' (network blip, 5xx) → keep the torrent; the health
         # sweep re-probes it on its own cycle.
 

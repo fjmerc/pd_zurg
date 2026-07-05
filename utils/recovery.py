@@ -212,8 +212,23 @@ def record_snapshot(data, now=None):
 
     Best-effort — returns the snapshot on success, ``None`` on any failure
     (callers must never let snapshotting break the scan).
+
+    Scans whose arr enrichment was degraded (``data['arr_degraded']``
+    non-empty — a configured Sonarr/Radarr bulk-list fetch failed) are
+    refused: a Sonarr failure inflates ``wanted`` by falling back to
+    TMDB-only missing math, a Radarr/ghost failure deflates it by
+    skipping injection.  Either way the daily point would be fiction.
+    Better a gap (or yesterday's honest value via the per-day upsert)
+    than a poisoned metric; the next healthy scan records the day.
     """
     if _file_path is None:
+        return None
+    degraded = data.get('arr_degraded')
+    if degraded:
+        logger.warning(
+            f"[recovery] Skipping snapshot — arr enrichment degraded this "
+            f"scan ({', '.join(map(str, degraded))}); wanted counts "
+            f"unreliable. The next healthy scan will record today's point.")
         return None
     try:
         snapshot = compute_snapshot(data, now=now)

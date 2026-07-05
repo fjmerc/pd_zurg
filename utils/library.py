@@ -1198,7 +1198,7 @@ def _sonarr_monitored_missing(series):
     return missing, monitored_total, sorted(unmonitored_nums)
 
 
-def _apply_sonarr_monitored_filter(shows):
+def _apply_sonarr_monitored_filter(shows, degraded=None):
     """Rebase show missing-episode counts against Sonarr's monitored view.
 
     The TMDB-only math in ``_enrich_with_tmdb_cache`` counts every aired
@@ -1235,6 +1235,11 @@ def _apply_sonarr_monitored_filter(shows):
     so ``_apply_sonarr_wanted_shows`` can inject ghosts only for the
     monitored series that remain unmatched (no double-counting).  Returns
     an empty set on every early exit.
+
+    ``degraded`` is an optional mutable set: when a *configured* Sonarr's
+    series-list fetch fails (returns ``None`` — network/DNS error, not an
+    empty library), ``'sonarr_series'`` is added so the scan payload can
+    flag that wanted counts fell back to the inflated TMDB-only math.
     """
     matched_ids = set()
     if not shows:
@@ -1248,6 +1253,10 @@ def _apply_sonarr_monitored_filter(shows):
     if not client or svc != 'sonarr':
         return matched_ids
     series_list = _get_sonarr_series_list(client)
+    if series_list is None:
+        if degraded is not None:
+            degraded.add('sonarr_series')
+        return matched_ids
     if not series_list:
         return matched_ids
 
@@ -1358,7 +1367,7 @@ def _apply_sonarr_monitored_filter(shows):
     return matched_ids
 
 
-def _apply_sonarr_wanted_shows(shows, matched_ids, pending=None):
+def _apply_sonarr_wanted_shows(shows, matched_ids, pending=None, degraded=None):
     """Inject Sonarr-monitored series with no on-disk episodes as "ghost"
     show entries so fully-absent wanted TV surfaces in the Wanted view and
     is counted by the recovery metric.
@@ -1404,6 +1413,10 @@ def _apply_sonarr_wanted_shows(shows, matched_ids, pending=None):
     is skipped to avoid double-counting.
 
     Returns the count of ghost entries injected (for caller logging).
+
+    ``degraded`` mirrors ``_apply_sonarr_monitored_filter``: a failed
+    series-list fetch from a configured Sonarr adds ``'sonarr_series'``
+    (here the failure *deflates* wanted — ghosts never get injected).
     """
     pending = pending or {}
     matched_ids = matched_ids or set()
@@ -1417,6 +1430,10 @@ def _apply_sonarr_wanted_shows(shows, matched_ids, pending=None):
         return 0
 
     series_list = _get_sonarr_series_list(client)
+    if series_list is None:
+        if degraded is not None:
+            degraded.add('sonarr_series')
+        return 0
     if not series_list:
         return 0
 
@@ -1722,7 +1739,7 @@ def _strip_ghost_duplicates(movies):
     ]
 
 
-def _apply_radarr_wanted_movies(movies, pending=None):
+def _apply_radarr_wanted_movies(movies, pending=None, degraded=None):
     """Inject Radarr-monitored movies with no file into the movie list as
     "ghost" entries so they surface in the Wanted view.
 
@@ -1762,6 +1779,10 @@ def _apply_radarr_wanted_movies(movies, pending=None):
     real movies it discovered.
 
     Returns the count of ghost entries injected (for caller logging).
+
+    ``degraded`` mirrors the Sonarr helpers: a failed movie-list fetch
+    from a configured Radarr adds ``'radarr_movies'`` (ghost movies never
+    get injected, deflating the wanted denominator).
     """
     pending = pending or {}
     try:
@@ -1774,6 +1795,10 @@ def _apply_radarr_wanted_movies(movies, pending=None):
         return 0
 
     radarr_movies = _get_radarr_movies_list(client)
+    if radarr_movies is None:
+        if degraded is not None:
+            degraded.add('radarr_movies')
+        return 0
     if not radarr_movies:
         return 0
 
@@ -2282,6 +2307,10 @@ def _deserialize_cache_state(envelope):
         return None
     if not _strict_int(cache.get('scan_duration_ms')):
         return None
+    # ``arr_degraded`` is a per-scan runtime signal for the recovery
+    # snapshot writer — a warm-started payload must never replay a
+    # previous run's degradation flag.
+    cache.pop('arr_degraded', None)
 
     raw_pi = envelope.get('path_index')
     raw_lpi = envelope.get('local_path_index')
@@ -3044,7 +3073,13 @@ class LibraryScanner:
             _pending_snapshot = _gap() or {}
         except Exception:
             _pending_snapshot = {}
-        ghosts_added = _apply_radarr_wanted_movies(movies, pending=_pending_snapshot)
+        # Tokens accumulated when a configured arr's bulk-list fetch fails
+        # mid-scan (DNS blip, restart race).  The recovery snapshot writer
+        # skips degraded scans so a transient failure can't poison the
+        # daily wanted/on-disk time series.
+        arr_degraded = set()
+        ghosts_added = _apply_radarr_wanted_movies(
+            movies, pending=_pending_snapshot, degraded=arr_degraded)
         if ghosts_added:
             logger.debug(f"[library] Injected {ghosts_added} Radarr wanted movie(s) as ghost entries")
 
@@ -3162,7 +3197,8 @@ class LibraryScanner:
         # unmonitored) don't report 100s of "missing" episodes the user
         # never asked to track.  Also surfaces unmonitored season numbers
         # to the UI and to gap-fill so neither invents phantom work.
-        matched_series_ids = _apply_sonarr_monitored_filter(shows)
+        matched_series_ids = _apply_sonarr_monitored_filter(
+            shows, degraded=arr_degraded)
 
         # Inject ghost entries for Sonarr-monitored series with no episode
         # on disk yet — the TV mirror of the Radarr wanted-movie injection
@@ -3173,6 +3209,7 @@ class LibraryScanner:
         # when Sonarr is unavailable.
         show_ghosts = _apply_sonarr_wanted_shows(
             shows, matched_series_ids, pending=_pending_snapshot,
+            degraded=arr_degraded,
         )
         if show_ghosts:
             logger.debug(f"[library] Injected {show_ghosts} Sonarr wanted show(s) as ghost entries")
@@ -3246,6 +3283,12 @@ class LibraryScanner:
         for show in shows:
             show.pop('_episodes', None)
 
+        if arr_degraded:
+            logger.warning(
+                f"[library] Scan completed with degraded arr enrichment: "
+                f"{', '.join(sorted(arr_degraded))} — wanted counts are "
+                f"unreliable this scan")
+
         elapsed_ms = int((time.monotonic() - start) * 1000)
         return {
             'movies': movies,
@@ -3253,6 +3296,7 @@ class LibraryScanner:
             'preferences': preferences,
             'last_scan': datetime.now(timezone.utc).isoformat(timespec='seconds'),
             'scan_duration_ms': elapsed_ms,
+            'arr_degraded': sorted(arr_degraded),
         }
 
     def _scan_effects(self, data, force_enforce=False):

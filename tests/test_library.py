@@ -3882,6 +3882,40 @@ class TestApplySonarrMonitoredFilter:
         assert shows[0]['missing_episodes'] == 5
         assert 'unmonitored_seasons' not in shows[0]
 
+    def test_fetch_failure_flags_degraded(self):
+        """A configured Sonarr whose series fetch fails must add
+        'sonarr_series' to the degraded set — the wanted counts fell back
+        to inflated TMDB-only math, so the recovery snapshot must skip."""
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{'title': 'Show', 'missing_episodes': 5}]
+        client = MagicMock()
+        client.get_all_series.side_effect = RuntimeError('dns boom')
+        degraded = set()
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(client, 'sonarr')):
+            _apply_sonarr_monitored_filter(shows, degraded=degraded)
+        assert degraded == {'sonarr_series'}
+
+    def test_empty_series_list_not_degraded(self):
+        """An empty Sonarr library is a valid state — no degradation flag."""
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{'title': 'Show', 'missing_episodes': 5}]
+        degraded = set()
+        with _fake_sonarr([]):
+            _apply_sonarr_monitored_filter(shows, degraded=degraded)
+        assert degraded == set()
+
+    def test_not_configured_not_degraded(self):
+        """No Sonarr configured → TMDB-only math is the normal state,
+        not a degradation."""
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{'title': 'Show', 'missing_episodes': 5}]
+        degraded = set()
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(None, None)):
+            _apply_sonarr_monitored_filter(shows, degraded=degraded)
+        assert degraded == set()
+
     def test_sonarr_not_configured_no_op(self):
         """Without Sonarr configured, monitored filtering is skipped entirely."""
         from utils.library import _apply_sonarr_monitored_filter
@@ -4013,6 +4047,37 @@ class TestApplyRadarrWantedMovies:
         assert ghost['type'] == 'movie', \
             'ghost movie must carry type=movie so the detail-view fetch ' \
             'does not poison the TMDB cache via type=undefined'
+
+    def test_fetch_failure_flags_degraded(self):
+        """A configured Radarr whose movie fetch fails must add
+        'radarr_movies' — ghost injection was skipped, deflating wanted."""
+        from utils.library import _apply_radarr_wanted_movies
+        client = MagicMock()
+        client.get_all_movies.side_effect = RuntimeError('dns boom')
+        degraded = set()
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(client, 'radarr')):
+            count = _apply_radarr_wanted_movies([], degraded=degraded)
+        assert count == 0
+        assert degraded == {'radarr_movies'}
+
+    def test_empty_movie_list_not_degraded(self):
+        """An empty Radarr library is a valid state — no degradation flag."""
+        from utils.library import _apply_radarr_wanted_movies
+        degraded = set()
+        with _fake_radarr([]):
+            _apply_radarr_wanted_movies([], degraded=degraded)
+        assert degraded == set()
+
+    def test_not_configured_not_degraded(self):
+        """No Radarr configured → skipping ghost injection is the normal
+        state, not a degradation."""
+        from utils.library import _apply_radarr_wanted_movies
+        degraded = set()
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(None, None)):
+            _apply_radarr_wanted_movies([], degraded=degraded)
+        assert degraded == set()
 
     def test_skips_monitored_with_file(self):
         """A monitored movie that DOES have a file is already on disk,
@@ -4271,6 +4336,40 @@ class TestApplySonarrWantedShows:
         assert ghost['_sonarr_id'] == 5
         assert ghost['imdb_id'] == 'tt123'
         assert ghost['tmdb_id'] == 100
+
+    def test_fetch_failure_flags_degraded(self):
+        """A configured Sonarr whose series fetch fails must add
+        'sonarr_series' — ghost injection was skipped, deflating wanted."""
+        from utils.library import _apply_sonarr_wanted_shows
+        client = MagicMock()
+        client.get_all_series.side_effect = RuntimeError('dns boom')
+        degraded = set()
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(client, 'sonarr')):
+            count = _apply_sonarr_wanted_shows(shows=[], matched_ids=set(),
+                                               degraded=degraded)
+        assert count == 0
+        assert degraded == {'sonarr_series'}
+
+    def test_empty_series_list_not_degraded(self):
+        """An empty Sonarr library is a valid state — no degradation flag."""
+        from utils.library import _apply_sonarr_wanted_shows
+        degraded = set()
+        with _fake_sonarr([]):
+            _apply_sonarr_wanted_shows(shows=[], matched_ids=set(),
+                                       degraded=degraded)
+        assert degraded == set()
+
+    def test_not_configured_not_degraded(self):
+        """No Sonarr configured → skipping ghost injection is the normal
+        state, not a degradation."""
+        from utils.library import _apply_sonarr_wanted_shows
+        degraded = set()
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(None, None)):
+            _apply_sonarr_wanted_shows(shows=[], matched_ids=set(),
+                                       degraded=degraded)
+        assert degraded == set()
 
     def test_skips_series_already_matched_to_a_library_show(self):
         """A series whose id is in ``matched_ids`` already has a real
@@ -5172,7 +5271,7 @@ class TestWebDAVUnsupportedMemoization:
         monkeypatch.setattr(library, '_enrich_with_tmdb_cache',
                             lambda movies, shows, **kw: [])
         monkeypatch.setattr(library, '_apply_sonarr_monitored_filter',
-                            lambda shows: None)
+                            lambda shows, **kw: None)
         from utils import library_prefs
         monkeypatch.setattr(library_prefs, 'get_all_preferences', lambda: {})
 
@@ -5235,7 +5334,7 @@ class TestWebDAVUnsupportedMemoization:
         monkeypatch.setattr(library, '_enrich_with_tmdb_cache',
                             lambda movies, shows, **kw: [])
         monkeypatch.setattr(library, '_apply_sonarr_monitored_filter',
-                            lambda shows: None)
+                            lambda shows, **kw: None)
         from utils import library_prefs
         monkeypatch.setattr(library_prefs, 'get_all_preferences', lambda: {})
 
@@ -5803,6 +5902,17 @@ class TestLibraryCachePersistence:
         assert pi2 == pi
         assert lpi2 == lpi
         assert an2 == an
+
+    def test_arr_degraded_stripped_on_deserialize(self):
+        """``arr_degraded`` is a per-scan runtime signal for the recovery
+        snapshot writer — a warm-started payload must never replay a
+        previous run's degradation flag."""
+        cache, pi, lpi, an = self._sample_state()
+        cache['arr_degraded'] = ['sonarr_series']
+        env = library._serialize_cache_state(cache, pi, lpi, an)
+        result = library._deserialize_cache_state(env)
+        assert result is not None
+        assert 'arr_degraded' not in result[0]
 
     def test_tuple_keys_round_trip(self):
         """JSON has no tuple keys — serialize as 4-element rows, restore as tuples."""

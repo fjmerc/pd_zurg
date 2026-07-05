@@ -183,6 +183,45 @@ def test_record_persists_and_loads(rec):
     assert isinstance(payload['snapshots'], list)
 
 
+def test_degraded_scan_skips_snapshot(rec):
+    """A scan whose arr enrichment failed (arr_degraded non-empty) must not
+    write a daily point — its wanted count is fiction (inflated by the
+    TMDB-only fallback or deflated by skipped ghost injection)."""
+    data = _sample_data()
+    data['arr_degraded'] = ['sonarr_series']
+    assert rec.record_snapshot(data,
+                               now=datetime(2026, 7, 5, tzinfo=timezone.utc)) is None
+    assert rec.load_snapshots() == []
+
+
+def test_degraded_scan_preserves_earlier_healthy_snapshot(rec):
+    """Regression for the 2026-07-05 incident: a healthy morning snapshot
+    must survive a later same-day degraded scan instead of being upserted
+    over with an inflated wanted count."""
+    healthy = datetime(2026, 7, 5, 8, 0, 0, tzinfo=timezone.utc)
+    rec.record_snapshot(_sample_data(), now=healthy)
+
+    data = _sample_data()
+    data['shows'][0]['missing_episodes'] = 400  # inflated TMDB-only fallback
+    data['arr_degraded'] = ['sonarr_series']
+    rec.record_snapshot(data, now=datetime(2026, 7, 5, 11, 0, 0, tzinfo=timezone.utc))
+
+    snaps = rec.load_snapshots()
+    assert len(snaps) == 1
+    assert snaps[0]['ts'] == '2026-07-05T08:00:00+00:00'
+    assert snaps[0]['recovery']['wanted'] == 3
+
+
+def test_healthy_scan_with_empty_degraded_list_records(rec):
+    """The scanner stamps arr_degraded=[] on healthy scans — that must
+    record normally."""
+    data = _sample_data()
+    data['arr_degraded'] = []
+    snap = rec.record_snapshot(data, now=datetime(2026, 7, 5, tzinfo=timezone.utc))
+    assert snap is not None
+    assert len(rec.load_snapshots()) == 1
+
+
 def test_upsert_by_day_replaces(rec):
     day = datetime(2026, 5, 31, 8, 0, 0, tzinfo=timezone.utc)
     rec.record_snapshot(_sample_data(), now=day)

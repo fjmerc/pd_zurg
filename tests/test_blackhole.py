@@ -5423,3 +5423,133 @@ class TestTorboxAltGiveUpCap(TestTorboxCachedAlternative):
                - timedelta(seconds=_TB_ALT_DEDUP_TTL + 60)).isoformat(timespec='seconds')
         self.ledger._state['tbaltdedup:tt777:s2']['last_ts'] = old
         assert w._tb_alt_recently_grabbed(key) is False
+
+class TestTorboxAltRetryLoopBreaker(TestTorboxCachedAlternative):
+    """Failed-import loop breaker: a cached alternative that was already
+    grabbed (or blocklisted) must never be re-grabbed for the same
+    (imdb_id, season).  Pre-fix, an alt that failed to import (mislabeled
+    payload, no symlink) was re-grabbed every ~6h — the sibling dedup TTL
+    expiring in step with the arr's search cycle — burning a TorBox create
+    and re-arming the abuse cooldown each time."""
+
+    @pytest.fixture(autouse=True)
+    def _ledger(self, tmp_dir):
+        import importlib
+        from utils import attempt_ledger
+        importlib.reload(attempt_ledger)
+        attempt_ledger.init(config_dir=tmp_dir)
+        self.ledger = attempt_ledger
+        yield
+
+    def test_blocklisted_candidate_excluded(self, tmp_dir, monkeypatch):
+        """A blocklisted hash must not be selectable as a cached alternative
+        (parity with the legacy alt-retry path and the main grab gate)."""
+        import utils.blackhole as bh
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn: ('tt1234567', 'movie', None, None))
+        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        seen = []
+        stub = type('B', (), {'is_blocked': staticmethod(
+            lambda h: seen.append(h) or h.lower() == self.CACHED_ALT)})()
+        monkeypatch.setattr(bh, '_blocklist', stub)
+        adds = []
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: adds.append(1) or (True, {}))
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert not adds
+        assert os.path.exists(fp)
+        assert seen  # the blocklist was actually consulted
+
+    def test_grab_records_tried_hash_in_ledger(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn: ('tt777', 'series', 2, 1))
+        self._stub_search(monkeypatch, [self._candidate(
+            self.CACHED_ALT, title='Show.S02.1080p.WEB.x264-GRP')])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        monkeypatch.setattr(w, '_add_to_torbox', lambda *a, **k: (True, {}))
+        fp = self._make_file(tmp_dir, 'Show.S02E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is True
+        assert self.ledger.get(f'tbalttried:tt777:s2:{self.CACHED_ALT}') == 1
+
+    def test_tried_alt_not_regrabbed_next_cycle(self, tmp_dir, monkeypatch):
+        """Second recovery cycle for the same (imdb, season) — i.e. the first
+        alt failed to import and the arr searched again after the dedup TTL —
+        must pick a DIFFERENT candidate, and give up once all are tried."""
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn: ('tt777', 'series', 2, 1))
+        alt_b = 'c' * 40
+        self._stub_search(monkeypatch, [
+            self._candidate(self.CACHED_ALT, seeds=50,
+                            title='Show.S02.1080p.WEB.x264-GRP'),
+            self._candidate(alt_b, seeds=5,
+                            title='Show.S02.1080p.WEB.x264-OTHER'),
+        ])
+        self._stub_cache(monkeypatch,
+                         {self.CACHED_ALT: True, alt_b: True})
+        added = []
+        def fake_add(path, api_key=None):
+            with open(path) as f:
+                added.append(f.read())
+            return True, {}
+        monkeypatch.setattr(w, '_add_to_torbox', fake_add)
+
+        # Cycle 1: grabs the best-seeded candidate.
+        fp1 = self._make_file(tmp_dir, 'Show.S02E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp1, os.path.basename(fp1), self.REJECTED, 'realdebrid') is True
+        assert self.CACHED_ALT in added[0]
+        # Original removed by the grab — the later cycles' _make_file calls
+        # reuse this name, so a leaked file would silently mask cycle 3's
+        # file-kept assertion.
+        assert not os.path.exists(fp1)
+
+        # The 6h sibling dedup would suppress the next call outright; the
+        # real loop fires only after it expires, so neutralize it here to
+        # isolate the tried-hash memory.
+        monkeypatch.setattr(w, '_tb_alt_recently_grabbed', lambda k: False)
+
+        # Cycle 2: the tried hash is excluded -> the OTHER candidate wins.
+        fp2 = self._make_file(tmp_dir, 'Show.S02E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp2, os.path.basename(fp2), self.REJECTED, 'realdebrid') is True
+        assert alt_b in added[1]
+
+        # Cycle 3: every candidate tried -> decline, no TorBox create.
+        fp3 = self._make_file(tmp_dir, 'Show.S02E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp3, os.path.basename(fp3), self.REJECTED, 'realdebrid') is False
+        assert len(added) == 2
+        assert os.path.exists(fp3)
+
+    def test_tried_hash_is_season_scoped(self, tmp_dir, monkeypatch):
+        """A pack tried for S02 must not be barred for S03 of the same show
+        (and vice versa) — the key is (imdb, season, hash)."""
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        ident = {'season': 2}
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn: ('tt777', 'series', ident['season'], 1))
+        self._stub_search(monkeypatch, [self._candidate(
+            self.CACHED_ALT, title='Show.1080p.WEB.x264-GRP')])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        adds = []
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: adds.append(1) or (True, {}))
+        fp1 = self._make_file(tmp_dir, 'Show.S02E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp1, os.path.basename(fp1), self.REJECTED, 'realdebrid') is True
+        ident['season'] = 3
+        fp2 = self._make_file(tmp_dir, 'Show.S03E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp2, os.path.basename(fp2), self.REJECTED, 'realdebrid') is True
+        assert len(adds) == 2

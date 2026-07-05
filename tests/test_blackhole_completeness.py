@@ -127,6 +127,23 @@ class TestCompletenessAudit:
         # Only MAX triggers should have fired
         assert sonarr_client.ensure_and_search.call_count == handler._AUDIT_RETRIGGER_MAX_PER_WINDOW
 
+    def test_torbox_payload_blocklists_real_hash(self, handler, tmp_dir, monkeypatch):
+        """A TB-alt monitor audits with a TorBox status payload while the
+        instance debrid is RD.  Pre-fix, hash extraction defaulted to the RD
+        shape, returned '' and silently skipped the blocklist add — so the
+        mislabeled alternative was re-grabbed every search cycle."""
+        mount = _populate_mount(tmp_dir, ['Show.S01E04.mkv'])  # E5 missing
+        filename = 'Show.S01E04-E05.1080p.WEB-DL.torrent'
+        info = {'data': {'hash': 'b' * 40}}  # TorBox shape
+        monkeypatch.setenv('BLOCKLIST_AUTO_ADD', 'true')
+        with patch('utils.blackhole._blocklist') as bl:
+            with patch('utils.blackhole.get_download_service', return_value=(MagicMock(), 'sonarr'), create=True):
+                handler._audit_release_completeness(
+                    filename, 'Show.S01E04-E05', mount, info, debrid='torbox')
+        bl.add.assert_called_once()
+        args, _kwargs = bl.add.call_args
+        assert args[0] == 'B' * 40
+
     def test_missing_info_hash_still_logs_history(self, handler, tmp_dir):
         mount = _populate_mount(tmp_dir, [])  # delivered nothing
         filename = 'Show.S01E04.torrent'

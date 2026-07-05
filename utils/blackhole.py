@@ -2219,8 +2219,15 @@ class BlackholeWatcher:
         with self._audit_retrigger_lock:
             self._audit_retrigger.setdefault(key, []).append(time.time())
 
-    def _audit_release_completeness(self, filename, release_name, mount_path, info):
+    def _audit_release_completeness(self, filename, release_name, mount_path, info,
+                                    debrid=None):
         """Verify a TV release actually delivered every claimed episode.
+
+        *debrid* names the provider whose status response ``info`` is —
+        hash extraction is provider-specific, so defaulting to the instance
+        debrid on a TB-alt monitor's TorBox payload would silently yield no
+        hash and skip the blocklist add (the exact memory-loss that lets a
+        mislabeled alternative be re-grabbed every search cycle).
 
         Only audits episode-level releases — ``_parse_episodes`` returns an
         empty set for season packs, and we have no TMDB ground truth at this
@@ -2270,7 +2277,7 @@ class BlackholeWatcher:
 
         info_hash = ''
         try:
-            info_hash = self._extract_hash_from_info(info) or ''
+            info_hash = self._extract_hash_from_info(info, debrid=debrid) or ''
         except Exception:
             pass
 
@@ -3007,7 +3014,8 @@ class BlackholeWatcher:
                             f'{count} symlink(s) created for {release_name}')
                 # Post-grab audit: did every claimed episode actually land?
                 try:
-                    self._audit_release_completeness(filename, release_name, mount_path, info)
+                    self._audit_release_completeness(filename, release_name, mount_path, info,
+                                                     debrid=debrid)
                 except Exception as e:
                     logger.debug(f"[blackhole] Completeness audit error for {release_name}: {e}")
                 try:
@@ -3789,8 +3797,28 @@ class BlackholeWatcher:
                                            filename)
                      if y not in title_toks]
             approved_year = int(years[0]) if years else None
+
+            def _eligible_hash(h):
+                """Not the rejected original, not blocklisted, and not an
+                alternative a previous recovery cycle already grabbed.
+
+                A hash re-entering this path after a grab means that grab
+                did not satisfy the arr (mislabeled payload, no symlink,
+                scanner-handoff limbo, ...) — re-grabbing it can only burn
+                another TorBox create and re-arm the abuse cooldown while
+                the arr's ~6h search cycle keeps feeding the loop.  Checked
+                BEFORE the probe slice so dead candidates can't occupy
+                cache-probe budget either.
+                """
+                if not h or h == rejected:
+                    return False
+                if _blocklist and _blocklist.is_blocked(h):
+                    return False
+                return attempt_ledger.get(
+                    self._tb_alt_tried_ledger_key(imdb_id, season, h)) == 0
+
             candidates = [r for r in results
-                          if (r.get('info_hash') or '').lower() != rejected
+                          if _eligible_hash((r.get('info_hash') or '').lower())
                           and (r.get('quality') or {}).get('label') == target_tier
                           and release_matches_title(r.get('title') or '',
                                                     approved_title,
@@ -3888,6 +3916,13 @@ class BlackholeWatcher:
         # False), and dedup_key is assigned before any code that can do so.
         self._remember_tb_alt_grab(dedup_key)
         attempt_ledger.bump(ledger_key)
+        # Recorded at grab time, not at import-failure time: success means
+        # the arr imports and stops hunting, so the only way this (imdb,
+        # season) re-enters the recovery is if this grab failed — and every
+        # failure mode (mislabeled payload, no symlink, handoff limbo,
+        # monitor death) funnels back here without needing its own
+        # report-back hook.
+        attempt_ledger.bump(self._tb_alt_tried_ledger_key(imdb_id, season, alt_hash))
         try:
             os.remove(file_path)
         except OSError as e:
@@ -3924,6 +3959,22 @@ class BlackholeWatcher:
             logger.warning(f"[blackhole] TB-alt: post-recovery bookkeeping failed for "
                            f"{filename}: {e}")
         return True
+
+    @staticmethod
+    def _tb_alt_tried_ledger_key(imdb_id, season, alt_hash):
+        """attempt_ledger key marking a specific cached alternative as
+        already grabbed for this (imdb_id, season).
+
+        Distinct ``tbalttried:`` family — per-hash memory, unlike the
+        ``tbalt:`` give-up counter (per-season count) and ``tbaltdedup:``
+        (per-season TTL).  Season-scoped to match those families' identity
+        and so mislabeled uploads sharing a hash across titles can't
+        cross-poison.  Movies key as ``sNone`` — same silent convention as
+        the peer families.  Hash is stored lowercase (Torrentio convention).
+        Entries decay with the ledger's 30-idle-day prune, giving an
+        abandoned title a fresh chance if it ever flows back through.
+        """
+        return f"tbalttried:{imdb_id}:s{season}:{(alt_hash or '').lower()}"
 
     @staticmethod
     def _tb_alt_dedup_ledger_key(key):

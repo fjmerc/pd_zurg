@@ -173,6 +173,17 @@ def prune(max_age_seconds):
         logger.debug(f"[attempt_ledger] Pruned {removed} stale key(s)")
 
 
+def snapshot():
+    """Return a point-in-time copy of the ledger map.
+
+    ``{key: {count, first_ts, last_ts}}`` with per-entry dict copies so
+    callers (the /api/stuck collector) can read cross-thread without
+    racing ``bump``/``prune``.  Empty dict before ``init()``.
+    """
+    with _lock:
+        return {k: dict(v) for k, v in _state.items()}
+
+
 def size():
     """Return the number of tracked keys. Test/debug hook."""
     with _lock:
@@ -186,4 +197,5 @@ def reset_all():
         _write_locked()
 
 
-__all__ = ['init', 'bump', 'get', 'reset', 'prune', 'size', 'reset_all']
+__all__ = ['init', 'bump', 'get', 'reset', 'prune', 'size', 'reset_all',
+           'snapshot', 'last_seen_epoch']

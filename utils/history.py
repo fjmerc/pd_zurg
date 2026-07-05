@@ -219,6 +219,21 @@ def query(type=None, title=None, start=None, end=None, page=1, limit=50):
     }
 
 
+def events_since(start):
+    """Return all events at or after ISO timestamp ``start``, oldest first.
+
+    Unpaginated — for aggregation readers (the /api/stuck collector) that
+    need the full retention window, not a UI page.  Bounded by the 30-day
+    ``rotate()`` retention.
+    """
+    if _file_path is None:
+        return []
+    events = _read_all_events()
+    if start:
+        events = [e for e in events if e.get('ts', '') >= start]
+    return events
+
+
 def count_by_cause(causes, start=None):
     """Count events whose ``meta['cause']`` is one of ``causes``.
 

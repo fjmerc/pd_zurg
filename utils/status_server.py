@@ -1684,6 +1684,18 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == '/api/blocklist':
             from utils import blocklist as blocklist_mod
             self._send_json_response(200, json.dumps(blocklist_mod.get_all()))
+        elif self.path == '/api/stuck' or self.path.startswith('/api/stuck?'):
+            # No cache-bypass param: on auth-less installs this GET is open
+            # (like /api/history) and a cold collect walks 30 days of
+            # history, so the 60s cache is the DoS guard.  The mutating
+            # endpoints invalidate the cache, so post-action reloads are
+            # still fresh.
+            try:
+                from utils import stuck
+                self._send_json_response(200, json.dumps(stuck.collect()))
+            except Exception as e:
+                logger.exception("[stuck] collect failed")
+                self._send_json_response(500, json.dumps({'error': str(e)}))
         elif self.path == '/activity' or self.path.startswith('/activity?'):
             from utils.activity_page import get_activity_html
             self._send_html_response(get_activity_html().encode())
@@ -2787,9 +2799,76 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             from utils import blocklist as blocklist_mod
             entry_id = blocklist_mod.add(info_hash, title, reason=reason, source='manual')
             if entry_id:
+                # A manual block changes the Stuck tab's annotations — drop
+                # its 60s cache so the follow-up reload reflects it.
+                try:
+                    from utils import stuck as _stuck
+                    _stuck.invalidate_cache()
+                except Exception:
+                    pass
                 self._send_json_response(200, json.dumps({'status': 'added', 'id': entry_id}))
             else:
                 self._send_json_response(500, json.dumps({'error': 'Failed to add entry'}))
+        elif self.path == '/api/stuck/retry':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 100_000:
+                    self._send_json_response(400, json.dumps({'error': 'Request body too large'}))
+                    return
+                body = self.rfile.read(content_length)
+                values = json.loads(body.decode('utf-8'))
+                if not isinstance(values, dict):
+                    self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
+                    return
+                key = (values.get('key') or '').strip()
+                title = (values.get('title') or '').strip()
+                imdb_id = (values.get('imdb_id') or '').strip()
+                if not key:
+                    self._send_json_response(400, json.dumps({'error': 'key required'}))
+                    return
+                if len(key) > 512 or len(title) > 512:
+                    self._send_json_response(400, json.dumps({'error': 'key/title too long'}))
+                    return
+                if imdb_id:
+                    import re as _re
+                    if not _re.match(r'^tt\d{7,8}$', imdb_id):
+                        self._send_json_response(400, json.dumps({'error': 'imdb_id must be tt followed by 7-8 digits'}))
+                        return
+                from utils import stuck
+                cleared = stuck.clear_retry_state(key, title=title or None,
+                                                  imdb_id=imdb_id or None)
+                self._send_json_response(200, json.dumps({'status': 'cleared', **cleared}))
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception:
+                logger.exception("[stuck] retry failed")
+                self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
+        elif self.path == '/api/stuck/dismiss':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 100_000:
+                    self._send_json_response(400, json.dumps({'error': 'Request body too large'}))
+                    return
+                body = self.rfile.read(content_length)
+                values = json.loads(body.decode('utf-8'))
+                if not isinstance(values, dict):
+                    self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
+                    return
+                key = (values.get('key') or '').strip()
+                if not key:
+                    self._send_json_response(400, json.dumps({'error': 'key required'}))
+                    return
+                if len(key) > 512:
+                    self._send_json_response(400, json.dumps({'error': 'key too long'}))
+                    return
+                from utils import stuck
+                stuck.dismiss(key)
+                self._send_json_response(200, json.dumps({'status': 'dismissed'}))
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception:
+                logger.exception("[stuck] dismiss failed")
+                self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
         elif self.path == '/api/search':
             try:
                 content_length = int(self.headers.get('Content-Length', 0))

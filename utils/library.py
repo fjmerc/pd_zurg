@@ -2352,6 +2352,15 @@ def _deserialize_cache_state(envelope):
 
 
 class LibraryScanner:
+    # Guards the three Wanted-recovery memo dicts (_wanted_tb_cooldown,
+    # _wanted_rd_miss, _wanted_no_results).  The scan-effects thread owns all
+    # writes during a pass; HTTP threads read snapshots (/api/stuck) and clear
+    # keys (retry action).  Bare membership checks on the effects thread stay
+    # lock-free (GIL-atomic, no iteration); anything that iterates, copies,
+    # rebinds, or mutates must hold this.  Class-level so test instances built
+    # via __new__ (bypassing __init__) still have it.
+    _wanted_memo_lock = threading.Lock()
+
     def __init__(self):
         self._mount_path = _discover_mount()
         self._local_movies_path = os.environ.get('BLACKHOLE_LOCAL_LIBRARY_MOVIES', '').strip() or None
@@ -3343,6 +3352,15 @@ class LibraryScanner:
             with self._lock:
                 self._effects_running = False
         return data
+
+    def peek_data(self):
+        """Return the cached scan payload without ever triggering a scan.
+
+        Monitoring readers (/api/stuck) must not pay — or race — a
+        synchronous library scan; stale-or-None is acceptable there.
+        """
+        with self._lock:
+            return self._cache
 
     def get_data(self):
         with self._lock:
@@ -4388,18 +4406,19 @@ class LibraryScanner:
 
         now = time.monotonic()
         # Expire per-title cooldown/miss entries.
-        self._wanted_tb_cooldown = {
-            k: t for k, t in self._wanted_tb_cooldown.items()
-            if now - t < self._WANTED_TB_RECOVERY_COOLDOWN
-        }
-        self._wanted_rd_miss = {
-            k: t for k, t in self._wanted_rd_miss.items()
-            if now - t < self._WANTED_RD_MISS_TTL
-        }
-        self._wanted_no_results = {
-            k: t for k, t in self._wanted_no_results.items()
-            if now - t < self._WANTED_TB_RECOVERY_COOLDOWN
-        }
+        with self._wanted_memo_lock:
+            self._wanted_tb_cooldown = {
+                k: t for k, t in self._wanted_tb_cooldown.items()
+                if now - t < self._WANTED_TB_RECOVERY_COOLDOWN
+            }
+            self._wanted_rd_miss = {
+                k: t for k, t in self._wanted_rd_miss.items()
+                if now - t < self._WANTED_RD_MISS_TTL
+            }
+            self._wanted_no_results = {
+                k: t for k, t in self._wanted_no_results.items()
+                if now - t < self._WANTED_TB_RECOVERY_COOLDOWN
+            }
 
         tb_budget = wanted_tb_recovery_max_per_scan()
         rd_budget = wanted_rd_recovery_max_per_scan()
@@ -4521,7 +4540,7 @@ class LibraryScanner:
                             "[library] Wanted recovery title-match filter "
                             "failed — using unfiltered results")
             if not results:
-                self._wanted_no_results[key] = time.monotonic()
+                self._memo_wanted(self._wanted_no_results, key)
                 continue
 
             # Rank by quality score then seeds; cap the TB cache fan-out.
@@ -4546,7 +4565,7 @@ class LibraryScanner:
                     rd_attempts += 1
                 if outcome == 'recovered':
                     rd_added += 1
-                    self._wanted_tb_cooldown[key] = time.monotonic()
+                    self._memo_wanted(self._wanted_tb_cooldown, key)
                     continue  # recovered on RD — no TB add needed
 
             # ---- TB leg: cache probe + add ---------------------------
@@ -4562,7 +4581,7 @@ class LibraryScanner:
             cached = next((r for r in probe if cmap.get(r['info_hash'])), None)
             if not cached:
                 # Probed, nothing cached — cool down so we don't re-walk it.
-                self._wanted_tb_cooldown[key] = time.monotonic()
+                self._memo_wanted(self._wanted_tb_cooldown, key)
                 continue
 
             try:
@@ -4583,7 +4602,7 @@ class LibraryScanner:
             # Cool the title down regardless of outcome: a success is added
             # (no need to re-add), a duplicate is already present, and a
             # transient failure shouldn't be retried until the window elapses.
-            self._wanted_tb_cooldown[key] = time.monotonic()
+            self._memo_wanted(self._wanted_tb_cooldown, key)
             if result.get('success'):
                 tb_added += 1
 
@@ -4645,7 +4664,7 @@ class LibraryScanner:
         if info_hash in existing:
             logger.info(f"[library] Wanted→RD probe skipped for "
                         f"{media_title!r} — hash already on RD account")
-            self._wanted_rd_miss[key] = time.monotonic()
+            self._memo_wanted(self._wanted_rd_miss, key)
             return 'skipped'
 
         # Re-issue selectFiles (once) if the add's own selection fired
@@ -4679,7 +4698,7 @@ class LibraryScanner:
             reason = core.get('reason', 'error')
             if reason in ('never_ready', 'failed_state'):
                 # Genuine cache miss — memoize + log the measurement.
-                self._wanted_rd_miss[key] = time.monotonic()
+                self._memo_wanted(self._wanted_rd_miss, key)
                 self._log_wanted_rd_miss(
                     title, media_title, ep_str, info_hash,
                     reason=core.get('state') or reason)
@@ -4689,7 +4708,7 @@ class LibraryScanner:
                 # post-add probe_file block below.  Without this branch
                 # the title would be retried every scan forever and never
                 # counted in the hit-rate measurement.
-                self._wanted_rd_miss[key] = time.monotonic()
+                self._memo_wanted(self._wanted_rd_miss, key)
                 self._log_wanted_rd_miss(
                     title, media_title, ep_str, info_hash,
                     reason='infringing_add')
@@ -4712,7 +4731,7 @@ class LibraryScanner:
                 rd_client.delete_torrent(tid)
             except Exception:
                 pass
-            self._wanted_rd_miss[key] = time.monotonic()
+            self._memo_wanted(self._wanted_rd_miss, key)
             self._log_wanted_rd_miss(
                 title, media_title, ep_str, info_hash,
                 reason=probe.get('reason', 'blocked'))
@@ -4760,6 +4779,44 @@ class LibraryScanner:
             )
         except Exception:
             pass
+
+    def _memo_wanted(self, memo, key):
+        """Stamp ``memo[key] = now`` under the memo lock (writer side)."""
+        with self._wanted_memo_lock:
+            memo[key] = time.monotonic()
+
+    def wanted_recovery_snapshot(self):
+        """Point-in-time copy of the Wanted-recovery memos for cross-thread
+        readers (the /api/stuck collector).
+
+        Keys are ``imdb`` (movies) or ``imdb:season:episode`` (shows).
+        Values are converted from monotonic stamps to age-in-seconds so
+        callers never have to compare against this process's monotonic
+        clock themselves.
+        """
+        now = time.monotonic()
+        with self._wanted_memo_lock:
+            return {
+                'no_results': {k: now - t for k, t in self._wanted_no_results.items()},
+                'rd_miss': {k: now - t for k, t in self._wanted_rd_miss.items()},
+                'tb_cooldown': {k: now - t for k, t in self._wanted_tb_cooldown.items()},
+            }
+
+    def clear_wanted_memos(self, imdb_id):
+        """Drop every recovery memo for ``imdb_id`` (movie key or any
+        ``imdb:s:e`` episode key) so the next scan's recovery pass retries
+        the title immediately.  Returns the number of keys removed."""
+        if not imdb_id:
+            return 0
+        prefix = f"{imdb_id}:"
+        removed = 0
+        with self._wanted_memo_lock:
+            for d in (self._wanted_no_results, self._wanted_rd_miss,
+                      self._wanted_tb_cooldown):
+                for k in [k for k in d if k == imdb_id or k.startswith(prefix)]:
+                    del d[k]
+                    removed += 1
+        return removed
 
     def _clear_resolved_pending(self, shows, movies):
         """Clear pending entries that are resolved or stale.

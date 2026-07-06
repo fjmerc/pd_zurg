@@ -52,6 +52,12 @@ CAUSE_INCOMPLETE_RELEASE = 'incomplete_release'
 CAUSE_ALTS_EXHAUSTED = 'alts_exhausted'
 CAUSE_DUPLICATE_SKIPPED = 'duplicate_skipped'
 CAUSE_BLOCKLISTED_HASH = 'blocklisted_hash'
+# Uncached-rejected grab reported back to the owning arr via the failed-
+# download API: the arr blocklists THAT release and immediately searches for
+# a different one.  Distinct from CAUSE_BLOCKLISTED_HASH (local pd_zurg
+# blocklist rejecting an incoming drop) — this is the outbound feedback that
+# breaks the silent delete → identical re-grab loop.
+CAUSE_ARR_FEEDBACK_BLOCKLISTED = 'arr_feedback_blocklisted'
 CAUSE_DEBRID_UNAVAILABLE_MARKED = 'debrid_unavailable_marked'
 CAUSE_DEBRID_ADD_VIA_SEARCH = 'debrid_add_via_search'
 # A "Wanted" library ghost (monitored, no file) that the arr never grabbed was

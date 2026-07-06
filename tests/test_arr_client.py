@@ -2358,3 +2358,131 @@ class TestProfileIdLookups:
     def test_get_profile_id_rejects_non_positive(self, mock_urlopen, radarr):
         mock_urlopen.return_value = _mock_urlopen({'id': 12, 'qualityProfileId': 0})
         assert radarr.get_profile_id_for_movie(12) is None
+
+
+# ---------------------------------------------------------------------------
+# mark_download_failed — failed-download feedback (blocklist + re-search)
+# ---------------------------------------------------------------------------
+
+class TestMarkDownloadFailed:
+    """The arr must be told an uncached grab failed, or it re-grabs the
+    identical release on every RSS pass.  Queue path: DELETE the queue item
+    with blocklist=true.  Fallback: POST /history/failed/{id} when the queue
+    item was already pruned."""
+
+    HASH = 'AB' * 20
+
+    def _wire(self, client, monkeypatch, queue=None, history=None,
+              delete_result=None, post_result=None):
+        calls = {'get': [], 'delete': [], 'post': []}
+
+        def fake_get(path, params=None, timeout=None):
+            calls['get'].append((path, params))
+            if path == '/api/v3/queue':
+                return queue
+            if path == '/api/v3/history':
+                return history
+            return None
+
+        def fake_delete(path, params=None):
+            calls['delete'].append((path, params))
+            return delete_result
+
+        def fake_post(path, body=None):
+            calls['post'].append((path, body))
+            return post_result
+
+        monkeypatch.setattr(client, '_get', fake_get)
+        monkeypatch.setattr(client, '_delete', fake_delete)
+        monkeypatch.setattr(client, '_post', fake_post)
+        return calls
+
+    def test_unconfigured_returns_false(self, monkeypatch):
+        client = SonarrClient('', '')
+        assert client.mark_download_failed(self.HASH) is False
+
+    def test_empty_hash_returns_false(self, sonarr, monkeypatch):
+        calls = self._wire(sonarr, monkeypatch)
+        assert sonarr.mark_download_failed('') is False
+        assert sonarr.mark_download_failed('   ') is False
+        assert calls['get'] == []
+
+    def test_queue_item_deleted_with_blocklist_and_research(self, sonarr, monkeypatch):
+        queue = {'records': [
+            {'id': 7, 'downloadId': self.HASH.lower(), 'title': 'Show.S01E01'}]}
+        calls = self._wire(sonarr, monkeypatch, queue=queue, delete_result={})
+        assert sonarr.mark_download_failed(self.HASH) is True
+        assert len(calls['delete']) == 1
+        path, params = calls['delete'][0]
+        assert path == '/api/v3/queue/7'
+        assert params['blocklist'] == 'true'
+        assert params['removeFromClient'] == 'true'
+        assert params['skipRedownload'] == 'false'
+        assert calls['post'] == []
+
+    def test_search_again_false_skips_redownload(self, radarr, monkeypatch):
+        queue = {'records': [{'id': 3, 'downloadId': self.HASH}]}
+        calls = self._wire(radarr, monkeypatch, queue=queue, delete_result={})
+        assert radarr.mark_download_failed(self.HASH, search_again=False) is True
+        assert calls['delete'][0][1]['skipRedownload'] == 'true'
+
+    def test_queue_delete_http_failure_returns_false(self, sonarr, monkeypatch):
+        queue = {'records': [{'id': 7, 'downloadId': self.HASH}]}
+        calls = self._wire(sonarr, monkeypatch, queue=queue, delete_result=None)
+        assert sonarr.mark_download_failed(self.HASH) is False
+        # Must NOT fall through to the history path after a failed delete —
+        # the queue item still exists; retrying is the caller's decision.
+        assert calls['post'] == []
+
+    def test_history_fallback_when_queue_pruned(self, sonarr, monkeypatch):
+        history = {'records': [
+            {'id': 99, 'eventType': 'downloadFolderImported'},
+            {'id': 41, 'eventType': 'grabbed', 'sourceTitle': 'Show.S01E01'}]}
+        calls = self._wire(sonarr, monkeypatch, queue={'records': []},
+                           history=history, post_result={})
+        assert sonarr.mark_download_failed(self.HASH) is True
+        assert calls['post'] == [('/api/v3/history/failed/41', {})]
+
+    def test_history_lookup_sends_uppercase_hash(self, sonarr, monkeypatch):
+        calls = self._wire(sonarr, monkeypatch, queue={'records': []},
+                           history={'records': []})
+        assert sonarr.mark_download_failed(self.HASH.lower()) is False
+        hist_calls = [p for p in calls['get'] if p[0] == '/api/v3/history']
+        assert hist_calls[0][1]['downloadId'] == self.HASH.upper()
+
+    def test_no_queue_or_history_record_returns_false(self, radarr, monkeypatch):
+        calls = self._wire(radarr, monkeypatch, queue={'records': []},
+                           history={'records': []})
+        assert radarr.mark_download_failed(self.HASH) is False
+        assert calls['delete'] == []
+        assert calls['post'] == []
+
+    def test_history_post_failure_returns_false(self, sonarr, monkeypatch):
+        history = {'records': [{'id': 41, 'eventType': 'grabbed'}]}
+        self._wire(sonarr, monkeypatch, queue={'records': []},
+                   history=history, post_result=None)
+        assert sonarr.mark_download_failed(self.HASH) is False
+
+    def test_history_second_grabbed_record_tried_after_first_post_fails(
+            self, sonarr, monkeypatch):
+        # A re-grabbed release leaves several 'grabbed' records for the same
+        # downloadId — a failed POST on the first must not abort the rest.
+        history = {'records': [
+            {'id': 41, 'eventType': 'grabbed'},
+            {'id': 52, 'eventType': 'grabbed'}]}
+        calls = self._wire(sonarr, monkeypatch, queue={'records': []},
+                           history=history)
+        results = iter([None, {}])
+
+        def fake_post(path, body=None):
+            calls['post'].append((path, body))
+            return next(results)
+
+        monkeypatch.setattr(sonarr, '_post', fake_post)
+        assert sonarr.mark_download_failed(self.HASH) is True
+        assert [p[0] for p in calls['post']] == [
+            '/api/v3/history/failed/41', '/api/v3/history/failed/52']
+
+    def test_radarr_inherits_same_method(self):
+        # Sonarr/Radarr parity by inheritance — one implementation on the base.
+        assert RadarrClient.mark_download_failed is SonarrClient.mark_download_failed

@@ -829,6 +829,29 @@ class TestTorboxCooldownProbe:
         _check_torbox_cooldown('tb-key', _now=now + 999)
         assert call_count['n'] == 2
 
+    def test_force_refresh_bypasses_fresh_cache(self, monkeypatch):
+        """The enforcement re-check must see a cooldown armed AFTER the
+        pass's advisory pre-check cached 0 — force_refresh re-queries even
+        within the TTL, so a just-armed cooldown isn't masked."""
+        from datetime import datetime, timedelta, timezone
+        # Pre-seed the cache as "no cooldown, just checked".
+        _tb_cooldown_cache['checked_at'] = time.time()
+        _tb_cooldown_cache['seconds_until'] = 0.0
+        future = datetime.now(timezone.utc) + timedelta(seconds=600)
+        iso = future.strftime('%Y-%m-%dT%H:%M:%SZ')
+        resp = self._mock_response(200, {'data': {'cooldown_until': iso}})
+        calls = {'n': 0}
+        def _get(*a, **kw):
+            calls['n'] += 1
+            return resp
+        monkeypatch.setattr('utils.blackhole.requests.get', _get)
+        # A normal read would return the cached 0; force_refresh re-queries.
+        assert _check_torbox_cooldown('tb-key') == 0.0
+        assert calls['n'] == 0
+        seconds = _check_torbox_cooldown('tb-key', force_refresh=True)
+        assert 595 <= seconds <= 605
+        assert calls['n'] == 1
+
 
 class TestCoalescedRootRefresh:
     """``_coalesced_root_refresh`` collapses the N-way root-relist burst a
@@ -5059,7 +5082,7 @@ class TestTorboxCachedAlternative:
         monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
         w = self._make_watcher(tmp_dir)
         monkeypatch.setattr(w, '_resolve_arr_identity',
-                            lambda fn: (None, None, None, None))
+                            lambda fn, label=None: (None, None, None, None))
         fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
         assert w._try_torbox_cached_alternative(
             fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
@@ -5069,7 +5092,7 @@ class TestTorboxCachedAlternative:
         monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
         w = self._make_watcher(tmp_dir)
         monkeypatch.setattr(w, '_resolve_arr_identity',
-                            lambda fn: ('tt1234567', 'movie', None, None))
+                            lambda fn, label=None: ('tt1234567', 'movie', None, None))
         self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
         # The only alternative is uncached on TorBox.
         self._stub_cache(monkeypatch, {self.CACHED_ALT: False})
@@ -5088,7 +5111,7 @@ class TestTorboxCachedAlternative:
         monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
         w = self._make_watcher(tmp_dir)
         monkeypatch.setattr(w, '_resolve_arr_identity',
-                            lambda fn: ('tt1234567', 'movie', None, None))
+                            lambda fn, label=None: ('tt1234567', 'movie', None, None))
         # Rejected release was 1080p; only cached alt is 720p.
         self._stub_search(monkeypatch,
                           [self._candidate(self.CACHED_ALT, tier='720p')])
@@ -5107,7 +5130,7 @@ class TestTorboxCachedAlternative:
         monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
         w = self._make_watcher(tmp_dir)
         monkeypatch.setattr(w, '_resolve_arr_identity',
-                            lambda fn: ('tt1234567', 'movie', None, None))
+                            lambda fn, label=None: ('tt1234567', 'movie', None, None))
         self._stub_search(monkeypatch, [self._candidate(
             self.CACHED_ALT, title='Fight.Club.1999.1080p.WEB.x264-JUNK')])
         self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
@@ -5126,7 +5149,7 @@ class TestTorboxCachedAlternative:
         monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
         w = self._make_watcher(tmp_dir)
         monkeypatch.setattr(w, '_resolve_arr_identity',
-                            lambda fn: ('tt1234567', 'movie', None, None))
+                            lambda fn, label=None: ('tt1234567', 'movie', None, None))
         # Search returns ONLY the rejected hash -> nothing left after exclusion.
         self._stub_search(monkeypatch, [self._candidate(self.REJECTED)])
         self._stub_cache(monkeypatch, {self.REJECTED: True})
@@ -5140,7 +5163,7 @@ class TestTorboxCachedAlternative:
         monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
         w = self._make_watcher(tmp_dir)
         monkeypatch.setattr(w, '_resolve_arr_identity',
-                            lambda fn: ('tt1234567', 'movie', None, None))
+                            lambda fn, label=None: ('tt1234567', 'movie', None, None))
         # One uncached alt + one cached alt, same tier as rejected (1080p).
         self._stub_search(monkeypatch, [
             self._candidate(self.CACHED_ALT, tier='1080p', seeds=50),
@@ -5178,7 +5201,7 @@ class TestTorboxCachedAlternative:
         monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
         w = self._make_watcher(tmp_dir)
         monkeypatch.setattr(w, '_resolve_arr_identity',
-                            lambda fn: ('tt1234567', 'movie', None, None))
+                            lambda fn, label=None: ('tt1234567', 'movie', None, None))
         self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
         self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
         monkeypatch.setattr(w, '_add_to_torbox',
@@ -5193,7 +5216,7 @@ class TestTorboxCachedAlternative:
         monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
         w = self._make_watcher(tmp_dir, symlink_enabled=True)
         monkeypatch.setattr(w, '_resolve_arr_identity',
-                            lambda fn: ('tt1234567', 'movie', None, None))
+                            lambda fn, label=None: ('tt1234567', 'movie', None, None))
         self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
         self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
         monkeypatch.setattr(w, '_add_to_torbox',
@@ -5214,7 +5237,7 @@ class TestTorboxCachedAlternative:
         monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
         w = self._make_watcher(tmp_dir, symlink_enabled=True)
         monkeypatch.setattr(w, '_resolve_arr_identity',
-                            lambda fn: ('tt1234567', 'movie', None, None))
+                            lambda fn, label=None: ('tt1234567', 'movie', None, None))
         self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
         self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
         # TorBox add "succeeds" but returns a body with no extractable id.
@@ -5237,7 +5260,7 @@ class TestTorboxCachedAlternative:
         monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
         w = self._make_watcher(tmp_dir)
         monkeypatch.setattr(w, '_resolve_arr_identity',
-                            lambda fn: ('tt999', 'series', 2, 1))
+                            lambda fn, label=None: ('tt999', 'series', 2, 1))
         self._stub_search(monkeypatch, [self._candidate(
             self.CACHED_ALT, title='Show.S02.1080p.WEB.x264-GRP')])
         self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
@@ -5262,7 +5285,7 @@ class TestTorboxCachedAlternative:
         w = self._make_watcher(tmp_dir)
         ident = {'season': 2}
         monkeypatch.setattr(w, '_resolve_arr_identity',
-                            lambda fn: ('tt999', 'series', ident['season'], 1))
+                            lambda fn, label=None: ('tt999', 'series', ident['season'], 1))
         self._stub_search(monkeypatch, [self._candidate(
             self.CACHED_ALT, title='Show.S02.1080p.WEB.x264-GRP')])
         self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
@@ -5285,7 +5308,7 @@ class TestTorboxCachedAlternative:
         monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
         w = self._make_watcher(tmp_dir)
         monkeypatch.setattr(w, '_resolve_arr_identity',
-                            lambda fn: ('tt999', 'series', 2, 1))
+                            lambda fn, label=None: ('tt999', 'series', 2, 1))
         self._stub_search(monkeypatch, [self._candidate(
             self.CACHED_ALT, title='Show.S02.1080p.WEB.x264-GRP')])
         cache = {self.CACHED_ALT: False}  # uncached on first attempt
@@ -5327,7 +5350,7 @@ class TestTorboxAltGiveUpCap(TestTorboxCachedAlternative):
         monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
         w = self._make_watcher(tmp_dir)
         monkeypatch.setattr(w, '_resolve_arr_identity',
-                            lambda fn: ('tt777', 'series', 2, 1))
+                            lambda fn, label=None: ('tt777', 'series', 2, 1))
         self._stub_search(monkeypatch, [self._candidate(
             self.CACHED_ALT, title='Show.S02.1080p.WEB.x264-GRP')])
         self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
@@ -5344,7 +5367,7 @@ class TestTorboxAltGiveUpCap(TestTorboxCachedAlternative):
         for _ in range(2):
             self.ledger.bump('tbalt:tt777:s2')
         monkeypatch.setattr(w, '_resolve_arr_identity',
-                            lambda fn: ('tt777', 'series', 2, 1))
+                            lambda fn, label=None: ('tt777', 'series', 2, 1))
         self._stub_search(monkeypatch, [self._candidate(
             self.CACHED_ALT, title='Show.S02.1080p.WEB.x264-GRP')])
         self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
@@ -5365,7 +5388,7 @@ class TestTorboxAltGiveUpCap(TestTorboxCachedAlternative):
         w = self._make_watcher(tmp_dir)
         imdb = {'id': 'tt111'}
         monkeypatch.setattr(w, '_resolve_arr_identity',
-                            lambda fn: (imdb['id'], 'movie', None, None))
+                            lambda fn, label=None: (imdb['id'], 'movie', None, None))
         alt_b = 'c' * 40
         self._stub_search(monkeypatch, [
             self._candidate(self.CACHED_ALT, title='Movie.A.1080p.WEB.x264-GRP'),
@@ -5448,7 +5471,7 @@ class TestTorboxAltRetryLoopBreaker(TestTorboxCachedAlternative):
         monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
         w = self._make_watcher(tmp_dir)
         monkeypatch.setattr(w, '_resolve_arr_identity',
-                            lambda fn: ('tt1234567', 'movie', None, None))
+                            lambda fn, label=None: ('tt1234567', 'movie', None, None))
         self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
         self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
         seen = []
@@ -5469,7 +5492,7 @@ class TestTorboxAltRetryLoopBreaker(TestTorboxCachedAlternative):
         monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
         w = self._make_watcher(tmp_dir)
         monkeypatch.setattr(w, '_resolve_arr_identity',
-                            lambda fn: ('tt777', 'series', 2, 1))
+                            lambda fn, label=None: ('tt777', 'series', 2, 1))
         self._stub_search(monkeypatch, [self._candidate(
             self.CACHED_ALT, title='Show.S02.1080p.WEB.x264-GRP')])
         self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
@@ -5486,7 +5509,7 @@ class TestTorboxAltRetryLoopBreaker(TestTorboxCachedAlternative):
         monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
         w = self._make_watcher(tmp_dir)
         monkeypatch.setattr(w, '_resolve_arr_identity',
-                            lambda fn: ('tt777', 'series', 2, 1))
+                            lambda fn, label=None: ('tt777', 'series', 2, 1))
         alt_b = 'c' * 40
         self._stub_search(monkeypatch, [
             self._candidate(self.CACHED_ALT, seeds=50,
@@ -5538,7 +5561,7 @@ class TestTorboxAltRetryLoopBreaker(TestTorboxCachedAlternative):
         w = self._make_watcher(tmp_dir)
         ident = {'season': 2}
         monkeypatch.setattr(w, '_resolve_arr_identity',
-                            lambda fn: ('tt777', 'series', ident['season'], 1))
+                            lambda fn, label=None: ('tt777', 'series', ident['season'], 1))
         self._stub_search(monkeypatch, [self._candidate(
             self.CACHED_ALT, title='Show.1080p.WEB.x264-GRP')])
         self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
@@ -5553,3 +5576,209 @@ class TestTorboxAltRetryLoopBreaker(TestTorboxCachedAlternative):
         assert w._try_torbox_cached_alternative(
             fp2, os.path.basename(fp2), self.REJECTED, 'realdebrid') is True
         assert len(adds) == 2
+
+
+class TestArrFailedFeedback:
+    """_push_arr_failed_feedback: an uncached-rejected grab must be reported
+    back to the owning arr (blocklist + immediate re-search) instead of
+    silently deleted — otherwise the arr re-grabs the identical release on
+    every RSS pass.  A persistent per-title strike cap bounds the walk down
+    the arr's candidate list."""
+
+    HASH = 'c' * 40
+
+    @pytest.fixture(autouse=True)
+    def _ledger(self, tmp_dir):
+        import importlib
+        from utils import attempt_ledger
+        importlib.reload(attempt_ledger)
+        attempt_ledger.init(config_dir=tmp_dir)
+        self.ledger = attempt_ledger
+        yield
+
+    def _make_watcher(self, tmp_dir):
+        return BlackholeWatcher(
+            os.path.join(tmp_dir, 'watch'), 'rdkey', 'realdebrid',
+            completed_dir=os.path.join(tmp_dir, 'completed'),
+            rclone_mount=os.path.join(tmp_dir, 'data'),
+        )
+
+    def _fake_arrs(self, monkeypatch, configured=True, result=True,
+                   raise_on_call=False):
+        """Patch SonarrClient/RadarrClient with call-recording fakes."""
+        import utils.arr_client as arr_client
+        record = {'sonarr': [], 'radarr': []}
+
+        def make(service):
+            class Fake:
+                def __init__(self):
+                    self.configured = configured
+
+                def mark_download_failed(self, info_hash, search_again=True):
+                    if raise_on_call:
+                        raise RuntimeError('boom')
+                    record[service].append(info_hash)
+                    return result
+            return Fake
+
+        monkeypatch.setattr(arr_client, 'SonarrClient', make('sonarr'))
+        monkeypatch.setattr(arr_client, 'RadarrClient', make('radarr'))
+        return record
+
+    TV_FILE = 'Show.S01E02.1080p.WEB.x264-GRP.mkv.magnet'
+    MOVIE_FILE = 'Sing.2.2021.1080p.WEB.x264-GRP.mkv.magnet'
+
+    def test_disabled_via_env_declines(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_ARR_FAILED_FEEDBACK_ENABLED', 'false')
+        w = self._make_watcher(tmp_dir)
+        record = self._fake_arrs(monkeypatch)
+        assert w._push_arr_failed_feedback(
+            self.TV_FILE, self.HASH, 'realdebrid') is False
+        assert record == {'sonarr': [], 'radarr': []}
+
+    def test_no_info_hash_declines(self, tmp_dir, monkeypatch):
+        w = self._make_watcher(tmp_dir)
+        record = self._fake_arrs(monkeypatch)
+        assert w._push_arr_failed_feedback(
+            self.TV_FILE, None, 'realdebrid') is False
+        assert record == {'sonarr': [], 'radarr': []}
+
+    def test_tv_success_routes_sonarr_and_bumps_ledger(self, tmp_dir, monkeypatch):
+        w = self._make_watcher(tmp_dir)
+        record = self._fake_arrs(monkeypatch)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt123', 'series', 1, 2))
+        assert w._push_arr_failed_feedback(
+            self.TV_FILE, self.HASH, 'realdebrid') is True
+        assert record['sonarr'] == [self.HASH]
+        assert record['radarr'] == []
+        assert self.ledger.get('arrfail:tt123:s1e2') == 1
+
+    def test_movie_success_routes_radarr_and_bumps_ledger(self, tmp_dir, monkeypatch):
+        w = self._make_watcher(tmp_dir)
+        record = self._fake_arrs(monkeypatch)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt777', 'movie', None, None))
+        assert w._push_arr_failed_feedback(
+            self.MOVIE_FILE, self.HASH, 'realdebrid') is True
+        assert record['radarr'] == [self.HASH]
+        assert record['sonarr'] == []
+        assert self.ledger.get('arrfail:tt777') == 1
+
+    def test_label_overrides_parsed_media_type(self, tmp_dir, monkeypatch):
+        # A movie-looking filename dropped in the sonarr/ label dir must be
+        # reported to Sonarr — directory layout is authoritative routing.
+        w = self._make_watcher(tmp_dir)
+        record = self._fake_arrs(monkeypatch)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt555', 'movie', None, None))
+        assert w._push_arr_failed_feedback(
+            self.MOVIE_FILE, self.HASH, 'realdebrid', label='sonarr') is True
+        assert record['sonarr'] == [self.HASH]
+        assert record['radarr'] == []
+
+    def test_resolve_identity_honors_label_override(self, tmp_dir, monkeypatch):
+        # The identity lookup must follow the same authoritative label
+        # routing as the client choice — a movie-shaped filename under the
+        # sonarr/ label queried against Radarr would return the wrong (or
+        # no) IMDb id, corrupting the strike key.
+        import utils.arr_client as arr_client
+        w = self._make_watcher(tmp_dir)
+
+        class FakeSonarr:
+            configured = True
+
+            def find_series_in_library(self, title=None):
+                return {'imdbId': 'tt42'}
+
+        class FakeRadarr:
+            configured = True
+
+            def find_movie_in_library(self, title=None):
+                raise AssertionError(
+                    'label said sonarr — Radarr must not be queried')
+
+        monkeypatch.setattr(arr_client, 'SonarrClient', FakeSonarr)
+        monkeypatch.setattr(arr_client, 'RadarrClient', FakeRadarr)
+        imdb, mtype, _season, _episode = w._resolve_arr_identity(
+            self.MOVIE_FILE, label='sonarr')
+        assert imdb == 'tt42'
+        assert mtype == 'series'
+
+    def test_strike_cap_declines_without_calling_arr(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_ARR_FEEDBACK_MAX_STRIKES', '2')
+        w = self._make_watcher(tmp_dir)
+        record = self._fake_arrs(monkeypatch)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt123', 'series', 1, 2))
+        self.ledger.bump('arrfail:tt123:s1e2')
+        self.ledger.bump('arrfail:tt123:s1e2')
+        assert w._push_arr_failed_feedback(
+            self.TV_FILE, self.HASH, 'realdebrid') is False
+        assert record['sonarr'] == []
+        assert self.ledger.get('arrfail:tt123:s1e2') == 2
+
+    def test_unconfigured_arr_declines(self, tmp_dir, monkeypatch):
+        w = self._make_watcher(tmp_dir)
+        self._fake_arrs(monkeypatch, configured=False)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt123', 'series', 1, 2))
+        assert w._push_arr_failed_feedback(
+            self.TV_FILE, self.HASH, 'realdebrid') is False
+        assert self.ledger.get('arrfail:tt123:s1e2') == 0
+
+    def test_arr_rejection_does_not_bump_ledger(self, tmp_dir, monkeypatch):
+        w = self._make_watcher(tmp_dir)
+        self._fake_arrs(monkeypatch, result=False)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt123', 'series', 1, 2))
+        assert w._push_arr_failed_feedback(
+            self.TV_FILE, self.HASH, 'realdebrid') is False
+        assert self.ledger.get('arrfail:tt123:s1e2') == 0
+
+    def test_arr_exception_degrades_to_false(self, tmp_dir, monkeypatch):
+        w = self._make_watcher(tmp_dir)
+        self._fake_arrs(monkeypatch, raise_on_call=True)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt123', 'series', 1, 2))
+        assert w._push_arr_failed_feedback(
+            self.TV_FILE, self.HASH, 'realdebrid') is False
+
+    def test_identity_fallback_uses_parsed_title(self, tmp_dir, monkeypatch):
+        # Arr lookup failed (no IMDb id) — the strike key falls back to the
+        # parsed title so the cap still binds.
+        w = self._make_watcher(tmp_dir)
+        self._fake_arrs(monkeypatch)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: (None, None, None, None))
+        assert w._push_arr_failed_feedback(
+            self.MOVIE_FILE, self.HASH, 'realdebrid') is True
+        keys = [k for k in self.ledger._state if k.startswith('arrfail:')]
+        assert len(keys) == 1
+        assert self.ledger.get(keys[0]) == 1
+
+    def test_success_logs_history_event(self, tmp_dir, monkeypatch):
+        import utils.blackhole as bh
+        events = []
+
+        class FakeHistory:
+            @staticmethod
+            def log_event(type, title, **kwargs):
+                events.append((type, title, kwargs))
+                return 'evt-1'
+
+        monkeypatch.setattr(bh, '_history', FakeHistory)
+        w = self._make_watcher(tmp_dir)
+        self._fake_arrs(monkeypatch)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt123', 'series', 1, 2))
+        assert w._push_arr_failed_feedback(
+            self.TV_FILE, self.HASH, 'realdebrid') is True
+        assert len(events) == 1
+        etype, _title, kwargs = events[0]
+        assert etype == 'blocklisted'
+        meta = kwargs['meta']
+        assert meta['cause'] == 'arr_feedback_blocklisted'
+        assert meta['info_hash'] == self.HASH
+        assert meta['arr_service'] == 'sonarr'
+        assert meta['strikes'] == 1

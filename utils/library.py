@@ -4390,18 +4390,26 @@ class LibraryScanner:
         tb_key = load_secret_or_env('torbox_api_key')
         tb_ok = bool(tb_key) and wanted_tb_recovery_enabled()
         if tb_ok:
-            # Account-level cooldown gate — reuse the blackhole probe
-            # (cached, so this doesn't add a /user/me round-trip when the
-            # blackhole just ran).
+            # ``cooldown_until`` on /user/me is ADVISORY, not an enforcement
+            # signal: on Pro plans organic creates succeed while the flag is
+            # set, and organic traffic keeps re-arming it — gating the leg
+            # on the flag self-starves recovery indefinitely (observed live:
+            # "skipped — cooldown for 83693s" on every scan while 181
+            # blackhole creates/week succeeded).  So the leg always attempts
+            # its first add; ENFORCEMENT is detected from the add actually
+            # failing while the cooldown flag is set, which disables the
+            # leg for the rest of the pass (see the add-failure handler
+            # below).  The pre-check remains purely informational.
             try:
                 from utils.blackhole import _check_torbox_cooldown
                 tb_cooldown = _check_torbox_cooldown(tb_key)
             except Exception:
                 tb_cooldown = 0
             if tb_cooldown > 0:
-                logger.info(f"[library] Wanted→TB leg skipped — TorBox on "
-                            f"cooldown for {int(tb_cooldown)}s")
-                tb_ok = False
+                logger.info(
+                    f"[library] Wanted→TB leg: TorBox cooldown flag set "
+                    f"({int(tb_cooldown)}s) — proceeding anyway; an add "
+                    f"failure will confirm enforcement and back off")
 
         # --- RD leg availability -------------------------------------
         rd_key = load_secret_or_env('rd_api_key')
@@ -4586,14 +4594,29 @@ class LibraryScanner:
             # ---- RD leg: the add IS the probe -----------------------
             rd_outcome = None
             if rd_try:
-                rd_outcome = self._wanted_rd_probe_add(
-                    rd_client, rd_key, results[0],
-                    media_title, ep_str, key)
-                if rd_outcome != 'skipped':
-                    # Only real add attempts count against the budget —
-                    # local skips (dedup hit, listing unavailable) cost
-                    # no RD API adds.
-                    rd_attempts += 1
+                top_hash = (results[0].get('info_hash') or '').lower()
+                if top_hash and _ledger.get(f'rdblock:{top_hash}') > 0:
+                    # RD's keyword filter already rejected this exact hash on
+                    # a previous pass — the verdict is deterministic and
+                    # persisted, so treat it as a confirmed filter block
+                    # WITHOUT re-adding (the in-memory miss memo dies on
+                    # restart, which was re-adding known-blocked hashes 6-7
+                    # times per title across deploys).  Costs no API call and
+                    # no budget; still pairs with the TB leg below so the
+                    # ``wantedblock:`` give-up strike keeps accruing.
+                    logger.debug(f"[library] Wanted→RD probe skipped for "
+                                 f"{media_title!r} — hash {top_hash[:8]}… has "
+                                 f"a persisted filter-block verdict")
+                    rd_outcome = 'filter_blocked'
+                else:
+                    rd_outcome = self._wanted_rd_probe_add(
+                        rd_client, rd_key, results[0],
+                        media_title, ep_str, key)
+                    if rd_outcome != 'skipped':
+                        # Only real add attempts count against the budget —
+                        # local skips (dedup hit, listing unavailable) cost
+                        # no RD API adds.
+                        rd_attempts += 1
                 if rd_outcome == 'recovered':
                     rd_added += 1
                     self._memo_wanted(self._wanted_tb_cooldown, key)
@@ -4662,6 +4685,28 @@ class LibraryScanner:
             self._memo_wanted(self._wanted_tb_cooldown, key)
             if result.get('success'):
                 tb_added += 1
+            elif not result.get('duplicate'):
+                # Enforcement check: an add failure WHILE the account
+                # cooldown flag is set means TB is actually rejecting
+                # creates (HTTP 400 DOWNLOAD_SERVER_ERROR surfaces as a
+                # generic failure here) — stop burning the remaining TB
+                # budget this pass.  A failure with no cooldown flag is a
+                # transient error; keep going.
+                try:
+                    from utils.blackhole import _check_torbox_cooldown
+                    # force_refresh: the advisory pre-check may have cached
+                    # 0 seconds ago; a cooldown armed by THIS add's rejection
+                    # would be masked by that cache, so re-query /user/me.
+                    tb_cooldown = _check_torbox_cooldown(
+                        tb_key, force_refresh=True)
+                except Exception:
+                    tb_cooldown = 0
+                if tb_cooldown > 0:
+                    logger.info(
+                        f"[library] Wanted→TB leg backing off — add failed "
+                        f"with account cooldown active "
+                        f"({int(tb_cooldown)}s); enforcement confirmed")
+                    tb_ok = False
 
         if rd_added or tb_added:
             logger.info(f"[library] Wanted recovery added {rd_added} release(s) "
@@ -4844,6 +4889,7 @@ class LibraryScanner:
                 self._log_wanted_rd_miss(
                     title, media_title, ep_str, info_hash,
                     reason='infringing_add')
+                self._persist_rd_filter_block(info_hash)
                 return 'filter_blocked'
             # Other add_error/add_failed are transient RD-side failures —
             # no memo, the title gets another shot on a later scan.
@@ -4881,9 +4927,18 @@ class LibraryScanner:
             # Same permanent-filter class as the add-time 403/451 branch —
             # report as a filter block (no _wanted_rd_miss memo) so the
             # caller can accrue the terminal give-up strike.
+            probe_reason = probe.get('reason', 'blocked')
             self._log_wanted_rd_miss(
                 title, media_title, ep_str, info_hash,
-                reason=probe.get('reason', 'blocked'))
+                reason=probe_reason)
+            # Only persist a restart-surviving verdict for a genuine keyword
+            # filter block (``infringing_file``).  ``probe_file`` also returns
+            # status='blocked' for a bare HTTP 404 (``not_found`` — the file
+            # is transiently unresolvable, e.g. RD hoster indexing lag on a
+            # just-added torrent); persisting THAT would lock a possibly-cached
+            # hash out of the RD leg for 30 idle days on a transient error.
+            if probe_reason == 'infringing_file':
+                self._persist_rd_filter_block(info_hash)
             return 'filter_blocked'
         # 'unknown' (network blip, 5xx) → keep the torrent; the health
         # sweep re-probes it on its own cycle.
@@ -4910,6 +4965,24 @@ class LibraryScanner:
         logger.info(f"[library] Wanted→RD recovery: {media_title!r} "
                     f"instantly ready on RealDebrid ({info_hash[:8]}…)")
         return 'recovered'
+
+    @staticmethod
+    def _persist_rd_filter_block(info_hash):
+        """Persist RD's keyword-filter verdict for *info_hash*.
+
+        The verdict is deterministic per hash (RD 451s the same release
+        forever), but the in-memory ``_wanted_rd_miss`` memo dies on
+        restart — observed live as 6-7 redundant probe adds of the same
+        blocked hash per title across a multi-deploy weekend.  The
+        ``rdblock:`` ledger key survives restarts; the recovery loop reads
+        it to treat the hash as filter-blocked without re-adding.  Cleared
+        by the ledger's idle-decay prune, which doubles as the safety
+        valve in case RD ever unblocks a hash."""
+        try:
+            from utils import attempt_ledger as _ledger
+            _ledger.bump(f'rdblock:{(info_hash or "").lower()}')
+        except Exception:
+            pass
 
     def _log_wanted_rd_miss(self, title, media_title, ep_str, info_hash,
                             reason):

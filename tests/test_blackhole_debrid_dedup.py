@@ -771,3 +771,72 @@ class TestPlexDebridCacheRuleEnforcer:
         assert rules[0] == ['cache status', 'requirement', 'cached', '']
         assert rules[1] == ['resolution', 'requirement', '<=', '1080']
         assert rules[2] == ['seeders', 'preference', 'highest', '']
+
+
+class TestArrFailedFeedbackWiring:
+    """Both reject sites must report the failed grab back to the arr BEFORE
+    deleting the drop — otherwise the arr re-grabs the identical release on
+    every RSS pass (the silent-delete loop).  The feedback result must not
+    change the delete outcome."""
+
+    def test_uncached_reject_pushes_feedback_then_deletes(
+        self, handler, magnet_file, monkeypatch,
+    ):
+        path, h = magnet_file
+        monkeypatch.setenv('BLACKHOLE_REQUIRE_CACHED', 'true')
+        handler._push_arr_failed_feedback = MagicMock(return_value=True)
+        with patch('utils.search._existing_hashes', return_value=set()), \
+             patch('utils.search.check_debrid_cache', return_value={h: False}):
+            handler._process_file(path)
+        handler._push_arr_failed_feedback.assert_called_once()
+        args, kwargs = handler._push_arr_failed_feedback.call_args
+        assert args[1].lower() == h, 'info hash must be forwarded to the arr'
+        assert args[2] == 'realdebrid'
+        assert not os.path.exists(path), 'feedback must not suppress the delete'
+        handler._add_to_realdebrid.assert_not_called()
+
+    def test_cross_confirmed_reject_pushes_feedback_then_deletes(
+        self, handler, magnet_file, monkeypatch,
+    ):
+        path, h = magnet_file
+        handler.debrid_api_keys = {'realdebrid': 'rd-key', 'torbox': 'tb-key'}
+        monkeypatch.setenv('BLACKHOLE_REQUIRE_CACHED', 'true')
+        handler._push_arr_failed_feedback = MagicMock(return_value=False)
+
+        def _probe(hashes, service=None, api_key=None):
+            return {h: False} if service == 'torbox' else {h: None}
+
+        with patch('utils.search._existing_hashes', return_value=set()), \
+             patch('utils.search.check_debrid_cache', side_effect=_probe):
+            handler._process_file(path)
+        handler._push_arr_failed_feedback.assert_called_once()
+        assert not os.path.exists(path), \
+            'feedback returning False must degrade to the status-quo delete'
+
+    def test_tb_alt_recovery_success_skips_feedback(
+        self, handler, magnet_file, monkeypatch,
+    ):
+        """A recovered grab is a SUCCESS — the arr must not be told it
+        failed, or it would blocklist a release we just fulfilled."""
+        path, h = magnet_file
+        monkeypatch.setenv('BLACKHOLE_REQUIRE_CACHED', 'true')
+        handler._try_torbox_cached_alternative = MagicMock(return_value=True)
+        handler._push_arr_failed_feedback = MagicMock()
+        with patch('utils.search._existing_hashes', return_value=set()), \
+             patch('utils.search.check_debrid_cache', return_value={h: False}):
+            handler._process_file(path)
+        handler._push_arr_failed_feedback.assert_not_called()
+
+    def test_deferred_unknown_cache_does_not_push_feedback(
+        self, handler, magnet_file, monkeypatch,
+    ):
+        """Defer is not a failure — the grab may still complete on the next
+        poll.  Feedback there would blocklist releases during API blips."""
+        path, h = magnet_file
+        monkeypatch.setenv('BLACKHOLE_REQUIRE_CACHED', 'true')
+        handler._push_arr_failed_feedback = MagicMock()
+        with patch('utils.search._existing_hashes', return_value=set()), \
+             patch('utils.search.check_debrid_cache', return_value={h: None}):
+            handler._process_file(path)
+        handler._push_arr_failed_feedback.assert_not_called()
+        assert os.path.exists(path)

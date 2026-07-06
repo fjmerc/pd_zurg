@@ -180,7 +180,7 @@ def _coalesced_root_refresh(*, _now=None):
     return True
 
 
-def _check_torbox_cooldown(api_key, *, _now=None):
+def _check_torbox_cooldown(api_key, *, _now=None, force_refresh=False):
     """Return seconds remaining on TB's account-level ``cooldown_until``.
 
     Reads ``/v1/api/user/me`` and parses the ISO-8601 ``cooldown_until``
@@ -196,14 +196,22 @@ def _check_torbox_cooldown(api_key, *, _now=None):
     a transient /user/me 5xx during a real cooldown must not mask the
     cooldown for the full TTL — the next call will re-probe and pick
     it up once the API recovers.  ``_now`` is a test seam.
+
+    ``force_refresh`` bypasses the cache read (still refreshing it on
+    success).  The Wanted→TB enforcement check needs this: a cooldown can
+    arm BETWEEN the pass's advisory pre-check (which caches 0) and an add
+    rejection seconds later — a cached read would miss the just-armed
+    cooldown and skip the back-off, burning the rest of the TB budget
+    against an already-cooling account.
     """
     now = _now if _now is not None else time.time()
-    with _rate_limit_lock:
-        cached_at = _tb_cooldown_cache.get('checked_at', 0.0)
-        cached_seconds = _tb_cooldown_cache.get('seconds_until', 0.0)
-    if now - cached_at < _TB_COOLDOWN_CACHE_TTL:
-        elapsed = now - cached_at
-        return max(0.0, cached_seconds - elapsed)
+    if not force_refresh:
+        with _rate_limit_lock:
+            cached_at = _tb_cooldown_cache.get('checked_at', 0.0)
+            cached_seconds = _tb_cooldown_cache.get('seconds_until', 0.0)
+        if now - cached_at < _TB_COOLDOWN_CACHE_TTL:
+            elapsed = now - cached_at
+            return max(0.0, cached_seconds - elapsed)
     if not api_key:
         return 0.0
     try:
@@ -3682,20 +3690,32 @@ class BlackholeWatcher:
         return str(os.environ.get(
             'BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')).lower() == 'true'
 
-    def _resolve_arr_identity(self, filename):
+    def _resolve_arr_identity(self, filename, label=None):
         """Resolve ``(imdb_id, media_type, season, episode)`` for *filename*.
 
         Looks the parsed title up in Radarr (movies) or Sonarr (series) to
         recover the IMDb id Torrentio needs.  Returns ``(None, None, None,
         None)`` when the arr is unconfigured, the title isn't in its
         library, or the record carries no IMDb id.  Never raises.
+
+        ``label`` (the blackhole subdir the drop came from) authoritatively
+        picks the arr when set — a label-scoped drop whose filename parses
+        ambiguously (e.g. a movie-shaped name under ``sonarr/``) would
+        otherwise be looked up in the wrong arr and get the wrong (or no)
+        IMDb id.  Falls back to the filename's parsed media type when the
+        drop is unlabelled (flat completed-dir layout).
         """
         try:
             from utils.arr_client import SonarrClient, RadarrClient
         except Exception as e:
-            logger.debug(f"[blackhole] TB-alt: arr import failed: {e}")
+            logger.debug(f"[blackhole] resolve_arr_identity: arr import failed: {e}")
             return None, None, None, None
         name, season, is_tv = parse_release_name(filename)
+        lbl = (label or '').lower()
+        if lbl == 'sonarr':
+            is_tv = True
+        elif lbl == 'radarr':
+            is_tv = False
         if not name:
             return None, None, None, None
         try:
@@ -3717,8 +3737,103 @@ class BlackholeWatcher:
                 return None, None, None, None
             return movie.get('imdbId'), 'movie', None, None
         except Exception as e:
-            logger.debug(f"[blackhole] TB-alt: arr lookup failed for {filename}: {e}")
+            logger.debug(f"[blackhole] resolve_arr_identity: arr lookup failed for {filename}: {e}")
             return None, None, None, None
+
+    @staticmethod
+    def _arr_failed_feedback_enabled():
+        return str(os.environ.get(
+            'BLACKHOLE_ARR_FAILED_FEEDBACK_ENABLED', 'true')).lower() == 'true'
+
+    @staticmethod
+    def _arr_feedback_max_strikes():
+        try:
+            return int(os.environ.get('BLACKHOLE_ARR_FEEDBACK_MAX_STRIKES', '8'))
+        except (ValueError, TypeError):
+            return 8
+
+    def _push_arr_failed_feedback(self, filename, info_hash, debrid, label=None):
+        """Tell the owning arr that the grab identified by *info_hash* failed.
+
+        Without feedback, an uncached-rejected drop is silently deleted and
+        the arr — never told anything went wrong — re-grabs the identical
+        release on its next RSS/search pass, forever (observed live: same
+        hash 25×/week).  ``mark_download_failed`` makes the arr blocklist
+        THAT release and immediately search for a different one.
+
+        A persistent per-title strike cap bounds the resulting escalation
+        chain: after ``BLACKHOLE_ARR_FEEDBACK_MAX_STRIKES`` fed-back
+        failures for one (title[, season/episode]) the arr has likely
+        exhausted its viable candidates, so feedback stops and the reject
+        degrades to the status-quo silent delete (the Wanted recovery pass
+        owns the title from there).
+
+        Returns True iff the arr accepted the failure report.  Never
+        raises; any failure degrades to the silent-delete status quo.
+        """
+        if not self._arr_failed_feedback_enabled():
+            return False
+        if not info_hash:
+            return False
+        try:
+            from utils.arr_client import SonarrClient, RadarrClient
+
+            name, season, is_tv = parse_release_name(filename)
+            lbl = (label or '').lower()
+            if lbl == 'sonarr':
+                is_tv = True
+            elif lbl == 'radarr':
+                is_tv = False
+            client = SonarrClient() if is_tv else RadarrClient()
+            if not client.configured:
+                return False
+
+            # Strike key prefers the arr's IMDb id (stable across release
+            # names); falls back to the parsed title so the cap still holds
+            # when the lookup fails.
+            imdb_id, _mtype, id_season, id_episode = \
+                self._resolve_arr_identity(filename, label=label)
+            ident = imdb_id or (name or '').lower().replace(' ', '_')
+            if not ident:
+                return False
+            if is_tv:
+                eps = _parse_episodes(filename)
+                episode = id_episode if id_episode is not None else (
+                    min(eps) if eps else None)
+                skey = f'arrfail:{ident}:s{season}e{episode}'
+            else:
+                skey = f'arrfail:{ident}'
+
+            cap = self._arr_feedback_max_strikes()
+            strikes = attempt_ledger.get(skey)
+            if cap > 0 and strikes >= cap:
+                logger.info(
+                    f"[blackhole] Arr feedback: strike cap reached for "
+                    f"{skey} ({strikes}/{cap}) — not reporting {filename}")
+                return False
+
+            if not client.mark_download_failed(info_hash):
+                return False
+            strikes = attempt_ledger.bump(skey)
+            if _history:
+                _mt, _ep = _enrich_for_history(filename)
+                _history.log_event(
+                    'blocklisted', filename, episode=_ep, source='blackhole',
+                    detail=f'Reported failed to '
+                           f'{"Sonarr" if is_tv else "Radarr"} — release '
+                           f'blocklisted, next candidate searched',
+                    meta={'cause': 'arr_feedback_blocklisted',
+                          'info_hash': info_hash,
+                          'provider': debrid,
+                          'arr_service': 'sonarr' if is_tv else 'radarr',
+                          'strikes': strikes,
+                          'max_strikes': cap},
+                    media_title=_mt)
+            return True
+        except Exception as e:
+            logger.warning(
+                f"[blackhole] Arr failed-feedback error for {filename}: {e}")
+            return False
 
     def _try_torbox_cached_alternative(self, file_path, filename, info_hash, debrid, label=None):
         """Last-ditch recovery before deleting an uncached-rejected grab.
@@ -3761,7 +3876,8 @@ class BlackholeWatcher:
                 logger.debug(f"[blackhole] TB-alt: unparseable tier for {filename}; skipping")
                 return False
 
-            imdb_id, media_type, season, episode = self._resolve_arr_identity(filename)
+            imdb_id, media_type, season, episode = self._resolve_arr_identity(
+                filename, label=label)
             if not imdb_id:
                 logger.debug(f"[blackhole] TB-alt: no IMDb id for {filename}; skipping")
                 return False
@@ -4675,6 +4791,10 @@ class BlackholeWatcher:
                     # an abundantly-cached title silently falls to "Wanted".
                     if self._try_torbox_cached_alternative(file_path, filename, info_hash, debrid, label=label):
                         return
+                    # No cached alternative either — before the silent
+                    # delete, tell the arr the grab failed so it blocklists
+                    # this release and searches for a different one.
+                    self._push_arr_failed_feedback(filename, info_hash, debrid, label=label)
                     # Provider confirmed uncached — safe to delete; nothing
                     # to wait for.
                     cache_label = 'uncached'
@@ -4720,6 +4840,7 @@ class BlackholeWatcher:
                         # before deleting.
                         if self._try_torbox_cached_alternative(file_path, filename, info_hash, debrid, label=label):
                             return
+                        self._push_arr_failed_feedback(filename, info_hash, debrid, label=label)
                         logger.info(
                             f"[blackhole] Skipping uncached (cross-confirmed via TB): "
                             f"{filename} routed to {debrid}"

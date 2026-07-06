@@ -157,6 +157,8 @@ ENV_SCHEMA = [
             ('BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'Delete Uncached Torrents on Timeout', 'boolean', False, 'When the blackhole gives up waiting for debrid to cache a torrent (BLACKHOLE_MOUNT_POLL_TIMEOUT — default 5 min), actively delete it from the debrid account instead of leaving it as a 0%/0-seed entry. Recommended ON for Real-Debrid users where no pre-add cache probe is available — see TROUBLESHOOTING.md "Uncached torrents pile up on my debrid account from the blackhole" (default: OFF).'),
             ('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'TorBox Cached-Alternative Recovery', 'boolean', False, 'When a grabbed release is uncached and would be rejected, search Torrentio for other releases of the same title that ARE cached on TorBox (at the same quality tier the arr approved) and grab one of those instead. Prevents abundantly-cached titles from silently falling back to "Wanted" just because the specific hash Sonarr/Radarr picked is uncached. Requires TorBox configured (default: ON).'),
             ('BLACKHOLE_TB_ALT_MAX_ATTEMPTS', 'TB-Alt Give-Up After (attempts)', 'number:1-100', False, 'How many cached-alternative grabs the recovery path will make for one season before giving up and letting the title fall back to "Wanted". Each grab re-arms TorBox\'s abuse cooldown, so a never-completing title would otherwise be re-grabbed every time its .magnet re-drops. The counter persists across restarts and decays after 30 idle days (default: 12).'),
+            ('BLACKHOLE_ARR_FAILED_FEEDBACK_ENABLED', 'Arr Failed-Download Feedback', 'boolean', False, 'When an uncached grab is rejected (and no cached alternative was found), report the failure back to Sonarr/Radarr via the failed-download API so the arr blocklists that release and immediately searches for a different one. Without feedback the arr is never told anything went wrong and re-grabs the identical release on every RSS pass (default: ON).'),
+            ('BLACKHOLE_ARR_FEEDBACK_MAX_STRIKES', 'Arr Feedback Give-Up After (strikes)', 'number:1-100', False, 'How many failed-download reports to send for one title (per episode for TV) before stopping. Each report makes the arr blocklist a release and grab the NEXT candidate, so an entirely-uncached title would otherwise walk its whole release list. Past the cap, rejects fall back to silent deletion and the Wanted recovery pass owns the title. Persists across restarts; decays after 30 idle days (default: 8).'),
         ],
     },
     {
@@ -335,6 +337,9 @@ _ENV_DEFAULTS = {
     # fallback in blackhole.py::_tb_alt_recovery_enabled().  Listed so the
     # Settings UI toggle renders ON when the var is unset.
     'BLACKHOLE_TB_ALT_RECOVERY_ENABLED': 'true',
+    # Arr failed-download feedback defaults ON — matches the runtime
+    # fallback in blackhole.py::_arr_failed_feedback_enabled().
+    'BLACKHOLE_ARR_FAILED_FEEDBACK_ENABLED': 'true',
     # Config backup retention default matches base/__init__.py Config.load().
     # Interval is omitted here because the scheduler's own default (86400s)
     # applies when the env var is empty; surfacing a non-empty UI default

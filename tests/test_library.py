@@ -7284,13 +7284,61 @@ class TestRecoverWantedViaTorbox:
         sc._recover_wanted_via_debrid([], movies, {})
         assert wire['adds'] == []
 
-    def test_tb_cooldown_skips(self, wire):
+    def _two_movies(self):
+        return [
+            {'title': 'The Substance', 'source': 'wanted',
+             'imdb_id': 'tt1', 'is_available': True},
+            {'title': 'The Substance', 'source': 'wanted',
+             'imdb_id': 'tt2', 'is_available': True},
+        ]
+
+    def _failing_add(self, wire, monkeypatch, duplicate=False):
+        import utils.search as search
+
+        def _add(info_hash, **kw):
+            wire['adds'].append({'info_hash': info_hash, **kw})
+            result = {'success': False,
+                      'error': 'Failed to add magnet to TorBox'}
+            if duplicate:
+                result['duplicate'] = True
+            return result
+        monkeypatch.setattr(search, 'add_to_debrid', _add)
+
+    def test_tb_advisory_cooldown_proceeds(self, wire):
+        # ``cooldown_until`` is advisory on Pro plans — organic creates
+        # succeed while it's set, so the flag alone must not starve the
+        # leg.  The pass attempts the add anyway.
         wire['cooldown'] = 3600
         sc = self._scanner()
-        movies = [{'title': 'X', 'source': 'wanted',
+        movies = [{'title': 'The Substance', 'source': 'wanted',
                    'imdb_id': 'tt1', 'is_available': True}]
         sc._recover_wanted_via_debrid([], movies, {})
-        assert wire['adds'] == []
+        assert len(wire['adds']) == 1
+
+    def test_add_failure_with_cooldown_flag_disables_leg(self, wire, monkeypatch):
+        # An add FAILING while the cooldown flag is set is the real
+        # enforcement signal — the leg must stop burning budget this pass.
+        wire['cooldown'] = 3600
+        self._failing_add(wire, monkeypatch)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._two_movies(), {})
+        assert len(wire['adds']) == 1  # second title never attempted
+
+    def test_add_failure_without_cooldown_flag_keeps_leg_alive(self, wire, monkeypatch):
+        # Failure with NO cooldown flag is a transient error — keep going.
+        self._failing_add(wire, monkeypatch)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._two_movies(), {})
+        assert len(wire['adds']) == 2
+
+    def test_duplicate_add_does_not_trigger_backoff(self, wire, monkeypatch):
+        # A duplicate isn't a rejected create — no enforcement inference,
+        # even with the advisory flag set.
+        wire['cooldown'] = 3600
+        self._failing_add(wire, monkeypatch, duplicate=True)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._two_movies(), {})
+        assert len(wire['adds']) == 2
 
     def test_budget_caps_adds(self, wire, monkeypatch):
         monkeypatch.setenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', '1')
@@ -7479,6 +7527,20 @@ class TestWantedRdRecovery:
     @pytest.fixture
     def wire(self, monkeypatch):
         return _wire_wanted_recovery(monkeypatch)
+
+    @pytest.fixture(autouse=True)
+    def ledger(self, tmp_path):
+        # Isolated attempt_ledger: the RD leg now reads/writes persistent
+        # ``rdblock:{hash}`` verdicts, and every test here shares the same
+        # 'a'*40 top hash — without isolation one 451 test would poison
+        # the RD probe for every test after it.
+        import importlib
+        from utils import attempt_ledger
+        importlib.reload(attempt_ledger)
+        attempt_ledger.init(config_dir=str(tmp_path))
+        yield attempt_ledger
+        attempt_ledger._file_path = None
+        attempt_ledger._state = {}
 
     def _causes(self, wire):
         return [(e['type'], (e.get('meta') or {}).get('cause'))
@@ -7793,6 +7855,83 @@ class TestWantedRdRecovery:
         assert wire['tb_adds'] == []
         assert 'tt1234567' in sc._wanted_no_results
 
+    # ---- persisted rdblock verdicts ----------------------------------
+
+    def test_451_add_persists_rdblock_verdict(self, wire, ledger):
+        wire['rd_core'] = {'rescued': False, 'reason': 'add_failed',
+                           'http_status': 451, 'alt_torrent_id': None}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert ledger.get('rdblock:' + 'a' * 40) == 1
+
+    def test_probe_file_block_persists_rdblock_verdict(self, wire, ledger):
+        wire['rd_client'].probe_result = {
+            'status': 'blocked', 'reason': 'infringing_file', 'http': 451}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert ledger.get('rdblock:' + 'a' * 40) == 1
+
+    def test_probe_file_not_found_does_not_persist_rdblock(self, wire, ledger):
+        # probe_file returns status='blocked' for a bare HTTP 404 too
+        # (reason='not_found' — file transiently unresolvable, e.g. RD
+        # hoster indexing lag).  That must NOT persist a 30-day rdblock
+        # verdict, or a possibly-cached hash gets locked out of RD on a
+        # transient error.
+        wire['rd_client'].probe_result = {
+            'status': 'blocked', 'reason': 'not_found', 'http': 404}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert ledger.get('rdblock:' + 'a' * 40) == 0
+
+    def test_transient_rd_failure_does_not_persist_rdblock(self, wire, ledger):
+        wire['rd_core'] = {'rescued': False, 'reason': 'add_failed',
+                           'http_status': 503, 'alt_torrent_id': None}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert ledger.get('rdblock:' + 'a' * 40) == 0
+
+    def test_persisted_rdblock_skips_rd_add_but_tb_still_runs(self, wire, ledger):
+        # Verdict persisted on a previous pass (possibly before a restart —
+        # this is the whole point: the in-memory miss memo dies on restart
+        # and was re-adding known-blocked hashes 6-7× per title).
+        ledger.bump('rdblock:' + 'a' * 40)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'] == []   # no RD re-add
+        assert len(wire['tb_adds']) == 1    # TB leg still got its chance
+
+    def test_persisted_rdblock_burns_no_rd_budget(self, wire, ledger, monkeypatch):
+        import utils.search as search
+        monkeypatch.setenv('WANTED_RD_RECOVERY_MAX_PER_SCAN', '1')
+        monkeypatch.setenv('WANTED_TB_RECOVERY_ENABLED', 'false')
+        ledger.bump('rdblock:' + 'a' * 40)
+
+        def _torrentio(imdb, **kw):
+            if imdb == 'tt7654321':
+                return [{'info_hash': 'c' * 40,
+                         'title': 'Other.2024.1080p.WEB.RelC', 'seeds': 3,
+                         'quality': {'label': '1080p', 'score': 90}}]
+            return list(wire['torrentio'])
+        monkeypatch.setattr(search, 'search_torrentio', _torrentio)
+        movies = self._movie() + self._movie(title='Other', imdb='tt7654321')
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], movies, {})
+        # The persisted verdict cost no API call and no budget — the single
+        # RD attempt survived to the second title.
+        assert len(wire['rescue_calls']) == 1
+        assert wire['rescue_calls'][0]['info_hash'] == 'c' * 40
+
+    def test_persisted_rdblock_still_accrues_giveup_strike(self, wire, ledger):
+        # The persisted verdict must count as the "RD filter-blocked" half
+        # of the terminal give-up signature WITHOUT re-adding, so strikes
+        # keep climbing across passes (and restarts).
+        ledger.bump('rdblock:' + 'a' * 40)
+        wire['cache_cached'] = False  # TB uncached → both halves confirmed
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'] == []
+        assert ledger.get('wantedblock:tt1234567') == 1
+
 
 class TestWantedFilterGiveup:
     """Terminal give-up when a Wanted ghost is RD-filter-blocked AND
@@ -7857,7 +7996,10 @@ class TestWantedFilterGiveup:
         # Strike caps at the threshold — the 4th pass is skipped by the guard
         # before it can probe, so the count never climbs past 3.
         assert ledger.get('wantedblock:tt1234567') == 3
-        assert len(wire['rescue_calls']) == 3
+        # Only the FIRST pass re-adds to RD: the 451 verdict is persisted
+        # per hash (rdblock:), so passes 2-3 confirm the filter-block from
+        # the ledger while the strike count still climbs.
+        assert len(wire['rescue_calls']) == 1
         giveups = [e for e in wire['events']
                    if (e.get('meta') or {}).get('cause') == 'wanted_filter_giveup']
         assert len(giveups) == 1  # logged exactly once, on the crossing pass
@@ -7872,11 +8014,13 @@ class TestWantedFilterGiveup:
         assert wire['rescue_calls'] == []   # RD leg never ran
         assert wire['tb_adds'] == []         # TB leg never ran
 
-    def test_tb_unavailable_filter_block_falls_back_to_rd_miss(self, wire, ledger):
-        # TB on cooldown → the "uncached" half can't be confirmed, so no
-        # strike; fall back to the 7-day RD-miss memo instead of hammering RD.
+    def test_tb_unavailable_filter_block_falls_back_to_rd_miss(self, wire, ledger, monkeypatch):
+        # TB leg unavailable (disabled — the account cooldown flag is only
+        # advisory now and no longer parks the leg) → the "uncached" half
+        # can't be confirmed, so no strike; fall back to the 7-day RD-miss
+        # memo instead of hammering RD.
         self._filter_block(wire)
-        wire['cooldown'] = 999
+        monkeypatch.setenv('WANTED_TB_RECOVERY_ENABLED', 'false')
         sc = self._scanner()
         sc._recover_wanted_via_debrid([], self._movie(), {})
         assert ledger.get('wantedblock:tt1234567') == 0

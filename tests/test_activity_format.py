@@ -232,6 +232,22 @@ def test_wanted_filter_giveup():
     assert 'TorBox' in s
 
 
+def test_arr_feedback_blocklisted_names_arr_and_strikes():
+    ev = _ev('arr_feedback_blocklisted', arr_service='sonarr',
+             info_hash='ABC123', provider='torbox', strikes=2, max_strikes=8)
+    s = format_event(ev)['short']
+    assert 'Sonarr' in s
+    assert 'blocklisted' in s
+    assert 'strike 2/8' in s
+
+
+def test_arr_feedback_blocklisted_radarr_without_strikes():
+    ev = _ev('arr_feedback_blocklisted', arr_service='radarr')
+    s = format_event(ev)['short']
+    assert 'Radarr' in s
+    assert 'strike' not in s
+
+
 def test_terminal_error_shows_status():
     ev = _ev('terminal_error', provider='realdebrid', status='magnet_error')
     assert 'Failed on realdebrid: magnet_error' == format_event(ev)['short']

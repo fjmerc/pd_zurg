@@ -393,6 +393,17 @@ def _fmt_blocklisted_hash(ev, meta):
     return 'Skipped — info hash is blocklisted', 'Skipped — info hash is blocklisted'
 
 
+def _fmt_arr_feedback_blocklisted(ev, meta):
+    arr = {'sonarr': 'Sonarr', 'radarr': 'Radarr'}.get(
+        str(meta.get('arr_service', '')).lower(), 'arr')
+    msg = f'Reported failed to {arr} — release blocklisted, new search triggered'
+    strikes = meta.get('strikes')
+    cap = meta.get('max_strikes')
+    if strikes and cap:
+        msg += f' (strike {strikes}/{cap})'
+    return msg, msg
+
+
 def _fmt_disc_rip_rejected(ev, meta):
     return 'Rejected — disc rip (no usable media files)', 'Rejected — disc rip (no usable media files)'
 
@@ -529,6 +540,7 @@ _CAUSE_FORMATTERS = {
     'alts_exhausted': _fmt_alts_exhausted,
     'duplicate_skipped': _fmt_duplicate_skipped,
     'blocklisted_hash': _fmt_blocklisted_hash,
+    'arr_feedback_blocklisted': _fmt_arr_feedback_blocklisted,
     'disc_rip_rejected': _fmt_disc_rip_rejected,
     'debrid_add_failed': _fmt_debrid_add_failed,
     'debrid_add_via_search': _fmt_debrid_add_via_search,
@@ -727,6 +739,12 @@ FORMATTER_JS = r"""
     alts_exhausted: function(){ return 'All alternative releases tried and failed'; },
     duplicate_skipped: function(ev,m){ return 'Skipped — already on ' + (m.provider||'debrid'); },
     blocklisted_hash: function(){ return 'Skipped — info hash is blocklisted'; },
+    arr_feedback_blocklisted: function(ev,m){
+      var arr = m.arr_service === 'sonarr' ? 'Sonarr' : (m.arr_service === 'radarr' ? 'Radarr' : 'arr');
+      var msg = 'Reported failed to ' + arr + ' — release blocklisted, new search triggered';
+      if (m.strikes && m.max_strikes) msg += ' (strike ' + m.strikes + '/' + m.max_strikes + ')';
+      return msg;
+    },
     disc_rip_rejected: function(){ return 'Rejected — disc rip (no usable media files)'; },
     debrid_add_failed: function(ev,m){ return 'Debrid add failed — ' + (m.error || 'unknown error'); },
     debrid_add_via_search: function(ev,m){ return 'Added to ' + (m.service || 'debrid') + ' via search'; },

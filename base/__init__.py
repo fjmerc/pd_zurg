@@ -94,6 +94,7 @@ __all__ = [
     # Blackhole cache / debrid-account dedup gates
     'BLACKHOLE_REQUIRE_CACHED', 'BLACKHOLE_DEBRID_DEDUP_ENABLED',
     'BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'BLACKHOLE_TB_ALT_RECOVERY_ENABLED',
+    'BLACKHOLE_ARR_FAILED_FEEDBACK_ENABLED',
     # plex_debrid content-version cache-rule enforcer
     'PD_ENFORCE_CACHED_VERSIONS',
     # Quality compromise (plan 33)
@@ -357,6 +358,15 @@ class Config:
         self.BLACKHOLE_TB_ALT_RECOVERY_ENABLED = os.getenv(
             'BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true'
         )
+        # When ON, an uncached-rejected grab is reported back to the owning
+        # arr via the failed-download API (blocklist + immediate re-search)
+        # instead of being silently deleted — which otherwise makes the arr
+        # re-grab the identical release on every RSS pass, forever.  Read
+        # live from os.environ in blackhole.py; declared here for the
+        # globals export + settings drift guard.
+        self.BLACKHOLE_ARR_FAILED_FEEDBACK_ENABLED = os.getenv(
+            'BLACKHOLE_ARR_FAILED_FEEDBACK_ENABLED', 'true'
+        )
         # When ON, plex_debrid setup injects the ``cache status / requirement
         # / cached`` rule into every content version on startup so the
         # vendored download path refuses uncached releases.  Default OFF
@@ -480,6 +490,7 @@ BLACKHOLE_REQUIRE_CACHED = config.BLACKHOLE_REQUIRE_CACHED
 BLACKHOLE_DEBRID_DEDUP_ENABLED = config.BLACKHOLE_DEBRID_DEDUP_ENABLED
 BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT = config.BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT
 BLACKHOLE_TB_ALT_RECOVERY_ENABLED = config.BLACKHOLE_TB_ALT_RECOVERY_ENABLED
+BLACKHOLE_ARR_FAILED_FEEDBACK_ENABLED = config.BLACKHOLE_ARR_FAILED_FEEDBACK_ENABLED
 PD_ENFORCE_CACHED_VERSIONS = config.PD_ENFORCE_CACHED_VERSIONS
 QUALITY_COMPROMISE_ENABLED = config.QUALITY_COMPROMISE_ENABLED
 QUALITY_COMPROMISE_DWELL_DAYS = config.QUALITY_COMPROMISE_DWELL_DAYS

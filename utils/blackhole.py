@@ -23,6 +23,7 @@ import requests
 from utils.file_utils import atomic_write
 from utils.logger import get_logger
 from utils import attempt_ledger
+from utils import heartbeat
 
 logger = get_logger()
 
@@ -44,6 +45,13 @@ except ImportError:
 from utils.api_metrics import tracked_request
 
 _watcher = None
+
+# Liveness ceiling for the healthcheck.  The loop also beats before each
+# watch-file it processes, so the gap is bounded by ONE file's debrid
+# round-trips (API calls + bounded TB alt probes), not a whole mass drop.
+# 15 minutes for a single file means dead/wedged, not slow.
+_HEARTBEAT_NAME = 'blackhole_watcher'
+_HEARTBEAT_STALE_AFTER = 900
 
 # Retry configuration for failed torrent submissions
 RETRY_SCHEDULE = [300, 900, 3600]  # 5 min, 15 min, 1 hour
@@ -2432,6 +2440,10 @@ class BlackholeWatcher:
         cleaned_label_parents = set()
 
         for label, release_name, entry_path in iter_release_dirs(self.completed_dir):
+            # Per-release beat: the walk resolves every symlink against the
+            # FUSE mount — a slow-but-alive mount (429 backpressure) can
+            # stretch a large library's sweep past the liveness ceiling.
+            self._beat()
             # Remove broken symlinks within this release dir.
             # Symlinks point to SYMLINK_TARGET_BASE which only exists in
             # Sonarr/Radarr's container — translate to the rclone mount
@@ -5030,6 +5042,10 @@ class BlackholeWatcher:
             return
         ext = os.path.splitext(filename)[1].lower()
         if ext in self.SUPPORTED_EXTENSIONS:
+            # Per-file beat: a mass drop (season pack of singles) processes
+            # serially — without this, N files × debrid round-trips could
+            # legitimately exceed the liveness ceiling.
+            self._beat()
             self._process_file(file_path, label=label)
 
     def _recover_alt_pending(self):
@@ -5101,6 +5117,9 @@ class BlackholeWatcher:
     def run(self):
         """Main loop - scan at poll_interval."""
         logger.info(f"[blackhole] Watching {self.watch_dir} (poll: {self.poll_interval}s, service: {self.debrid_service})")
+        # Register before startup recovery so a wedge in _recover_alt_pending
+        # or _resume_pending_monitors is also visible to the healthcheck.
+        heartbeat.register(_HEARTBEAT_NAME, _HEARTBEAT_STALE_AFTER)
         try:
             self._recover_alt_pending()
         except Exception as e:
@@ -5118,6 +5137,7 @@ class BlackholeWatcher:
                 logger.error(f"[blackhole] _resume_pending_monitors failed at startup: {e}")
 
         while not self._stop_event.is_set():
+            self._beat()
             try:
                 self._scan()
                 self._retry_failed()
@@ -5130,8 +5150,21 @@ class BlackholeWatcher:
                 logger.error(f"[blackhole] Scan error: {e}")
             self._stop_event.wait(self.poll_interval)
 
+    def _beat(self):
+        """Heartbeat gated on THIS watcher's stop event.
+
+        The SIGHUP reload path (config_reload) calls ``stop()`` then
+        ``setup()`` without joining the old thread — an old watcher still
+        mid-scan would otherwise keep beating the name the NEW watcher
+        just registered, masking a wedge in the new thread for as long
+        as the old one keeps working.
+        """
+        if not self._stop_event.is_set():
+            heartbeat.beat(_HEARTBEAT_NAME)
+
     def stop(self):
         self._stop_event.set()
+        heartbeat.unregister(_HEARTBEAT_NAME)
 
 
 def setup():

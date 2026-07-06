@@ -77,6 +77,13 @@ def main():
 
     logger.info(banner)
 
+    # Clear heartbeat entries surviving a `docker restart` — a worker that
+    # legitimately doesn't start this boot must not inherit a ghost entry.
+    # BEFORE run_validation(): a wedge anywhere later in startup must not
+    # leave the previous run's entries aging toward a restart storm.
+    from utils import heartbeat
+    heartbeat.reset()
+
     if not run_validation():
         sys.exit(1)
 

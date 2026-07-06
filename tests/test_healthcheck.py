@@ -159,3 +159,56 @@ class TestStatusServerAlive:
             raise TimeoutError('timed out')
         monkeypatch.setattr(healthcheck.urllib.request, 'urlopen', slow)
         assert healthcheck._status_server_alive(8080, 3) is False
+
+
+# ---------------------------------------------------------------------------
+# Worker-thread heartbeat wiring in main()
+# ---------------------------------------------------------------------------
+
+class TestMainHeartbeatWiring:
+    """main() must fail the container on a stale worker heartbeat and stay
+    quiet when the snapshot is fresh or missing (feature degrades to the
+    pre-heartbeat checks — never fails on its own plumbing)."""
+
+    @pytest.fixture(autouse=True)
+    def quiet_environment(self, tmp_path, monkeypatch):
+        # Nothing should_run → process/mount checks contribute no errors
+        for attr, value in (('ZURG', 'false'), ('PLEXDEBRID', 'false'),
+                            ('RDAPIKEY', None), ('ADAPIKEY', None),
+                            ('TORBOXAPIKEY', None),
+                            ('TORBOXWEBDAVUSER', None),
+                            ('TORBOXWEBDAVPASS', None),
+                            ('RCLONEMN', 'mnt'), ('NFSMOUNT', 'false'),
+                            ('TORBOX_MOUNT_NAME', 'torbox')):
+            monkeypatch.setattr(healthcheck, attr, value)
+        monkeypatch.setattr(healthcheck, 'check_processes',
+                            lambda info: {k: False for k in info})
+        monkeypatch.setattr(healthcheck, '_status_server_alive',
+                            lambda port, timeout: True)
+        from utils import heartbeat
+        self.hb_path = str(tmp_path / 'heartbeats.json')
+        monkeypatch.setattr(heartbeat, 'HEARTBEAT_FILE', self.hb_path)
+
+    def _write_snapshot(self, entries):
+        import json
+        with open(self.hb_path, 'w', encoding='utf-8') as f:
+            json.dump(entries, f)
+
+    def test_stale_heartbeat_fails_healthcheck(self, capsys):
+        import time as _time
+        self._write_snapshot({'task_scheduler': {
+            'last_beat': _time.monotonic() - 400, 'stale_after': 300}})
+        with pytest.raises(SystemExit) as exc_info:
+            healthcheck.main()
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "Worker thread 'task_scheduler'" in err
+
+    def test_fresh_heartbeat_passes(self):
+        import time as _time
+        self._write_snapshot({'task_scheduler': {
+            'last_beat': _time.monotonic(), 'stale_after': 300}})
+        healthcheck.main()  # must not exit
+
+    def test_missing_snapshot_passes(self):
+        healthcheck.main()  # must not exit

@@ -1,5 +1,6 @@
 from base import *
 from utils.logger import SubprocessLogger
+from utils import heartbeat
 
 
 class RestartPolicy:
@@ -32,6 +33,13 @@ _registry_lock = threading.Lock()
 _shutting_down = False
 _monitor_stop_event = threading.Event()
 _monitor_thread = None
+
+# Liveness ceiling for the healthcheck.  A single _handle_restart can
+# legitimately block ~300s (max backoff) plus restart time; beating before
+# each restart bounds the gap to one entry's worth, so 15 minutes means
+# dead, not busy.
+_HEARTBEAT_NAME = 'process_monitor'
+_HEARTBEAT_STALE_AFTER = 900
 
 
 def register_process(handler, process_name, key_type=None):
@@ -208,7 +216,9 @@ def _handle_restart(entry, logger):
 def _monitor_loop(logger):
     """Poll registered processes and restart any that have died."""
     logger.info("Process monitor started")
+    heartbeat.register(_HEARTBEAT_NAME, _HEARTBEAT_STALE_AFTER)
     while not _monitor_stop_event.is_set():
+        heartbeat.beat(_HEARTBEAT_NAME)
         if not _shutting_down:
             with _registry_lock:
                 entries_to_restart = []
@@ -223,7 +233,17 @@ def _monitor_loop(logger):
             for entry in entries_to_restart:
                 if _shutting_down:
                     break
-                _handle_restart(entry, logger)
+                heartbeat.beat(_HEARTBEAT_NAME)
+                try:
+                    _handle_restart(entry, logger)
+                except Exception as e:
+                    # restart_process() can raise (spawn failure, dead
+                    # config).  A dead monitor means NO process ever
+                    # auto-restarts again — log and keep the loop alive.
+                    logger.error(
+                        f"Process monitor: restart of "
+                        f"{entry['process_name']} failed: {e}", exc_info=True
+                    )
 
         _monitor_stop_event.wait(10)
     logger.info("Process monitor stopped")
@@ -246,6 +266,7 @@ def stop_process_monitor():
     if _monitor_thread and _monitor_thread.is_alive():
         _monitor_thread.join(timeout=15)
     _monitor_thread = None
+    heartbeat.unregister(_HEARTBEAT_NAME)
 
 
 def restart_service(service_name):

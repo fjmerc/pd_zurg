@@ -201,6 +201,20 @@ def main():
             if not alive:
                 error_messages.append(f"Rclone mount {mp} is not active ({why}).")
 
+        # Worker-thread liveness.  Process/mount checks above can't see
+        # threads inside the main process — a dead scheduler loop stops
+        # ALL periodic work while the container looks healthy.  Workers
+        # beat into /healthcheck/heartbeats.json (utils/heartbeat.py);
+        # an entry past its per-thread ceiling means dead or permanently
+        # wedged — restart is the correct remedy for both.  Missing or
+        # corrupt file degrades to the pre-heartbeat checks (no error).
+        from utils.heartbeat import stale_entries
+        for name, age, ceiling in stale_entries():
+            error_messages.append(
+                f"Worker thread '{name}' has not beat in {age:.0f}s "
+                f"(ceiling {ceiling:.0f}s) — dead or wedged."
+            )
+
         # Status server responsiveness (non-fatal — log warning but don't
         # fail healthcheck).  Kept short so it can't, together with the
         # bounded mount probes, push the whole check past Docker's 10s cap.

@@ -282,6 +282,45 @@ class RealDebridClient(DebridClientBase):
             return None
         return str(torrent_id)
 
+    def torrent_info(self, torrent_id):
+        """Return the full ``/torrents/info/{id}`` dict, or ``None`` on error.
+
+        Carries fields ``torrent_status``/``list_torrents`` drop:
+        ``original_filename`` (the real torrent top-level name),
+        ``files`` (with per-file ``path``), and ``added`` (ISO
+        timestamp).  Consumers: symlink-retarget anchor derivation and
+        the probe-add pre-existing-torrent guard.
+        """
+        if not _SAFE_ID.match(str(torrent_id)):
+            return None
+        try:
+            resp = tracked_request(
+                self._name, requests.get,
+                f'{self._BASE}/torrents/info/{torrent_id}',
+                headers=self._headers(),
+                timeout=_TIMEOUT,
+            )
+            if resp.status_code != 200:
+                # A 401 (stale key) / 429 (rate limit) / 5xx here reads the
+                # same as a missing entry to the pre-existing-add guard
+                # (both → None → conservatively "pre-existing"); log so an
+                # orphaned probe entry left by that path is traceable.
+                logger.debug(
+                    f"[debrid] RD torrent_info HTTP {resp.status_code} "
+                    f"for {torrent_id}"
+                )
+                return None
+            data = resp.json()
+            if not isinstance(data, dict):
+                return None
+            return data
+        except (requests.RequestException, ValueError) as e:
+            logger.warning(
+                f"[debrid] RD torrent_info failed for {torrent_id}: "
+                f"{self._sanitize_error(e)}"
+            )
+            return None
+
     def torrent_status(self, torrent_id):
         """Return the ``status`` of an RD torrent (or '' on error).
 
@@ -292,27 +331,10 @@ class RealDebridClient(DebridClientBase):
         ``downloaded``, ``error``, ``magnet_error``, ``virus``, ``dead``,
         ``uploading``, ``compressing``.
         """
-        if not _SAFE_ID.match(str(torrent_id)):
+        info = self.torrent_info(torrent_id)
+        if not info:
             return ''
-        try:
-            resp = tracked_request(
-                self._name, requests.get,
-                f'{self._BASE}/torrents/info/{torrent_id}',
-                headers=self._headers(),
-                timeout=_TIMEOUT,
-            )
-            if resp.status_code != 200:
-                return ''
-            data = resp.json()
-            if not isinstance(data, dict):
-                return ''
-            return str(data.get('status') or '')
-        except (requests.RequestException, ValueError) as e:
-            logger.warning(
-                f"[debrid] RD torrent_status failed for {torrent_id}: "
-                f"{self._sanitize_error(e)}"
-            )
-            return ''
+        return str(info.get('status') or '')
 
     def select_files(self, torrent_id):
         """POST ``selectFiles files=all`` for a torrent.  True on 2xx.
@@ -441,22 +463,7 @@ class RealDebridClient(DebridClientBase):
         almost always fails on every file, so one sample is sufficient
         signal.
         """
-        try:
-            resp = tracked_request(
-                self._name, requests.get,
-                f'{self._BASE}/torrents/info/{torrent_id}',
-                headers=self._headers(),
-                timeout=_TIMEOUT,
-            )
-            resp.raise_for_status()
-            info = resp.json()
-        except (requests.RequestException, ValueError) as e:
-            logger.warning(
-                f"[debrid] RD info failed for {torrent_id}: "
-                f"{self._sanitize_error(e)}"
-            )
-            return None
-
+        info = self.torrent_info(torrent_id)
         if not isinstance(info, dict):
             return None
 
@@ -683,6 +690,44 @@ class TorBoxClient(DebridClientBase):
             )
             return None
 
+    def torrent_info(self, torrent_id):
+        """Return the full per-torrent mylist dict, or ``None`` on error.
+
+        Carries ``files[].name`` — the only field that exposes the real
+        on-disk TB folder (mylist ``name`` is a sanitized display string;
+        the actual folder is the first component of ``files[].name``).
+        Consumers: symlink-retarget TB-side folder derivation.
+        """
+        if not _SAFE_ID.match(str(torrent_id)):
+            return None
+        try:
+            resp = tracked_request(
+                self._name, requests.get,
+                f'{self._BASE}/torrents/mylist',
+                headers=self._headers(),
+                params={'id': torrent_id, 'bypass_cache': 'true'},
+                timeout=_TIMEOUT,
+            )
+            if resp.status_code != 200:
+                # Same rationale as the RD path: a non-200 is indistinguishable
+                # from a missing entry to the pre-existing-add guard; log it so
+                # the resulting conservative skip-delete is traceable.
+                logger.debug(
+                    f"[debrid] TB torrent_info HTTP {resp.status_code} "
+                    f"for {torrent_id}"
+                )
+                return None
+            data = resp.json().get('data')
+            if not isinstance(data, dict):
+                return None
+            return data
+        except (requests.RequestException, ValueError) as e:
+            logger.warning(
+                f"[debrid] TB torrent_info failed for {torrent_id}: "
+                f"{self._sanitize_error(e)}"
+            )
+            return None
+
     def torrent_status(self, torrent_id):
         """Return the ``download_state`` of a TB torrent (or '' on error).
 
@@ -695,28 +740,10 @@ class TorBoxClient(DebridClientBase):
         BT downloads, and ``uploading`` for the post-download seed
         phase.  All three indicate the file is on TB storage.
         """
-        if not _SAFE_ID.match(str(torrent_id)):
+        info = self.torrent_info(torrent_id)
+        if not info:
             return ''
-        try:
-            resp = tracked_request(
-                self._name, requests.get,
-                f'{self._BASE}/torrents/mylist',
-                headers=self._headers(),
-                params={'id': torrent_id, 'bypass_cache': 'true'},
-                timeout=_TIMEOUT,
-            )
-            if resp.status_code != 200:
-                return ''
-            data = resp.json().get('data')
-            if not isinstance(data, dict):
-                return ''
-            return str(data.get('download_state') or '')
-        except (requests.RequestException, ValueError) as e:
-            logger.warning(
-                f"[debrid] TB torrent_status failed for {torrent_id}: "
-                f"{self._sanitize_error(e)}"
-            )
-            return ''
+        return str(info.get('download_state') or '')
 
 
 _SERVICE_CLASSES = {

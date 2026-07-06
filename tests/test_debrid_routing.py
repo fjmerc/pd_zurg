@@ -15,7 +15,7 @@ from utils.debrid_routing import (
     mount_for_debrid, symlink_target_base_for_debrid,
     pick_debrid_for_grab,
     classify_add_failure, is_debrid_rejection, is_filter_block_reason,
-    pick_alt_debrid, attempt_add_rescue,
+    pick_alt_debrid, attempt_add_rescue, make_preexisting_check,
     build_tb_lookup_candidates, strip_indexer_prefix,
 )
 
@@ -723,6 +723,177 @@ class TestAttemptAddRescue:
         assert result['rescued'] is False
         assert result['reason'] == 'failed_state'
         assert result['state'] == 'dead'
+
+    # -- preexisting_check: providers with add-time hash-dedup (RD) can
+    #    hand back the id of a torrent the USER already had on the
+    #    account.  Cleanup deletes must never fire on those. ------------
+
+    def _never_ready_kwargs(self, client, **extra):
+        return dict(
+            alt_client=client,
+            cache_probe=lambda s, h: True,
+            ready_states={'cached'},
+            ready_timeout=0.05,
+            poll_interval=0.01,
+            **extra,
+        )
+
+    def test_preexisting_check_skips_cleanup_delete_on_never_ready(self):
+        client = _FakeAltClient(add_returns='alt-tid-1',
+                                statuses=['downloading', 'downloading'])
+        result = attempt_add_rescue(
+            'AAAA' * 10, REALDEBRID,
+            **self._never_ready_kwargs(
+                client, preexisting_check=lambda c, tid: True),
+        )
+        assert result['rescued'] is False
+        assert result['reason'] == 'never_ready'
+        assert result['preexisting'] is True
+        # THE point: the user's own torrent must not be destroyed.
+        assert client.delete_calls == []
+
+    def test_preexisting_check_false_still_deletes(self):
+        client = _FakeAltClient(add_returns='alt-tid-1',
+                                statuses=['downloading', 'downloading'])
+        result = attempt_add_rescue(
+            'AAAA' * 10, REALDEBRID,
+            **self._never_ready_kwargs(
+                client, preexisting_check=lambda c, tid: False),
+        )
+        assert result['reason'] == 'never_ready'
+        assert result['preexisting'] is False
+        assert client.delete_calls == ['alt-tid-1']
+
+    def test_preexisting_check_exception_treated_as_preexisting(self):
+        # Unknown ownership → don't delete.  An orphaned probe entry
+        # beats destroying user data.
+        def boom(c, tid):
+            raise ConnectionError('RD info down')
+
+        client = _FakeAltClient(add_returns='alt-tid-1',
+                                statuses=['downloading', 'downloading'])
+        result = attempt_add_rescue(
+            'AAAA' * 10, REALDEBRID,
+            **self._never_ready_kwargs(client, preexisting_check=boom),
+        )
+        assert result['reason'] == 'never_ready'
+        assert result['preexisting'] is True
+        assert client.delete_calls == []
+
+    def test_preexisting_check_guards_stop_event_delete(self):
+        import threading
+        client = _FakeAltClient(statuses=('cached',))
+        stop = threading.Event()
+        stop.set()
+        result = attempt_add_rescue(
+            'AAAA' * 10, REALDEBRID,
+            alt_client=client,
+            cache_probe=lambda s, h: True,
+            ready_states={'cached'},
+            stop_event=stop,
+            preexisting_check=lambda c, tid: True,
+        )
+        assert result['reason'] == 'stop_requested'
+        assert result['preexisting'] is True
+        assert client.delete_calls == []
+
+    def test_preexisting_check_guards_failed_state_delete(self):
+        client = _FakeAltClient(add_returns='alt-tid-1',
+                                statuses=['magnet_error'])
+        result = attempt_add_rescue(
+            'AAAA' * 10, REALDEBRID,
+            alt_client=client,
+            cache_probe=lambda s, h: True,
+            ready_states={'cached'},
+            fail_states={'magnet_error'},
+            ready_timeout=5,
+            poll_interval=0.01,
+            preexisting_check=lambda c, tid: True,
+        )
+        assert result['reason'] == 'failed_state'
+        assert result['preexisting'] is True
+        assert client.delete_calls == []
+
+    def test_no_preexisting_check_reports_false_and_deletes(self):
+        client = _FakeAltClient(add_returns='alt-tid-1',
+                                statuses=['downloading', 'downloading'])
+        result = attempt_add_rescue(
+            'AAAA' * 10, REALDEBRID,
+            **self._never_ready_kwargs(client),
+        )
+        assert result['reason'] == 'never_ready'
+        assert result['preexisting'] is False
+        assert client.delete_calls == ['alt-tid-1']
+
+
+class TestMakePreexistingCheck:
+    """The shared factory that all three rescue callers use to build their
+    pre-existing-add guard.  Conservative on every uncertainty; direction
+    of the comparison must NOT flip (a fresh probe-created entry is ours,
+    a pre-probe entry is the user's)."""
+
+    class _Client:
+        def __init__(self, info):
+            self._info = info
+
+        def torrent_info(self, tid):
+            return self._info
+
+    def test_fresh_entry_is_deletable(self):
+        import time
+        from datetime import datetime, timezone
+        probe_start = time.time()
+        fresh = datetime.now(timezone.utc).isoformat()
+        check = make_preexisting_check(probe_start)
+        assert check(self._Client({'added': fresh}), 'T1') is False
+
+    def test_old_entry_is_preexisting(self):
+        import time
+        check = make_preexisting_check(time.time())
+        assert check(self._Client({'added': '2020-01-01T00:00:00+00:00'}), 'T1') is True
+
+    def test_created_at_field_for_torbox(self):
+        import time
+        check = make_preexisting_check(time.time())
+        # TB uses ``created_at``, not ``added``.
+        assert check(self._Client({'created_at': '2020-01-01T00:00:00Z'}), 'T1') is True
+
+    def test_naive_timestamp_treated_as_unknown(self):
+        import time
+        check = make_preexisting_check(time.time())
+        # No tzinfo → no epoch anchor → conservative True.
+        assert check(self._Client({'added': '2020-01-01T00:00:00'}), 'T1') is True
+
+    def test_unparseable_timestamp_is_conservative(self):
+        import time
+        check = make_preexisting_check(time.time())
+        assert check(self._Client({'added': 'not-a-date'}), 'T1') is True
+
+    def test_missing_timestamp_is_conservative(self):
+        import time
+        check = make_preexisting_check(time.time())
+        assert check(self._Client({'status': 'downloaded'}), 'T1') is True
+
+    def test_non_dict_info_is_conservative(self):
+        import time
+        check = make_preexisting_check(time.time())
+        assert check(self._Client(None), 'T1') is True
+
+    def test_no_torrent_info_method_is_conservative(self):
+        import time
+        check = make_preexisting_check(time.time())
+        assert check(object(), 'T1') is True
+
+    def test_grace_absorbs_clock_skew(self):
+        """An entry created ``grace`` seconds before probe_start is still
+        ours (server clock a beat behind) — must stay deletable."""
+        import time
+        from datetime import datetime, timezone
+        probe_start = time.time()
+        # 5s before probe start, grace=30 → within the skew window → ours.
+        skewed = datetime.fromtimestamp(probe_start - 5, timezone.utc).isoformat()
+        check = make_preexisting_check(probe_start, grace=30)
+        assert check(self._Client({'added': skewed}), 'T1') is False
 
 
 # ---------------------------------------------------------------------------

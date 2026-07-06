@@ -3279,7 +3279,8 @@ class BlackholeWatcher:
         follow-up wired through ``_add_to_torbox`` is the right place
         to close the orphan window for all callers.
         """
-        from utils.debrid_routing import attempt_add_rescue, pick_alt_debrid, classify_add_failure
+        from utils.debrid_routing import (attempt_add_rescue, pick_alt_debrid,
+                                           classify_add_failure, make_preexisting_check)
 
         alt = pick_alt_debrid(source_debrid)
         if not alt:
@@ -3370,6 +3371,11 @@ class BlackholeWatcher:
                 add_response['extract_failed'] = True
             return tid or None
 
+        # Guard the shared helper's cleanup deletes against the alt's add
+        # hash-dedup: if the add returned an entry the user already had on
+        # the alt account (TB ``created_at`` / RD ``added`` predating this
+        # probe), a rescue-failure delete would destroy their content.
+        _rescue_probe_start = time.time()
         core = attempt_add_rescue(
             info_hash, source_debrid,
             alt_debrid=alt,
@@ -3377,6 +3383,7 @@ class BlackholeWatcher:
             alt_add_fn=_add_via_handler,
             ready_states=TB_READY_STATES,
             stop_event=self._stop_event,
+            preexisting_check=make_preexisting_check(_rescue_probe_start),
             logger_prefix='blackhole',
         )
 

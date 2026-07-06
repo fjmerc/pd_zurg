@@ -1463,6 +1463,14 @@ class TestCrossRescue:
         tb.configured = True
         tb.add_magnet.return_value = 'TB_ID_123'
         tb.torrent_status.return_value = 'completed'
+        # Default: a fresh ``created_at`` so the pre-existing add guard
+        # reads this entry as probe-created (deletable).  Tests modelling
+        # a user's pre-existing TB torrent override this with an old ts.
+        from datetime import datetime, timezone
+        tb.torrent_info.return_value = {
+            'id': 'TB_ID_123',
+            'created_at': datetime.now(timezone.utc).isoformat(),
+        }
         return tb
 
     @pytest.fixture
@@ -1855,3 +1863,231 @@ class TestCrossRescue:
             f"unrelated RD symlink was incorrectly retargeted: "
             f"{os.readlink(str(unrelated_link))}"
         )
+
+    def test_inner_path_filename_does_not_retarget_same_stem_torrent(
+            self, state_path, no_sleep, rd_enabled, rescue_on, tb_cached,
+            mock_tb_client, tmp_path, monkeypatch, mock_remediation_deps):
+        """Rank-5A regression: RD's list-entry ``filename`` for a
+        multi-file torrent can be an INNER file name, not the torrent's
+        top folder.  Pre-fix the retarget anchored on that basename stem
+        with a substring match — so rescuing a season pack whose inner
+        file stem equals an UNRELATED single-episode torrent's folder
+        name retargeted THAT torrent's symlinks to TB (where its content
+        is not cached), leaving dangling links.  Post-fix the anchor set
+        comes from RD ``/torrents/info`` (authoritative folder names) so
+        the pack's own symlinks move and the same-stem torrent's don't.
+        """
+        rd_base = str(tmp_path / 'debrid')
+        tb_base = str(tmp_path / 'debrid_torbox')
+        pack_folder = 'Show.S01.1080p.WEB-GROUP'
+        ep_folder = 'Show.S01E05.1080p.WEB-GROUP'   # unrelated torrent
+        os.makedirs(os.path.join(rd_base, 'shows', pack_folder), exist_ok=True)
+        os.makedirs(os.path.join(rd_base, 'shows', ep_folder), exist_ok=True)
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', rd_base)
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', tb_base)
+
+        lib_root = tmp_path / 'local_media' / 'tv'
+        lib_root.mkdir(parents=True)
+        monkeypatch.setenv('BLACKHOLE_LOCAL_LIBRARY_TV', str(lib_root))
+
+        pack_link = lib_root / 'Show' / 'Season 01' / 'ep5.mkv'
+        pack_link.parent.mkdir(parents=True)
+        pack_target = rd_base + f'/shows/{pack_folder}/{ep_folder}.mkv'
+        os.symlink(pack_target, pack_link)
+
+        ep_link = lib_root / 'Show' / 'Season 01' / 'ep5-single.mkv'
+        ep_target = rd_base + f'/shows/{ep_folder}/{ep_folder}.mkv'
+        os.symlink(ep_target, ep_link)
+
+        # RD list entry carries the inner FILE name (the bug trigger);
+        # /torrents/info carries the real top folder.
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000', filename=f'{ep_folder}.mkv')],
+            probe_results={'T1': self._BLOCKED},
+        )
+        client.torrent_info.return_value = {
+            'id': 'T1',
+            'filename': pack_folder,
+            'original_filename': pack_folder,
+            'files': [{'path': f'/{pack_folder}/{ep_folder}.mkv'}],
+        }
+        with _patch_clients(client, mock_tb_client):
+            debrid_health.run_sweep()
+
+        # The pack's own symlink moved to TB…
+        assert os.readlink(str(pack_link)) == (
+            tb_base + f'/shows/{pack_folder}/{ep_folder}.mkv'
+        )
+        # …the unrelated same-stem torrent's symlink did NOT.
+        assert os.readlink(str(ep_link)) == ep_target, (
+            f"same-stem unrelated torrent was retargeted: "
+            f"{os.readlink(str(ep_link))}"
+        )
+
+    def test_alt_real_folder_remap_from_tb_torrent_info(
+            self, state_path, no_sleep, rd_enabled, rescue_on, tb_cached,
+            mock_tb_client, arr_library_with_symlink, mock_remediation_deps):
+        """TB sanitizes torrent folder names (mylist gotcha: the real
+        on-disk folder is the first component of ``files[].name``).  A
+        same-name prefix swap would produce a dangling link whenever the
+        TB folder differs from RD's — the retarget must substitute the
+        real TB folder for the matched release component."""
+        lib_root, sym, original_target = arr_library_with_symlink
+        mock_tb_client.torrent_info.return_value = {
+            'id': 'TB_ID_123',
+            'files': [{'name': 'Release 2025 Sanitized/file.mkv'}],
+        }
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000', filename='Release.2025.mkv')],
+            probe_results={'T1': self._BLOCKED},
+        )
+        with _patch_clients(client, mock_tb_client):
+            debrid_health.run_sweep()
+
+        new_target = os.readlink(str(sym))
+        assert new_target.endswith('/movies/Release 2025 Sanitized/file.mkv'), (
+            f"TB folder not remapped: {new_target}"
+        )
+        assert 'debrid_torbox' in new_target
+
+    def test_anchor_underivable_declines_retarget(
+            self, state_path, no_sleep, rd_enabled, rescue_on, tb_cached,
+            mock_tb_client, arr_library_with_symlink, mock_remediation_deps):
+        """No list filename AND no usable torrent info → the walk cannot
+        be scoped to one torrent.  Declining beats guessing: the rescue
+        is still recorded (content reachable via TB going forward) but
+        existing symlinks are left untouched, with a distinct outcome so
+        the operator can see why nothing moved."""
+        lib_root, sym, original_target = arr_library_with_symlink
+        client = _mock_client(
+            torrents=[_torrent('T1', 'AAAA0000', filename='')],
+            probe_results={'T1': self._BLOCKED},
+        )
+        client.torrent_info.return_value = None
+        with _patch_clients(client, mock_tb_client):
+            debrid_health.run_sweep()
+
+        # Symlink untouched — no anchor, no retarget.
+        assert os.readlink(str(sym)) == original_target
+        # Rescue still short-circuits remediation.
+        assert mock_remediation_deps['blocklist_add'].call_count == 0
+        from utils import history as _h
+        rescue_metas = [
+            c.kwargs.get('meta', {})
+            for c in mock_remediation_deps['log_event'].call_args_list
+            if c.kwargs.get('meta', {}).get('cause') == _h.CAUSE_DEBRID_RESCUED
+        ]
+        assert len(rescue_metas) == 1
+        assert rescue_metas[0]['rescue_outcome'] == 'anchor_underivable'
+
+
+# ---------------------------------------------------------------------------
+# _release_anchor_candidates
+# ---------------------------------------------------------------------------
+
+class TestReleaseAnchorCandidates:
+
+    def test_authoritative_names_from_torrent_info(self):
+        client = MagicMock()
+        client.torrent_info.return_value = {
+            'filename': 'Show.S01.1080p.WEB-GROUP',
+            'original_filename': 'Show.S01.1080p.WEB-PROPER-GROUP',
+            'files': [
+                {'path': '/Show.S01.1080p.WEB-GROUP/Show.S01E01.mkv'},
+                {'path': '/Show.S01.1080p.WEB-GROUP/Show.S01E02.mkv'},
+            ],
+        }
+        got = debrid_health._release_anchor_candidates(
+            'Show.S01E01.mkv', client, 'T1')
+        assert got == {'Show.S01.1080p.WEB-GROUP',
+                       'Show.S01.1080p.WEB-PROPER-GROUP'}
+        # Crucially: the list-entry inner-file stem must NOT be present —
+        # it's the needle that matched unrelated torrents pre-fix.
+        assert 'Show.S01E01' not in got
+
+    def test_no_extension_stripping_on_folder_names(self):
+        """splitext on a dotted release name chops the ``.WEB-DL`` tail —
+        a widened candidate would over-match.  Folder names go in verbatim."""
+        client = MagicMock()
+        client.torrent_info.return_value = {
+            'filename': 'Movie.2025.1080p.WEB-DL',
+            'files': [{'path': '/Movie.2025.1080p.WEB-DL/movie.mkv'}],
+        }
+        got = debrid_health._release_anchor_candidates('x.mkv', client, 'T1')
+        assert got == {'Movie.2025.1080p.WEB-DL'}
+
+    def test_inner_path_fallback_uses_first_component_only(self):
+        """No client → fall back to the list filename.  An inner PATH
+        contributes only its first component (a plausible top folder);
+        the basename stem — the dangerous needle — is excluded."""
+        got = debrid_health._release_anchor_candidates('Show/S01/ep.mkv')
+        assert got == {'Show'}
+
+    def test_single_file_legacy_stem_preserved(self):
+        got = debrid_health._release_anchor_candidates('Release.2025.mkv')
+        assert got == {'Release.2025.mkv', 'Release.2025'}
+
+    def test_nothing_derivable_returns_empty(self):
+        client = MagicMock()
+        client.torrent_info.return_value = None
+        assert debrid_health._release_anchor_candidates('', client, 'T1') == set()
+
+    def test_torrent_info_exception_falls_back_to_filename(self):
+        client = MagicMock()
+        client.torrent_info.side_effect = RuntimeError('boom')
+        got = debrid_health._release_anchor_candidates(
+            'Release.2025.mkv', client, 'T1')
+        assert got == {'Release.2025.mkv', 'Release.2025'}
+
+    def test_files_path_only_when_no_authoritative_name(self):
+        """A wrapper torrent (top-level folder) DOES carry filename/
+        original_filename.  When those are present, per-file paths are
+        NOT consulted — otherwise a generic first component (``Sample``,
+        ``Season 02``) would sneak in alongside the real folder."""
+        client = MagicMock()
+        client.torrent_info.return_value = {
+            'filename': 'Show.S02.1080p.WEB-GROUP',
+            'files': [
+                {'path': '/Season 02/Show.S02E01.mkv'},
+                {'path': '/Sample/sample.mkv'},
+            ],
+        }
+        got = debrid_health._release_anchor_candidates('x.mkv', client, 'T1')
+        assert got == {'Show.S02.1080p.WEB-GROUP'}
+        assert 'Season 02' not in got and 'Sample' not in got
+
+    def test_files_path_unanimous_component_accepted(self):
+        """No authoritative name, but every file shares one first
+        component ⇒ that component IS the torrent's own top folder."""
+        client = MagicMock()
+        client.torrent_info.return_value = {
+            'files': [
+                {'path': '/Pack.Folder.2025/a.mkv'},
+                {'path': '/Pack.Folder.2025/b.mkv'},
+            ],
+        }
+        got = debrid_health._release_anchor_candidates('a.mkv', client, 'T1')
+        assert got == {'Pack.Folder.2025'}
+
+    def test_files_path_ambiguous_components_rejected(self):
+        """No authoritative name and the files' first components DISAGREE
+        (a wrapper-less torrent of loose per-season dirs).  Trusting any
+        single generic component (``Season 01``) would retarget unrelated
+        releases — decline and fall back to the (empty) filename."""
+        client = MagicMock()
+        client.torrent_info.return_value = {
+            'files': [
+                {'path': '/Season 01/ep1.mkv'},
+                {'path': '/Season 02/ep2.mkv'},
+            ],
+        }
+        got = debrid_health._release_anchor_candidates('', client, 'T1')
+        assert got == set()
+
+    def test_dot_components_rejected(self):
+        """``.``/``..`` are never real release folders — a retarget keyed
+        on them could escape the intended tree."""
+        client = MagicMock()
+        client.torrent_info.return_value = {'filename': '.', 'original_filename': '..'}
+        got = debrid_health._release_anchor_candidates('', client, 'T1')
+        assert got == set()

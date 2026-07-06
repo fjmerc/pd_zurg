@@ -411,7 +411,101 @@ def _should_skip(torrent_hash, state, now):
     return isinstance(ts, (int, float)) and (now - ts) < _PROBE_TTL
 
 
-def _attempt_cross_rescue(torrent_hash, filename, source_debrid='realdebrid'):
+def _release_anchor_candidates(filename, src_client=None, src_torrent_id=None):
+    """Derive the set of mount folder names that identify THIS torrent's
+    symlink targets.
+
+    The sweep's ``filename`` comes from the source debrid's list entry,
+    which for multi-file RD torrents can be an INNER file path
+    (``Show/S01/ep.mkv``) rather than the torrent's top-level folder.
+    Anchoring the retarget on that basename stem either matches nothing
+    (silent rescue no-op) or — worse — matches a DIFFERENT torrent whose
+    folder name equals the inner file's stem (e.g. a single-episode
+    release of the same episode a season pack contains), retargeting an
+    unrelated torrent's symlinks to a mount that doesn't have its
+    content.
+
+    When a source client is available, pull authoritative names from
+    the torrent-info endpoint: ``filename`` / ``original_filename``
+    (the torrent names Zurg derives the mount folder from) and the
+    first path component of every multi-file ``files[].path``.  Folder
+    names are added verbatim — NO extension stripping, since
+    ``splitext`` on a dotted release name chops the ``.WEB-DL`` tail
+    and would widen the match.
+
+    Only when no authoritative name is derivable does the legacy
+    behavior apply: the list-entry filename's basename stem.  Returns
+    an empty set when nothing is derivable at all — callers must
+    decline the retarget rather than guess.
+    """
+    candidates = set()
+
+    def _add_top(name):
+        if not isinstance(name, str):
+            return
+        name = name.strip().strip('/')
+        top = name.split('/')[0]
+        # ``.`` / ``..`` are never real release folders and would let a
+        # retarget escape the intended tree — reject them.
+        if top and top not in ('.', '..'):
+            candidates.add(top)
+
+    info = None
+    if src_client is not None and src_torrent_id:
+        try:
+            info_fn = getattr(src_client, 'torrent_info', None)
+            if callable(info_fn):
+                info = info_fn(src_torrent_id)
+        except Exception as e:
+            logger.debug(
+                f"[debrid_health] torrent_info fetch for anchor derivation "
+                f"failed: {type(e).__name__}"
+            )
+    if isinstance(info, dict):
+        _add_top(info.get('filename'))
+        _add_top(info.get('original_filename'))
+        if not candidates:
+            # Only fall back to ``files[].path`` when the torrent carries
+            # no authoritative name.  Per-file first components are unsafe
+            # to trust individually: a wrapper-less torrent gives generic
+            # folders (``Season 02``, ``Sample``, ``CD1``) that collide
+            # with unrelated releases.  Only accept a first component that
+            # is UNANIMOUS across every multi-file path — that unanimity
+            # is what makes it the torrent's own top folder rather than a
+            # per-file subdir.
+            files = info.get('files')
+            if isinstance(files, list):
+                first_components = set()
+                have_multifile = False
+                for f in files:
+                    if not isinstance(f, dict):
+                        continue
+                    p = f.get('path')
+                    if isinstance(p, str) and '/' in p.strip('/'):
+                        have_multifile = True
+                        first_components.add(p.strip().strip('/').split('/')[0])
+                if have_multifile and len(first_components) == 1:
+                    _add_top(next(iter(first_components)))
+
+    if not candidates:
+        raw = (filename or '').strip().strip('/')
+        if '/' in raw:
+            # Inner file path: only the first component can be a top
+            # folder.  The basename stem is exactly the dangerous
+            # needle — never add it.
+            _add_top(raw)
+        elif raw:
+            candidates.add(raw)
+            stem = os.path.splitext(raw)[0]
+            if stem:
+                candidates.add(stem)
+
+    candidates.discard('')
+    return candidates
+
+
+def _attempt_cross_rescue(torrent_hash, filename, source_debrid='realdebrid',
+                          src_client=None, src_torrent_id=None):
     """Try to re-host a filter-blocked torrent on the alt debrid.
 
     Plan 39 phase 3 — short-circuit the existing blocklist+delete+research
@@ -441,8 +535,10 @@ def _attempt_cross_rescue(torrent_hash, filename, source_debrid='realdebrid'):
     they are debrid_health-specific (add-time rescues have no existing
     symlinks to disrupt).
     """
-    from utils.debrid_routing import attempt_add_rescue, pick_alt_debrid
+    from utils.debrid_routing import (attempt_add_rescue, pick_alt_debrid,
+                                       make_preexisting_check)
     from utils.blackhole import TB_READY_STATES
+    import time as _time
 
     # Pre-resolve the alt-debrid client in debrid_health's namespace so
     # ``get_debrid_client`` is the locally-imported symbol — that's the
@@ -473,6 +569,11 @@ def _attempt_cross_rescue(torrent_hash, filename, source_debrid='realdebrid'):
     if alt_client is None or not getattr(alt_client, 'configured', False):
         return {'rescued': False, 'reason': 'no_alt_client'}
 
+    # Guard the shared helper's cleanup deletes: the alt add hash-dedups,
+    # so a rescue that can't reach ready must never delete an entry the
+    # user already had on the alt account (TB ``created_at`` / RD ``added``
+    # predating our probe ⇒ pre-existing, skip the delete).
+    _probe_start = _time.time()
     core = attempt_add_rescue(
         torrent_hash, source_debrid,
         alt_debrid=alt,
@@ -481,6 +582,7 @@ def _attempt_cross_rescue(torrent_hash, filename, source_debrid='realdebrid'):
         stop_event=_stop_event,
         ready_timeout=_RESCUE_READY_TIMEOUT,
         poll_interval=_RESCUE_POLL_INTERVAL,
+        preexisting_check=make_preexisting_check(_probe_start),
         logger_prefix='debrid_health',
     )
     if not core.get('rescued'):
@@ -497,6 +599,12 @@ def _attempt_cross_rescue(torrent_hash, filename, source_debrid='realdebrid'):
     alt_tid = core['alt_torrent_id']
     alt_client = core['alt_client']
 
+    # Anchor derivation — the set of mount folder names that identify
+    # this torrent's symlink targets.  Both the Plex guard and the
+    # retarget walk key off these; deriving once keeps them consistent
+    # (the guard must protect exactly the symlinks the walk would touch).
+    candidates = _release_anchor_candidates(filename, src_client, src_torrent_id)
+
     # Plex active-session guard — never swap a symlink that's mid-stream.
     # FUSE caches the open file descriptor so playback usually continues
     # from the original target, but new seeks fail after the rewrite.
@@ -506,11 +614,10 @@ def _attempt_cross_rescue(torrent_hash, filename, source_debrid='realdebrid'):
     # Lives in debrid_health (not the shared helper) because add-time
     # rescues have no existing symlinks to disrupt — Plex can't be
     # mid-stream on a file the arr hasn't imported yet.
-    release_name_guard = os.path.splitext(os.path.basename(filename or ''))[0]
-    if release_name_guard and _plex_session_active_for_release(release_name_guard):
+    if any(_plex_session_active_for_release(name) for name in candidates):
         logger.info(
             f"[debrid_health] rescue deferred — Plex is actively streaming "
-            f"{release_name_guard!r}; will retry next sweep"
+            f"one of {sorted(candidates)!r}; will retry next sweep"
         )
         # Clean up the TB add so we don't accumulate dead entries on the
         # alt debrid while we wait for Plex to stop streaming.
@@ -526,14 +633,33 @@ def _attempt_cross_rescue(torrent_hash, filename, source_debrid='realdebrid'):
     # the alt base instead.  Zero symlinks found ≠ failure — newly
     # blocked content might not have been imported by the arr yet, and
     # the rescue still made the file accessible going forward.
-    retargeted = _retarget_symlinks_to_alt(torrent_hash, filename)
+    if candidates:
+        retargeted = _retarget_symlinks_to_alt(
+            torrent_hash, filename,
+            src_debrid=source_debrid, dst_debrid=alt,
+            candidates=candidates,
+            alt_client=alt_client, alt_torrent_id=alt_tid,
+        )
+        outcome = 'symlinks_retargeted' if retargeted else 'no_symlinks_found'
+    else:
+        # No anchor derivable → we cannot scope the walk to this torrent.
+        # Declining beats guessing: a mis-anchored retarget rewrites an
+        # UNRELATED torrent's symlinks to a mount that lacks its content.
+        logger.warning(
+            f"[debrid_health] rescue retarget declined — no release anchor "
+            f"derivable for hash {torrent_hash[:8]}… (filename={filename!r}); "
+            f"content is reachable via {alt} but existing symlinks were left "
+            f"untouched"
+        )
+        retargeted = 0
+        outcome = 'anchor_underivable'
 
     return {
         'rescued': True,
         'to': alt,
         'tb_torrent_id': alt_tid,
         'retargeted': retargeted,
-        'outcome': 'symlinks_retargeted' if retargeted else 'no_symlinks_found',
+        'outcome': outcome,
     }
 
 
@@ -574,7 +700,8 @@ def _plex_session_active_for_release(release_name):
         return False
 
 
-def _retarget_symlinks_to_alt(torrent_hash, filename, src_debrid='realdebrid', dst_debrid='torbox'):
+def _retarget_symlinks_to_alt(torrent_hash, filename, src_debrid='realdebrid', dst_debrid='torbox',
+                              candidates=None, alt_client=None, alt_torrent_id=None):
     """Find symlinks in the arr libraries pointing at the source debrid's
     mount FOR THIS SPECIFIC RELEASE, and atomic-retarget each one to the
     equivalent path under the alt debrid's mount.
@@ -586,12 +713,20 @@ def _retarget_symlinks_to_alt(torrent_hash, filename, src_debrid='realdebrid', d
     ``BLACKHOLE_LOCAL_LIBRARY_MOVIES`` (the arr-side library roots), and
     for each symlink whose target points into the source debrid's
     ``BLACKHOLE_SYMLINK_TARGET_BASE`` **AND** belongs to the rescued
-    release (matched by the ``/<release_name>/`` segment that
-    blackhole.py uses as the torrent-folder name), swap the path prefix
-    to the alt debrid's base and replace the symlink atomically via
-    ``os.symlink + os.replace``.
+    release (a directory component of the target — the torrent-folder
+    name blackhole.py builds targets around — exactly equals one of the
+    anchor *candidates*), swap the path prefix to the alt debrid's base
+    and replace the symlink atomically via ``os.symlink + os.replace``.
 
-    The release-name filter is what keeps rescue scoped to ONE torrent:
+    *candidates* is the anchor set from ``_release_anchor_candidates``;
+    when ``None`` it is derived from *filename* alone (legacy direct
+    callers).  When *alt_client*/*alt_torrent_id* are given, the alt
+    debrid's REAL on-disk folder is derived from its torrent info and
+    substituted for the matched component — the alt provider may
+    sanitize the folder name (TB mylist gotcha), so a same-name swap
+    can produce a dangling link even though the content is there.
+
+    The release-anchor filter is what keeps rescue scoped to ONE torrent:
     without it, the walker would rewrite every RD symlink to TB on the
     first rescue, silently breaking the entire library since the alt
     debrid only has THIS torrent's content cached.
@@ -607,19 +742,36 @@ def _retarget_symlinks_to_alt(torrent_hash, filename, src_debrid='realdebrid', d
         )
         return 0
 
-    # Release name = filename without media extension.  Matches how
-    # blackhole.py names the torrent folder under the rclone mount and
-    # therefore the ``/<release_name>/`` segment of every symlink target
-    # for this torrent.  Without a non-empty release filter we'd
-    # mass-retarget every RD symlink on a single rescue.
-    release_name = os.path.splitext(os.path.basename(filename or ''))[0]
-    if not release_name:
+    if candidates is None:
+        candidates = _release_anchor_candidates(filename)
+    if not candidates:
         logger.warning(
-            f"[debrid_health] rescue retarget skipped — empty release name "
-            f"for hash {torrent_hash[:8]}…"
+            f"[debrid_health] rescue retarget skipped — no release anchor "
+            f"derivable for hash {torrent_hash[:8]}…"
         )
         return 0
-    release_segment = '/' + release_name + '/'
+
+    # Real on-disk folder on the alt debrid, when derivable.  TB's
+    # mylist ``name`` is a sanitized display string — the actual mount
+    # folder is the first component of ``files[].name``.  ``None``
+    # falls back to the same-name swap (correct whenever the alt
+    # provider preserves the torrent folder name).
+    alt_folder = None
+    if alt_client is not None and alt_torrent_id:
+        try:
+            info_fn = getattr(alt_client, 'torrent_info', None)
+            alt_info = info_fn(alt_torrent_id) if callable(info_fn) else None
+            if isinstance(alt_info, dict):
+                files = alt_info.get('files')
+                if isinstance(files, list) and files and isinstance(files[0], dict):
+                    first = files[0].get('name')
+                    if isinstance(first, str) and '/' in first.strip('/'):
+                        alt_folder = first.strip('/').split('/')[0]
+        except Exception as e:
+            logger.debug(
+                f"[debrid_health] alt torrent_info fetch for folder remap "
+                f"failed: {type(e).__name__}"
+            )
 
     library_roots = [
         r for r in (
@@ -645,13 +797,22 @@ def _retarget_symlinks_to_alt(torrent_hash, filename, src_debrid='realdebrid', d
                 if not current_target.startswith(src_prefix):
                     continue
                 # Per-release filter — only rewrite symlinks that
-                # belong to THIS rescued torrent (matched by the
-                # ``/<release_name>/`` path segment).  Symlinks for
-                # other RD torrents stay untouched; the alt debrid
-                # doesn't have their content cached.
-                if release_segment not in current_target:
+                # belong to THIS rescued torrent: a DIRECTORY component
+                # of the target tail must exactly equal an anchor
+                # candidate (the leaf is a file, never the torrent
+                # folder).  Symlinks for other torrents stay untouched;
+                # the alt debrid doesn't have their content cached.
+                parts = current_target[len(src_prefix):].split('/')
+                matched_idx = next(
+                    (i for i, p in enumerate(parts[:-1]) if p in candidates),
+                    None,
+                )
+                if matched_idx is None:
                     continue
-                new_target = dst_base + '/' + current_target[len(src_prefix):]
+                if alt_folder and alt_folder != parts[matched_idx]:
+                    parts = (parts[:matched_idx] + [alt_folder]
+                             + parts[matched_idx + 1:])
+                new_target = dst_base + '/' + '/'.join(parts)
                 try:
                     # Atomic-replace: write the new symlink at a temp
                     # path in the same directory, then ``os.replace``
@@ -939,7 +1100,9 @@ def run_sweep():
         # fall through to the existing remediate path.
         if is_filter_block and rescue_on:
             rescue = _attempt_cross_rescue(torrent_hash, filename,
-                                           source_debrid='realdebrid')
+                                           source_debrid='realdebrid',
+                                           src_client=client,
+                                           src_torrent_id=tid)
             if rescue.get('rescued'):
                 entry['rescued'] = True
                 entry['rescue_meta'] = {

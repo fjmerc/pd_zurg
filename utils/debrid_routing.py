@@ -21,6 +21,7 @@ stub the debrid-cache lookup without monkeypatching ``utils.search``.
 
 import os
 import re
+from datetime import datetime
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -506,6 +507,60 @@ def is_filter_block_reason(reason):
 _DEFAULT_RESCUE_READY_TIMEOUT = 60
 _DEFAULT_RESCUE_POLL_INTERVAL = 3
 
+# Clock-skew headroom for the pre-existing add guard.  A provider's
+# ``added``/``created_at`` timestamp is server-side; our ``probe_start``
+# is local.  This grace absorbs the skew between the two clocks so a
+# freshly-created probe entry (server time a beat behind our local start)
+# isn't misread as pre-existing.  Kept small: too large a window lets a
+# torrent the user added seconds before our probe slip through as "ours"
+# and be deleted.  30s comfortably covers real NTP-synced skew.
+_PREEXISTING_GRACE_SECONDS = 30
+
+
+def make_preexisting_check(probe_start, grace=_PREEXISTING_GRACE_SECONDS,
+                           timestamp_fields=('added', 'created_at')):
+    """Build a ``preexisting_check`` for :func:`attempt_add_rescue`.
+
+    A provider's add endpoint dedups by hash: adding a magnet the account
+    already holds returns the PRE-EXISTING torrent's id (RD and TB both do
+    this).  A rescue that later deletes that id on failure would destroy
+    the user's own content.  The returned closure fetches the alt entry's
+    creation timestamp (``added`` for RD, ``created_at`` for TB) and
+    reports pre-existing when it predates our probe (minus ``grace`` for
+    clock skew).
+
+    Conservative on every uncertainty — no ``torrent_info`` method, a
+    non-dict response, a missing/unparseable timestamp, or a naive
+    (tz-less) datetime all return ``True``.  An orphaned probe entry is a
+    tolerable leak; deleting the user's torrent is not.
+    """
+    def _check(client, tid):
+        info_fn = getattr(client, 'torrent_info', None)
+        if not callable(info_fn):
+            return True
+        info = info_fn(tid)
+        if not isinstance(info, dict):
+            return True
+        raw = ''
+        for field in timestamp_fields:
+            v = info.get(field)
+            if isinstance(v, str) and v.strip():
+                raw = v.strip()
+                break
+        if not raw:
+            return True
+        try:
+            dt = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+        except (ValueError, TypeError):
+            return True
+        # A naive timestamp has no anchor to compare against a UTC epoch —
+        # treat as unknown rather than guessing the zone.
+        if dt.tzinfo is None:
+            return True
+        return dt.timestamp() < probe_start - grace
+
+    return _check
+
 
 def pick_alt_debrid(source_debrid, configured=None):
     """Return the cross-rescue target for a torrent currently on ``source_debrid``.
@@ -538,6 +593,7 @@ def attempt_add_rescue(info_hash, source_debrid, *,
                        stop_event=None,
                        ready_timeout=None,
                        poll_interval=None,
+                       preexisting_check=None,
                        logger_prefix='rescue'):
     """Probe alt-debrid cache, add the hash, and wait for a ready state.
 
@@ -586,6 +642,16 @@ def attempt_add_rescue(info_hash, source_debrid, *,
       ready_timeout / poll_interval: override the module defaults
         (60s / 3s).  Per-caller tests monkeypatch these to keep
         tests fast.
+      preexisting_check: optional callable ``(alt_client, alt_torrent_id)
+        -> bool`` consulted before any cleanup delete.  Providers with
+        add-time hash-dedup (RD's ``addMagnet`` returns the
+        PRE-EXISTING torrent's id when the hash is already on the
+        account) can hand back a torrent the USER owns — deleting it on
+        ``never_ready``/``stop_requested`` would destroy their
+        in-flight download.  Return ``True`` to skip the delete; the
+        failure result then carries ``'preexisting': True``.  If the
+        check itself raises, the entry is treated as pre-existing —
+        an orphaned probe entry beats destroying user data.
       logger_prefix: tag prepended to all log lines.  Defaults to
         ``'rescue'``; callers should pass a more specific prefix like
         ``'[debrid_health] rescue'`` or ``'[blackhole] rescue'``.
@@ -687,7 +753,7 @@ def attempt_add_rescue(info_hash, source_debrid, *,
             )
             return {'rescued': False, 'reason': 'no_alt_client',
                     'alt_torrent_id': None}
-        alt_key = os.environ.get(f'{alt.upper()}_API_KEY')
+        alt_key = os.environ.get(f'{alt.upper()}_API_KEY') if alt != REALDEBRID else os.environ.get('RD_API_KEY')
         try:
             alt_client, _svc = get_debrid_client(service=alt, api_key=alt_key)
         except Exception as e:
@@ -724,14 +790,36 @@ def attempt_add_rescue(info_hash, source_debrid, *,
                 'alt_torrent_id': None}
     alt_tid = str(alt_tid)
 
+    def _is_preexisting():
+        if preexisting_check is None:
+            return False
+        try:
+            preexisting = bool(preexisting_check(alt_client, alt_tid))
+        except Exception as e:
+            logger.warning(
+                f"[{logger_prefix}] preexisting check failed for "
+                f"{info_hash[:8]}…: {type(e).__name__} — treating alt "
+                f"entry {alt_tid} as pre-existing (skipping delete)"
+            )
+            return True
+        if preexisting:
+            logger.warning(
+                f"[{logger_prefix}] alt entry {alt_tid} for "
+                f"{info_hash[:8]}… predates this add (provider hash-dedup "
+                f"returned an existing torrent) — skipping cleanup delete"
+            )
+        return preexisting
+
     # 5. Stop-event short-circuit between add and poll loop
     if stop_event is not None and stop_event.is_set():
-        try:
-            alt_client.delete_torrent(alt_tid)
-        except Exception:
-            pass
+        preexisting = _is_preexisting()
+        if not preexisting:
+            try:
+                alt_client.delete_torrent(alt_tid)
+            except Exception:
+                pass
         return {'rescued': False, 'reason': 'stop_requested',
-                'alt_torrent_id': alt_tid}
+                'alt_torrent_id': alt_tid, 'preexisting': preexisting}
 
     # 6. Poll for ready
     if status_fn is None:
@@ -764,18 +852,22 @@ def attempt_add_rescue(info_hash, source_debrid, *,
             time.sleep(poll_interval)
 
     if not is_ready:
-        try:
-            alt_client.delete_torrent(alt_tid)
-        except Exception:
-            pass
+        preexisting = _is_preexisting()
+        if not preexisting:
+            try:
+                alt_client.delete_torrent(alt_tid)
+            except Exception:
+                pass
         if failed_state:
             return {'rescued': False, 'reason': 'failed_state',
-                    'alt_torrent_id': alt_tid, 'state': failed_state}
+                    'alt_torrent_id': alt_tid, 'state': failed_state,
+                    'preexisting': preexisting}
         # Honour stop-event observed mid-poll loop so the caller can
         # distinguish a SIGTERM-driven abort from a genuine timeout.
         reason = 'stop_requested' if (stop_event is not None and stop_event.is_set()) else 'never_ready'
         return {'rescued': False, 'reason': reason,
-                'alt_torrent_id': alt_tid}
+                'alt_torrent_id': alt_tid, 'preexisting': preexisting}
 
     return {'rescued': True, 'to': alt,
-            'alt_torrent_id': alt_tid, 'alt_client': alt_client}
+            'alt_torrent_id': alt_tid, 'alt_client': alt_client,
+            'preexisting': False}

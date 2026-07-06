@@ -3922,6 +3922,15 @@ class LibraryScanner:
     _WANTED_RD_READY_TIMEOUT = 20
     _WANTED_RD_POLL_INTERVAL = 2
     _WANTED_RD_MISS_TTL = 7 * 24 * 3600
+    # RD's addMagnet hash-dedups: adding a hash already on the account
+    # returns the PRE-EXISTING torrent's id.  Before any probe-cleanup
+    # delete, the torrent's ``added`` timestamp is compared against the
+    # probe start; anything older than this grace (clock-skew headroom
+    # between RD's server and ours) was NOT created by the probe and
+    # must never be deleted.  Kept small: too wide a window lets a torrent
+    # the user added seconds before our probe read as "ours" and be
+    # deleted — the exact data-loss we're guarding against.
+    _WANTED_RD_PREEXISTING_GRACE = 30
     # Time budget for the whole Wanted recovery pass.  Wider than
     # _SEARCH_BUDGET_SECONDS (30s) because each uncached RD probe-add can
     # legitimately burn _WANTED_RD_READY_TIMEOUT seconds of polling — a
@@ -4730,7 +4739,7 @@ class LibraryScanner:
         Never raises.
         """
         from utils import search as _search
-        from utils.debrid_routing import attempt_add_rescue
+        from utils.debrid_routing import attempt_add_rescue, make_preexisting_check
         from utils.debrid_client import RD_READY_STATES, RD_FAIL_STATES
 
         info_hash = (release.get('info_hash') or '').lower()
@@ -4748,8 +4757,16 @@ class LibraryScanner:
         # * Hash already on the account (parked blocked entry, or content
         #   the mount has under a mismatched name): skip and memoize —
         #   re-adding won't change anything within the miss window.
+        #
+        # force_refresh bypasses the 30s dedup-cache TTL.  The staleness
+        # window is CORRELATED, not random: the user manually adding a
+        # popular release is exactly when the probe grabs the same hash —
+        # a stale "not on account" answer here hands the probe the user's
+        # own torrent id (RD hash-dedup) and the miss-cleanup delete
+        # would destroy their in-flight download.
         try:
-            existing = _search._existing_hashes('realdebrid', rd_key)
+            existing = _search._existing_hashes('realdebrid', rd_key,
+                                                force_refresh=True)
         except Exception:
             existing = None
         if existing is None:
@@ -4774,6 +4791,25 @@ class LibraryScanner:
                 client.select_files(tid)
             return st
 
+        # Last line of defense behind the force-refreshed dedup listing
+        # above: the listing can still miss (RD truncates /torrents at
+        # 2500 entries, dropping the OLDEST; or the user adds between
+        # our listing and our add).  RD's addMagnet hash-dedup then
+        # hands back the user's own torrent id, and every cleanup
+        # delete on that id destroys THEIR torrent.  Anything whose
+        # ``added`` timestamp predates the probe wasn't created by us.
+        # Unknown (info fetch failed, timestamp missing/unparseable) →
+        # treat as pre-existing: an orphaned probe entry beats
+        # destroying user data.
+        probe_start = time.time()
+        # Narrowed to RD's field only: this leg always holds an RD client
+        # (``created_at`` is TB's field, never present here).  The factory
+        # default checks both — don't rely on it in case a future third
+        # field would change precedence.
+        _preexisting = make_preexisting_check(
+            probe_start, grace=self._WANTED_RD_PREEXISTING_GRACE,
+            timestamp_fields=('added',))
+
         core = attempt_add_rescue(
             info_hash, 'torbox',
             alt_debrid='realdebrid',
@@ -4786,6 +4822,7 @@ class LibraryScanner:
             fail_states=RD_FAIL_STATES,
             ready_timeout=self._WANTED_RD_READY_TIMEOUT,
             poll_interval=self._WANTED_RD_POLL_INTERVAL,
+            preexisting_check=_preexisting,
             logger_prefix='library.wanted_rd',
         )
 
@@ -4823,10 +4860,24 @@ class LibraryScanner:
         except Exception:
             probe = {'status': 'unknown'}
         if probe.get('status') == 'blocked':
+            # Same pre-existing guard as the miss-cleanup deletes: if
+            # RD's hash-dedup handed us the user's own (blocked) torrent,
+            # leave it in place — the filter verdict still stands.
             try:
-                rd_client.delete_torrent(tid)
+                skip_delete = _preexisting(rd_client, tid)
             except Exception:
-                pass
+                skip_delete = True
+            if skip_delete:
+                logger.warning(
+                    f"[library] Wanted→RD probe: torrent {tid} predates "
+                    f"this probe (RD hash-dedup) — leaving the blocked "
+                    f"entry in place"
+                )
+            else:
+                try:
+                    rd_client.delete_torrent(tid)
+                except Exception:
+                    pass
             # Same permanent-filter class as the add-time 403/451 branch —
             # report as a filter block (no _wanted_rd_miss memo) so the
             # caller can accrue the terminal give-up strike.

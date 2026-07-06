@@ -7361,6 +7361,13 @@ class _FakeRdClient:
         self.probe_result = {'status': 'healthy'}
         self.probe_calls = []
         self.delete_calls = []
+        self.info_calls = []
+        # ``added`` returned by torrent_info; default = "just now", i.e.
+        # a torrent the probe itself created (deletable).  Tests set an
+        # old timestamp to model RD hash-dedup returning the USER'S
+        # pre-existing torrent, or None to model an info fetch failure.
+        from datetime import datetime, timezone
+        self.info_added = datetime.now(timezone.utc).isoformat()
 
     def probe_file(self, tid):
         self.probe_calls.append(tid)
@@ -7368,6 +7375,15 @@ class _FakeRdClient:
 
     def delete_torrent(self, tid):
         self.delete_calls.append(tid)
+        return True
+
+    def torrent_info(self, tid):
+        self.info_calls.append(tid)
+        if self.info_added is None:
+            return None
+        return {'id': tid, 'status': 'downloaded', 'added': self.info_added}
+
+    def select_files(self, tid):
         return True
 
 
@@ -7576,6 +7592,66 @@ class TestWantedRdRecovery:
         assert wire['rd_client'].delete_calls == []
         assert ('debrid_add', 'wanted_rd_recovered') in self._causes(wire)
         assert wire['tb_adds'] == []
+
+    def test_add_time_filter_block_preexisting_torrent_not_deleted(self, wire):
+        """Rank-5B regression: RD's addMagnet hash-dedups — adding a hash
+        already on the account returns the USER'S pre-existing torrent id.
+        When that torrent turns out filter-blocked, the probe's cleanup
+        delete must not fire on a torrent the probe didn't create."""
+        wire['rd_client'].probe_result = {
+            'status': 'blocked', 'reason': 'infringing_file', 'http': 451}
+        wire['rd_client'].info_added = '2020-01-01T00:00:00+00:00'
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rd_client'].delete_calls == []
+        # Still classified as a filter block: no miss memo, TB leg fires.
+        assert sc._wanted_rd_miss == {}
+        assert len(wire['tb_adds']) == 1
+
+    def test_add_time_filter_block_info_unavailable_skips_delete(self, wire):
+        # Unknown ownership (torrent_info fetch failed) → conservative:
+        # an orphaned probe entry beats destroying user data.
+        wire['rd_client'].probe_result = {
+            'status': 'blocked', 'reason': 'infringing_file', 'http': 451}
+        wire['rd_client'].info_added = None
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rd_client'].delete_calls == []
+
+    def test_preexisting_check_wired_into_rescue_core(self, wire):
+        """The same added-timestamp guard must reach attempt_add_rescue's
+        own cleanup deletes (never_ready / failed_state / stop_event)."""
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        check = wire['rescue_calls'][0].get('preexisting_check')
+        assert callable(check)
+        rd = wire['rd_client']
+        # Fresh probe-created torrent → deletable.
+        assert check(rd, 'RDTID1') is False
+        # Old ``added`` → the user's own torrent.
+        rd.info_added = '2020-01-01T00:00:00+00:00'
+        assert check(rd, 'RDTID1') is True
+        # Unparseable timestamp → conservative True.
+        rd.info_added = 'not-a-date'
+        assert check(rd, 'RDTID1') is True
+        # Info fetch failure → conservative True.
+        rd.info_added = None
+        assert check(rd, 'RDTID1') is True
+
+    def test_dedup_listing_bypasses_ttl_cache(self, wire, monkeypatch):
+        """The 30s dedup-cache staleness window is CORRELATED with user
+        adds (a popular new release).  The probe must force-refresh so a
+        just-added user torrent is seen and the probe bails 'skipped'."""
+        import utils.search as search
+        calls = []
+
+        def _existing(svc, key, **kw):
+            calls.append(kw)
+            return set()
+        monkeypatch.setattr(search, '_existing_hashes', _existing)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert calls and calls[0].get('force_refresh') is True
 
     def test_tb_cooldown_only_disables_tb_leg(self, wire):
         # Previously a TB cooldown aborted the whole pass.

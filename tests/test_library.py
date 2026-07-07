@@ -7546,12 +7546,52 @@ class TestWantedRdRecovery:
         return [(e['type'], (e.get('meta') or {}).get('cause'))
                 for e in wire['events']]
 
-    def test_rd_hit_recovers_without_tb_add(self, wire):
+    def test_tb_cached_title_never_probes_rd(self, wire):
+        # THE demotion invariant: TB has the title cached (the 93-97%
+        # case), so TB claims it and the RD leg never spends an
+        # add/delete churn on it.
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert len(wire['tb_adds']) == 1
+        assert wire['rescue_calls'] == []
+        assert ('debrid_add', 'wanted_rd_recovered') not in self._causes(wire)
+
+    def test_tb_add_failure_on_cached_title_does_not_fall_through_to_rd(
+            self, wire, monkeypatch):
+        # Even a failed TB add on a CACHED title keeps RD out: the cached
+        # TB copy is the cheaper retry once the cooldown memo expires.
+        import utils.search as search
+
+        def _add(info_hash, **kw):
+            wire['tb_adds'].append({'info_hash': info_hash, **kw})
+            return {'success': False, 'error': 'boom'}
+        monkeypatch.setattr(search, 'add_to_debrid', _add)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert len(wire['tb_adds']) == 1
+        assert wire['rescue_calls'] == []
+        assert 'tt1234567' in sc._wanted_tb_cooldown
+
+    def test_tb_probe_error_lets_rd_fire(self, wire, monkeypatch):
+        # TB can't answer for the cache state → the RD fallback still gets
+        # its shot (unknown ≠ cached).
+        import utils.search as search
+
+        def _boom(*a, **kw):
+            raise RuntimeError('tb api down')
+        monkeypatch.setattr(search, 'check_debrid_cache', _boom)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert len(wire['rescue_calls']) == 1
+        assert ('debrid_add', 'wanted_rd_recovered') in self._causes(wire)
+
+    def test_rd_hit_recovers_tb_uncached_title(self, wire):
+        wire['cache_cached'] = False
         sc = self._scanner()
         sc._recover_wanted_via_debrid([], self._movie(), {})
         assert len(wire['rescue_calls']) == 1
         assert wire['rescue_calls'][0]['info_hash'] == 'a' * 40
-        assert wire['tb_adds'] == []  # RD won — TB leg skipped
+        assert wire['tb_adds'] == []
         assert ('debrid_add', 'wanted_rd_recovered') in self._causes(wire)
         assert ('realdebrid', 'a' * 40) in wire['remembered']
         assert 'tt1234567' in sc._wanted_tb_cooldown
@@ -7559,23 +7599,25 @@ class TestWantedRdRecovery:
 
     def test_rd_hit_targets_top_quality_release(self, wire):
         # Results arrive unsorted; the RD probe must get the ranked top.
+        wire['cache_cached'] = False
         wire['torrentio'] = list(reversed(wire['torrentio']))
         sc = self._scanner()
         sc._recover_wanted_via_debrid([], self._movie(), {})
         assert wire['rescue_calls'][0]['info_hash'] == 'a' * 40
 
-    def test_rd_miss_falls_back_to_tb(self, wire):
+    def test_rd_miss_memoized_for_seven_days(self, wire):
+        wire['cache_cached'] = False
         wire['rd_core'] = {'rescued': False, 'reason': 'never_ready',
                            'alt_torrent_id': 'RDTID1'}
         sc = self._scanner()
         sc._recover_wanted_via_debrid([], self._movie(), {})
-        assert len(wire['tb_adds']) == 1  # TB leg took over
         assert 'tt1234567' in sc._wanted_rd_miss
         causes = self._causes(wire)
         assert ('debrid_add_failed', 'wanted_rd_uncached') in causes
         assert ('debrid_add', 'wanted_rd_recovered') not in causes
 
     def test_rd_failed_state_records_state_as_reason(self, wire):
+        wire['cache_cached'] = False
         wire['rd_core'] = {'rescued': False, 'reason': 'failed_state',
                            'state': 'magnet_error',
                            'alt_torrent_id': 'RDTID1'}
@@ -7587,6 +7629,7 @@ class TestWantedRdRecovery:
         assert miss[0]['meta']['reason'] == 'magnet_error'
 
     def test_rd_transient_add_error_not_memoized(self, wire):
+        wire['cache_cached'] = False
         wire['rd_core'] = {'rescued': False, 'reason': 'add_error',
                            'alt_torrent_id': None}
         sc = self._scanner()
@@ -7595,14 +7638,13 @@ class TestWantedRdRecovery:
         # the title gets another RD shot on a later scan.
         assert sc._wanted_rd_miss == {}
         assert ('debrid_add_failed', 'wanted_rd_uncached') not in self._causes(wire)
-        assert len(wire['tb_adds']) == 1  # TB fallback still ran
 
     def test_rd_451_at_add_time_is_filter_block_not_miss(self, wire):
         # RD's keyword filter rejects at addMagnet time — deterministic and
         # permanent, NOT a cache miss.  It no longer lands in the 7-day
         # _wanted_rd_miss memo (that would re-probe a blocked release
-        # forever); the measurement event still fires.  Here TB has it
-        # cached, so the title is recovered on TB.
+        # forever); the measurement event still fires.
+        wire['cache_cached'] = False
         wire['rd_core'] = {'rescued': False, 'reason': 'add_failed',
                            'http_status': 451, 'alt_torrent_id': None}
         sc = self._scanner()
@@ -7612,9 +7654,9 @@ class TestWantedRdRecovery:
                 if (e.get('meta') or {}).get('cause') == 'wanted_rd_uncached']
         assert len(miss) == 1
         assert miss[0]['meta']['reason'] == 'infringing_add'
-        assert len(wire['tb_adds']) == 1  # TB recovered it
 
     def test_rd_403_add_error_is_filter_block(self, wire):
+        wire['cache_cached'] = False
         wire['rd_core'] = {'rescued': False, 'reason': 'add_error',
                            'http_status': 403, 'alt_torrent_id': None}
         sc = self._scanner()
@@ -7623,6 +7665,7 @@ class TestWantedRdRecovery:
         assert ('debrid_add_failed', 'wanted_rd_uncached') in self._causes(wire)
 
     def test_rd_5xx_add_failure_stays_transient(self, wire):
+        wire['cache_cached'] = False
         wire['rd_core'] = {'rescued': False, 'reason': 'add_failed',
                            'http_status': 503, 'alt_torrent_id': None}
         sc = self._scanner()
@@ -7630,7 +7673,8 @@ class TestWantedRdRecovery:
         assert sc._wanted_rd_miss == {}
         assert ('debrid_add_failed', 'wanted_rd_uncached') not in self._causes(wire)
 
-    def test_add_time_filter_block_deletes_and_falls_back(self, wire):
+    def test_add_time_filter_block_deletes_probe_torrent(self, wire):
+        wire['cache_cached'] = False
         wire['rd_client'].probe_result = {
             'status': 'blocked', 'reason': 'infringing_file', 'http': 451}
         sc = self._scanner()
@@ -7643,11 +7687,11 @@ class TestWantedRdRecovery:
         assert len(miss) == 1
         assert miss[0]['meta']['reason'] == 'infringing_file'
         assert ('debrid_add', 'wanted_rd_recovered') not in self._causes(wire)
-        assert len(wire['tb_adds']) == 1  # TB leg got its chance immediately
 
     def test_probe_unknown_keeps_recovery(self, wire):
         # Network blip on the filter probe must not throw away a good add —
         # the health sweep re-probes on its own cycle.
+        wire['cache_cached'] = False
         wire['rd_client'].probe_result = {'status': 'unknown', 'error': 'x'}
         sc = self._scanner()
         sc._recover_wanted_via_debrid([], self._movie(), {})
@@ -7660,19 +7704,20 @@ class TestWantedRdRecovery:
         already on the account returns the USER'S pre-existing torrent id.
         When that torrent turns out filter-blocked, the probe's cleanup
         delete must not fire on a torrent the probe didn't create."""
+        wire['cache_cached'] = False
         wire['rd_client'].probe_result = {
             'status': 'blocked', 'reason': 'infringing_file', 'http': 451}
         wire['rd_client'].info_added = '2020-01-01T00:00:00+00:00'
         sc = self._scanner()
         sc._recover_wanted_via_debrid([], self._movie(), {})
         assert wire['rd_client'].delete_calls == []
-        # Still classified as a filter block: no miss memo, TB leg fires.
+        # Still classified as a filter block: no cache-miss memo.
         assert sc._wanted_rd_miss == {}
-        assert len(wire['tb_adds']) == 1
 
     def test_add_time_filter_block_info_unavailable_skips_delete(self, wire):
         # Unknown ownership (torrent_info fetch failed) → conservative:
         # an orphaned probe entry beats destroying user data.
+        wire['cache_cached'] = False
         wire['rd_client'].probe_result = {
             'status': 'blocked', 'reason': 'infringing_file', 'http': 451}
         wire['rd_client'].info_added = None
@@ -7683,6 +7728,7 @@ class TestWantedRdRecovery:
     def test_preexisting_check_wired_into_rescue_core(self, wire):
         """The same added-timestamp guard must reach attempt_add_rescue's
         own cleanup deletes (never_ready / failed_state / stop_event)."""
+        wire['cache_cached'] = False
         sc = self._scanner()
         sc._recover_wanted_via_debrid([], self._movie(), {})
         check = wire['rescue_calls'][0].get('preexisting_check')
@@ -7711,13 +7757,16 @@ class TestWantedRdRecovery:
             calls.append(kw)
             return set()
         monkeypatch.setattr(search, '_existing_hashes', _existing)
+        wire['cache_cached'] = False
         sc = self._scanner()
         sc._recover_wanted_via_debrid([], self._movie(), {})
         assert calls and calls[0].get('force_refresh') is True
 
-    def test_tb_cooldown_only_disables_tb_leg(self, wire):
-        # Previously a TB cooldown aborted the whole pass.
+    def test_advisory_cooldown_does_not_block_rd_fallback(self, wire):
+        # The account cooldown flag is advisory — it must not park the
+        # pass, and the RD fallback still fires on a TB-uncached title.
         wire['cooldown'] = 999
+        wire['cache_cached'] = False
         sc = self._scanner()
         sc._recover_wanted_via_debrid([], self._movie(), {})
         assert len(wire['rescue_calls']) == 1
@@ -7751,24 +7800,25 @@ class TestWantedRdRecovery:
         assert len(wire['rescue_calls']) == 1  # budget spent on the miss
 
     def test_duplicate_hash_on_rd_account_skips_probe(self, wire):
+        wire['cache_cached'] = False
         wire['existing'] = {'a' * 40}
         sc = self._scanner()
         sc._recover_wanted_via_debrid([], self._movie(), {})
         assert wire['rescue_calls'] == []  # never added
         assert 'tt1234567' in sc._wanted_rd_miss
-        assert len(wire['tb_adds']) == 1  # TB fallback still ran
 
     def test_rd_miss_memo_skips_reprobe(self, wire):
+        wire['cache_cached'] = False
         sc = self._scanner()
         sc._wanted_rd_miss['tt1234567'] = time.monotonic()
         sc._recover_wanted_via_debrid([], self._movie(), {})
         assert wire['rescue_calls'] == []
-        assert len(wire['tb_adds']) == 1
 
     def test_blocklisted_hash_excluded_from_both_legs(self, wire, monkeypatch):
         import utils.blocklist as blocklist
         monkeypatch.setattr(blocklist, 'is_blocked',
                             lambda h: h == 'a' * 40)
+        wire['cache_cached'] = False
         sc = self._scanner()
         sc._recover_wanted_via_debrid([], self._movie(), {})
         # RD probe got the next-best non-blocklisted release.
@@ -7802,16 +7852,17 @@ class TestWantedRdRecovery:
         import utils.search as search
         monkeypatch.setattr(search, '_existing_hashes',
                             lambda svc, key, **kw: None)
+        wire['cache_cached'] = False
         sc = self._scanner()
         sc._recover_wanted_via_debrid([], self._movie(), {})
         assert wire['rescue_calls'] == []   # no add attempted
         assert sc._wanted_rd_miss == {}     # transient — no memo
-        assert len(wire['tb_adds']) == 1    # TB fallback still ran
 
     def test_local_skips_do_not_burn_rd_budget(self, wire, monkeypatch):
         # Movie 1's hash is already on the account (local skip, no API
         # add); with a budget of 1 the probe slot must survive to movie 2.
         monkeypatch.setenv('WANTED_RD_RECOVERY_MAX_PER_SCAN', '1')
+        wire['cache_cached'] = False
         wire['existing'] = {'a' * 40}
 
         def _torrentio(imdb, **kw):
@@ -7833,6 +7884,7 @@ class TestWantedRdRecovery:
         # junk entry outscores the real release.  The title filter must
         # drop it so the RD probe targets the real release's hash — this
         # is the live "Fight Club added in The Fountain's slot" bug.
+        wire['cache_cached'] = False
         wire['torrentio'] = [
             {'info_hash': 'f' * 40,
              'title': 'Fight Club (1999) AI UHD - 10th Anniversary Edition',
@@ -7858,6 +7910,7 @@ class TestWantedRdRecovery:
     # ---- persisted rdblock verdicts ----------------------------------
 
     def test_451_add_persists_rdblock_verdict(self, wire, ledger):
+        wire['cache_cached'] = False
         wire['rd_core'] = {'rescued': False, 'reason': 'add_failed',
                            'http_status': 451, 'alt_torrent_id': None}
         sc = self._scanner()
@@ -7865,6 +7918,7 @@ class TestWantedRdRecovery:
         assert ledger.get('rdblock:' + 'a' * 40) == 1
 
     def test_probe_file_block_persists_rdblock_verdict(self, wire, ledger):
+        wire['cache_cached'] = False
         wire['rd_client'].probe_result = {
             'status': 'blocked', 'reason': 'infringing_file', 'http': 451}
         sc = self._scanner()
@@ -7877,6 +7931,7 @@ class TestWantedRdRecovery:
         # hoster indexing lag).  That must NOT persist a 30-day rdblock
         # verdict, or a possibly-cached hash gets locked out of RD on a
         # transient error.
+        wire['cache_cached'] = False
         wire['rd_client'].probe_result = {
             'status': 'blocked', 'reason': 'not_found', 'http': 404}
         sc = self._scanner()
@@ -7884,21 +7939,22 @@ class TestWantedRdRecovery:
         assert ledger.get('rdblock:' + 'a' * 40) == 0
 
     def test_transient_rd_failure_does_not_persist_rdblock(self, wire, ledger):
+        wire['cache_cached'] = False
         wire['rd_core'] = {'rescued': False, 'reason': 'add_failed',
                            'http_status': 503, 'alt_torrent_id': None}
         sc = self._scanner()
         sc._recover_wanted_via_debrid([], self._movie(), {})
         assert ledger.get('rdblock:' + 'a' * 40) == 0
 
-    def test_persisted_rdblock_skips_rd_add_but_tb_still_runs(self, wire, ledger):
+    def test_persisted_rdblock_skips_rd_add(self, wire, ledger):
         # Verdict persisted on a previous pass (possibly before a restart —
         # this is the whole point: the in-memory miss memo dies on restart
         # and was re-adding known-blocked hashes 6-7× per title).
+        wire['cache_cached'] = False
         ledger.bump('rdblock:' + 'a' * 40)
         sc = self._scanner()
         sc._recover_wanted_via_debrid([], self._movie(), {})
         assert wire['rescue_calls'] == []   # no RD re-add
-        assert len(wire['tb_adds']) == 1    # TB leg still got its chance
 
     def test_persisted_rdblock_burns_no_rd_budget(self, wire, ledger, monkeypatch):
         import utils.search as search
@@ -8026,6 +8082,38 @@ class TestWantedFilterGiveup:
         assert ledger.get('wantedblock:tt1234567') == 0
         assert 'tt1234567' in sc._wanted_rd_miss
         assert wire['tb_adds'] == []
+
+    def test_tb_budget_exhausted_filter_block_no_strike(self, wire, ledger,
+                                                        monkeypatch):
+        # TB budget spent mid-pass: the first (TB-cached) title consumes the
+        # only TB slot, so the second title's TB leg never runs — its RD
+        # filter-block can't confirm the "uncached" half of the give-up
+        # signature.  No strike; 7-day RD-miss memo instead.
+        import utils.search as search
+        monkeypatch.setenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', '1')
+        wire['rd_core'] = {'rescued': False, 'reason': 'add_failed',
+                           'http_status': 451, 'alt_torrent_id': None}
+
+        def _cache(hashes, service=None, api_key=None):
+            # First title TB-cached (burns the budget), second uncached.
+            return {h: h == 'a' * 40 for h in hashes}
+        monkeypatch.setattr(search, 'check_debrid_cache', _cache)
+
+        def _torrentio(imdb, **kw):
+            if imdb == 'tt9999999':
+                return [{'info_hash': 'c' * 40,
+                         'title': 'Second.2024.1080p.WEB.RelC', 'seeds': 3,
+                         'quality': {'label': '1080p', 'score': 90}}]
+            return list(wire['torrentio'])
+        monkeypatch.setattr(search, 'search_torrentio', _torrentio)
+
+        movies = self._movie() + self._movie(title='Second',
+                                             imdb='tt9999999')
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], movies, {})
+        assert len(wire['tb_adds']) == 1              # budget consumed
+        assert ledger.get('wantedblock:tt9999999') == 0
+        assert 'tt9999999' in sc._wanted_rd_miss
 
     def test_tb_probe_error_filter_block_no_strike(self, wire, ledger, monkeypatch):
         # A TorBox cache-probe error can't confirm "uncached" — be

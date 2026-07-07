@@ -4357,21 +4357,26 @@ class LibraryScanner:
         Wanted ghost (movie or first missing episode of a show), both fed by
         a single Torrentio search per title:
 
-        * **RD leg** (``WANTED_RD_RECOVERY_ENABLED``): RD's cache probe is
-          dead, so the add IS the probe — add the top release, keep it if
-          it goes instantly ready (cached), delete it and fall through to
-          the TB leg otherwise.  RD has no create-volume cooldown, so this
-          leg caps only on attempts per scan
+        * **TB leg** (``WANTED_TB_RECOVERY_ENABLED``): probe candidates
+          against TorBox's still-working cache endpoint and add the best
+          cached release.  Runs FIRST and claims every TB-cached title
+          exclusively — the RD leg never fires on one.  Bounded per scan
+          (``WANTED_TB_RECOVERY_MAX_PER_SCAN``, default 2 — a trickle,
+          because create-volume bursts arm TB Essential's ~24h abuse
+          cooldown).  Enforcement backoff (an add failing while the
+          account cooldown flag is set) disables only this leg — the RD
+          leg keeps draining.
+        * **RD leg** (``WANTED_RD_RECOVERY_ENABLED``): fallback for titles
+          TorBox does NOT have cached (or can't answer for this pass) —
+          measured live at ~8% hit rate vs TB's 93-97% cache coverage, so
+          spending its add/delete churn on TB-cached titles is pure waste.
+          RD's cache probe is dead, so the add IS the probe — add the top
+          release, keep it if it goes instantly ready (cached), delete it
+          otherwise.  RD has no create-volume cooldown, so this leg caps
+          only on attempts per scan
           (``WANTED_RD_RECOVERY_MAX_PER_SCAN``).  Every attempt doubles as
           an RD cache-hit measurement (``wanted_rd_recovered`` vs
           ``wanted_rd_uncached`` history causes).
-        * **TB leg** (``WANTED_TB_RECOVERY_ENABLED``): probe candidates
-          against TorBox's still-working cache endpoint and add the best
-          cached release.  Bounded per scan
-          (``WANTED_TB_RECOVERY_MAX_PER_SCAN``, default 2 — a trickle,
-          because create-volume bursts arm TB Essential's ~24h abuse
-          cooldown) and gated on TorBox's account cooldown.  A TB cooldown
-          only disables this leg — the RD leg keeps draining.
 
         The scanner's own symlink phase links recovered content on a
         subsequent scan, and Radarr/Sonarr import it from the mount.
@@ -4526,12 +4531,8 @@ class LibraryScanner:
             if key in self._wanted_no_results:
                 continue
             # Per-leg gates — a TB cooldown must never suppress the RD leg
-            # (or vice versa); each leg answers only to its own memo.  The
-            # RD leg also needs a full poll window of headroom left in the
-            # pass budget: starting a probe with a clamped-short window
-            # would misclassify cached titles as 7-day misses.
-            rd_try = (rd_active and key not in self._wanted_rd_miss
-                      and deadline - now_loop >= self._WANTED_RD_READY_TIMEOUT)
+            # (or vice versa); each leg answers only to its own memo.
+            rd_try = rd_active and key not in self._wanted_rd_miss
             tb_try = tb_active and key not in self._wanted_tb_cooldown
             if not rd_try and not tb_try:
                 continue
@@ -4591,7 +4592,95 @@ class LibraryScanner:
             ep_str = (f"S{season:02d}E{episode:02d}"
                       if media_type == 'series' else None)
 
-            # ---- RD leg: the add IS the probe -----------------------
+            # ---- TB leg first: cache probe + add ---------------------
+            # TB gets first claim: ~93-97% of the live Wanted backlog is
+            # TB-cached vs a measured ~8% RD probe hit rate, so the RD leg
+            # is demoted to a fallback that only fires on titles TB does
+            # NOT have cached (or whose cache state it can't answer for
+            # this pass).
+            tb_uncached = False  # TB probe ran cleanly and found nothing
+            if tb_try:
+                probe = results[:self._WANTED_TB_MAX_PROBES]
+                hashes = [r['info_hash'] for r in probe]
+                tb_probe_ok = True
+                try:
+                    cmap = _search.check_debrid_cache(
+                        hashes, service='torbox', api_key=tb_key)
+                except Exception:
+                    cmap = {}
+                    tb_probe_ok = False
+                cached = next(
+                    (r for r in probe if cmap.get(r['info_hash'])), None)
+                if cached:
+                    try:
+                        result = _search.add_to_debrid(
+                            cached['info_hash'],
+                            title=cached.get('title') or media_title or '',
+                            media_title=media_title,
+                            episode=ep_str,
+                            service='torbox',
+                            api_key=tb_key,
+                            cause='wanted_tb_recovered',
+                            source='library',
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"[library] Wanted→TB recovery add failed for "
+                            f"{media_title!r}: {type(e).__name__}")
+                        result = {}
+                    # Cool the title down regardless of outcome: a success
+                    # is added (no need to re-add), a duplicate is already
+                    # present, and a transient failure shouldn't be retried
+                    # until the window elapses.
+                    self._memo_wanted(self._wanted_tb_cooldown, key)
+                    if result.get('success'):
+                        tb_added += 1
+                    elif not result.get('duplicate'):
+                        # Enforcement check: an add failure WHILE the account
+                        # cooldown flag is set means TB is actually rejecting
+                        # creates (HTTP 400 DOWNLOAD_SERVER_ERROR surfaces as
+                        # a generic failure here) — stop burning the remaining
+                        # TB budget this pass.  A failure with no cooldown
+                        # flag is a transient error; keep going.
+                        try:
+                            from utils.blackhole import _check_torbox_cooldown
+                            # force_refresh: the advisory pre-check may have
+                            # cached 0 seconds ago; a cooldown armed by THIS
+                            # add's rejection would be masked by that cache,
+                            # so re-query /user/me.
+                            tb_cooldown = _check_torbox_cooldown(
+                                tb_key, force_refresh=True)
+                        except Exception:
+                            # Can't distinguish enforcement from a transient
+                            # add failure — keep the leg alive (blast radius
+                            # is the small remaining per-scan budget) but
+                            # leave a trace for the operator.
+                            logger.warning(
+                                "[library] Wanted→TB leg: cooldown re-probe "
+                                "failed after an add failure — cannot "
+                                "confirm enforcement, leg stays active")
+                            tb_cooldown = 0
+                        if tb_cooldown > 0:
+                            logger.info(
+                                f"[library] Wanted→TB leg backing off — add "
+                                f"failed with account cooldown active "
+                                f"({int(tb_cooldown)}s); enforcement "
+                                f"confirmed")
+                            tb_ok = False
+                    # TB-cached: the RD leg never fires on this title — even
+                    # after a transient add failure the cached TB copy is the
+                    # cheaper retry once the cooldown memo expires.
+                    continue
+                tb_uncached = tb_probe_ok
+
+            # ---- RD leg: fallback for TB-uncached titles --------------
+            # The probe needs a full poll window of headroom left in the
+            # pass budget — starting with a clamped-short window would
+            # misclassify cached titles as 7-day misses.  Checked HERE (not
+            # at loop top) because the TB leg just consumed some of it.
+            if rd_try and (deadline - time.monotonic()
+                           < self._WANTED_RD_READY_TIMEOUT):
+                rd_try = False
             rd_outcome = None
             if rd_try:
                 top_hash = (results[0].get('info_hash') or '').lower()
@@ -4602,7 +4691,7 @@ class LibraryScanner:
                     # WITHOUT re-adding (the in-memory miss memo dies on
                     # restart, which was re-adding known-blocked hashes 6-7
                     # times per title across deploys).  Costs no API call and
-                    # no budget; still pairs with the TB leg below so the
+                    # no budget; still pairs with the TB probe above so the
                     # ``wantedblock:`` give-up strike keeps accruing.
                     logger.debug(f"[library] Wanted→RD probe skipped for "
                                  f"{media_title!r} — hash {top_hash[:8]}… has "
@@ -4620,93 +4709,38 @@ class LibraryScanner:
                 if rd_outcome == 'recovered':
                     rd_added += 1
                     self._memo_wanted(self._wanted_tb_cooldown, key)
-                    continue  # recovered on RD — no TB add needed
+                    continue
 
-            # ---- TB leg: cache probe + add ---------------------------
+            # ---- combine the legs' verdicts ---------------------------
             if not tb_try:
-                # RD filter-blocked but the TB leg can't run this pass (TB on
-                # cooldown/disabled): we can't confirm the "uncached" half of
-                # the give-up signature, so don't accrue a strike.  Fall back
-                # to the 7-day RD-miss memo so the blocked release isn't
-                # re-probed against RD every scan while TB is unavailable.
+                # The TB leg couldn't run this pass (disabled / budget spent
+                # / per-title cooldown): the "uncached" half of the give-up
+                # signature can't be confirmed, so don't accrue a strike.
+                # Fall back to the 7-day RD-miss memo so a blocked release
+                # isn't re-probed against RD every scan while TB is
+                # unavailable.
                 if rd_outcome == 'filter_blocked':
                     self._memo_wanted(self._wanted_rd_miss, key)
                 continue
-            probe = results[:self._WANTED_TB_MAX_PROBES]
-            hashes = [r['info_hash'] for r in probe]
-            tb_probe_ok = True
-            try:
-                cmap = _search.check_debrid_cache(
-                    hashes, service='torbox', api_key=tb_key)
-            except Exception:
-                cmap = {}
-                tb_probe_ok = False
-            cached = next((r for r in probe if cmap.get(r['info_hash'])), None)
-            if not cached:
-                if rd_outcome == 'filter_blocked' and imdb and tb_probe_ok:
-                    # Both providers confirmed failing THIS pass — accrue a
-                    # terminal give-up strike.  Deliberately DON'T cool the
-                    # title down: leaving both memos clear lets each leg
-                    # re-confirm on the next scan so the strike count can
-                    # climb to WANTED_FILTER_GIVEUP_STRIKES (a few passes),
-                    # after which the top-of-loop guard skips it for good.
-                    self._record_wanted_filter_giveup(
-                        key, imdb, media_title, ep_str)
-                elif rd_outcome == 'filter_blocked' and imdb:
-                    # TB probe errored — can't confirm uncached, so no strike;
-                    # cool down + memo RD-miss to avoid re-probing the blocked
-                    # release every scan while TB's cache state is unknown.
-                    self._memo_wanted(self._wanted_tb_cooldown, key)
-                    self._memo_wanted(self._wanted_rd_miss, key)
-                else:
-                    # Plain TB miss (RD didn't filter-block) — cool down so we
-                    # don't re-walk it before the window elapses.
-                    self._memo_wanted(self._wanted_tb_cooldown, key)
-                continue
-
-            try:
-                result = _search.add_to_debrid(
-                    cached['info_hash'],
-                    title=cached.get('title') or media_title or '',
-                    media_title=media_title,
-                    episode=ep_str,
-                    service='torbox',
-                    api_key=tb_key,
-                    cause='wanted_tb_recovered',
-                    source='library',
-                )
-            except Exception as e:
-                logger.error(f"[library] Wanted→TB recovery add failed for "
-                             f"{media_title!r}: {type(e).__name__}")
-                result = {}
-            # Cool the title down regardless of outcome: a success is added
-            # (no need to re-add), a duplicate is already present, and a
-            # transient failure shouldn't be retried until the window elapses.
-            self._memo_wanted(self._wanted_tb_cooldown, key)
-            if result.get('success'):
-                tb_added += 1
-            elif not result.get('duplicate'):
-                # Enforcement check: an add failure WHILE the account
-                # cooldown flag is set means TB is actually rejecting
-                # creates (HTTP 400 DOWNLOAD_SERVER_ERROR surfaces as a
-                # generic failure here) — stop burning the remaining TB
-                # budget this pass.  A failure with no cooldown flag is a
-                # transient error; keep going.
-                try:
-                    from utils.blackhole import _check_torbox_cooldown
-                    # force_refresh: the advisory pre-check may have cached
-                    # 0 seconds ago; a cooldown armed by THIS add's rejection
-                    # would be masked by that cache, so re-query /user/me.
-                    tb_cooldown = _check_torbox_cooldown(
-                        tb_key, force_refresh=True)
-                except Exception:
-                    tb_cooldown = 0
-                if tb_cooldown > 0:
-                    logger.info(
-                        f"[library] Wanted→TB leg backing off — add failed "
-                        f"with account cooldown active "
-                        f"({int(tb_cooldown)}s); enforcement confirmed")
-                    tb_ok = False
+            if rd_outcome == 'filter_blocked' and imdb and tb_uncached:
+                # Both providers confirmed failing THIS pass — accrue a
+                # terminal give-up strike.  Deliberately DON'T cool the
+                # title down: leaving both memos clear lets each leg
+                # re-confirm on the next scan so the strike count can
+                # climb to WANTED_FILTER_GIVEUP_STRIKES (a few passes),
+                # after which the top-of-loop guard skips it for good.
+                self._record_wanted_filter_giveup(
+                    key, imdb, media_title, ep_str)
+            elif rd_outcome == 'filter_blocked' and imdb:
+                # TB probe errored — can't confirm uncached, so no strike;
+                # cool down + memo RD-miss to avoid re-probing the blocked
+                # release every scan while TB's cache state is unknown.
+                self._memo_wanted(self._wanted_tb_cooldown, key)
+                self._memo_wanted(self._wanted_rd_miss, key)
+            else:
+                # Plain TB miss (RD didn't filter-block) — cool down so we
+                # don't re-walk it before the window elapses.
+                self._memo_wanted(self._wanted_tb_cooldown, key)
 
         if rd_added or tb_added:
             logger.info(f"[library] Wanted recovery added {rd_added} release(s) "

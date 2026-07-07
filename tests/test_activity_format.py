@@ -146,6 +146,20 @@ def test_library_symlink_cleanup_with_counts():
     assert 'Library symlink cleanup' in s
 
 
+def test_mount_selfheal_restarted():
+    ev = _ev('mount_selfheal', mount='/data', restarted=True)
+    s = format_event(ev)['short']
+    assert 'Self-healed dead mount /data' in s
+    assert 'rclone remounted' in s
+
+
+def test_mount_selfheal_restart_failed():
+    ev = _ev('mount_selfheal', mount='/mnt/torbox', restarted=False)
+    s = format_event(ev)['short']
+    assert 'Dead mount /mnt/torbox' in s
+    assert 'operator attention needed' in s
+
+
 def test_blackhole_new_import_with_count():
     ev = _ev('blackhole_new_import', count=5, release='Big.Pack.2024')
     assert 'Blackhole import: 5 files from Big.Pack.2024' in format_event(ev)['short']

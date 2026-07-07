@@ -1143,6 +1143,103 @@ def _probe_mount(mount_path, tolerate_timeout=False):
         return 'error', f'Mount unresponsive: {e}', 0
 
 
+# Consecutive-unresponsive counts and last-heal stamps per mount path.
+# Module-level (not task-local) because each probe run is a fresh call —
+# the streak has to survive between scheduler ticks.
+_MOUNT_SELFHEAL_FAILS = 2        # consecutive unresponsive probes before healing
+_MOUNT_SELFHEAL_COOLDOWN = 600   # min seconds between heal attempts per mount
+_mount_unresponsive_counts = {}
+_mount_last_selfheal = {}
+
+
+def _selfheal_enabled():
+    return str(os.environ.get('MOUNT_SELFHEAL_ENABLED', 'true')).lower() == 'true'
+
+
+def _maybe_selfheal_mount(mount_path, status, message):
+    """Auto-recover a dead FUSE mount (the ENOTCONN corpse).
+
+    The canonical failure: rclone was SIGKILLed (container recreate) and
+    left a stale mount-table entry; the supervisor's rclone restarts then
+    crashloop on "directory already mounted" until an operator manually
+    lazy-unmounts.  Detection has existed in this probe for a while — this
+    closes the detection→remediation gap: after ``_MOUNT_SELFHEAL_FAILS``
+    consecutive unresponsive probes, lazy-unmount the corpse (reusing the
+    startup ladder in ``rclone.rclone._force_clear_stale_mount``) and
+    restart the owning rclone process.
+
+    Deliberately narrow: heals ONLY the 'Mount unresponsive' signature
+    (dead FUSE daemon).  'Mount hung' (alive-but-slow rclone) and 'absent'
+    are left alone — killing a live rclone mid-operation risks worse.
+    Never unmounts unless the matching rclone process is registered, so
+    there is always something to remount with.
+
+    Returns True when a heal was attempted and the rclone restart
+    succeeded.
+    """
+    if status != 'error' or 'unresponsive' not in (message or ''):
+        _mount_unresponsive_counts.pop(mount_path, None)
+        return False
+    count = _mount_unresponsive_counts.get(mount_path, 0) + 1
+    _mount_unresponsive_counts[mount_path] = count
+    if not _selfheal_enabled() or count < _MOUNT_SELFHEAL_FAILS:
+        return False
+    now = time.monotonic()
+    last = _mount_last_selfheal.get(mount_path)
+    if last is not None and now - last < _MOUNT_SELFHEAL_COOLDOWN:
+        return False
+
+    from utils.processes import restart_service, service_registered
+    mn = os.path.basename(mount_path.rstrip('/'))
+    if not service_registered('rclone', key_type=mn):
+        # Deliberately NOT latching the cooldown: nothing was attempted, so
+        # the moment an rclone registers (startup ordering) the very next
+        # probe may heal.  Throttle the log via the streak count instead.
+        if count == _MOUNT_SELFHEAL_FAILS or count % 10 == 0:
+            logger.error(
+                f"[scheduler] Mount {mount_path} is dead but no rclone "
+                f"process is registered for '{mn}' — cannot self-heal, "
+                f"operator attention needed")
+        return False
+
+    _mount_last_selfheal[mount_path] = now
+    logger.warning(
+        f"[scheduler] Mount {mount_path} unresponsive for {count} "
+        f"consecutive probes — self-healing: lazy-unmount + rclone "
+        f"restart ({mn})")
+    try:
+        from rclone.rclone import _force_clear_stale_mount
+        _force_clear_stale_mount(mount_path, logger)
+    except Exception as e:
+        logger.error(f"[scheduler] Self-heal unmount of {mount_path} "
+                     f"failed: {e}")
+    restarted = False
+    try:
+        restarted = restart_service('rclone', key_type=mn)
+    except Exception as e:
+        logger.error(f"[scheduler] Self-heal rclone restart for '{mn}' "
+                     f"failed: {e}")
+    if restarted:
+        logger.info(f"[scheduler] Self-heal complete — rclone ({mn}) "
+                    f"restarted for {mount_path}")
+        _mount_unresponsive_counts.pop(mount_path, None)
+    else:
+        logger.error(f"[scheduler] Self-heal could not restart rclone "
+                     f"({mn}) — mount {mount_path} remains dead")
+    if _history:
+        try:
+            _history.log_event(
+                'repair' if restarted else 'failed',
+                f'Mount {mount_path}',
+                source='scheduler',
+                meta={'cause': _history.CAUSE_MOUNT_SELFHEAL,
+                      'mount': mount_path,
+                      'restarted': restarted})
+        except Exception:
+            pass
+    return restarted
+
+
 def mount_liveness_probe():
     """Verify rclone FUSE mounts (RD/AD + TB) and local library mounts are healthy.
 
@@ -1161,6 +1258,7 @@ def mount_liveness_probe():
     if primary_status == 'absent':
         # Primary missing is a real error (existing behavior).
         primary_status = 'error'
+    _maybe_selfheal_mount(rclone_mount, primary_status, primary_msg)
 
     # Optional TB mount.  Gated on the same three env vars
     # ``rclone/rclone.py::_torbox_mount_configured`` checks, so we don't
@@ -1198,6 +1296,7 @@ def mount_liveness_probe():
 
     if tb_mount_path:
         tb_status, tb_msg, tb_items = _probe_mount(tb_mount_path, tolerate_timeout=True)
+        _maybe_selfheal_mount(tb_mount_path, tb_status, tb_msg)
 
     # Combine.  TB 'absent' means TB not configured — don't degrade.
     # TB 'error' means TB configured but dead — degrade to error.

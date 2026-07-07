@@ -295,6 +295,7 @@ homelab-scale installs — most users don't need to touch these.
 | `CONFIG_BACKUP_RETENTION` | Number of scheduled backup archives to retain. Older ones are pruned after each run | `7` |
 | `CONFIG_BACKUP_DIR` | Directory that receives scheduled backup archives. Pre-restore snapshots also land here (under `pre-restore-<timestamp>/` subdirs) | `/config/backups` |
 | `MOUNT_LIVENESS_INTERVAL` | Minutes between rclone mount liveness probes | `5` |
+| `MOUNT_SELFHEAL_ENABLED` | When the liveness probe finds a dead FUSE mount (stale mount-table entry after a container recreate — rclone crashloops on "directory already mounted"), automatically lazy-unmount the corpse and restart the owning rclone process. Fires only after 2 consecutive dead probes, only for the dead-daemon signature (never a merely slow or rate-limited mount), at most once per 10 minutes per mount. Set `false` to require manual recovery | `true` |
 
 ---
 

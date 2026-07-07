@@ -315,6 +315,44 @@ class TestRestartService:
         assert restart_service('zurg') is False
         assert restart_service('Zurg') is False
 
+    @staticmethod
+    def _fake_entry(name, key_type, restarted):
+        class FakeHandler:
+            process = None
+            subprocess_logger = None
+            _restart_count = 3
+            _first_restart_time = 123.0
+
+            def restart_process(self):
+                restarted.append((name, key_type))
+        return {'process_name': name, 'key_type': key_type,
+                'handler': FakeHandler()}
+
+    def test_no_key_type_restarts_every_instance(self, monkeypatch):
+        """The UI's 'restart rclone' must reach BOTH mounts — key_type=None
+        restarts every registered instance of the name, not just the
+        first-registered one."""
+        import utils.processes as processes
+        restarted = []
+        monkeypatch.setattr(processes, '_process_registry', [
+            self._fake_entry('rclone', 'zurgarr', restarted),
+            self._fake_entry('rclone', 'torbox', restarted),
+            self._fake_entry('Zurg', 'zurgarr', restarted),
+        ])
+        assert restart_service('rclone') is True
+        assert restarted == [('rclone', 'zurgarr'), ('rclone', 'torbox')]
+
+    def test_key_type_filter_restarts_only_matching_instance(self, monkeypatch):
+        import utils.processes as processes
+        restarted = []
+        monkeypatch.setattr(processes, '_process_registry', [
+            self._fake_entry('rclone', 'zurgarr', restarted),
+            self._fake_entry('rclone', 'torbox', restarted),
+        ])
+        assert restart_service('rclone', key_type='torbox') is True
+        assert restarted == [('rclone', 'torbox')]
+        assert restart_service('rclone', key_type='nosuchmount') is False
+
 
 # ---------------------------------------------------------------------------
 # StatusHandler — client-disconnect swallowing

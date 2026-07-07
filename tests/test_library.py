@@ -8148,6 +8148,140 @@ class TestWantedFilterGiveup:
         assert ledger.get('wantedblock:tt7654321') == 0
 
 
+class TestWantedMemoPersistence:
+    """The three Wanted-recovery memo dicts survive container restarts via
+    /config/wanted_memos.json, so a restart mid-drain doesn't re-probe the
+    whole backlog through Torrentio + TB checkcached."""
+
+    def _scanner(self):
+        sc = LibraryScanner.__new__(LibraryScanner)
+        sc._wanted_tb_cooldown = {}
+        sc._wanted_rd_miss = {}
+        sc._wanted_no_results = {}
+        return sc
+
+    @pytest.fixture(autouse=True)
+    def config_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv('CONFIG_DIR', str(tmp_path))
+        return tmp_path
+
+    def _memos_path(self, config_dir):
+        return config_dir / 'wanted_memos.json'
+
+    def test_round_trip(self, config_dir):
+        import time as _time
+        sc = self._scanner()
+        now = _time.monotonic()
+        sc._wanted_tb_cooldown['tt0000001'] = now
+        sc._wanted_rd_miss['tt0000002'] = now
+        sc._wanted_no_results['tt0000003:1:1'] = now
+        sc._persist_wanted_memos()
+        assert self._memos_path(config_dir).is_file()
+
+        sc2 = self._scanner()
+        sc2._load_wanted_memos()
+        assert 'tt0000001' in sc2._wanted_tb_cooldown
+        assert 'tt0000002' in sc2._wanted_rd_miss
+        assert 'tt0000003:1:1' in sc2._wanted_no_results
+
+    def test_expired_entries_dropped_on_load(self, config_dir):
+        import json as _json
+        import time as _time
+        # tb_cooldown TTL is 6h, rd_miss is 7d: an 8h-old tb entry must be
+        # dropped while an 8h-old rd_miss entry loads.
+        payload = {
+            'version': 1,
+            'saved_at': _time.time(),
+            'memos': {
+                'tb_cooldown': {'tt0000001': 8 * 3600},
+                'rd_miss': {'tt0000002': 8 * 3600},
+                'no_results': {},
+            },
+        }
+        self._memos_path(config_dir).write_text(_json.dumps(payload))
+        sc = self._scanner()
+        sc._load_wanted_memos()
+        assert sc._wanted_tb_cooldown == {}
+        assert 'tt0000002' in sc._wanted_rd_miss
+
+    def test_downtime_counts_against_ttl(self, config_dir):
+        import json as _json
+        import time as _time
+        # Saved 5h ago with a 2h age → current age 7h > 6h TTL → dropped.
+        payload = {
+            'version': 1,
+            'saved_at': _time.time() - 5 * 3600,
+            'memos': {
+                'tb_cooldown': {'tt0000001': 2 * 3600},
+                'rd_miss': {},
+                'no_results': {},
+            },
+        }
+        self._memos_path(config_dir).write_text(_json.dumps(payload))
+        sc = self._scanner()
+        sc._load_wanted_memos()
+        assert sc._wanted_tb_cooldown == {}
+
+    def test_loaded_age_respected_by_pass_expiry(self, config_dir):
+        import json as _json
+        import time as _time
+        # A loaded 1h-old tb_cooldown entry must still gate the next pass
+        # (1h < 6h TTL) — i.e. the age survives the monotonic conversion.
+        payload = {
+            'version': 1,
+            'saved_at': _time.time(),
+            'memos': {
+                'tb_cooldown': {'tt0000001': 3600},
+                'rd_miss': {},
+                'no_results': {},
+            },
+        }
+        self._memos_path(config_dir).write_text(_json.dumps(payload))
+        sc = self._scanner()
+        sc._load_wanted_memos()
+        now = _time.monotonic()
+        age = now - sc._wanted_tb_cooldown['tt0000001']
+        assert 3500 < age < 3700
+
+    def test_corrupt_file_loads_nothing(self, config_dir):
+        self._memos_path(config_dir).write_text('{not json')
+        sc = self._scanner()
+        sc._load_wanted_memos()  # must not raise
+        assert sc._wanted_tb_cooldown == {}
+        assert sc._wanted_rd_miss == {}
+        assert sc._wanted_no_results == {}
+
+    def test_missing_file_loads_nothing(self):
+        sc = self._scanner()
+        sc._load_wanted_memos()  # must not raise
+        assert sc._wanted_tb_cooldown == {}
+
+    def test_clear_wanted_memos_rewrites_snapshot(self, config_dir):
+        import time as _time
+        sc = self._scanner()
+        sc._wanted_tb_cooldown['tt0000001'] = _time.monotonic()
+        sc._persist_wanted_memos()
+        sc.clear_wanted_memos('tt0000001')
+
+        sc2 = self._scanner()
+        sc2._load_wanted_memos()
+        assert 'tt0000001' not in sc2._wanted_tb_cooldown
+
+    def test_recovery_pass_persists_memos(self, config_dir, monkeypatch):
+        # End-to-end: a TB-cached add during the pass lands in the snapshot
+        # file without any explicit persist call.
+        wire = _wire_wanted_recovery(monkeypatch)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid(
+            [], [{'title': 'The Substance', 'source': 'wanted',
+                  'imdb_id': 'tt1234567', 'is_available': True}], {})
+        assert len(wire['tb_adds']) == 1
+
+        sc2 = self._scanner()
+        sc2._load_wanted_memos()
+        assert 'tt1234567' in sc2._wanted_tb_cooldown
+
+
 class TestReleaseMatchesTitle:
     """Golden cases for the Torrentio auto-add title sanity check."""
 

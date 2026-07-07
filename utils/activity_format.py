@@ -494,6 +494,17 @@ def _fmt_task_verify_symlinks(ev, meta):
     return short, short
 
 
+def _fmt_mount_selfheal(ev, meta):
+    mount = meta.get('mount', 'mount')
+    ok = meta.get('restarted')
+    if ok:
+        short = f'Self-healed dead mount {mount} — rclone remounted'
+    else:
+        short = (f'Dead mount {mount} — unmounted stale FUSE but rclone '
+                 f'restart failed, operator attention needed')
+    return short, short
+
+
 def _fmt_library_symlink_cleanup(ev, meta):
     s = meta.get('searched', 0)
     d = meta.get('deleted', 0)
@@ -555,6 +566,7 @@ _CAUSE_FORMATTERS = {
     'task_routing_audit': _fmt_task_routing_audit,
     'task_verify_symlinks': _fmt_task_verify_symlinks,
     'library_symlink_cleanup': _fmt_library_symlink_cleanup,
+    'mount_selfheal': _fmt_mount_selfheal,
 }
 
 
@@ -779,6 +791,11 @@ FORMATTER_JS = r"""
       if (m.searched) parts.push('searched ' + m.searched);
       if (m.deleted)  parts.push('deleted ' + m.deleted);
       return 'Library symlink cleanup — ' + (parts.length ? parts.join(', ') : 'nothing to do');
+    },
+    mount_selfheal: function(ev,m){
+      var mount = m.mount || 'mount';
+      if (m.restarted) return 'Self-healed dead mount ' + mount + ' — rclone remounted';
+      return 'Dead mount ' + mount + ' — unmounted stale FUSE but rclone restart failed, operator attention needed';
     }
   };
 

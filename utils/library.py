@@ -2408,6 +2408,12 @@ class LibraryScanner:
         # add), so it gates the pass before the per-leg memos; expires on the
         # short TB cooldown TTL so newly-released content isn't held back.
         self._wanted_no_results = {}
+        # Rehydrate the three memo dicts from the last persisted snapshot so
+        # a container restart doesn't re-probe the whole Wanted backlog
+        # through Torrentio + TB checkcached (observed live: a restart mid-
+        # drain re-ground all ~135 titles, burning the very TB create budget
+        # the memos exist to protect).
+        self._load_wanted_memos()
         self._alias_norms = {}     # {norm_title: set of alias norm_titles}
         try:
             self._debrid_unavailable_days = int(os.environ.get('DEBRID_UNAVAILABLE_THRESHOLD_DAYS', '3'))
@@ -4745,6 +4751,9 @@ class LibraryScanner:
         if rd_added or tb_added:
             logger.info(f"[library] Wanted recovery added {rd_added} release(s) "
                         f"to RealDebrid and {tb_added} to TorBox")
+        # Persist the memo state so a restart resumes the drain where it
+        # left off instead of re-probing the whole backlog.
+        self._persist_wanted_memos()
 
     def _record_wanted_filter_giveup(self, key, imdb, media_title, ep_str):
         """Bump the persistent both-providers give-up strike for a Wanted
@@ -5072,7 +5081,89 @@ class LibraryScanner:
                 for k in [k for k in d if k == imdb_id or k.startswith(prefix)]:
                     del d[k]
                     removed += 1
+        if removed:
+            # Rewrite the snapshot so a restart can't resurrect a memo the
+            # operator just cleared via the Stuck-tab Retry action.
+            self._persist_wanted_memos()
         return removed
+
+    @staticmethod
+    def _wanted_memos_file():
+        return os.path.join(
+            os.environ.get('CONFIG_DIR', '/config'), 'wanted_memos.json')
+
+    def _persist_wanted_memos(self):
+        """Snapshot the three Wanted-recovery memo dicts to disk.
+
+        One atomic write per recovery pass (plus one per operator Retry).
+        Ages are stored in seconds (monotonic stamps are meaningless across
+        restarts) together with a wall-clock ``saved_at`` so the loader can
+        account for the downtime between save and reload.  Best-effort: a
+        read-only or full ``/config`` must never break a scan.
+        """
+        payload = {
+            'version': 1,
+            'saved_at': time.time(),
+            'memos': self.wanted_recovery_snapshot(),
+        }
+        try:
+            import json as _json
+            from utils.file_utils import atomic_write
+            with atomic_write(self._wanted_memos_file()) as fh:
+                _json.dump(payload, fh, separators=(',', ':'))
+        except (OSError, ValueError, TypeError) as e:
+            logger.debug(f"[library] Could not persist wanted memos: {e}")
+
+    def _load_wanted_memos(self):
+        """Rehydrate the memo dicts from the persisted snapshot (init-time).
+
+        Each stored age is grown by the wall-clock downtime since
+        ``saved_at``; entries already past their TTL are dropped rather than
+        loaded.  Clock skew makes the ages approximate, which is fine — the
+        memos are API-pressure hints, not correctness state (worst case a
+        title is re-probed a little early or late).  Missing/corrupt file
+        loads nothing.
+        """
+        import json as _json
+        path = self._wanted_memos_file()
+        try:
+            with open(path, encoding='utf-8') as fh:
+                payload = _json.load(fh)
+        except (OSError, ValueError):
+            return
+        if not isinstance(payload, dict):
+            return
+        memos = payload.get('memos')
+        saved_at = payload.get('saved_at')
+        if not isinstance(memos, dict) or not isinstance(saved_at, (int, float)):
+            return
+        downtime = max(0.0, time.time() - saved_at)
+        now = time.monotonic()
+        ttls = {
+            'no_results': self._WANTED_TB_RECOVERY_COOLDOWN,
+            'rd_miss': self._WANTED_RD_MISS_TTL,
+            'tb_cooldown': self._WANTED_TB_RECOVERY_COOLDOWN,
+        }
+        loaded = 0
+        with self._wanted_memo_lock:
+            for name, target in (('no_results', self._wanted_no_results),
+                                 ('rd_miss', self._wanted_rd_miss),
+                                 ('tb_cooldown', self._wanted_tb_cooldown)):
+                stored = memos.get(name)
+                if not isinstance(stored, dict):
+                    continue
+                ttl = ttls[name]
+                for key, age in stored.items():
+                    if not isinstance(key, str) or not isinstance(age, (int, float)):
+                        continue
+                    current_age = age + downtime
+                    if current_age < 0 or current_age >= ttl:
+                        continue
+                    target[key] = now - current_age
+                    loaded += 1
+        if loaded:
+            logger.info(f"[library] Restored {loaded} Wanted-recovery memo(s) "
+                        f"from {path}")
 
     def _clear_resolved_pending(self, shows, movies):
         """Clear pending entries that are resolved or stale.

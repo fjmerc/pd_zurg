@@ -252,6 +252,8 @@ ENV_SCHEMA = [
         'name': 'Monitoring',
         'description': 'ffprobe monitoring and auto-update',
         'fields': [
+            ('MOUNT_SELFHEAL_ENABLED', 'Mount Self-Heal', 'boolean', False,
+             'When the mount-liveness probe finds a dead FUSE mount (stale mount-table entry after a container recreate — rclone crashloops on "directory already mounted" until someone manually lazy-unmounts), automatically unmount the corpse and restart the owning rclone process. Fires only after 2 consecutive dead probes, only for the dead-daemon signature (never a slow or rate-limited mount), and at most once per 10 minutes per mount (default: ON).'),
             ('FFPROBE_MONITOR_ENABLED', 'Enable ffprobe Monitor', 'boolean', False, 'Monitor for stuck ffprobe processes'),
             ('FFPROBE_STUCK_TIMEOUT', 'Stuck Timeout (seconds)', 'number:10-600', False, 'Seconds before an ffprobe process is considered stuck'),
             ('FFPROBE_POLL_INTERVAL', 'Poll Interval (seconds)', 'number:5-300', False, 'How often to check for stuck processes'),
@@ -322,6 +324,9 @@ _ENV_DEFAULTS = {
     # Debrid health detection is on by default; matches
     # utils/debrid_health.py::_enabled() and base/__init__.py Config.
     'DEBRID_HEALTH_ENABLED': 'true',
+    # Mount self-heal defaults ON — matches
+    # utils/scheduled_tasks.py::_selfheal_enabled() and base/__init__.py Config.
+    'MOUNT_SELFHEAL_ENABLED': 'true',
     # Quality compromise true-defaults — see Config.load() in base/__init__.py.
     # Listed so the Settings UI renders the matching toggles as ON out of
     # the box instead of misleading the user with an OFF toggle when the

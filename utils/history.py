@@ -118,6 +118,9 @@ CAUSE_TASK_STALE_GRAB_DETECTION = 'task_stale_grab_detection'
 CAUSE_TASK_ROUTING_AUDIT = 'task_routing_audit'
 CAUSE_TASK_VERIFY_SYMLINKS = 'task_verify_symlinks'
 CAUSE_LIBRARY_SYMLINK_CLEANUP = 'library_symlink_cleanup'
+# mount_liveness detected a dead FUSE mount (ENOTCONN corpse) and
+# automatically unmounted + restarted the owning rclone process.
+CAUSE_MOUNT_SELFHEAL = 'mount_selfheal'
 
 
 def init(config_dir='/config'):

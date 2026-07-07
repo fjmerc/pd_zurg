@@ -269,7 +269,23 @@ def stop_process_monitor():
     heartbeat.unregister(_HEARTBEAT_NAME)
 
 
-def restart_service(service_name):
+def service_registered(service_name, key_type=None):
+    """Return True if a process with this name (and optional key_type) is
+    in the registry.  Lets callers verify a restart target exists BEFORE
+    taking destructive preparation steps (e.g. the mount self-heal must
+    not lazy-unmount a path it has no rclone process to remount)."""
+    with _registry_lock:
+        for entry in _process_registry:
+            if entry['process_name'].lower() != service_name.lower():
+                continue
+            if key_type is not None and \
+                    (entry['key_type'] or '').lower() != key_type.lower():
+                continue
+            return True
+    return False
+
+
+def restart_service(service_name, key_type=None):
     """Restart a specific service by name. For admin-triggered restarts.
 
     Terminates the process and immediately re-launches it, resetting the
@@ -277,20 +293,29 @@ def restart_service(service_name):
 
     Args:
         service_name: Process name to match (e.g., 'Zurg', 'rclone', 'plex_debrid')
+        key_type: Optional key-type filter for names registered more than
+            once (both rclone mounts register as 'rclone', distinguished by
+            mount name — e.g. 'zurgarr' vs 'torbox').  None restarts EVERY
+            registered instance of the name — the UI's "restart rclone"
+            must reach both mounts, not just the first-registered one.
 
     Returns:
-        True if process was found and restarted, False otherwise.
+        True if at least one matching process was found and restarted.
     """
     from utils.logger import get_logger
     logger = get_logger()
 
+    restarted_any = False
     with _registry_lock:
         for entry in _process_registry:
             name = entry['process_name']
             handler = entry['handler']
-            key_type = entry['key_type']
+            key_type_entry = entry['key_type']
+            if key_type is not None and \
+                    (key_type_entry or '').lower() != key_type.lower():
+                continue
             if name.lower() == service_name.lower():
-                desc = f"{name} w/ {key_type}" if key_type else name
+                desc = f"{name} w/ {key_type_entry}" if key_type_entry else name
 
                 # Terminate if running
                 if handler.process and handler.process.poll() is None:
@@ -313,10 +338,11 @@ def restart_service(service_name):
                 # Re-launch
                 handler.restart_process()
                 logger.info(f"[restart_service] {desc} restarted successfully")
-                return True
+                restarted_any = True
 
-    logger.warning(f"[restart_service] Process '{service_name}' not found in registry")
-    return False
+    if not restarted_any:
+        logger.warning(f"[restart_service] Process '{service_name}' not found in registry")
+    return restarted_any
 
 
 class ProcessHandler:

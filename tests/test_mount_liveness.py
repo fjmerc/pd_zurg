@@ -278,3 +278,177 @@ class TestListdirWithTimeout:
         assert status == 'success'
         assert 'slow' in msg.lower()
         assert any('slow' in r.message.lower() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# _maybe_selfheal_mount — unit
+# ---------------------------------------------------------------------------
+
+UNRESPONSIVE = 'Mount unresponsive: [Errno 107] Transport endpoint is not connected'
+
+
+class _HistoryRecorder:
+    CAUSE_MOUNT_SELFHEAL = 'mount_selfheal'
+
+    def __init__(self):
+        self.events = []
+
+    def log_event(self, ev_type, title, **kwargs):
+        self.events.append({'type': ev_type, 'title': title, **kwargs})
+
+
+class TestMountSelfheal:
+
+    @pytest.fixture(autouse=True)
+    def _reset_state(self, monkeypatch):
+        """Fresh streak/cooldown state per test; self-heal enabled by
+        default; all side-effecting collaborators mocked to recorders."""
+        import utils.processes as processes
+        import rclone.rclone as rclone_mod
+
+        monkeypatch.setattr(scheduled_tasks, '_mount_unresponsive_counts', {})
+        monkeypatch.setattr(scheduled_tasks, '_mount_last_selfheal', {})
+        monkeypatch.delenv('MOUNT_SELFHEAL_ENABLED', raising=False)
+
+        self.cleared = []
+        self.restarts = []
+        monkeypatch.setattr(
+            rclone_mod, '_force_clear_stale_mount',
+            lambda path, log: self.cleared.append(path))
+        monkeypatch.setattr(
+            processes, 'service_registered',
+            lambda name, key_type=None: True)
+        monkeypatch.setattr(
+            processes, 'restart_service',
+            lambda name, key_type=None: (
+                self.restarts.append((name, key_type)) or True))
+        self.history = _HistoryRecorder()
+        monkeypatch.setattr(scheduled_tasks, '_history', self.history)
+        yield
+
+    def test_first_unresponsive_probe_does_not_heal(self):
+        healed = scheduled_tasks._maybe_selfheal_mount(
+            '/data', 'error', UNRESPONSIVE)
+        assert healed is False
+        assert self.cleared == []
+        assert self.restarts == []
+        assert scheduled_tasks._mount_unresponsive_counts['/data'] == 1
+
+    def test_second_consecutive_unresponsive_heals(self):
+        scheduled_tasks._maybe_selfheal_mount('/data', 'error', UNRESPONSIVE)
+        healed = scheduled_tasks._maybe_selfheal_mount(
+            '/data', 'error', UNRESPONSIVE)
+        assert healed is True
+        assert self.cleared == ['/data']
+        assert self.restarts == [('rclone', 'data')]
+        # Streak reset after successful heal.
+        assert '/data' not in scheduled_tasks._mount_unresponsive_counts
+        assert len(self.history.events) == 1
+        ev = self.history.events[0]
+        assert ev['type'] == 'repair'
+        assert ev['meta']['cause'] == 'mount_selfheal'
+        assert ev['meta']['restarted'] is True
+        assert ev['meta']['mount'] == '/data'
+
+    def test_key_type_is_mount_basename(self):
+        scheduled_tasks._maybe_selfheal_mount(
+            '/mnt/torbox/', 'error', UNRESPONSIVE)
+        scheduled_tasks._maybe_selfheal_mount(
+            '/mnt/torbox/', 'error', UNRESPONSIVE)
+        assert self.restarts == [('rclone', 'torbox')]
+
+    def test_success_probe_resets_streak(self):
+        scheduled_tasks._maybe_selfheal_mount('/data', 'error', UNRESPONSIVE)
+        scheduled_tasks._maybe_selfheal_mount('/data', 'success', '3 entries')
+        healed = scheduled_tasks._maybe_selfheal_mount(
+            '/data', 'error', UNRESPONSIVE)
+        assert healed is False
+        assert self.cleared == []
+        assert scheduled_tasks._mount_unresponsive_counts['/data'] == 1
+
+    def test_disabled_via_env(self, monkeypatch):
+        monkeypatch.setenv('MOUNT_SELFHEAL_ENABLED', 'false')
+        for _ in range(3):
+            healed = scheduled_tasks._maybe_selfheal_mount(
+                '/data', 'error', UNRESPONSIVE)
+        assert healed is False
+        assert self.cleared == []
+        assert self.restarts == []
+
+    def test_heal_cooldown_suppresses_retry(self, monkeypatch):
+        import utils.processes as processes
+        # Restart fails so the streak is NOT reset — the mount stays dead.
+        monkeypatch.setattr(
+            processes, 'restart_service', lambda name, key_type=None: False)
+        scheduled_tasks._maybe_selfheal_mount('/data', 'error', UNRESPONSIVE)
+        scheduled_tasks._maybe_selfheal_mount('/data', 'error', UNRESPONSIVE)
+        assert self.cleared == ['/data']
+        # Further failures within the cooldown do not re-attempt.
+        healed = scheduled_tasks._maybe_selfheal_mount(
+            '/data', 'error', UNRESPONSIVE)
+        assert healed is False
+        assert self.cleared == ['/data']
+
+    def test_cooldown_expiry_allows_second_attempt(self, monkeypatch):
+        import utils.processes as processes
+        monkeypatch.setattr(
+            processes, 'restart_service', lambda name, key_type=None: False)
+        scheduled_tasks._maybe_selfheal_mount('/data', 'error', UNRESPONSIVE)
+        scheduled_tasks._maybe_selfheal_mount('/data', 'error', UNRESPONSIVE)
+        # Age the last-heal stamp past the cooldown.
+        scheduled_tasks._mount_last_selfheal['/data'] -= (
+            scheduled_tasks._MOUNT_SELFHEAL_COOLDOWN + 1)
+        scheduled_tasks._maybe_selfheal_mount('/data', 'error', UNRESPONSIVE)
+        assert self.cleared == ['/data', '/data']
+
+    def test_no_registered_process_skips_unmount(self, monkeypatch):
+        import utils.processes as processes
+        monkeypatch.setattr(
+            processes, 'service_registered',
+            lambda name, key_type=None: False)
+        scheduled_tasks._maybe_selfheal_mount('/data', 'error', UNRESPONSIVE)
+        healed = scheduled_tasks._maybe_selfheal_mount(
+            '/data', 'error', UNRESPONSIVE)
+        assert healed is False
+        assert self.cleared == []
+        assert self.restarts == []
+
+    def test_no_registered_process_does_not_latch_cooldown(self, monkeypatch):
+        """A refused heal (no rclone registered) must NOT arm the 600s
+        cooldown — the moment rclone registers, the next probe heals."""
+        import utils.processes as processes
+        registered = {'v': False}
+        monkeypatch.setattr(
+            processes, 'service_registered',
+            lambda name, key_type=None: registered['v'])
+        scheduled_tasks._maybe_selfheal_mount('/data', 'error', UNRESPONSIVE)
+        scheduled_tasks._maybe_selfheal_mount('/data', 'error', UNRESPONSIVE)
+        assert scheduled_tasks._mount_last_selfheal == {}
+        registered['v'] = True
+        healed = scheduled_tasks._maybe_selfheal_mount(
+            '/data', 'error', UNRESPONSIVE)
+        assert healed is True
+        assert self.cleared == ['/data']
+
+    def test_hung_signature_not_healed(self):
+        for _ in range(3):
+            healed = scheduled_tasks._maybe_selfheal_mount(
+                '/data', 'error', 'Mount hung: listdir exceeded 15s')
+        assert healed is False
+        assert self.cleared == []
+        assert '/data' not in scheduled_tasks._mount_unresponsive_counts
+
+    def test_restart_failure_logs_failed_event(self, monkeypatch):
+        import utils.processes as processes
+        monkeypatch.setattr(
+            processes, 'restart_service', lambda name, key_type=None: False)
+        scheduled_tasks._maybe_selfheal_mount('/data', 'error', UNRESPONSIVE)
+        healed = scheduled_tasks._maybe_selfheal_mount(
+            '/data', 'error', UNRESPONSIVE)
+        assert healed is False
+        assert self.cleared == ['/data']
+        ev = self.history.events[0]
+        assert ev['type'] == 'failed'
+        assert ev['meta']['restarted'] is False
+        # Streak survives a failed heal — the mount is still dead.
+        assert scheduled_tasks._mount_unresponsive_counts['/data'] == 2

@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import tempfile
 import pytest
 from unittest.mock import patch, MagicMock
@@ -116,7 +117,7 @@ class TestEnvSchema:
         assert roundtrip == schema
 
     def test_gap_fill_enabled_registered_as_default_on_boolean(self):
-        """GAP_FILL_ENABLED must be surfaced in the UI under Media Services as
+        """GAP_FILL_ENABLED must be surfaced in the UI under Recovery & Reconciliation as
         a boolean toggle that renders ON out of the box — otherwise a user who
         never set it in .env would see an OFF toggle despite runtime default=ON."""
         schema = get_env_schema()
@@ -130,8 +131,67 @@ class TestEnvSchema:
                     break
         assert field is not None, "GAP_FILL_ENABLED missing from schema"
         assert field['type'] == 'boolean'
-        assert category == 'Media Services'
+        assert category == 'Recovery & Reconciliation'
         assert _ENV_DEFAULTS.get('GAP_FILL_ENABLED') == 'true'
+
+    def test_recovery_reconciliation_section_exists_with_moved_keys(self):
+        """Recovery & Reconciliation section must exist and contain the keys
+        moved out of Media Services in Change 2."""
+        schema = get_env_schema()
+        recovery_cat = next(
+            (c for c in schema['categories'] if c['name'] == 'Recovery & Reconciliation'),
+            None,
+        )
+        assert recovery_cat is not None, "'Recovery & Reconciliation' section missing from schema"
+        recovery_keys = {f['key'] for f in recovery_cat['fields']}
+        moved_keys = {
+            'WANTED_TB_RECOVERY_ENABLED',
+            'WANTED_TB_RECOVERY_MAX_PER_SCAN',
+            'WANTED_RD_RECOVERY_ENABLED',
+            'WANTED_RD_RECOVERY_MAX_PER_SCAN',
+            'FORCE_GRAB_MAX_ATTEMPTS',
+            'DEBRID_UNAVAILABLE_THRESHOLD_DAYS',
+            'GAP_FILL_ENABLED',
+            'LIBRARY_RESCAN_NFS_DELAY',
+        }
+        assert moved_keys <= recovery_keys, (
+            f"Missing from Recovery & Reconciliation: {moved_keys - recovery_keys}"
+        )
+        # None of the moved keys should still be in Media Services
+        media_cat = next(
+            (c for c in schema['categories'] if c['name'] == 'Media Services'),
+            None,
+        )
+        assert media_cat is not None, "'Media Services' section missing from schema"
+        media_keys = {f['key'] for f in media_cat['fields']}
+        assert not (moved_keys & media_keys), (
+            f"Keys still present in Media Services after move: {moved_keys & media_keys}"
+        )
+
+    def test_no_env_vars_lost_or_duplicated_after_reorder(self):
+        """Invariant: the complete set of env var keys across all sections must
+        equal _ALL_KEYS, with no duplicates. Reordering/moving sections must
+        not silently drop a field or create two entries for the same key."""
+        all_keys_from_schema = []
+        for cat in ENV_SCHEMA:
+            for field in cat['fields']:
+                all_keys_from_schema.append(field[0])
+        # No duplicates
+        assert len(all_keys_from_schema) == len(set(all_keys_from_schema)), (
+            f"Duplicate keys in ENV_SCHEMA: "
+            f"{[k for k in all_keys_from_schema if all_keys_from_schema.count(k) > 1]}"
+        )
+        # Same set as _ALL_KEYS (which is derived from ENV_SCHEMA at module load)
+        assert set(all_keys_from_schema) == _ALL_KEYS, (
+            f"Mismatch between schema keys and _ALL_KEYS. "
+            f"In schema but not _ALL_KEYS: {set(all_keys_from_schema) - _ALL_KEYS}. "
+            f"In _ALL_KEYS but not schema: {_ALL_KEYS - set(all_keys_from_schema)}"
+        )
+        # Count matches _ENV_DEFAULTS coverage (every default key must exist in schema)
+        for key in _ENV_DEFAULTS:
+            assert key in _ALL_KEYS, (
+                f"_ENV_DEFAULTS references {key!r} which is not in the schema"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1028,6 +1088,15 @@ class TestReset:
         for key, expected in _ENV_DEFAULTS.items():
             assert defaults[key] == expected
 
+    # Live-os.environ knobs: read fresh at use time by design, so they have
+    # no Config attribute. Their runtime default is the fallback literal at
+    # each os.environ.get call site — guarded by the source-scan test below.
+    _LIVE_ENV_KEYS = {
+        'FORCE_GRAB_MAX_ATTEMPTS',
+        'BLACKHOLE_TB_ALT_MAX_ATTEMPTS',
+        'BLACKHOLE_ARR_FEEDBACK_MAX_STRIKES',
+    }
+
     def test_env_defaults_stays_in_sync_with_config(self, monkeypatch):
         """Drift guard: every _ENV_DEFAULTS entry must match the default baked
         into base.Config.__init__. If Config is changed to default to 'false'
@@ -1039,16 +1108,48 @@ class TestReset:
         from base import Config
         fresh = Config()
         for key, declared in _ENV_DEFAULTS.items():
+            if key in self._LIVE_ENV_KEYS:
+                continue
             assert hasattr(fresh, key), (
                 f"_ENV_DEFAULTS references {key!r} but Config has no attribute "
                 f"by that name — the drift guard assumes env key == Config attr "
-                f"name. Either rename the Config attr or remove this key from "
-                f"_ENV_DEFAULTS."
+                f"name. Either rename the Config attr, remove this key from "
+                f"_ENV_DEFAULTS, or (for a live-os.environ knob) add it to "
+                f"_LIVE_ENV_KEYS."
             )
             actual = getattr(fresh, key)
             assert actual == declared, (
                 f"_ENV_DEFAULTS[{key!r}]={declared!r} but Config defaults to "
                 f"{actual!r} — one of them is stale."
+            )
+
+    def test_live_env_defaults_match_source_fallbacks(self):
+        """Drift guard for the live-os.environ knobs: extract the fallback
+        literal from every os.environ.get call site in utils/ and pin it to
+        _ENV_DEFAULTS. Also catches two call sites disagreeing with each
+        other (e.g. FORCE_GRAB_MAX_ATTEMPTS is read in utils/library.py and
+        utils/stuck.py). Only matches bare string-literal fallbacks
+        (os.environ.get('K', '12')); a computed fallback (str(12), a named
+        constant) would not match and trip the `key in found` assertion."""
+        import pathlib
+        import utils
+        pattern = re.compile(
+            r"os\.environ\.get\(\s*['\"](" + "|".join(self._LIVE_ENV_KEYS)
+            + r")['\"]\s*,\s*['\"]([^'\"]*)['\"]"
+        )
+        found = {}
+        for py in pathlib.Path(utils.__file__).parent.glob('*.py'):
+            for m in pattern.finditer(py.read_text()):
+                found.setdefault(m.group(1), set()).add(m.group(2))
+        for key in self._LIVE_ENV_KEYS:
+            assert key in found, (
+                f"no os.environ.get('{key}', ...) fallback literal found in "
+                f"utils/ — if the knob moved or gained a Config attr, update "
+                f"_LIVE_ENV_KEYS."
+            )
+            assert found[key] == {_ENV_DEFAULTS[key]}, (
+                f"_ENV_DEFAULTS[{key!r}]={_ENV_DEFAULTS[key]!r} but source "
+                f"fallbacks are {sorted(found[key])} — one of them is stale."
             )
 
     def test_plex_debrid_defaults_from_file(self, tmp_path):

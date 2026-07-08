@@ -306,6 +306,12 @@ ENV_SCHEMA = [
 # All known env var keys from the schema
 _ALL_KEYS = {field[0] for cat in ENV_SCHEMA for field in cat['fields']}
 
+# Keys the schema declares as secret-typed. Sourced by config viewers so a
+# future secret field whose name lacks a KEY/TOKEN/PASS/SECRET/AUTH token
+# still gets masked (all current secret keys happen to match by name).
+_SECRET_KEYS = {field[0] for cat in ENV_SCHEMA
+                for field in cat['fields'] if field[2] == 'secret'}
+
 # Env vars whose application default is non-empty (typically boolean toggles
 # that default to ON when unset). Used by read_env_values() and
 # get_env_defaults() to surface the real default in the UI — without this,

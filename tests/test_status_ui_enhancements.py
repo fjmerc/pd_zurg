@@ -246,6 +246,56 @@ class TestGetSanitizedConfig:
         assert 'PASS' in _SENSITIVE_PATTERNS
         assert 'SECRET' in _SENSITIVE_PATTERNS
 
+    def test_notification_url_masked(self, monkeypatch):
+        """NOTIFICATION_URL embeds a credential the name-pattern misses."""
+        monkeypatch.setenv('NOTIFICATION_URL', 'discord://sekrettoken@webhookid')
+        config = get_sanitized_config()
+        assert 'sekrettoken' not in config['NOTIFICATION_URL']
+        assert '****' in config['NOTIFICATION_URL']
+        # partial-mask, not over-masked to a bare '****' (still identifiable)
+        assert config['NOTIFICATION_URL'].startswith('disc')
+
+    def test_all_schema_secret_keys_masked(self, monkeypatch):
+        """Every schema secret-typed field must be masked, name or not."""
+        from utils.settings_api import _SECRET_KEYS
+        for key in _SECRET_KEYS:
+            monkeypatch.setenv(key, 'plaintextsecretvalue123')
+        config = get_sanitized_config()
+        for key in _SECRET_KEYS:
+            assert 'plaintextsecretvalue123' not in config[key], key
+            assert '****' in config[key], key
+
+    def test_embedded_credential_key_consulted(self, monkeypatch):
+        """A key in _EMBEDDED_CREDENTIAL_KEYS is masked even with a clean name."""
+        import utils.status_server as ss
+        # STATUS_UI_* matches a config prefix but the name has no secret token
+        monkeypatch.setattr(ss, '_EMBEDDED_CREDENTIAL_KEYS', {'STATUS_UI_FAKECRED'})
+        monkeypatch.setenv('STATUS_UI_FAKECRED', 'shouldbemaskedvalue')
+        config = ss.get_sanitized_config()
+        assert 'shouldbemaskedvalue' not in config['STATUS_UI_FAKECRED']
+        assert '****' in config['STATUS_UI_FAKECRED']
+
+    def test_all_schema_keys_present(self):
+        """Every schema key must appear in the config dump (anti-drift)."""
+        from utils.settings_api import _ALL_KEYS
+        config = get_sanitized_config()
+        missing = _ALL_KEYS - set(config.keys())
+        assert not missing, f"schema keys missing from config dump: {sorted(missing)}"
+
+    def test_formerly_missing_feature_keys_present(self):
+        """Feature keys not covered by _CONFIG_PREFIXES still show up."""
+        config = get_sanitized_config()
+        for key in ('WANTED_TB_RECOVERY_ENABLED',
+                    'QUALITY_COMPROMISE_ENABLED',
+                    'DEBRID_HEALTH_ENABLED'):
+            assert key in config, f"{key} missing from config dump"
+
+    def test_prefix_only_var_still_shows(self, monkeypatch):
+        """A prefix-matched var absent from the schema still appears."""
+        monkeypatch.setenv('ZURG_INSTANCES_CONFIG', '/config/zurg.yml')
+        config = get_sanitized_config()
+        assert config.get('ZURG_INSTANCES_CONFIG') == '/config/zurg.yml'
+
 
 # ---------------------------------------------------------------------------
 # localStorage keys (post-Phase-6)

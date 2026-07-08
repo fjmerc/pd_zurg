@@ -255,18 +255,36 @@ _CONFIG_PREFIXES = (
     'SYMLINK_VERIFY', 'PREFERENCE_ENFORCE', 'HOUSEKEEPING',
     'CONFIG_BACKUP', 'MOUNT_LIVENESS', 'HISTORY_',
 )
+# Keys whose value embeds a credential the name-pattern check can't catch
+# (e.g. Apprise URLs like discord://token@id). Always masked.
+_EMBEDDED_CREDENTIAL_KEYS = {'NOTIFICATION_URL'}
 
 
 def get_sanitized_config():
-    """Return current Zurgarr config with sensitive values masked."""
-    config = {}
-    for key in sorted(os.environ.keys()):
-        if not any(key.startswith(p) for p in _CONFIG_PREFIXES):
-            continue
+    """Return current Zurgarr config with sensitive values masked.
 
-        value = os.environ[key]
-        if any(s in key.upper() for s in _SENSITIVE_PATTERNS):
-            if value and len(value) > 8:
+    The key set is the union of the authoritative settings schema
+    (``settings_api._ALL_KEYS``) and any live env var matching a config
+    prefix, so schema keys are shown even when unset and non-schema knobs
+    (e.g. ZURG_INSTANCES_CONFIG) still appear.
+    """
+    from utils.settings_api import _ALL_KEYS, _SECRET_KEYS
+
+    keys = set(_ALL_KEYS)
+    for key in os.environ:
+        if any(key.startswith(p) for p in _CONFIG_PREFIXES):
+            keys.add(key)
+
+    config = {}
+    for key in sorted(keys):
+        value = os.environ.get(key, '')
+        sensitive = (
+            any(s in key.upper() for s in _SENSITIVE_PATTERNS)
+            or key in _SECRET_KEYS
+            or key in _EMBEDDED_CREDENTIAL_KEYS
+        )
+        if sensitive:
+            if value and len(value) > 12:
                 config[key] = value[:4] + '****' + value[-4:]
             elif value:
                 config[key] = '****'

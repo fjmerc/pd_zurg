@@ -1152,6 +1152,19 @@ class TestReset:
                 f"fallbacks are {sorted(found[key])} — one of them is stale."
             )
 
+    def test_env_example_covers_all_schema_keys(self):
+        """Drift guard: every schema key must have a (commented) template
+        line in .env.example — CLAUDE.md requires one for each new env var."""
+        import pathlib
+        from utils.settings_api import _ALL_KEYS
+        root = pathlib.Path(__file__).resolve().parent.parent
+        text = (root / '.env.example').read_text()
+        missing = [k for k in sorted(_ALL_KEYS)
+                   if not re.search(r'^#? ?' + re.escape(k) + '=', text, re.M)]
+        assert not missing, (
+            f".env.example is missing template lines for: {missing}"
+        )
+
     def test_plex_debrid_defaults_from_file(self, tmp_path):
         defaults_file = tmp_path / 'defaults.json'
         defaults_file.write_text(json.dumps({'Show Menu on Startup': 'true'}))

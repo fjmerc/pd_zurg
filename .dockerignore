@@ -3,3 +3,14 @@
 **/*.gitignore
 **/*.github
 *Ubuntu*
+.git
+.env
+.venv
+tests/
+**/__pycache__
+.pytest_cache/
+log/
+.claude/
+.plans/
+.playwright-mcp/
+pd_zurg/

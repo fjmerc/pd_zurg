@@ -7401,6 +7401,257 @@ class TestRecoverWantedViaTorbox:
         assert wire['adds'][0]['episode'] == 'S01E01'
 
 
+class TestReleaseCoversSeason:
+    """_release_covers_season release-name classifier."""
+
+    @pytest.mark.parametrize('name,season,episode,expected', [
+        # Season-pack forms.
+        ('The.Americans.S03.1080p.WEB-DL', 3, 2, 'pack'),
+        ('The.Americans.S01-S04.COMPLETE.1080p', 3, 2, 'pack'),
+        ('The.Americans.S01-04.COMPLETE.1080p', 3, 2, 'pack'),
+        ('The Americans Season 3 1080p', 3, 2, 'pack'),
+        ("Grey's.Anatomy.S22.COMPLETE.720p", 22, 1, 'pack'),
+        # Exact-episode fallback.
+        ('The.Americans.S03E02.1080p.WEB', 3, 2, 'episode'),
+        # Rejections: wrong episode, wrong season, wrong range, no marker.
+        ('The.Americans.S03E09.1080p.WEB', 3, 2, None),
+        ('The.Americans.S05.1080p.WEB-DL', 3, 2, None),
+        ('The.Americans.S04-S06.COMPLETE', 3, 2, None),
+        ('The.Americans.2018.1080p.BluRay', 3, 2, None),
+        ('', 3, 2, None),
+    ])
+    def test_classification(self, name, season, episode, expected):
+        from utils.library import _release_covers_season
+        assert _release_covers_season(name, season, episode) == expected
+
+
+class TestWantedSeasonPackRecovery:
+    """Wanted→TB season-pack recovery for partially-present shows."""
+
+    def _scanner(self, missing=None):
+        """``missing`` maps imdb_id → _compute_missing_episodes() result."""
+        sc = LibraryScanner.__new__(LibraryScanner)
+        sc._wanted_tb_cooldown = {}
+        sc._wanted_rd_miss = {}
+        sc._wanted_no_results = {}
+        missing = missing or {}
+        sc._compute_missing_episodes = (
+            lambda show: list(missing.get(show.get('imdb_id'), [])))
+        return sc
+
+    def _partial(self, imdb='tt2149175', title='The Americans',
+                 missing_count=3):
+        # source != 'wanted' + missing_episodes > 0 = partially present.
+        return {'title': title, 'source': 'debrid', 'imdb_id': imdb,
+                'missing_episodes': missing_count}
+
+    @pytest.fixture
+    def wire(self, monkeypatch):
+        """Stub the external surfaces; capture searches + adds."""
+        import base
+        import utils.blackhole as bh
+        import utils.search as search
+
+        monkeypatch.setenv('TORRENTIO_URL', 'https://torrentio.example')
+        monkeypatch.setenv('WANTED_TB_RECOVERY_ENABLED', 'true')
+        monkeypatch.delenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', raising=False)
+        monkeypatch.delenv('WANTED_SEASON_RECOVERY_ENABLED', raising=False)
+
+        state = {
+            'adds': [],
+            'searches': [],
+            'cooldown': 0,
+            'cache_cached': True,
+            'torrentio': [
+                # Pack scores BELOW the single episode so pack preference
+                # is proven against the quality sort, not by it.
+                {'info_hash': 'a' * 40,
+                 'title': 'The.Americans.S03.1080p.WEB-DL.Pack',
+                 'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+                {'info_hash': 'b' * 40,
+                 'title': 'The.Americans.S03E02.1080p.WEB',
+                 'seeds': 20, 'quality': {'label': '1080p', 'score': 120}},
+            ],
+        }
+
+        monkeypatch.setattr(
+            base, 'load_secret_or_env',
+            lambda name: 'tb_key' if name == 'torbox_api_key' else None)
+        monkeypatch.setattr(bh, '_check_torbox_cooldown',
+                            lambda *a, **kw: state['cooldown'])
+
+        def _torrentio(imdb_id, media_type=None, season=None, episode=None,
+                       **kw):
+            state['searches'].append({'imdb': imdb_id,
+                                      'media_type': media_type,
+                                      'season': season, 'episode': episode})
+            return list(state['torrentio'])
+        monkeypatch.setattr(search, 'search_torrentio', _torrentio)
+
+        def _cache(hashes, service=None, api_key=None):
+            return {h: state['cache_cached'] for h in hashes}
+        monkeypatch.setattr(search, 'check_debrid_cache', _cache)
+
+        def _add(info_hash, **kw):
+            state['adds'].append({'info_hash': info_hash, **kw})
+            return {'success': True, 'torrent_id': 't', 'service': 'torbox'}
+        monkeypatch.setattr(search, 'add_to_debrid', _add)
+
+        return state
+
+    def test_pack_added_for_partial_show_season(self, wire):
+        sc = self._scanner({'tt2149175': [(3, 2), (3, 5), (3, 7)]})
+        sc._recover_wanted_via_debrid([self._partial()], [], {})
+        # Torrentio queried at (season, first missing episode) as 'series'.
+        assert wire['searches'] == [
+            {'imdb': 'tt2149175', 'media_type': 'series',
+             'season': 3, 'episode': 2}]
+        assert len(wire['adds']) == 1
+        add = wire['adds'][0]
+        # The pack wins despite the episode release's higher quality score.
+        assert add['info_hash'] == 'a' * 40
+        assert add['episode'] == 'S03'
+        assert add['service'] == 'torbox'
+        assert add['cause'] == 'wanted_tb_recovered'
+        assert add['media_title'] == 'The Americans'
+
+    def test_single_episode_fallback_when_no_pack(self, wire):
+        wire['torrentio'] = [
+            {'info_hash': 'b' * 40,
+             'title': 'The.Americans.S03E02.1080p.WEB',
+             'seeds': 20, 'quality': {'label': '1080p', 'score': 120}},
+        ]
+        sc = self._scanner({'tt2149175': [(3, 2), (3, 5)]})
+        sc._recover_wanted_via_debrid([self._partial()], [], {})
+        assert len(wire['adds']) == 1
+        assert wire['adds'][0]['info_hash'] == 'b' * 40
+        assert wire['adds'][0]['episode'] == 'S03E02'
+
+    def test_non_covering_releases_dropped(self, wire):
+        wire['torrentio'] = [
+            {'info_hash': 'c' * 40,
+             'title': 'The.Americans.S05.1080p.WEB-DL',   # wrong season
+             'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+            {'info_hash': 'd' * 40,
+             'title': 'The.Americans.S03E09.1080p.WEB',   # off-target ep
+             'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+            {'info_hash': 'e' * 40,
+             'title': 'The.Americans.2018.1080p.BluRay',  # no TV marker
+             'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+        ]
+        sc = self._scanner({'tt2149175': [(3, 2)]})
+        sc._recover_wanted_via_debrid([self._partial()], [], {})
+        assert wire['adds'] == []
+        # Everything dropped → the empty-result memo gates re-probing.
+        assert 'tt2149175:3:pack' in sc._wanted_no_results
+
+    def test_ghosts_claim_budget_before_seasons(self, wire, monkeypatch):
+        monkeypatch.setenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', '1')
+        sc = self._scanner({'tt2149175': [(3, 2)]})
+        movies = [{'title': 'The Americans', 'source': 'wanted',
+                   'imdb_id': 'tt0000001', 'is_available': True}]
+        sc._recover_wanted_via_debrid([self._partial()], movies, {})
+        assert len(wire['adds']) == 1
+        # The ghost movie won the single budget slot (episode=None), the
+        # season target never ran.
+        assert wire['adds'][0]['episode'] is None
+
+    def test_season_targets_ordered_by_missing_count(self, wire):
+        wire['torrentio'] = [
+            {'info_hash': 'a' * 40,
+             'title': 'The.Americans.S01.1080p.Pack',
+             'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+            {'info_hash': 'b' * 40,
+             'title': 'The.Americans.S03.1080p.Pack',
+             'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+        ]
+        sc = self._scanner({
+            'tt0000003': [(3, 2), (3, 5), (3, 7)],                # 3 missing
+            'tt0000001': [(1, 1), (1, 2), (1, 3), (1, 4), (1, 5)],  # 5
+        })
+        shows = [
+            self._partial(imdb='tt0000003', missing_count=3),
+            self._partial(imdb='tt0000001', missing_count=5),
+        ]
+        sc._recover_wanted_via_debrid(shows, [], {})
+        # Biggest gap first (default budget of 2 admits both).
+        assert [a['episode'] for a in wire['adds']] == ['S01', 'S03']
+
+    def test_rd_leg_never_fires_for_season_target(self, wire, monkeypatch):
+        import base
+        import utils.debrid_client as dc
+        monkeypatch.setenv('WANTED_RD_RECOVERY_ENABLED', 'true')
+        monkeypatch.setattr(
+            base, 'load_secret_or_env',
+            lambda name: {'torbox_api_key': 'tb_key',
+                          'rd_api_key': 'rd_key'}.get(name))
+        monkeypatch.setattr(dc, 'get_debrid_client',
+                            lambda **kw: (_FakeRdClient(), 'realdebrid'))
+        wire['cache_cached'] = False  # TB miss would normally cue RD leg
+
+        probes = []
+        sc = self._scanner({'tt2149175': [(3, 2)]})
+        sc._wanted_rd_probe_add = (
+            lambda *a, **kw: probes.append(a) or 'skipped')
+        movies = [{'title': 'The Americans', 'source': 'wanted',
+                   'imdb_id': 'tt0000001', 'is_available': True}]
+        sc._recover_wanted_via_debrid([self._partial()], movies, {})
+        # The RD fallback fired exactly once — for the TB-uncached ghost
+        # movie — and never for the season target.
+        assert len(probes) == 1
+        assert probes[0][5] == 'tt0000001'  # key arg of the probe
+        assert 'tt2149175:3:pack' in sc._wanted_tb_cooldown
+
+    def test_disabled_toggle_skips_season_targets(self, wire, monkeypatch):
+        monkeypatch.setenv('WANTED_SEASON_RECOVERY_ENABLED', 'false')
+        sc = self._scanner({'tt2149175': [(3, 2)]})
+        sc._recover_wanted_via_debrid([self._partial()], [], {})
+        assert wire['searches'] == []
+        assert wire['adds'] == []
+
+    def test_ineligible_shows_skipped(self, wire):
+        shows = [
+            # No imdb_id.
+            {'title': 'NoId', 'source': 'debrid', 'missing_episodes': 5},
+            # TMDB can't say which episodes are missing — never probe blind.
+            self._partial(imdb='tt0000002', missing_count=5),
+            # No missing episodes recorded at all.
+            {'title': 'Complete', 'source': 'debrid',
+             'imdb_id': 'tt0000004', 'missing_episodes': 0},
+        ]
+        sc = self._scanner({'tt0000002': []})
+        sc._recover_wanted_via_debrid(shows, [], {})
+        assert wire['searches'] == []
+        assert wire['adds'] == []
+
+    def test_ghost_show_not_duplicated_as_season_target(self, wire):
+        # A fully-absent 'wanted' show gets exactly one ghost probe — the
+        # season-target builder must skip it even though it also has
+        # missing_episodes metadata.
+        wire['torrentio'] = [
+            {'info_hash': 'b' * 40,
+             'title': 'The.Americans.S01E01.1080p.WEB',
+             'seeds': 20, 'quality': {'label': '1080p', 'score': 120}},
+        ]
+        shows = [{'title': 'The Americans', 'source': 'wanted',
+                  'imdb_id': 'tt2149175', 'missing_episodes': 13}]
+        sc = self._scanner({'tt2149175': [(1, 1)]})
+        sc._recover_wanted_via_debrid(shows, [], {})
+        assert len(wire['searches']) == 1
+        assert len(wire['adds']) == 1
+        assert wire['adds'][0]['episode'] == 'S01E01'
+
+    def test_uncached_season_memoized_and_gated(self, wire):
+        wire['cache_cached'] = False
+        sc = self._scanner({'tt2149175': [(3, 2)]})
+        sc._recover_wanted_via_debrid([self._partial()], [], {})
+        assert wire['adds'] == []
+        assert 'tt2149175:3:pack' in sc._wanted_tb_cooldown
+        # Second pass inside the cooldown window: no re-probe.
+        sc._recover_wanted_via_debrid([self._partial()], [], {})
+        assert len(wire['searches']) == 1
+
+
 class _FakeRdClient:
     """RD client stub for the Wanted RD leg — records probe/delete calls."""
 

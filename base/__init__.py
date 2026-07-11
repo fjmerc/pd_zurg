@@ -90,6 +90,7 @@ __all__ = [
     # Wanted proactive recovery (TorBox + RealDebrid legs)
     'WANTED_TB_RECOVERY_ENABLED', 'WANTED_TB_RECOVERY_MAX_PER_SCAN',
     'WANTED_RD_RECOVERY_ENABLED', 'WANTED_RD_RECOVERY_MAX_PER_SCAN',
+    'WANTED_SEASON_RECOVERY_ENABLED',
     # Debrid search
     'TORRENTIO_URL', 'SEARCH_REQUIRE_CACHED', 'SEARCH_DEDUP_ENABLED',
     # Blackhole cache / debrid-account dedup gates
@@ -322,6 +323,9 @@ class Config:
         # keep if instantly ready, delete + fall back to the TB leg if not.
         self.WANTED_RD_RECOVERY_ENABLED = os.getenv('WANTED_RD_RECOVERY_ENABLED', 'true')
         self.WANTED_RD_RECOVERY_MAX_PER_SCAN = os.getenv('WANTED_RD_RECOVERY_MAX_PER_SCAN', '4')
+        # Season-pack extension: probe TB packs for partial-show seasons
+        # with missing aired episodes (TB-only, shares the TB budget).
+        self.WANTED_SEASON_RECOVERY_ENABLED = os.getenv('WANTED_SEASON_RECOVERY_ENABLED', 'true')
         # Debrid search
         self.TORRENTIO_URL = os.getenv('TORRENTIO_URL')
         # Refuse the interactive "Add" button when the chosen hash is not
@@ -486,6 +490,7 @@ WANTED_TB_RECOVERY_ENABLED = config.WANTED_TB_RECOVERY_ENABLED
 WANTED_TB_RECOVERY_MAX_PER_SCAN = config.WANTED_TB_RECOVERY_MAX_PER_SCAN
 WANTED_RD_RECOVERY_ENABLED = config.WANTED_RD_RECOVERY_ENABLED
 WANTED_RD_RECOVERY_MAX_PER_SCAN = config.WANTED_RD_RECOVERY_MAX_PER_SCAN
+WANTED_SEASON_RECOVERY_ENABLED = config.WANTED_SEASON_RECOVERY_ENABLED
 TORRENTIO_URL = config.TORRENTIO_URL
 SEARCH_REQUIRE_CACHED = config.SEARCH_REQUIRE_CACHED
 SEARCH_DEDUP_ENABLED = config.SEARCH_DEDUP_ENABLED

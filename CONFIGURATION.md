@@ -237,6 +237,7 @@ Sweep cadence (`DEBRID_HEALTH_INTERVAL`, default 12h) is a power-user override r
 | `WANTED_TB_RECOVERY_MAX_PER_SCAN` | Max Wanted titles the recovery pass adds to TorBox per library scan. Kept small so creates trickle across scans — create-volume bursts arm TorBox Essential's ~24h abuse cooldown, which starves recovery far more than a low cap | `2` |
 | `WANTED_RD_RECOVERY_ENABLED` | RD leg of the Wanted recovery pass — a fallback that fires only on titles the TorBox cache probe reports uncached (or when TorBox can't answer this pass); TorBox-cached titles are claimed by the TorBox leg exclusively. RD's cache probe is dead, so the add is the probe: add the top release to RealDebrid, keep it if it goes instantly ready (cached), delete it otherwise. Requires RealDebrid + `TORRENTIO_URL` | `true` |
 | `WANTED_RD_RECOVERY_MAX_PER_SCAN` | Max RealDebrid probe-adds per library scan (attempts, not successes). RD has no create-volume cooldown, so this can sit higher than the TorBox cap; each uncached attempt burns up to ~20s of ready-polling | `4` |
+| `WANTED_SEASON_RECOVERY_ENABLED` | Extend Wanted recovery to partially-present shows: each season with missing aired episodes is probed for a TorBox-cached season pack (single-episode release for the first missing episode as fallback). One cached pack add fills every gap in the season — the symlink phase skips episodes already on disk. TorBox-only; shares `WANTED_TB_RECOVERY_MAX_PER_SCAN` with whole-title targets, which keep first claim. Requires `WANTED_TB_RECOVERY_ENABLED` | `true` |
 
 ---
 

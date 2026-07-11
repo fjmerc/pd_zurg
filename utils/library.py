@@ -114,6 +114,19 @@ def wanted_rd_recovery_max_per_scan():
     return n if n > 0 else 4
 
 
+def wanted_season_recovery_enabled():
+    """Return ``True`` when Wanted recovery may also probe season packs for
+    partially-present shows (not just fully-absent ghosts).
+
+    Default ``true`` — opt-out.  Rides the TB leg only (shares its budget
+    and requires ``WANTED_TB_RECOVERY_ENABLED``); a single cached
+    season-pack add fills every gap in that season via the symlink phase,
+    which is how scattered per-episode holes the arr's indexers never
+    close actually drain.
+    """
+    return os.environ.get('WANTED_SEASON_RECOVERY_ENABLED', 'true').strip().lower() == 'true'
+
+
 # Plan 41 phase B.2 — NFS attribute-cache delay between symlink creation
 # and arr rescan trigger.  See ``_create_debrid_symlinks`` for the
 # narrative.  Lifted to a module-level helper so it can be unit-tested
@@ -543,6 +556,43 @@ def _detect_tv_marker(folder_name):
     if _SEASON_WORD_PATTERN.search(folder_name):
         return True
     return False
+
+
+def _release_covers_season(release_name, season, episode):
+    """Classify *release_name* against a (season, episode) recovery target.
+
+    Returns ``'pack'`` when the name marks a season pack covering *season*
+    (``S03``, ``S01-S04``, ``Season 3``, ``S22.COMPLETE``), ``'episode'``
+    when it carries an exact ``SxxEyy`` tag for the target episode, and
+    ``None`` for everything else — a different episode, a pack for another
+    season, or a name with no TV marker at all (Torrentio series result
+    lists are imdb-keyed and polluted with mislabeled uploads).
+
+    The ``SxxEyy`` check runs FIRST: an episode tag also matches the
+    season-only pattern's number, so without the early return a
+    wrong-episode release (``S03E09`` when we want ``S03E02``) would
+    misclassify as a season-3 pack.
+    """
+    if not release_name:
+        return None
+    m = _EPISODE_ID_PATTERN.search(release_name)
+    if m:
+        if int(m.group(1)) == season and int(m.group(2)) == episode:
+            return 'episode'
+        return None
+    m = _MULTI_SEASON_RANGE_PATTERN.search(release_name)
+    if m:
+        lo, hi = int(m.group(1)), int(m.group(2))
+        if lo > hi:
+            lo, hi = hi, lo
+        return 'pack' if lo <= season <= hi else None
+    m = _SEASON_ONLY_PATTERN.search(release_name)
+    if m:
+        return 'pack' if int(m.group(1)) == season else None
+    m = _SEASON_WORD_PATTERN.search(release_name)
+    if m:
+        return 'pack' if int(m.group(1)) == season else None
+    return None
 
 
 def _get_folder_mtime(path):
@@ -4103,7 +4153,11 @@ class LibraryScanner:
                 # the next scan — the same self-erase regression the movie
                 # path guards against below.  This gate is also one half of
                 # the inverse-gate invariant with _recover_wanted_via_debrid
-                # (see the comment there) that prevents dual acquisition.
+                # (see the comment there) that prevents dual acquisition of
+                # GHOSTS.  Partial-show seasons are a deliberate exception:
+                # that pass's season targets probe TB packs for the same
+                # missing episodes this pass searches the arr for — a
+                # dual-path overlap that self-corrects at import time.
                 if show.get('source') == 'wanted':
                     continue
                 norm = _normalize_title(show['title'])
@@ -4354,7 +4408,7 @@ class LibraryScanner:
                     update_pending_error(pending_norm, f"Radarr: {e}")
 
     def _recover_wanted_via_debrid(self, shows, movies, preferences):
-        """Proactively grab debrid-cached copies of "Wanted" ghosts.
+        """Proactively grab debrid-cached copies of "Wanted" media.
 
         The arr searches its own indexer pool (Prowlarr/Torznab); zurgarr
         queries the Torrentio feed directly.  These are different populations,
@@ -4386,6 +4440,15 @@ class LibraryScanner:
           (``WANTED_RD_RECOVERY_MAX_PER_SCAN``).  Every attempt doubles as
           an RD cache-hit measurement (``wanted_rd_recovered`` vs
           ``wanted_rd_uncached`` history causes).
+
+        Beyond whole-title ghosts, the pass also builds **season targets**
+        (``WANTED_SEASON_RECOVERY_ENABLED``) for partially-present shows:
+        each season with missing aired episodes is probed for a season
+        pack covering it (single-episode releases for the first missing
+        episode are the fallback).  Season targets are TB-only, share the
+        TB budget with ghosts (ghosts first), and one cached pack add
+        fills every gap in the season — the symlink phase skips episodes
+        already on disk.
 
         The scanner's own symlink phase links recovered content on a
         subsequent scan, and Radarr/Sonarr import it from the mount.
@@ -4468,14 +4531,25 @@ class LibraryScanner:
         rd_attempts = 0
 
         # Build the target list: released movie ghosts + show ghosts (probing
-        # the first still-missing episode, defaulting to S01E01).
+        # the first still-missing episode, defaulting to S01E01) + season
+        # targets for partially-present shows (probing a season pack that
+        # covers the season's missing episodes).
         #
-        # INVARIANT: this pass and _search_for_missing_episodes have inverse
-        # source gates — that pass skips source == 'wanted' items, this one
-        # processes ONLY them.  The complementary gates are what prevent the
-        # two acquisition paths (arr search vs. direct TB add) from
-        # double-acquiring the same title in one scan; if either gate
-        # changes, re-check the other.
+        # INVARIANT (movies + ghost shows): this pass and
+        # _search_for_missing_episodes have inverse source gates — that pass
+        # skips source == 'wanted' items, this one's ghost targets are ONLY
+        # them.  The complementary gates prevent the two acquisition paths
+        # (arr search vs. direct TB add) from double-acquiring the same
+        # title in one scan; if either gate changes, re-check the other.
+        #
+        # DELIBERATE EXCEPTION (season targets): partial-show seasons are
+        # dual-path — gap-fill keeps firing arr searches for the same
+        # missing episodes while this pass probes TB for a season pack.
+        # The mechanisms differ (indexer grab → blackhole vs. direct
+        # debrid add → symlink) and the overlap self-corrects: if both
+        # succeed, the arr import simply replaces the symlinked file.
+        # Season targets exist precisely because gap-fill's indexer pool
+        # has been failing on these seasons.
         targets = []  # (media_type, item, season, episode)
         for m in movies:
             if m.get('source') != 'wanted':
@@ -4508,6 +4582,40 @@ class LibraryScanner:
                 season, episode = miss[0]
             targets.append(('series', s, season, episode))
 
+        # Season targets: partially-present shows whose seasons still have
+        # missing aired episodes.  One cached pack add fills every gap in
+        # the season via the symlink phase (which skips episodes already on
+        # disk), so these drain scattered per-episode holes the arr's
+        # indexers never close.  TB-only — probing a whole pack through
+        # RD's add-poll-delete cycle is expensive at a measured ~8% hit
+        # rate — and appended AFTER the ghost targets so whole-title
+        # recovery keeps first claim on the shared TB budget.  Sorted by
+        # missing-count descending so the biggest gaps drain first.
+        if tb_ok and wanted_season_recovery_enabled():
+            season_targets = []
+            for s in shows:
+                if s.get('source') == 'wanted':
+                    continue  # ghosts are handled above
+                if not s.get('imdb_id'):
+                    continue
+                me = s.get('missing_episodes')
+                if not (isinstance(me, int) and me > 0):
+                    continue
+                try:
+                    miss = self._compute_missing_episodes(s)
+                except Exception:
+                    miss = []
+                if not miss:
+                    continue  # [] = "don't know" — never probe blind
+                by_season = {}
+                for sn, en in miss:
+                    by_season.setdefault(sn, []).append(en)
+                for sn, eps in by_season.items():
+                    season_targets.append(
+                        (len(eps), ('season', s, sn, min(eps))))
+            season_targets.sort(key=lambda t: t[0], reverse=True)
+            targets.extend(t for _, t in season_targets)
+
         try:
             from utils.blocklist import is_blocked as _is_blocked
         except ImportError:
@@ -4524,7 +4632,15 @@ class LibraryScanner:
                             "deferring remainder to next scan")
                 break
             imdb = item['imdb_id']
-            key = imdb if media_type == 'movie' else f"{imdb}:{season}:{episode}"
+            if media_type == 'movie':
+                key = imdb
+            elif media_type == 'season':
+                # Distinct namespace from the per-episode ghost keys so a
+                # pack probe and an episode probe of the same season never
+                # share memo/ledger state.
+                key = f"{imdb}:{season}:pack"
+            else:
+                key = f"{imdb}:{season}:{episode}"
             # Terminal give-up: this title's top releases are confirmed
             # doomed on BOTH providers (RD filter-blocked + TB uncached)
             # across WANTED_FILTER_GIVEUP_STRIKES passes.  Stop probing —
@@ -4541,7 +4657,9 @@ class LibraryScanner:
                 continue
             # Per-leg gates — a TB cooldown must never suppress the RD leg
             # (or vice versa); each leg answers only to its own memo.
-            rd_try = rd_active and key not in self._wanted_rd_miss
+            # Season targets are TB-only (see the target-build comment).
+            rd_try = (rd_active and media_type != 'season'
+                      and key not in self._wanted_rd_miss)
             tb_try = tb_active and key not in self._wanted_tb_cooldown
             if not rd_try and not tb_try:
                 continue
@@ -4549,7 +4667,10 @@ class LibraryScanner:
             media_title = item.get('title')
             try:
                 results = _search.search_torrentio(
-                    imdb, media_type=media_type, season=season, episode=episode)
+                    imdb,
+                    media_type='series' if media_type == 'season'
+                    else media_type,
+                    season=season, episode=episode)
             except Exception:
                 results = []
             # Blocklisted hashes were rejected for a reason (bad release,
@@ -4587,6 +4708,28 @@ class LibraryScanner:
                         logger.warning(
                             "[library] Wanted recovery title-match filter "
                             "failed — using unfiltered results")
+            # Season targets: keep only releases that actually cover the
+            # target — a pack marking this season (or a range spanning it)
+            # or an exact-episode release for the first missing episode.
+            # Everything else (wrong season, wrong episode, no TV marker)
+            # is junk from Torrentio's imdb-keyed result list.
+            season_cls = {}
+            if media_type == 'season' and results:
+                kept = []
+                for r in results:
+                    ih = r.get('info_hash') or ''
+                    cls = _release_covers_season(
+                        r.get('title') or '', season, episode)
+                    if ih and cls:
+                        season_cls[ih] = cls
+                        kept.append(r)
+                if len(kept) < len(results):
+                    logger.debug(
+                        f"[library] Wanted season recovery dropped "
+                        f"{len(results) - len(kept)}/{len(results)} "
+                        f"non-covering result(s) for '{media_title}' "
+                        f"S{season:02d}")
+                results = kept
             if not results:
                 self._memo_wanted(self._wanted_no_results, key)
                 continue
@@ -4597,9 +4740,16 @@ class LibraryScanner:
                                r.get('seeds', 0)),
                 reverse=True,
             )
+            if media_type == 'season':
+                # Stable re-sort: packs before single-episode releases (one
+                # pack add covers the whole season's gaps); the quality
+                # order above is preserved within each class.
+                results.sort(
+                    key=lambda r: season_cls.get(
+                        r.get('info_hash') or '') != 'pack')
 
             ep_str = (f"S{season:02d}E{episode:02d}"
-                      if media_type == 'series' else None)
+                      if media_type in ('series', 'season') else None)
 
             # ---- TB leg first: cache probe + add ---------------------
             # TB gets first claim: ~93-97% of the live Wanted backlog is
@@ -4621,12 +4771,17 @@ class LibraryScanner:
                 cached = next(
                     (r for r in probe if cmap.get(r['info_hash'])), None)
                 if cached:
+                    # season_cls is empty for non-season targets, so this
+                    # collapses to ep_str everywhere else.
+                    add_ep = (f"S{season:02d}"
+                              if season_cls.get(cached['info_hash']) == 'pack'
+                              else ep_str)
                     try:
                         result = _search.add_to_debrid(
                             cached['info_hash'],
                             title=cached.get('title') or media_title or '',
                             media_title=media_title,
-                            episode=ep_str,
+                            episode=add_ep,
                             service='torbox',
                             api_key=tb_key,
                             cause='wanted_tb_recovered',

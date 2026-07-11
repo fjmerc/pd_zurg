@@ -197,6 +197,31 @@ def _get_state():
         return _state
 
 
+def restore_state_bytes(data):
+    """Replace ``_STATE_PATH`` on disk AND the live singleton (backup restore).
+
+    The file write and the in-memory refresh happen under a single
+    ``_lock`` hold so an in-flight sweep (which persists via
+    ``with _lock: _save_state(state)``) can't interleave and clobber the
+    restored file with pre-restore memory.
+
+    Mutates the existing dict in place rather than reassigning, so an
+    in-flight sweep holding a reference from ``_get_state`` keeps
+    operating on the live object — its next ``_save_state`` persists
+    the restored data instead of an orphaned copy.
+    """
+    global _state
+    with _lock:
+        with atomic_write(_STATE_PATH, mode='wb') as fh:
+            fh.write(data)
+        fresh = _load_state()
+        if _state is None:
+            _state = fresh
+        else:
+            _state.clear()
+            _state.update(fresh)
+
+
 # ---------------------------------------------------------------------------
 # Public read API (used by library enrichment in phase 3)
 # ---------------------------------------------------------------------------
@@ -942,17 +967,36 @@ def _remediate(client, torrent_id, torrent_hash, filename, probe_result):
     return actions
 
 
+# Re-entry guard for run_sweep.  The task scheduler already serializes
+# scheduled + manual (run_now) invocations via its per-task `running`
+# flag, but the `_stop_event.clear()` at sweep start would unmuzzle a
+# stopping sweep if any future caller bypassed the scheduler — so the
+# guard lives here with the hazard rather than relying on every caller.
+_sweep_guard = threading.Lock()
+
+
 def run_sweep():
     """Probe up to ``_MAX_PER_SWEEP`` Real-Debrid torrents and persist state.
 
     Returns a result dict compatible with the scheduler's expectations
     (``status``, ``message``, optional ``items``). The sweep is a no-op
     when ``DEBRID_HEALTH_ENABLED`` is false or no RD client is configured.
+    Never re-entered: a second concurrent call returns immediately.
 
     Rate-limited to ``_RATE_LIMIT_PER_MIN`` probes/minute with an
     incremental persist every ``_PERSIST_EVERY`` probes so an
     interrupted run doesn't lose all work.
     """
+    if not _sweep_guard.acquire(blocking=False):
+        logger.info("[debrid_health] sweep already running, skipping")
+        return {'status': 'success', 'message': 'sweep already running', 'items': 0}
+    try:
+        return _run_sweep()
+    finally:
+        _sweep_guard.release()
+
+
+def _run_sweep():
     if not _enabled():
         logger.debug("[debrid_health] disabled, skipping sweep")
         return {'status': 'success', 'message': 'disabled', 'items': 0}

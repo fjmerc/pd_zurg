@@ -286,3 +286,20 @@ def _save_unlocked():
             json.dump(entries, f, indent=2)
     except OSError as e:
         logger.error(f"[blocklist] Failed to save: {e}")
+
+
+def restore_bytes(data):
+    """Replace the on-disk blocklist AND the in-memory indexes atomically.
+
+    Backup-restore entry point.  Holding ``_lock`` across both the file
+    write and the ``_load()`` rebuild guarantees an in-flight ``add``/
+    ``remove`` can't persist pre-restore memory over the restored file.
+    Before ``init()`` only the file is written (``_load`` needs a path);
+    the eventual ``init()`` picks it up.
+    """
+    path = _file_path or '/config/blocklist.json'
+    with _lock:
+        with atomic_write(path, mode='wb') as f:
+            f.write(data)
+        if _file_path is not None:
+            _load()

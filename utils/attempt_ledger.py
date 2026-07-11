@@ -190,6 +190,22 @@ def size():
         return len(_state)
 
 
+def restore_bytes(data):
+    """Replace the on-disk ledger AND the in-memory state atomically.
+
+    Backup-restore entry point.  Holding ``_lock`` across both the file
+    write and the in-memory refresh guarantees an in-flight ``bump``/
+    ``prune`` can't persist pre-restore memory over the restored file.
+    """
+    global _state
+    path = _file_path or '/config/grab_attempts.json'
+    with _lock:
+        with atomic_write(path, mode='wb') as f:
+            f.write(data)
+        if _file_path is not None:
+            _state = _read_file()
+
+
 def reset_all():
     """Clear every counter and persist. Test hook."""
     with _lock:
@@ -198,4 +214,4 @@ def reset_all():
 
 
 __all__ = ['init', 'bump', 'get', 'reset', 'prune', 'size', 'reset_all',
-           'snapshot', 'last_seen_epoch']
+           'snapshot', 'last_seen_epoch', 'restore_bytes']

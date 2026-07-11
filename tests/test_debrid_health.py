@@ -33,8 +33,10 @@ def state_path(tmp_path, monkeypatch):
 
 @pytest.fixture
 def no_sleep(monkeypatch):
-    """Replace time.sleep with a counter so rate-limit logic doesn't
-    block the test suite. Yields the mock so tests can assert on it."""
+    """Replace time.sleep with a mock as a belt-and-braces guard against
+    the suite blocking. The sweep's rate-limit pause now goes through
+    ``_stop_event.wait`` (not time.sleep), so this mostly documents intent;
+    tests that need to observe/skip the pause patch ``_stop_event`` too."""
     mock = MagicMock()
     monkeypatch.setattr(debrid_health.time, 'sleep', mock)
     return mock
@@ -2091,3 +2093,44 @@ class TestReleaseAnchorCandidates:
         client.torrent_info.return_value = {'filename': '.', 'original_filename': '..'}
         got = debrid_health._release_anchor_candidates('', client, 'T1')
         assert got == set()
+
+
+# ---------------------------------------------------------------------------
+# restore_state_bytes (backup restore) + run_sweep re-entry guard
+# ---------------------------------------------------------------------------
+
+class TestRestoreStateAndSweepGuard:
+    def test_restore_state_bytes_updates_singleton_in_place(self, state_path):
+        """An in-flight sweep holding the dict from _get_state must see the
+        restored data — restore mutates in place, never reassigns."""
+        held = debrid_health._get_state()
+        held['probed']['AAAA'] = {'status': 'healthy', 'ts': time.time()}
+
+        data = json.dumps({
+            'version': debrid_health._STATE_VERSION,
+            'probed': {'BBBB': {'status': 'blocked', 'ts': time.time()}},
+        }).encode()
+
+        debrid_health.restore_state_bytes(data)
+
+        assert debrid_health._get_state() is held
+        assert set(held['probed']) == {'BBBB'}
+        with open(state_path, 'rb') as f:
+            assert f.read() == data
+
+    def test_restore_state_bytes_before_first_use(self, state_path):
+        data = json.dumps({
+            'version': debrid_health._STATE_VERSION,
+            'probed': {'CCCC': {'status': 'blocked', 'ts': time.time()}},
+        }).encode()
+        debrid_health.restore_state_bytes(data)
+        assert 'CCCC' in debrid_health._get_state()['probed']
+
+    def test_run_sweep_reentry_returns_immediately(self, state_path, rd_enabled):
+        assert debrid_health._sweep_guard.acquire(blocking=False)
+        try:
+            res = debrid_health.run_sweep()
+        finally:
+            debrid_health._sweep_guard.release()
+        assert res['status'] == 'success'
+        assert res['message'] == 'sweep already running'

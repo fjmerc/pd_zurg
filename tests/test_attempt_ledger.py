@@ -106,3 +106,19 @@ def test_reset_all(ledger):
     ledger.bump('fg:b')
     ledger.reset_all()
     assert ledger.size() == 0
+
+
+def test_restore_bytes_replaces_disk_and_memory(ledger, tmp_dir):
+    """Backup restore: file AND in-memory state swap atomically."""
+    ledger.bump('fg:old')
+    payload = json.dumps({'version': 1, 'entries': {
+        'fg:restored': {'count': 5, 'first_ts': '2026-01-01T00:00:00+00:00'},
+    }}).encode()
+
+    ledger.restore_bytes(payload)
+
+    assert ledger.get('fg:old') == 0
+    assert ledger.get('fg:restored') == 5
+    path = os.path.join(tmp_dir, 'grab_attempts.json')
+    with open(path, 'rb') as f:
+        assert f.read() == payload

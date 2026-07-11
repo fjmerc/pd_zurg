@@ -254,6 +254,19 @@ def record_snapshot(data, now=None):
     return snapshot
 
 
+def restore_bytes(data):
+    """Replace the on-disk snapshot series atomically (backup restore).
+
+    Holding ``_lock`` across the write guarantees an in-flight
+    ``record_snapshot`` read-modify-write can't persist pre-restore
+    content over the restored file.
+    """
+    path = _file_path or '/config/recovery_snapshots.json'
+    with _lock:
+        with atomic_write(path, mode='wb') as f:
+            f.write(data)
+
+
 def load_snapshots(limit=None):
     """Return the recorded snapshots oldest-first, optionally last *limit*.
 

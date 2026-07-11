@@ -206,3 +206,19 @@ def test_torrent_info_hash_extraction(tmp_dir):
 
     result = BlackholeWatcher._extract_info_hash_from_file(torrent_path)
     assert result == expected_hash
+
+
+def test_restore_bytes_replaces_disk_and_indexes(tmp_dir):
+    """Backup restore: file write + in-memory index rebuild under one lock."""
+    blocklist.init(tmp_dir)
+    blocklist.add('AAAA1111', 'Old Entry')
+
+    restored = [{'id': 'fixed-id', 'info_hash': 'BBBB2222',
+                 'title': 'Restored Entry', 'reason': '', 'date': '', 'source': 'manual'}]
+    blocklist.restore_bytes(json.dumps(restored).encode())
+
+    assert not blocklist.is_blocked('AAAA1111')
+    assert blocklist.is_blocked('BBBB2222')
+    path = os.path.join(tmp_dir, 'blocklist.json')
+    with open(path) as f:
+        assert json.load(f) == restored

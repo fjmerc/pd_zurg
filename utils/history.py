@@ -135,6 +135,19 @@ def init(config_dir='/config'):
     logger.info(f"[history] Initialized — {_file_path} (retention: {_retention_days} days)")
 
 
+def restore_bytes(data):
+    """Replace the on-disk event log atomically (backup restore).
+
+    Holding ``_lock`` across the write closes the lost-append race:
+    ``log_event`` appends under the same lock, so an append can't land
+    between restore's read-nothing and its rename.
+    """
+    path = _file_path or '/config/history.jsonl'
+    with _lock:
+        with atomic_write(path, mode='wb') as f:
+            f.write(data)
+
+
 def log_event(type, title, episode=None, detail='', source='', meta=None, media_title=None):
     """Append a single event to the history JSONL file.
 

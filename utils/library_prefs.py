@@ -61,6 +61,19 @@ def set_preference(normalized_title, preference):
         return {'status': 'saved', 'preference': preference}
 
 
+def restore_prefs_bytes(data):
+    """Replace the on-disk preference store atomically (backup restore).
+
+    Holding ``_prefs_lock`` across the write guarantees an in-flight
+    ``set_preference``/``remove_preference`` read-modify-write can't
+    persist pre-restore content over the restored file.
+    """
+    with _prefs_lock:
+        os.makedirs(os.path.dirname(PREFS_PATH), exist_ok=True)
+        with atomic_write(PREFS_PATH, mode='wb') as f:
+            f.write(data)
+
+
 def get_all_preferences():
     """Return all preferences. Alias for load_preferences."""
     return load_preferences()
@@ -98,6 +111,19 @@ def _save_pending(pending):
     os.makedirs(os.path.dirname(PENDING_PATH), exist_ok=True)
     with atomic_write(PENDING_PATH) as f:
         json.dump(pending, f, indent=2)
+
+
+def restore_pending_bytes(data):
+    """Replace the on-disk pending store atomically (backup restore).
+
+    Holding ``_pending_lock`` across the write guarantees an in-flight
+    ``set_pending``-style read-modify-write can't persist pre-restore
+    content over the restored file.
+    """
+    with _pending_lock:
+        os.makedirs(os.path.dirname(PENDING_PATH), exist_ok=True)
+        with atomic_write(PENDING_PATH, mode='wb') as f:
+            f.write(data)
 
 
 _VALID_DIRECTIONS = {'to-debrid', 'to-local', 'to-local-fallback', 'to-any'}

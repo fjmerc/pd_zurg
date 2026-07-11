@@ -2392,7 +2392,10 @@ class LibraryScanner:
         self._path_index = {}
         self._local_path_index = {}
         self._path_lock = threading.Lock()
-        self._search_cooldown = {}  # {(norm, sn): timestamp} — suppress re-search for 1 hour
+        # {(norm, sn): timestamp} — suppress re-search for 1 hour.  No lock:
+        # only touched from _search_for_missing_episodes, whose sole caller
+        # (_scan_effects) is serialized by _effects_running under self._lock.
+        self._search_cooldown = {}
         # {imdb_or_imdb:s:e: monotonic ts} — suppress re-probing a Wanted ghost
         # against Torrentio/TorBox for _WANTED_TB_RECOVERY_COOLDOWN after a miss
         # or a grab, so a deep backlog isn't re-walked every scan.
@@ -5086,6 +5089,12 @@ class LibraryScanner:
             # operator just cleared via the Stuck-tab Retry action.
             self._persist_wanted_memos()
         return removed
+
+    def reload_wanted_memos(self):
+        """Merge the on-disk memo snapshot into the live dicts (used by
+        backup restore).  ``_load_wanted_memos`` is additive and
+        TTL-aware, so calling it on a running scanner is safe."""
+        self._load_wanted_memos()
 
     @staticmethod
     def _wanted_memos_file():

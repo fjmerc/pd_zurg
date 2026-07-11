@@ -23,7 +23,9 @@ def _write(path, data):
 
 
 def _populated_config(tmp_dir):
-    """Create a fake /config with all four backup files."""
+    """Create a fake /config with the four core backup files (.env,
+    settings, prefs, blocklist). Operator-state stores are added on top
+    by ``_operator_config``."""
     cfg = os.path.join(tmp_dir, 'config')
     _write(os.path.join(cfg, '.env'), 'FOO=bar\nBAZ=qux\n')
     _write(os.path.join(cfg, 'settings.json'), json.dumps({'k': 1}))
@@ -356,9 +358,12 @@ def test_created_backup_file_is_mode_0600(tmp_dir):
 def test_restore_rejects_env_with_no_equals(tmp_dir):
     cfg = _populated_config(tmp_dir)
     bdir = os.path.join(tmp_dir, 'backups')
-    blob = _build_archive({'env': b'INVALIDLINE\n'})
-    with pytest.raises(backup.RestoreError, match='env'):
+    blob = _build_archive({'env': b'GOOD=1\nSECRETVALUE_NO_EQUALS\n'})
+    with pytest.raises(backup.RestoreError, match='env line 2') as exc_info:
         _restore_without_reload(blob, cfg, bdir)
+    # The message must cite position only — echoing the line could leak
+    # a mistyped secret into the error response and logs.
+    assert 'SECRETVALUE' not in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
@@ -622,3 +627,197 @@ def test_delete_snapshot_missing_dir_not_found(tmp_dir):
     os.makedirs(bdir)
     with pytest.raises(backup.RestoreError, match='not found'):
         backup.delete_snapshot('pre-restore-20260101-000000', backup_dir=bdir)
+
+
+# ---------------------------------------------------------------------------
+# Operator-state members (grab_attempts, history, debrid_health, ...)
+# ---------------------------------------------------------------------------
+
+_OPERATOR_STATE_FILES = {
+    'library_pending.json': json.dumps({'show': {'direction': 'to-debrid'}}),
+    'grab_attempts.json': json.dumps({'fg:show:s1': {'count': 2}}),
+    'recovery_snapshots.json': json.dumps({'version': 1, 'snapshots': []}),
+    'debrid_health.json': json.dumps({'version': 1, 'probed': {}}),
+    'wanted_memos.json': json.dumps({'version': 1, 'saved_at': 0, 'memos': {}}),
+    'history.jsonl': '{"type": "grabbed", "title": "x"}\n'
+                     '{"type": "cached", "title": "y"}\n',
+}
+
+
+def _operator_config(tmp_dir):
+    """_populated_config plus every operator-state store."""
+    cfg = _populated_config(tmp_dir)
+    for name, content in _OPERATOR_STATE_FILES.items():
+        _write(os.path.join(cfg, name), content)
+    return cfg
+
+
+def test_create_backup_blob_includes_operator_state(tmp_dir):
+    cfg = _operator_config(tmp_dir)
+    _filename, blob = backup.create_backup_blob(config_dir=cfg)
+    with tarfile.open(fileobj=io.BytesIO(blob), mode='r:gz') as tar:
+        names = set(tar.getnames())
+    assert set(_OPERATOR_STATE_FILES) <= names
+
+
+def test_history_jsonl_gets_raised_member_cap(tmp_dir):
+    """history.jsonl over the 5M default cap is still archived; a same-size
+    member without an override is skipped."""
+    cfg = _minimal_config(tmp_dir)
+    line = '{"type": "grabbed", "title": "' + 'x' * 80 + '"}\n'
+    big = line * (backup._MAX_MEMBER_BYTES // len(line) + 10)
+    assert len(big) > backup._MAX_MEMBER_BYTES
+    _write(os.path.join(cfg, 'history.jsonl'), big)
+    _write(os.path.join(cfg, 'settings.json'), '{"pad": "' + 'x' * len(big) + '"}')
+
+    _filename, blob = backup.create_backup_blob(config_dir=cfg)
+    with tarfile.open(fileobj=io.BytesIO(blob), mode='r:gz') as tar:
+        names = set(tar.getnames())
+    assert 'history.jsonl' in names
+    assert 'settings.json' not in names
+
+
+def test_restore_applies_operator_state(tmp_dir):
+    members = {name: content.encode()
+               for name, content in _OPERATOR_STATE_FILES.items()}
+    members['env'] = b'A=1\n'
+    blob = _build_archive(members)
+    cfg = os.path.join(tmp_dir, 'config')
+    os.makedirs(cfg)
+    bdir = os.path.join(tmp_dir, 'backups')
+
+    result = _restore_without_reload(blob, cfg, bdir)
+
+    assert set(_OPERATOR_STATE_FILES) <= set(result['restored'])
+    for name, content in _OPERATOR_STATE_FILES.items():
+        with open(os.path.join(cfg, name)) as f:
+            assert f.read() == content
+
+
+def test_restore_rejects_invalid_history_line(tmp_dir):
+    blob = _build_archive({
+        'history.jsonl': b'{"ok": 1}\nnot-json\n',
+        'env': b'A=1\n',
+    })
+    cfg = os.path.join(tmp_dir, 'config')
+    with pytest.raises(backup.RestoreError, match='history.jsonl line 2'):
+        _restore_without_reload(blob, cfg, os.path.join(tmp_dir, 'backups'))
+
+
+def test_restore_rejects_non_object_history_line(tmp_dir):
+    blob = _build_archive({
+        'history.jsonl': b'[1, 2, 3]\n',
+        'env': b'A=1\n',
+    })
+    cfg = os.path.join(tmp_dir, 'config')
+    with pytest.raises(backup.RestoreError, match='must be a JSON object'):
+        _restore_without_reload(blob, cfg, os.path.join(tmp_dir, 'backups'))
+
+
+@pytest.mark.parametrize('member', sorted(
+    n for n in backup._JSON_OBJECT_MEMBERS))
+def test_restore_rejects_non_object_json_member(tmp_dir, member):
+    blob = _build_archive({
+        member: b'[1, 2]',
+        'env': b'A=1\n',
+    })
+    cfg = os.path.join(tmp_dir, 'config')
+    with pytest.raises(backup.RestoreError, match='must be a JSON object'):
+        _restore_without_reload(blob, cfg, os.path.join(tmp_dir, 'backups'))
+
+
+def test_restore_rejects_history_over_raised_cap(tmp_dir):
+    data = b'x' * (backup._MEMBER_SIZE_CAPS['history.jsonl'] + 1)
+    blob = _build_archive({'history.jsonl': data, 'env': b'A=1\n'})
+    cfg = os.path.join(tmp_dir, 'config')
+    with pytest.raises(backup.RestoreError, match='per-member size cap'):
+        _restore_without_reload(blob, cfg, os.path.join(tmp_dir, 'backups'))
+
+
+@pytest.mark.parametrize('member', sorted(
+    n for n in backup._JSON_OBJECT_MEMBERS))
+def test_restore_rejects_unparseable_json_member(tmp_dir, member):
+    blob = _build_archive({
+        member: b'not json',
+        'env': b'A=1\n',
+    })
+    cfg = os.path.join(tmp_dir, 'config')
+    with pytest.raises(backup.RestoreError, match='not valid JSON'):
+        _restore_without_reload(blob, cfg, os.path.join(tmp_dir, 'backups'))
+
+
+def test_apply_dispatches_to_owner_appliers(tmp_dir, monkeypatch):
+    """When restoring to the real config dir, stateful members must go
+    through their owner module's locked restore function; settings.json,
+    wanted_memos.json and env fall through to plain atomic writes."""
+    from utils import (attempt_ledger, blocklist, debrid_health, history,
+                       library_prefs, recovery)
+    cfg = os.path.join(tmp_dir, 'config')
+    os.makedirs(cfg)
+    monkeypatch.setattr(backup, 'DEFAULT_CONFIG_DIR', cfg)
+
+    calls = {}
+    monkeypatch.setattr(library_prefs, 'restore_prefs_bytes',
+                        lambda d: calls.__setitem__('prefs', d))
+    monkeypatch.setattr(library_prefs, 'restore_pending_bytes',
+                        lambda d: calls.__setitem__('pending', d))
+    monkeypatch.setattr(blocklist, 'restore_bytes',
+                        lambda d: calls.__setitem__('blocklist', d))
+    monkeypatch.setattr(attempt_ledger, 'restore_bytes',
+                        lambda d: calls.__setitem__('ledger', d))
+    monkeypatch.setattr(recovery, 'restore_bytes',
+                        lambda d: calls.__setitem__('recovery', d))
+    monkeypatch.setattr(debrid_health, 'restore_state_bytes',
+                        lambda d: calls.__setitem__('health', d))
+    monkeypatch.setattr(history, 'restore_bytes',
+                        lambda d: calls.__setitem__('history', d))
+
+    content = {name: f'payload:{name}'.encode()
+               for name, _ in backup._BACKUP_FILES}
+    applied = []
+    backup._apply(content, cfg, applied)
+
+    assert set(calls) == {'prefs', 'pending', 'blocklist', 'ledger',
+                          'recovery', 'health', 'history'}
+    assert calls['health'] == b'payload:debrid_health.json'
+    # Non-owner members took the plain write path.
+    for plain in ('settings.json', 'wanted_memos.json', '.env'):
+        assert os.path.isfile(os.path.join(cfg, plain))
+    assert len(applied) == len(backup._BACKUP_FILES)
+
+
+def test_apply_skips_owner_appliers_for_other_config_dirs(tmp_dir, monkeypatch):
+    """Owner modules have hardcoded /config paths — restores to any other
+    dir (tests, dry runs) must use plain atomic writes."""
+    from utils import attempt_ledger
+
+    def _boom(_data):
+        raise AssertionError('owner applier must not be used')
+
+    monkeypatch.setattr(attempt_ledger, 'restore_bytes', _boom)
+    cfg = os.path.join(tmp_dir, 'config')
+    os.makedirs(cfg)
+    applied = []
+    backup._apply({'grab_attempts.json': b'{"a": 1}'}, cfg, applied)
+    with open(os.path.join(cfg, 'grab_attempts.json')) as f:
+        assert f.read() == '{"a": 1}'
+    assert applied == ['grab_attempts.json']
+
+
+def test_reload_services_fires_wanted_memo_merge(monkeypatch):
+    from unittest.mock import MagicMock
+    import utils.library as library
+
+    scanner = MagicMock()
+    monkeypatch.setattr(library, 'get_scanner', lambda: scanner)
+
+    backup._reload_services(['wanted_memos.json'])
+
+    scanner.reload_wanted_memos.assert_called_once()
+
+
+def test_reload_hooks_tolerate_missing_scanner(monkeypatch):
+    import utils.library as library
+    monkeypatch.setattr(library, 'get_scanner', lambda: None)
+    # Must not raise — no scanner just means nothing to refresh.
+    backup._reload_services(['wanted_memos.json'])

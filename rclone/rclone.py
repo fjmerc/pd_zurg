@@ -52,12 +52,70 @@ def _unescape_mountinfo(field):
                  .replace("\\134", "\\"))
 
 
+def _dead_fuse_mount_at(path):
+    """True iff a FUSE filesystem is mounted at ``path`` and it is dead.
+
+    ``/data/<mn>`` may itself be a docker bind mount, so plain
+    mountpoint-ness (``_is_mount_point``) can't identify a leftover rclone
+    mount — the fstype (after the ``' - '`` separator in each mountinfo
+    line) must say ``fuse``.  Deadness is probed with ``os.listdir``: a
+    corpse whose daemon is gone fails with ENOTCONN/EIO, while a healthy
+    mount lists (possibly empty) — a stale corpse often still ``stat``s
+    fine, which is why the ``makedirs`` guard alone misses it.
+
+    In every caller the owning rclone is not running (setup before first
+    launch, relaunch after a crash/terminate), so the listdir fails fast on
+    a corpse; a slow-but-alive FUSE mount here would only delay the probe,
+    never trigger a clear.
+    """
+    fuse_here = False
+    try:
+        with open("/proc/self/mountinfo") as fh:
+            for line in fh:
+                pre, sep, post = line.partition(" - ")
+                if not sep:
+                    continue
+                fields = pre.split()
+                if len(fields) > 4 and _unescape_mountinfo(fields[4]) == path:
+                    post_fields = post.split()
+                    fstype = post_fields[0] if post_fields else ""
+                    if fstype.startswith("fuse"):
+                        fuse_here = True
+                        break
+    except OSError:
+        return False
+    if not fuse_here:
+        return False
+    try:
+        os.listdir(path)
+        return False
+    except OSError:
+        return True
+
+
+def _clear_dead_mount(mount_path):
+    """Probe for a dead FUSE corpse at ``mount_path`` and force-clear it.
+
+    Safe no-op when the path has no FUSE mount or the mount is healthy.
+    Used both at setup (a corpse re-imported through the ``:shared`` bind)
+    and as the per-mount ``pre_restart`` hook (a crashed rclone can leave
+    its own mount behind, so every relaunch would refuse with "directory
+    already mounted" until it is detached).
+    """
+    if _dead_fuse_mount_at(mount_path):
+        logger.warning(
+            f"Dead FUSE mount detected at {mount_path}; force-clearing "
+            f"before starting rclone")
+        _force_clear_stale_mount(mount_path, logger)
+
+
 def _force_clear_stale_mount(mount_path, logger, attempts=10, delay=0.5):
     """Detach a stale FUSE corpse at ``mount_path`` and wait until it is gone.
 
-    Only called once a plain ``os.makedirs(exist_ok=True)`` has already failed,
-    i.e. the mountpoint is already broken — so a healthy, actively-streaming
-    mount is never reached here.
+    Every caller first establishes that the mountpoint is already broken —
+    a failed ``os.makedirs(exist_ok=True)``, a dead-probe via
+    ``_dead_fuse_mount_at``, or the scheduler's unresponsive-mount self-heal
+    — so a healthy, actively-streaming mount is never reached here.
 
     The corpse is left by a prior container whose rclone was SIGKILLed mid
     shutdown; because the TorBox mount is nested under the ``:shared`` ``/data``
@@ -316,16 +374,20 @@ def setup():
             else:
                 mount_names.append(TORBOX_MOUNT_NAME)
 
-        process_handler = ProcessHandler(logger)
-
         def _configure_mount(idx, mn):
             logger.info(f"Configuring rclone for {mn}")
             mount_path = f"/data/{mn}"
             # Plain (non-lazy) umount clears a clean leftover mount but is a
-            # no-op (EBUSY) on a healthy, actively-streaming mount — which is
-            # exactly what we want, since setup() also runs on SIGHUP reload.
+            # no-op (EBUSY) on a healthy, actively-streaming mount — never
+            # force-detach a mount that may be serving.
             subprocess.run(["umount", mount_path], check=False,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # A corpse re-imported through the :shared bind usually survives
+            # the plain umount AND still stat()s fine, so the makedirs guard
+            # below never sees it — rclone then refuses with "directory
+            # already mounted".  Probe explicitly; the deadness check inside
+            # _dead_fuse_mount_at keeps a healthy live mount untouched.
+            _clear_dead_mount(mount_path)
             try:
                 os.makedirs(mount_path, exist_ok=True)
             except OSError:
@@ -463,7 +525,20 @@ def setup():
                 suppress_logging=False
                 if str(RCLONELOGLEVEL).lower()=='off':
                     suppress_logging = True
-                    logger.info(f"Suppressing {process_name} logging")                     
+                    logger.info(f"Suppressing {process_name} logging")
+                # One ProcessHandler PER MOUNT: start_process overwrites the
+                # handler's command/key_type and register_process dedups by
+                # handler identity, so a shared handler leaves only the
+                # first mount in the registry while its internals track the
+                # last-started one — breaking per-mount shutdown, monitor
+                # coverage, restart_service(key_type=...), and the mount
+                # self-heal's service_registered gate.
+                process_handler = ProcessHandler(logger)
+                # Every auto-restart / restart_service relaunch runs the same
+                # `rclone mount` command, so a corpse left by the crashed
+                # instance must be cleared first or the whole restart budget
+                # burns on "directory already mounted".
+                process_handler.pre_restart = lambda path=mount_path: _clear_dead_mount(path)
                 rclone_process = process_handler.start_process(process_name, "/config", rclone_command, mn, suppress_logging=suppress_logging)
                 if rclone_process:
                     # Register the RC URL only once the mount process is
@@ -472,7 +547,7 @@ def setup():
                     _rc_urls[mn] = f"http://localhost:{rc_port}"
                 notify('mount_success', 'Rclone Mounted', f'Mount {mn} is ready')
             else:
-                logger.error(f"The Zurg WebDav URL {url}/dav is not accessible within the timeout period. Skipping rclone setup for {mn}")
+                logger.error(f"The {probe_label} URL {url}{probe_endpoint} is not accessible within the timeout period. Skipping rclone setup for {mn}")
                 notify('health_error', 'Rclone Mount Failed', f'Mount {mn} failed: Zurg WebDAV timeout', level='error')
 
         # Per-mount isolation: a single mount failing (stale FUSE mountpoint

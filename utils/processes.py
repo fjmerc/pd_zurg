@@ -124,20 +124,24 @@ def _on_restart_exhausted(desc, restart_count, max_restarts):
 def _check_dependencies_alive(process_name):
     """Check if all dependencies for a process are alive.
 
+    A name can be registered more than once (each rclone mount is its own
+    entry) — the dependency is satisfied when at least one instance is
+    alive, so a single dead mount doesn't wedge dependents that can run
+    degraded on the surviving one.
+
     Returns (ok, dead_dep_name). Caller must acquire _registry_lock.
     """
     deps = _PROCESS_DEPENDENCIES.get(process_name, [])
     for dep_name in deps:
-        found = False
+        any_alive = False
         for entry in _process_registry:
             if entry['process_name'] == dep_name:
-                found = True
                 h = entry['handler']
-                if not h.process or h.process.poll() is not None:
-                    return False, dep_name
-                break
-        if not found:
-            # Dependency not registered (e.g., disabled) — treat as dead
+                if h.process and h.process.poll() is None:
+                    any_alive = True
+                    break
+        if not any_alive:
+            # Also covers "dependency not registered" (e.g., disabled)
             return False, dep_name
     return True, None
 
@@ -160,16 +164,18 @@ def _handle_restart(entry, logger):
     with _registry_lock:
         deps_ok, dead_dep = _check_dependencies_alive(process_name)
         if not deps_ok:
-            # If the dependency has permanently died (exhausted its own restarts),
-            # mark this process as dead too rather than deferring forever.
-            dep_exhausted = False
-            for dep_entry in _process_registry:
-                if dep_entry['process_name'] == dead_dep:
-                    dep_h = dep_entry['handler']
-                    if (dep_h.restart_policy and
-                            dep_h._restart_count >= dep_h.restart_policy.max_restarts):
-                        dep_exhausted = True
-                    break
+            # If the dependency has permanently died (every registered
+            # instance exhausted its own restarts), mark this process as
+            # dead too rather than deferring forever. An instance whose
+            # restart_policy is None (intentionally stopped, e.g. mid
+            # config-reload) deliberately does NOT count as exhausted —
+            # it may come back, so keep deferring.
+            dep_entries = [e for e in _process_registry
+                           if e['process_name'] == dead_dep]
+            dep_exhausted = bool(dep_entries) and all(
+                e['handler'].restart_policy and
+                e['handler']._restart_count >= e['handler'].restart_policy.max_restarts
+                for e in dep_entries)
             if dep_exhausted:
                 logger.error(f"{desc} cannot restart — dependency '{dead_dep}' is permanently dead")
                 _on_restart_exhausted(desc, 0, policy.max_restarts)
@@ -202,6 +208,13 @@ def _handle_restart(entry, logger):
     if _monitor_stop_event.wait(delay):
         return  # Shutdown requested during backoff
 
+    # Run the pre-restart hook BEFORE taking the registry lock — it may
+    # sleep and fork for seconds (rclone stale-mount clearing), and holding
+    # the lock through that stalls the status UI, service_registered(), and
+    # every other registry consumer. Ordering is still correct: the process
+    # is already dead here, so the corpse it left behind exists to clear.
+    handler.run_pre_restart()
+
     # Re-check shutdown and restart_policy under lock to close TOCTOU gap.
     # restart_policy is set to None by stop_process() during config reload —
     # if reload already restarted this process, we must not start a duplicate.
@@ -210,7 +223,7 @@ def _handle_restart(entry, logger):
             return
         if handler.restart_policy is None:
             return
-        handler.restart_process()
+        handler.restart_process(run_pre_restart=False)
 
 
 def _monitor_loop(logger):
@@ -363,6 +376,12 @@ class ProcessHandler:
         self._process_name = None
         self._key_type = None
         self._suppress_logging = False
+        # Optional callable invoked before every relaunch in
+        # restart_process() — e.g. rclone clears a dead FUSE corpse left by
+        # the crashed instance so the relaunch doesn't refuse with
+        # "directory already mounted". A raising hook must not block the
+        # relaunch; failures are logged and the restart proceeds.
+        self.pre_restart = None
 
     _DEFAULT_RESTART = object()  # sentinel
 
@@ -406,7 +425,23 @@ class ProcessHandler:
             self.logger.error(f"Error running subprocess for {process_description}: {e}")
             return None
 
-    def restart_process(self):
+    def run_pre_restart(self):
+        """Invoke the pre_restart hook, if any. Never raises.
+
+        Separated from restart_process() so callers that hold
+        ``_registry_lock`` across the relaunch (``_handle_restart``) can run
+        the hook — which may sleep and fork for seconds — BEFORE taking the
+        lock, then relaunch with ``run_pre_restart=False``.
+        """
+        if self.pre_restart is None:
+            return
+        try:
+            self.pre_restart()
+        except Exception as e:
+            desc = f"{self._process_name} w/ {self._key_type}" if self._key_type else self._process_name
+            self.logger.error(f"pre-restart hook for {desc} failed: {e}")
+
+    def restart_process(self, run_pre_restart=True):
         """Stop logging threads and re-launch the process with the same parameters."""
         if self._command is None:
             self.logger.error("Cannot restart: no command recorded from initial start")
@@ -419,6 +454,9 @@ class ProcessHandler:
             self.subprocess_logger.stop_logging_stdout()
             self.subprocess_logger.stop_monitoring_stderr()
             self.subprocess_logger = None
+
+        if run_pre_restart:
+            self.run_pre_restart()
 
         try:
             self.logger.info(f"Restarting {desc}")

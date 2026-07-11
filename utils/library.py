@@ -5953,6 +5953,7 @@ class LibraryScanner:
             return None
 
         created = 0
+        phantom_sources = 0
         symlinked_shows = set()   # titles that got new symlinks
         symlinked_movies = set()  # titles that got new symlinks
         # Per-title details for the activity event: set of new basenames
@@ -6270,6 +6271,26 @@ class LibraryScanner:
                         if os.path.islink(local_path) or os.path.exists(local_path):
                             continue
 
+                        # Enumeration (TB mylist API / Zurg WebDAV) can report
+                        # folder names the FUSE layer renames (e.g. TorBox
+                        # strips '&' from on-disk folders), so path_index may
+                        # carry paths that don't exist on the mount. A symlink
+                        # to such a path is born broken and churns
+                        # create→cleanup every scan. The mount is ground
+                        # truth: skip sources that don't resolve. (exists()
+                        # also returns False on a dead/ENOTCONN mount —
+                        # skipping there is benign: nothing is created or
+                        # deleted, and the next healthy scan links normally.)
+                        if not os.path.exists(debrid_path):
+                            phantom_sources += 1
+                            if phantom_sources <= 5:
+                                logger.warning(
+                                    "[library] Skipping symlink for %r S%02dE%02d: "
+                                    "source does not exist on mount: %r",
+                                    title, snum, enum, debrid_path,
+                                )
+                            continue
+
                         # Translate mount path to Sonarr/arr namespace
                         real_debrid = os.path.realpath(debrid_path)
                         symlink_target = _resolve_symlink_target(real_debrid)
@@ -6313,6 +6334,12 @@ class LibraryScanner:
                                 title, snum, enum, e
                             )
 
+        if phantom_sources > 5:
+            logger.warning(
+                "[library] Skipped %d symlink(s) total whose enumerated "
+                "source path does not exist on the mount",
+                phantom_sources,
+            )
         if created:
             logger.info(f"[library] Created {created} debrid symlink(s) in local library")
             # Cause picker: first-scan-after-restart bypasses upgrade heuristic

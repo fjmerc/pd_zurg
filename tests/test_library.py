@@ -1912,6 +1912,84 @@ class TestCreateDebridSymlinksSkipsObfuscated:
         assert os.listdir(scanner._local_tv_path) == []
 
 
+class TestCreateDebridSymlinksPhantomSource:
+    """Enumeration (TB mylist API / Zurg WebDAV) can report folder names the
+    FUSE layer renames (e.g. TorBox strips '&' from on-disk folders), so a
+    path_index entry may point at a path that doesn't exist on the mount.
+    Creating a symlink to it makes a born-broken link that the cleanup pass
+    deletes next scan — churning create→cleanup forever. The TV branch must
+    verify the source exists before linking."""
+
+    def _make_scanner(self, tmp_dir, monkeypatch):
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_ENABLED', 'true')
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', os.path.join(tmp_dir, 'mount'))
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_movies_path = os.path.join(tmp_dir, 'local_movies')
+        scanner._local_tv_path = os.path.join(tmp_dir, 'local_tv')
+        os.makedirs(scanner._local_movies_path)
+        os.makedirs(scanner._local_tv_path)
+        scanner._last_had_local = True
+        scanner._local_drop_alerted = False
+        scanner._last_symlinked_files = {}
+        scanner._pending_rescan_prior_ids = {}
+        scanner._discover_torbox_mount = lambda: None
+        return scanner
+
+    def test_nonexistent_source_not_symlinked(self, tmp_dir, monkeypatch):
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        mount = os.path.join(tmp_dir, 'mount')
+        os.makedirs(mount)
+
+        from utils.library import _normalize_title
+        norm = _normalize_title('Some Show')
+        shows = [
+            {'title': 'Anchor Show', 'year': 2020, 'source': 'local',
+             'season_data': []},
+            {'title': 'Some Show', 'year': 2024, 'source': 'debrid',
+             'season_data': [{'number': 3, 'episodes': [
+                 {'number': 8, 'source': 'debrid'}]}]},
+        ]
+        # Enumerated path with '&' that the mount never materialized.
+        phantom = os.path.join(
+            mount, 'Some Show S03E08 Upstairs&Downstairs 1080p',
+            'Some Show S03E08.mkv')
+        path_index = {(norm, 3, 8): phantom}
+        scanner._create_debrid_symlinks(shows, [], path_index)
+
+        assert os.listdir(scanner._local_tv_path) == []
+
+    def test_existing_source_still_symlinked(self, tmp_dir, monkeypatch):
+        """Control: same setup with a real source file IS linked — proves
+        the guard, not a broken harness, is what skips the phantom."""
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        mount = os.path.join(tmp_dir, 'mount')
+        rel = os.path.join(mount, 'Some Show S03E08 1080p')
+        os.makedirs(rel)
+        src = os.path.join(rel, 'Some Show S03E08.mkv')
+        open(src, 'w').close()
+
+        from utils.library import _normalize_title
+        norm = _normalize_title('Some Show')
+        shows = [
+            {'title': 'Anchor Show', 'year': 2020, 'source': 'local',
+             'season_data': []},
+            {'title': 'Some Show', 'year': 2024, 'source': 'debrid',
+             'season_data': [{'number': 3, 'episodes': [
+                 {'number': 8, 'source': 'debrid'}]}]},
+        ]
+        path_index = {(norm, 3, 8): src}
+        scanner._create_debrid_symlinks(shows, [], path_index)
+
+        show_dirs = os.listdir(scanner._local_tv_path)
+        assert show_dirs == ['Some Show (2024)']
+        link = os.path.join(scanner._local_tv_path, 'Some Show (2024)',
+                            'Season 03', 'Some Show S03E08.mkv')
+        assert os.path.islink(link)
+
+
 class TestFindCanonicalTmdbViaPrefix:
     """Tests for _find_canonical_tmdb_via_prefix — token-aligned prefix
     lookup against the TMDB cache, used as the final fallback in the

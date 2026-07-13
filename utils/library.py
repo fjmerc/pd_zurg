@@ -450,27 +450,67 @@ def _parse_folder_name(name):
 
 _EPISODE_PATTERN = re.compile(r'S\d{1,2}E\d{1,2}', re.IGNORECASE)
 _EPISODE_ID_PATTERN = re.compile(r'S(\d{1,2})E(\d{1,2})', re.IGNORECASE)
-# Season packs commonly qualify their per-season subdirs with a bracketed
-# source/quality tag — "Season 1 (BluRay)", "Season 2 (AMZN WEB-DL)",
-# "Season 3 [1080p x265]".  The strict ``^Season N$`` form missed those,
-# so every episode inside a qualified subdir was invisible to collection:
-# the pack sat fully-materialized on the mount while its episodes stayed
-# "wanted" (and the recovery pass re-selected the same owned pack forever).
-# The qualifier must be BRACKETED — bare-word suffixes ("Season 1 Extras")
-# stay excluded so junk files can't ride the no-SxxEyy sequential-key
-# fallback into season_data as phantom episodes.  Bracketed junk qualifiers
-# ("Season 1 (Extras)", "Season 2 (Featurettes)") are denylisted the same
-# way — the lookahead vocabulary mirrors ``_SKIP_FOLDERS``.  Source/quality
-# tags like "(Complete)" or "(BluRay)" stay allowed.
+# Season-dir recognition — three live pack dialects (all observed on the
+# TB mount as owned-but-invisible content):
+#   1. "Season 1", "Season 1 (BluRay)", "Season 3 [1080p x265]" — the word
+#      form, optionally bracket-qualified (The Americans mega-pack).
+#   2. "S01" — bare form (Broadchurch, Barry, Bad.Sisters packs).
+#   3. "S01 Bluray", "S04 WEB-DL" — bare form with an UNBRACKETED
+#      qualifier, accepted only when the qualifier starts with a known
+#      source/quality keyword (Arrested Development pack).  Arbitrary bare
+#      words ("Season 1 Extras", "S01 Bloopers") stay rejected.
+#
+# The prefix alternation keeps the season number in group(1) for every
+# consumer.  Digits capped at 4 so year-based seasons ("Season 2023")
+# survive while ``S99999`` shrapnel doesn't.  The end anchor rejects
+# ``S01E01`` (episode tag), ``S01-S03`` (range), and ``S01.COMPLETE``
+# (release-name shrapnel): after the digits only end-of-string, a bracket,
+# or whitespace+allowlisted-keyword may follow.
+#
+# IMPORTANT: never call this pattern directly — use ``_match_season_dir``
+# below, which applies the junk-tail denylist.  A raw match here says
+# nothing about phantom-episode safety.
 _SEASON_DIR_PATTERN = re.compile(
-    r'^Season\s+(\d+)'
-    r'(?:\s*[([]'
-    r'(?!\s*(?:extras?|featurettes?|bonus(?:es)?|specials?|samples?'
-    r'|subs?|subtitles?|trailers?|interviews?|deleted[\s.-]scenes'
-    r'|behind[\s.-]the[\s.-]scenes)\b)'
-    r'.*)?$',
+    r'^(?:Season\s+|S)(\d{1,4})'
+    r'(?:'
+    r'\s*[([].*'
+    r'|\s+(?:blu-?ray|b[dr]-?rip|web-?(?:dl|rip)?|hdtv|dvd(?:rip)?|remux'
+    r'|complete|proper|repack|uhd|4k|hdr10?(?:\+)?|dv|sdr'
+    r'|amzn|dsnp|nf|hulu|hmax|max|atvp|pcok|itunes'
+    r'|\d{3,4}p|[hx]\.?26[45]|hevc|avc|av1|xvid)\b.*'
+    r')?$',
     re.IGNORECASE,
 )
+
+# Junk vocabulary (mirrors _SKIP_FOLDERS) searched over the WHOLE qualifier
+# tail, not just its first token — "Season 1 (BluRay Extras)" and
+# "S01 Bluray Extras" are junk dirs even though they lead with a legit
+# source tag.  Files inside a matched season dir that lack an SxxEyy tag
+# get synthetic sequential episode keys, so a false-positive season dir
+# injects phantom episodes into season_data (Plex-visible junk); this
+# denylist is the guard.
+_SEASON_DIR_JUNK_TAIL = re.compile(
+    r'\b(?:extras?|featurettes?|bonus(?:es)?|specials?|samples?'
+    r'|subs?|subtitles?|trailers?|interviews?|scenes?|bloopers?'
+    r'|making[\s.-]of|plex[\s.-]versions?)\b',
+    re.IGNORECASE,
+)
+
+
+def _match_season_dir(name):
+    """Match *name* as a season directory.
+
+    Returns the ``re.Match`` (season number in ``group(1)``) or ``None``.
+    The single gate for all season-dir decisions: shape via
+    ``_SEASON_DIR_PATTERN``, then the junk-tail denylist over everything
+    after the season number.
+    """
+    m = _SEASON_DIR_PATTERN.match(name)
+    if not m:
+        return None
+    if _SEASON_DIR_JUNK_TAIL.search(name[m.end(1):]):
+        return None
+    return m
 
 # Plan 41 phase B.1 — TV markers beyond ``SxxExx``.  Without these,
 # season packs (``S22.COMPLETE``), multi-season packs (``S01-S04``),
@@ -656,7 +696,7 @@ def _collect_episodes(folder_path):
         with os.scandir(folder_path) as it:
             for entry in it:
                 if entry.is_dir(follow_symlinks=False):
-                    season_match = _SEASON_DIR_PATTERN.match(entry.name)
+                    season_match = _match_season_dir(entry.name)
                     if not season_match:
                         continue
                     season_num = int(season_match.group(1))
@@ -890,15 +930,18 @@ def _get_movie_quality_from_webdav(contents):
 
 
 def _count_show_content(show_path):
-    seasons = 0
+    seen_seasons = set()
     episodes = 0
     flat_episodes = 0
     try:
         with os.scandir(show_path) as it:
             for entry in it:
                 if entry.is_dir(follow_symlinks=False):
-                    if _SEASON_DIR_PATTERN.match(entry.name):
-                        seasons += 1
+                    season_match = _match_season_dir(entry.name)
+                    if season_match:
+                        # Dedupe by season number — "Season 01" and a
+                        # legacy "S01 Bluray" sibling are one season.
+                        seen_seasons.add(int(season_match.group(1)))
                         try:
                             with os.scandir(entry.path) as season_it:
                                 for file_entry in season_it:
@@ -916,6 +959,7 @@ def _count_show_content(show_path):
     except (PermissionError, OSError, FileNotFoundError):
         pass
 
+    seasons = len(seen_seasons)
     # If no Season subdirs but flat episode files exist, report as 1 season
     if seasons == 0 and flat_episodes > 0:
         seasons = 1
@@ -6292,8 +6336,17 @@ class LibraryScanner:
                             if release_folder is None:
                                 parent = os.path.dirname(debrid_path)
                                 parent_name = os.path.basename(parent)
-                                if _SEASON_DIR_PATTERN.match(parent_name):
-                                    release_folder = os.path.basename(os.path.dirname(parent))
+                                if _match_season_dir(parent_name):
+                                    grandparent_name = os.path.basename(
+                                        os.path.dirname(parent))
+                                    # Abort the climb when the grandparent
+                                    # is empty or itself season-shaped —
+                                    # the parent is then likely a flat
+                                    # release, not a season subdir.
+                                    if grandparent_name and not _match_season_dir(grandparent_name):
+                                        release_folder = grandparent_name
+                                    else:
+                                        release_folder = parent_name
                                 else:
                                     release_folder = parent_name
                             if _blocklist.is_blocked_title(release_folder):
@@ -7346,7 +7399,7 @@ class LibraryScanner:
 
         # Check season subdirectories
         for season_dir, files in contents.get('season_files', {}).items():
-            season_match = _SEASON_DIR_PATTERN.match(season_dir)
+            season_match = _match_season_dir(season_dir)
             if not season_match:
                 continue
             season_num = int(season_match.group(1))

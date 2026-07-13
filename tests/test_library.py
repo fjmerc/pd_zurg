@@ -448,10 +448,30 @@ class TestCollectEpisodes:
         eps = _collect_episodes(folder)
         assert set(eps.keys()) == {(1, 1), (2, 1)}
 
+    def test_bare_snn_season_dirs_collected(self, tmp_dir):
+        """Second and third live pack dialects: bare 'S01' subdirs
+        (Broadchurch/Barry shape) and unbracketed allowlisted qualifiers
+        ('S01 Bluray', 'S04 WEB-DL' — Arrested Development shape).
+        Non-allowlisted bare words stay excluded."""
+        folder = os.path.join(tmp_dir, "pack")
+        s1 = os.path.join(folder, "S01")
+        s2 = os.path.join(folder, "S02 Bluray")
+        s4 = os.path.join(folder, "S04 WEB-DL")
+        junk = os.path.join(folder, "S01 Bloopers")
+        for d in (s1, s2, s4, junk):
+            os.makedirs(d)
+        open(os.path.join(s1, "Show - S01E01.mkv"), 'w').close()
+        open(os.path.join(s2, "Show - S02E01.mkv"), 'w').close()
+        open(os.path.join(s4, "Show - S04E01.mkv"), 'w').close()
+        open(os.path.join(junk, "gag-reel.mkv"), 'w').close()
+        eps = _collect_episodes(folder)
+        assert set(eps.keys()) == {(1, 1), (2, 1), (4, 1)}
+
 
 class TestSeasonDirPattern:
     """_SEASON_DIR_PATTERN accepts plain and bracket-qualified season
-    dirs; bare-word suffixes stay excluded so junk files can't ride the
+    dirs; junk qualifiers (anywhere in the tail, bracketed or not) are
+    denylisted by _match_season_dir so junk files can't ride the
     sequential-key fallback into season_data as phantom episodes."""
 
     @pytest.mark.parametrize("name,season", [
@@ -464,10 +484,25 @@ class TestSeasonDirPattern:
         ("Season 12(BluRay)", 12),
         ("Season 1 (Complete)", 1),
         ("Season 4 (2160p Remux)", 4),
+        # Bare-SNN pack dialect (prod: Broadchurch S01-S03 pack subdirs).
+        ("S01", 1),
+        ("S1", 1),
+        ("s03", 3),
+        ("S02 (BluRay)", 2),
+        # Unbracketed source/quality qualifier — allowlisted keywords only
+        # (prod: Arrested Development pack subdirs).
+        ("S01 Bluray", 1),
+        ("S04 WEB-DL", 4),
+        ("S03 WEB", 3),
+        ("S02 1080p x265", 2),
+        ("Season 3 WEB-DL", 3),
+        ("Season 2 Complete", 2),
+        # Year-based seasons (daily shows) must survive the digit cap.
+        ("Season 2023", 2023),
     ])
     def test_accepts(self, name, season):
-        from utils.library import _SEASON_DIR_PATTERN
-        m = _SEASON_DIR_PATTERN.match(name)
+        from utils.library import _match_season_dir
+        m = _match_season_dir(name)
         assert m and int(m.group(1)) == season
 
     @pytest.mark.parametrize("name", [
@@ -477,7 +512,17 @@ class TestSeasonDirPattern:
         "Season One",
         "The Season 1",
         "Featurettes",
-        "S01",
+        # Bare-SNN accepts only exact/bracket-qualified/allowlisted-keyword
+        # forms — episode tags, ranges, release-name shrapnel, and
+        # non-allowlisted bare words stay rejected.
+        "S01E01",
+        "S01-S03",
+        "S01.COMPLETE",
+        "S01 Extras",
+        "S01 (Extras)",
+        "S01 Bloopers",
+        "S99999",
+        "Sample",
         # Bracketed junk qualifiers — denylisted so their contents can't
         # ride the sequential-key fallback in as phantom episodes.
         "Season 1 (Extras)",
@@ -486,6 +531,7 @@ class TestSeasonDirPattern:
         "Season 2 (Bonus)",
         "Season 3 (Bonuses)",
         "Season 3 (Specials)",
+        "Season 3 (Scenes)",
         "Season 4 (Behind the Scenes)",
         "Season 4 [Behind.the.Scenes]",
         "Season 5 (Deleted Scenes)",
@@ -494,10 +540,28 @@ class TestSeasonDirPattern:
         "Season 6 (Subtitles)",
         "Season 7 (Trailers)",
         "Season 7 (Interviews)",
+        # S-prefix siblings of the bracketed junk forms.
+        "S02 (Bonus)",
+        "S03 (Specials)",
+        "S04 (Behind the Scenes)",
+        "S05 (Featurettes)",
+        "S06 (Subs)",
+        "S07 (Trailers)",
+        # Junk ANYWHERE in the qualifier tail — a leading allowlisted
+        # keyword is not a permission slip for trailing junk words.
+        "S01 Bluray Extras",
+        "S01 Bluray Bonus Disc",
+        "S01 DVD Sample",
+        "S01 Complete Bloopers",
+        "Season 1 Bluray Extras",
+        "Season 1 Complete Extras",
+        "Season 1 (BluRay Extras)",
+        "S01 (Complete Sample)",
+        "S01 (1080p Trailers)",
     ])
     def test_rejects(self, name):
-        from utils.library import _SEASON_DIR_PATTERN
-        assert _SEASON_DIR_PATTERN.match(name) is None
+        from utils.library import _match_season_dir
+        assert _match_season_dir(name) is None
 
     def test_webdav_collect_qualified_season_bucket(self):
         """The TB mylist / WebDAV collector sees the same qualified
@@ -544,6 +608,18 @@ class TestCountShowContent:
         seasons, episodes = _count_show_content(show_path)
         assert seasons == 2
         assert episodes == 0
+
+    def test_mixed_dialects_dedupe_by_season_number(self, tmp_dir):
+        """'Season 01' and a legacy 'S01 Bluray' sibling are ONE season —
+        the wider dir pattern must not inflate the season count."""
+        show_path = _make_show(tmp_dir, "Mixed Show", {
+            "Season 01": ["ep1.mkv"],
+            "S01 Bluray": ["ep2.mkv"],
+            "Season 02": ["ep1.mkv"],
+        })
+        seasons, episodes = _count_show_content(show_path)
+        assert seasons == 2
+        assert episodes == 3
 
     def test_no_season_dirs(self, tmp_dir):
         show_path = os.path.join(tmp_dir, "Flat Show")

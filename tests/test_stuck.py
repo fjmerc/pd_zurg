@@ -195,6 +195,212 @@ class TestCollectHistory:
 
 
 # ---------------------------------------------------------------------------
+# Satisfied-reconcile (history streaks vs current library state)
+# ---------------------------------------------------------------------------
+
+class TestReconcileSatisfied:
+
+    def _scanner(self, monkeypatch, movies=None, shows=None):
+        import utils.library
+        sc = _FakeScanner(data={'movies': movies or [], 'shows': shows or []})
+        monkeypatch.setattr(utils.library, 'get_scanner', lambda: sc)
+        return sc
+
+    def _hist_record(self, title, media_type='movie'):
+        key = 'title:' + stuck._norm_key(title)
+        rec = stuck._record(key, title, media_type)
+        rec['kinds'].append('history')
+        rec['reasons'].append('failure_streak')
+        return key, rec
+
+    def test_satisfied_movie_suppressed(self, stores, monkeypatch):
+        self._scanner(monkeypatch, movies=[
+            {'title': 'German Genius', 'source': 'both', 'year': 2011}])
+        key, rec = self._hist_record('German Genius')
+        records = {key: rec}
+        stuck._reconcile_satisfied(records)
+        assert records == {}
+
+    def test_satisfied_movie_debrid_source_suppressed(self, stores,
+                                                      monkeypatch):
+        # source 'debrid'/'local' are satisfied too, not just 'both'.
+        self._scanner(monkeypatch, movies=[
+            {'title': 'German Genius', 'source': 'debrid', 'year': 2011}])
+        key, rec = self._hist_record('German Genius')
+        records = {key: rec}
+        stuck._reconcile_satisfied(records)
+        assert records == {}
+
+    def test_completed_show_suppressed(self, stores, monkeypatch):
+        self._scanner(monkeypatch, shows=[
+            {'title': 'Dexter', 'source': 'local', 'year': 2006,
+             'missing_episodes': 0}])
+        key, rec = self._hist_record('Dexter', 'show')
+        records = {key: rec}
+        stuck._reconcile_satisfied(records)
+        assert records == {}
+
+    def test_show_with_missing_episodes_kept(self, stores, monkeypatch):
+        self._scanner(monkeypatch, shows=[
+            {'title': "Grey's Anatomy", 'source': 'both', 'year': 2005,
+             'missing_episodes': 8}])
+        key, rec = self._hist_record("Grey's Anatomy", 'show')
+        records = {key: rec}
+        stuck._reconcile_satisfied(records)
+        assert key in records
+
+    def test_title_absent_from_library_kept(self, stores, monkeypatch):
+        self._scanner(monkeypatch, movies=[
+            {'title': 'Something Else', 'source': 'both', 'year': 2010}])
+        key, rec = self._hist_record('German Genius')
+        records = {key: rec}
+        stuck._reconcile_satisfied(records)
+        assert key in records
+
+    def test_show_unknown_missing_count_kept(self, stores, monkeypatch):
+        self._scanner(monkeypatch, shows=[
+            {'title': 'Mystery Show', 'source': 'both', 'year': 2020,
+             'missing_episodes': None}])
+        key, rec = self._hist_record('Mystery Show', 'show')
+        records = {key: rec}
+        stuck._reconcile_satisfied(records)
+        assert key in records
+
+    def test_wanted_source_movie_kept(self, stores, monkeypatch):
+        self._scanner(monkeypatch, movies=[
+            {'title': 'Ghost Movie', 'source': 'wanted', 'year': 2019}])
+        key, rec = self._hist_record('Ghost Movie')
+        records = {key: rec}
+        stuck._reconcile_satisfied(records)
+        assert key in records
+
+    def test_live_kind_never_suppressed(self, stores, monkeypatch):
+        self._scanner(monkeypatch, movies=[
+            {'title': 'German Genius', 'source': 'both', 'year': 2011}])
+        key, rec = self._hist_record('German Genius')
+        rec['kinds'].insert(0, 'inflight')  # no longer history-only
+        records = {key: rec}
+        stuck._reconcile_satisfied(records)
+        assert key in records
+
+    def test_media_type_mismatch_kept(self, stores, monkeypatch):
+        # A movie-typed streak must NOT be cleared by a satisfied *show* of
+        # the same name (the Dexter: Original Sin cross-type case).
+        self._scanner(monkeypatch, shows=[
+            {'title': 'Dexter: Original Sin', 'source': 'both', 'year': 2024,
+             'missing_episodes': 0}])
+        key, rec = self._hist_record('Dexter: Original Sin', 'movie')
+        records = {key: rec}
+        stuck._reconcile_satisfied(records)
+        assert key in records
+
+    def test_ambiguous_same_name_different_year_kept(self, stores,
+                                                     monkeypatch):
+        # Two satisfied movies collapse to one norm — can't prove which the
+        # streak is about, so the streak survives.
+        self._scanner(monkeypatch, movies=[
+            {'title': 'It', 'source': 'both', 'year': 1990},
+            {'title': 'It', 'source': 'both', 'year': 2017}])
+        key, rec = self._hist_record('It')
+        records = {key: rec}
+        stuck._reconcile_satisfied(records)
+        assert key in records
+
+    def test_unknown_year_not_confirmable(self, stores, monkeypatch):
+        # A satisfied entry with year=None can't establish a distinct
+        # identity, so it must never clear a streak (a year-less remake
+        # can't hide a stuck original of the same name).
+        self._scanner(monkeypatch, movies=[
+            {'title': 'German Genius', 'source': 'both', 'year': None}])
+        key, rec = self._hist_record('German Genius')
+        records = {key: rec}
+        stuck._reconcile_satisfied(records)
+        assert key in records
+
+    def test_same_year_duplicate_not_confirmed(self, stores, monkeypatch):
+        # Two library entries collapsing to the same (norm, year) are still
+        # ambiguous (dupe rows / split-merge) — more than one entry blocks
+        # suppression regardless of matching years.
+        self._scanner(monkeypatch, movies=[
+            {'title': 'It', 'source': 'both', 'year': 2017},
+            {'title': 'It', 'source': 'both', 'year': 2017}])
+        key, rec = self._hist_record('It')
+        records = {key: rec}
+        stuck._reconcile_satisfied(records)
+        assert key in records
+
+    def test_season_pack_streak_typed_as_show(self, stores, monkeypatch):
+        # A streak whose LAST event lacks an episode but an EARLIER event
+        # had one is a show — a satisfied movie of the same name must not
+        # clear it.
+        now = datetime.now(timezone.utc)
+        _write_history(stores, [
+            {'ts': _iso(now - timedelta(days=3)), 'type': 'failed',
+             'title': 'Foundation', 'episode': 'S02E10',
+             'meta': {'cause': 'uncached_rejected'}},
+            {'ts': _iso(now - timedelta(days=2)), 'type': 'failed',
+             'title': 'Foundation', 'meta': {'cause': 'uncached_rejected'}},
+            {'ts': _iso(now - timedelta(days=1)), 'type': 'failed',
+             'title': 'Foundation', 'meta': {'cause': 'uncached_rejected'}},
+        ])
+        self._scanner(monkeypatch, movies=[
+            {'title': 'Foundation', 'source': 'both', 'year': 2021}])
+        stuck.invalidate_cache()
+        payload = stuck.collect(force=True)
+        assert 'Foundation' in [it['title'] for it in payload['items']]
+
+    def test_no_scanner_no_suppression(self, stores):
+        # stores fixture wires get_scanner -> None
+        key, rec = self._hist_record('German Genius')
+        records = {key: rec}
+        stuck._reconcile_satisfied(records)
+        assert key in records
+
+    def test_collect_end_to_end_suppresses_movie(self, stores, monkeypatch):
+        now = datetime.now(timezone.utc)
+        _write_history(stores, [
+            {'ts': _iso(now - timedelta(days=d)), 'type': 'failed',
+             'title': 'German Genius',
+             'meta': {'cause': 'uncached_rejected'}}
+            for d in (3, 2, 1)
+        ])
+        self._scanner(monkeypatch, movies=[
+            {'title': 'German Genius', 'source': 'both', 'year': 2011}])
+        stuck.invalidate_cache()
+        payload = stuck.collect(force=True)
+        assert 'German Genius' not in [it['title'] for it in payload['items']]
+
+    def test_collect_end_to_end_suppresses_show(self, stores, monkeypatch):
+        now = datetime.now(timezone.utc)
+        _write_history(stores, [
+            {'ts': _iso(now - timedelta(days=d)), 'type': 'failed',
+             'title': 'Dexter', 'episode': 'S08E12',
+             'meta': {'cause': 'uncached_rejected'}}
+            for d in (3, 2, 1)
+        ])
+        self._scanner(monkeypatch, shows=[
+            {'title': 'Dexter', 'source': 'both', 'year': 2006,
+             'missing_episodes': 0}])
+        stuck.invalidate_cache()
+        payload = stuck.collect(force=True)
+        assert 'Dexter' not in [it['title'] for it in payload['items']]
+
+    def test_reconcile_exception_does_not_break_collect(self, stores,
+                                                        monkeypatch):
+        now = datetime.now(timezone.utc)
+        _write_history(stores, [
+            {'ts': _iso(now - timedelta(days=d)), 'type': 'failed',
+             'title': 'Some Movie', 'meta': {'cause': 'uncached_timeout'}}
+            for d in (3, 2, 1)
+        ])
+        monkeypatch.setattr(stuck, '_reconcile_satisfied',
+                            lambda records: 1 / 0)
+        payload = stuck.collect(force=True)
+        # Reconcile blew up but collect still returns the un-reconciled item.
+        assert [it['title'] for it in payload['items']] == ['Some Movie']
+
+
+# ---------------------------------------------------------------------------
 # Wanted-ghost collector
 # ---------------------------------------------------------------------------
 

@@ -15,6 +15,12 @@ title-level records an operator can act on:
   streak (N+ failure-cause events with no progress-cause event after
   them, spanning at least a day).
 
+History streaks are then reconciled against the scanner's merged library:
+a streak-only record is dropped when the library shows the title now
+satisfied (a movie on disk, or a show with zero missing episodes), since
+the event log alone can't see a title that was filled by a path that
+logged no progress-cause event.
+
 Everything here is read-only against the source stores; the only mutation
 this module owns is the 7-day operator dismissal, persisted as
 ``stuckdismiss:<key>`` attempt-ledger entries so no new store is needed.
@@ -345,9 +351,12 @@ def _collect_history(records):
         st = streaks.get(norm)
         if st is None:
             st = streaks[norm] = {'title': title, 'first_ts': e.get('ts'),
-                                  'count': 0, 'last_event': None}
+                                  'count': 0, 'last_event': None,
+                                  'has_episode': False}
         st['count'] += 1
         st['last_event'] = e
+        if e.get('episode'):
+            st['has_episode'] = True
 
     now = datetime.now(timezone.utc)
     for norm, st in streaks.items():
@@ -366,7 +375,7 @@ def _collect_history(records):
         key = 'title:' + norm
         rec = records.get(key)
         if rec is None:
-            media_type = 'show' if last.get('episode') else 'movie'
+            media_type = 'show' if st.get('has_episode') else 'movie'
             rec = records[key] = _record(key, st['title'], media_type)
         rec['kinds'].append('history')
         _add_reason(rec, 'failure_streak')
@@ -411,6 +420,104 @@ def _annotate(records):
             pass
         if rec['blocklisted']:
             _add_reason(rec, 'blocklisted')
+
+
+def _reconcile_satisfied(records):
+    """Drop history-only failure streaks the library now shows satisfied.
+
+    ``_collect_history`` reconstructs streaks from the event log alone and
+    has no view of current library state, so a title that was eventually
+    filled by a path that logged no progress-cause event (a quality
+    upgrade, a different release, an out-of-window grab) keeps showing its
+    stale streak until it ages out of the 30-day window.  Cross-check
+    against the scanner's merged library — the same ``peek_data`` snapshot
+    ``_collect_wanted`` already reads — and drop a record whose *only*
+    justification is a history streak when the library confirms that title
+    satisfied (a movie present on disk; a show with zero missing episodes).
+
+    History events carry no year or imdb_id (``history.log_event``), so the
+    join is by normalized title, which is weak: ``normalize_title`` strips
+    the trailing ``(YYYY)`` and years live in a separate field, so a
+    remake/reboot collapses onto its original.  To keep the reconcile from
+    ever *hiding* a genuinely-stuck title (the dangerous direction), a
+    match must be unambiguous on the two axes the streak does carry:
+
+    * **media_type** — a movie streak is only suppressed by a satisfied
+      *movie*, a show streak only by a satisfied *show*.  (A ``Daredevil``
+      release parsed as a movie can't be cleared by a satisfied show of
+      the same name, and vice-versa.)  The streak's type is derived from
+      *any* episode-bearing event in it (``_collect_history``), so a
+      season-pack failure can't mistype a show as a movie.
+    * **single identity** — a ``(norm, media_type)`` that maps to more than
+      one library entry is ambiguous and never suppressed; only a lone,
+      fully-satisfied entry with a *known* year clears a streak.  A
+      ``year`` of ``None`` can't establish a distinct identity, so such an
+      entry is never confirmable — a satisfied remake with an unknown year
+      can't hide a stuck original of the same name.
+
+    Records also backed by a live in-flight or wanted kind are never
+    touched, and a show whose missing-episode count is unknown (``None``)
+    is treated as unsatisfied so a genuine gap can never be hidden.  The
+    one irreducible residual: a stuck title present *only* in the history
+    log (e.g. a watchlist grab absent from any arr) that shares a name with
+    a lone satisfied library entry of a different year — no available datum
+    distinguishes them.
+    """
+    try:
+        from utils.library import get_scanner
+        scanner = get_scanner()
+        data = scanner.peek_data() if scanner is not None else None
+    except Exception:
+        data = None
+    if not data:
+        return
+
+    # (norm, media_type) -> list of (year, satisfied).  A streak is cleared
+    # only when its identity maps to exactly ONE satisfied library entry
+    # with a known year; any duplicate, ambiguity, or unknown year blocks
+    # suppression so a genuinely-stuck title can never be hidden.
+    ident = {}
+
+    def _mark(norm, mtype, year, sat):
+        if not norm:
+            return
+        ident.setdefault((norm, mtype), []).append((year, sat))
+
+    for m in data.get('movies') or []:
+        if isinstance(m, dict):
+            _mark(_norm_key(m.get('title') or ''), 'movie',
+                  m.get('year'), m.get('source') != 'wanted')
+    for s in data.get('shows') or []:
+        if not isinstance(s, dict):
+            continue
+        miss = s.get('missing_episodes')
+        done = (s.get('source') != 'wanted'
+                and isinstance(miss, int) and miss == 0)
+        _mark(_norm_key(s.get('title') or ''), 'show', s.get('year'), done)
+
+    confirmed = set()
+    for k, entries in ident.items():
+        if len(entries) != 1:
+            continue
+        year, sat = entries[0]
+        if sat and year is not None:
+            confirmed.add(k)
+    if not confirmed:
+        return
+
+    suppressed = []
+    for key, rec in list(records.items()):
+        if set(rec.get('kinds') or ()) != {'history'}:
+            continue
+        norm = (key[len('title:'):] if key.startswith('title:')
+                else _norm_key(rec.get('title') or ''))
+        if (norm, rec.get('media_type')) in confirmed:
+            suppressed.append(rec.get('title') or norm)
+            records.pop(key, None)
+    if suppressed:
+        logger.info("[stuck] suppressed %d satisfied history streak(s): %s",
+                    len(suppressed),
+                    ', '.join(sorted(suppressed))[:200])
 
 
 def _dismissed_keys(ledger):
@@ -507,6 +614,11 @@ def collect(max_items=200, force=False):
             except Exception:
                 logger.warning('[stuck] Collector step failed', exc_info=True)
         _annotate(records)
+        try:
+            _reconcile_satisfied(records)
+        except Exception:
+            logger.warning('[stuck] Satisfied-reconcile step failed',
+                           exc_info=True)
 
         dismissed = _dismissed_keys(ledger)
         items = []

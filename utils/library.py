@@ -2308,6 +2308,57 @@ def _build_tmdb_aliases():
     )
 
 
+def _season_merge_conflict(norm_key, max_season, year=None):
+    """True when season-aware TMDB resolution redirects *norm_key* to a
+    different show than its direct cache entry.
+
+    Guards the pre-enrichment alias merges: the TMDB cache maps each
+    parsed title to exactly one show, so a bare reboot-family title
+    (cache key "daredevil" → "Daredevil: Born Again") drags releases of
+    the sibling show ("Marvel's Daredevil" S03) into the wrong entry.
+    Once merged, the enrichment-time season guard can't recover — its
+    word-subset search on the merged title never matches the sibling.
+    Kept unmerged, the pipeline self-heals: enrichment renames the item
+    via ``find_show_by_season`` and ``_dedup_shows_by_external_id``
+    folds it into the right show.
+
+    Fail-open: returns False when there is no season data, no direct
+    cache entry, or no covering sibling — so a cache that merely lags
+    the newest season keeps merging exactly as before.
+    """
+    if not max_season:
+        return False
+    try:
+        from utils.tmdb import get_cached_tmdb_ids, find_show_tmdb_id_by_season
+        show_ids = get_cached_tmdb_ids().get('shows', {})
+        direct_id = ((show_ids.get(f"{norm_key} ({year})") if year else None)
+                     or show_ids.get(norm_key))
+        if not direct_id:
+            return False
+        alt_id = find_show_tmdb_id_by_season(norm_key, max_season, year)
+    except Exception as e:
+        logger.debug("[library] season merge-veto check failed for %r: %s",
+                     norm_key, e)
+        return False
+    return bool(alt_id and alt_id != direct_id)
+
+
+def _max_episode_season(item):
+    """Highest season number present in an item's ``_episodes`` keys.
+
+    Falls back to the ``seasons`` count when episode filenames didn't
+    parse (``_count_show_content`` fallback path) so the season-aware
+    merge veto isn't silently disabled for those shows.  The count is
+    always ≤ the true max season number, so the proxy can only err in
+    the fail-open direction.  Movies carry neither key → 0.
+    """
+    eps = item.get('_episodes') or {}
+    if eps:
+        return max((sn for sn, _en in eps), default=0)
+    seasons = item.get('seasons')
+    return seasons if isinstance(seasons, int) and seasons > 0 else 0
+
+
 class _WebDAVUnsupportedError(RuntimeError):
     """Zurg does not honor recursive PROPFIND.
 
@@ -2892,6 +2943,43 @@ class LibraryScanner:
             logger.debug("[library] TMDB alias map empty, skipping debrid dedup")
             return items
 
+        # Season-aware merge veto (shows only): the alias map trusts the
+        # cache's one-show-per-title mapping, but a bare reboot-family
+        # title can point at the wrong sibling for the seasons an item
+        # actually holds (see _season_merge_conflict).  Precompute each
+        # key's max season/year across its items so either side of a
+        # candidate pairing can be checked.  Upstream (_scan_mount /
+        # _merge_alt_debrid_items) already collapses same-normalized-key
+        # items, so the max() aggregation below is defensive — if
+        # duplicate keys ever leak in, over-approximating max_season
+        # only errs toward keeping items separate.
+        key_max_season = {}
+        key_year = {}
+        for item in items:
+            k = _normalize_title(item['title'])
+            if not aliases.get(k):
+                continue
+            mx = _max_episode_season(item)
+            if mx > key_max_season.get(k, 0):
+                key_max_season[k] = mx
+            if k not in key_year and item.get('year'):
+                key_year[k] = item['year']
+
+        veto_memo = {}
+
+        def _vetoed(k):
+            if k not in veto_memo:
+                conflict = _season_merge_conflict(
+                    k, key_max_season.get(k, 0), key_year.get(k))
+                if conflict:
+                    logger.info(
+                        "[library] season-aware dedup veto: %r S%02d resolves "
+                        "to a different TMDB show than its cache entry — "
+                        "kept as a separate item for enrichment to re-resolve",
+                        k, key_max_season.get(k, 0))
+                veto_memo[k] = conflict
+            return veto_memo[k]
+
         # Map each norm key to its canonical (first-seen) key via aliases
         canon = {}  # norm_key -> canonical norm_key
         for item in items:
@@ -2901,6 +2989,8 @@ class LibraryScanner:
             # Check if any existing canonical key is an alias of this key
             for alias in sorted(aliases.get(key, ())):
                 if alias in canon:
+                    if _vetoed(key) or _vetoed(alias):
+                        continue
                     canon[key] = canon[alias]
                     break
             if key not in canon:
@@ -3227,6 +3317,23 @@ class LibraryScanner:
 
         shows = []
         merged_local_show_keys = set()
+        # Memoized season-aware veto for the alias hops below — same
+        # rationale as the _dedup_by_tmdb veto (a bare reboot-family
+        # title must not drag its S-mismatched releases into the local
+        # sibling entry).  Exact-key matches are never vetoed: identical
+        # normalized titles are re-resolved together by enrichment.
+        _local_veto_memo = {}
+
+        def _local_merge_vetoed(nk, mx, yr):
+            # Keyed by the full argument tuple: the same norm key can be
+            # probed with different season contexts (alias hop uses the
+            # local candidate's seasons, prefix hop uses the debrid
+            # item's), and a first-wins memo would pin the wrong answer.
+            memo_key = (nk, mx, yr)
+            if memo_key not in _local_veto_memo:
+                _local_veto_memo[memo_key] = _season_merge_conflict(nk, mx, yr)
+            return _local_veto_memo[memo_key]
+
         for item in debrid_shows:
             key = _normalize_title(item['title'])
             local_key = None
@@ -3234,9 +3341,21 @@ class LibraryScanner:
                 local_key = key
             else:
                 for alias in sorted(show_aliases.get(key, ())):
-                    if alias in local_show_map:
-                        local_key = alias
-                        break
+                    if alias not in local_show_map:
+                        continue
+                    local_candidate = local_show_map[alias]
+                    if (_local_merge_vetoed(
+                            key, _max_episode_season(item), item.get('year'))
+                        or _local_merge_vetoed(
+                            alias, _max_episode_season(local_candidate),
+                            local_candidate.get('year'))):
+                        logger.info(
+                            "[library] season-aware merge veto: debrid %r "
+                            "not merged into local %r — seasons resolve to "
+                            "a different TMDB show", key, alias)
+                        continue
+                    local_key = alias
+                    break
             if local_key is None:
                 # Final fallback: token-aligned prefix lookup against the
                 # TMDB cache — symmetric with the movies merge cascade.
@@ -3248,8 +3367,21 @@ class LibraryScanner:
                 if canonical:
                     canon_key = _normalize_title(canonical['title'])
                     # Self-loop guard — see movies branch comment.
+                    # Season-aware veto mirrors the alias hop above.
+                    # Both sides are checked with the ITEM's seasons:
+                    # the key side asks "does my own cache entry redirect
+                    # me elsewhere?", the canon_key side asks "does the
+                    # entry I'd merge into actually cover the seasons I
+                    # carry?" — the latter matters when the parsed key
+                    # has no direct cache entry (long junk titles), which
+                    # would otherwise fail the key-side check open.
+                    item_mx = _max_episode_season(item)
                     if (canon_key and canon_key != key
-                            and canon_key in local_show_map):
+                            and canon_key in local_show_map
+                            and not _local_merge_vetoed(
+                                key, item_mx, item.get('year'))
+                            and not _local_merge_vetoed(
+                                canon_key, item_mx, item.get('year'))):
                         local_key = canon_key
                         logger.debug(
                             f"[library] TMDB prefix match (show): debrid '{key}' "

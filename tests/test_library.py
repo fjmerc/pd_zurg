@@ -5331,6 +5331,326 @@ class TestDedupShowsByExternalId:
             f'equal-size collision should keep first-seen, got {ep["file"]!r}'
 
 
+class TestSeasonAwareMergeVeto:
+    """Wrong-show alias merges must be blocked pre-enrichment.
+
+    The TMDB cache maps each parsed title to exactly ONE show, so a bare
+    reboot-family title (cache key "daredevil" → "Daredevil: Born Again")
+    puts the bare key and the sibling's key in the same alias group.  A
+    "Daredevil" S03 release must NOT merge into Born Again (S01 only) —
+    once merged, enrichment's season-aware guard can never recover
+    because its word-subset search runs on the merged title.  Kept
+    separate, enrichment renames the item to "Marvel's Daredevil" and
+    _dedup_shows_by_external_id folds it into the right entry.
+    """
+
+    # TMDB fixture: id 100 = Born Again (covers S01 only),
+    # id 200 = Marvel's Daredevil (covers S01-S03).
+    _SHOW_IDS = {
+        'daredevil': 100,
+        'daredevil born again': 100,
+        'marvels daredevil': 200,
+    }
+
+    def _patch_tmdb(self, monkeypatch, alt_lookup=None):
+        import utils.tmdb as _tmdb
+        monkeypatch.setattr(
+            _tmdb, 'get_cached_tmdb_ids',
+            lambda: {'shows': dict(self._SHOW_IDS), 'movies': {}})
+        if alt_lookup is None:
+            def alt_lookup(norm_key, max_season, year=None):
+                # Season-aware resolution: any daredevil-family key at
+                # S02+ belongs to Marvel's Daredevil; S01 keeps the
+                # direct entry.
+                if norm_key in self._SHOW_IDS and max_season > 1:
+                    return 200
+                return self._SHOW_IDS.get(norm_key)
+        monkeypatch.setattr(_tmdb, 'find_show_tmdb_id_by_season', alt_lookup)
+
+    _ALIASES = {
+        'daredevil': {'daredevil born again'},
+        'daredevil born again': {'daredevil'},
+    }
+
+    @staticmethod
+    def _bare_item():
+        return {'title': 'Daredevil', 'source': 'debrid', 'episodes': 1,
+                'seasons': 1, 'date_added': 0,
+                '_episodes': {(3, 8): {'path': '/mnt/dd/S03E08.mkv', 'file': 'S03E08.mkv',
+                                       'source': 'debrid'}}}
+
+    @staticmethod
+    def _born_again_item():
+        return {'title': 'Daredevil Born Again', 'year': 2025,
+                'source': 'debrid', 'episodes': 1, 'seasons': 1,
+                'date_added': 0,
+                '_episodes': {(1, 1): {'path': '/mnt/ba/S01E01.mkv', 'file': 'S01E01.mkv',
+                                       'source': 'debrid'}}}
+
+    # -- _season_merge_conflict unit behavior --------------------------
+
+    def test_conflict_when_season_lookup_redirects(self, monkeypatch):
+        self._patch_tmdb(monkeypatch)
+        from utils.library import _season_merge_conflict
+        assert _season_merge_conflict('daredevil', 3) is True
+
+    def test_no_conflict_when_direct_entry_covers_season(self, monkeypatch):
+        self._patch_tmdb(monkeypatch)
+        from utils.library import _season_merge_conflict
+        assert _season_merge_conflict('daredevil born again', 1, 2025) is False
+
+    def test_fail_open_when_no_alternative_found(self, monkeypatch):
+        """Cache merely lagging the newest season (alt lookup → None)
+        must NOT veto — legitimate alias merges keep working."""
+        self._patch_tmdb(monkeypatch, alt_lookup=lambda *a, **kw: None)
+        from utils.library import _season_merge_conflict
+        assert _season_merge_conflict('daredevil', 3) is False
+
+    def test_fail_open_when_key_has_no_direct_entry(self, monkeypatch):
+        self._patch_tmdb(monkeypatch)
+        from utils.library import _season_merge_conflict
+        assert _season_merge_conflict('unknown show', 5) is False
+
+    def test_no_lookup_without_season_data(self, monkeypatch):
+        import utils.tmdb as _tmdb
+        monkeypatch.setattr(_tmdb, 'get_cached_tmdb_ids',
+                            lambda: pytest.fail('must not load cache'))
+        from utils.library import _season_merge_conflict
+        assert _season_merge_conflict('daredevil', 0) is False
+
+    def test_fail_open_on_tmdb_error(self, monkeypatch):
+        import utils.tmdb as _tmdb
+        def boom():
+            raise OSError('cache unreadable')
+        monkeypatch.setattr(_tmdb, 'get_cached_tmdb_ids', boom)
+        from utils.library import _season_merge_conflict
+        assert _season_merge_conflict('daredevil', 3) is False
+
+    # -- _dedup_by_tmdb veto --------------------------------------------
+
+    def test_dedup_keeps_season_mismatched_siblings_separate(self, monkeypatch):
+        self._patch_tmdb(monkeypatch)
+        items = [self._born_again_item(), self._bare_item()]
+        result = LibraryScanner._dedup_by_tmdb(items, dict(self._ALIASES))
+        assert len(result) == 2, \
+            'S03 bare-title item must not merge into the S01-only sibling'
+        titles = {i['title'] for i in result}
+        assert titles == {'Daredevil', 'Daredevil Born Again'}
+
+    def test_dedup_veto_is_order_independent(self, monkeypatch):
+        """Bare item first: Born Again must not be dragged into ITS group
+        either (the veto checks both sides of the pairing)."""
+        self._patch_tmdb(monkeypatch)
+        items = [self._bare_item(), self._born_again_item()]
+        result = LibraryScanner._dedup_by_tmdb(items, dict(self._ALIASES))
+        assert len(result) == 2
+
+    def test_dedup_still_merges_when_seasons_agree(self, monkeypatch):
+        """Same show under two parsed names (Andor / Star Wars Andor)
+        with covered seasons merges exactly as before."""
+        import utils.tmdb as _tmdb
+        monkeypatch.setattr(
+            _tmdb, 'get_cached_tmdb_ids',
+            lambda: {'shows': {'andor': 300, 'star wars andor': 300},
+                     'movies': {}})
+        monkeypatch.setattr(_tmdb, 'find_show_tmdb_id_by_season',
+                            lambda k, mx, yr=None: 300)
+        aliases = {'andor': {'star wars andor'},
+                   'star wars andor': {'andor'}}
+        items = [
+            {'title': 'Andor', 'source': 'debrid', 'episodes': 1,
+             'seasons': 1, 'date_added': 0,
+             '_episodes': {(1, 1): {'path': '/mnt/a/S01E01.mkv', 'file': 'S01E01.mkv'}}},
+            {'title': 'Star Wars Andor', 'source': 'debrid', 'episodes': 1,
+             'seasons': 1, 'date_added': 0,
+             '_episodes': {(2, 1): {'path': '/mnt/a/S02E01.mkv', 'file': 'S02E01.mkv'}}},
+        ]
+        result = LibraryScanner._dedup_by_tmdb(items, aliases)
+        assert len(result) == 1
+        assert set(result[0]['_episodes']) == {(1, 1), (2, 1)}
+
+    def test_dedup_fail_open_merges_on_stale_cache(self, monkeypatch):
+        """Alt lookup returning None (no covering sibling in cache) keeps
+        the pre-fix merge behavior."""
+        self._patch_tmdb(monkeypatch, alt_lookup=lambda *a, **kw: None)
+        items = [self._born_again_item(), self._bare_item()]
+        result = LibraryScanner._dedup_by_tmdb(items, dict(self._ALIASES))
+        assert len(result) == 1
+
+    def test_dedup_movies_unaffected(self, monkeypatch):
+        """Movie items carry no _episodes — the veto must never fire and
+        never load the TMDB cache for them."""
+        import utils.tmdb as _tmdb
+        monkeypatch.setattr(_tmdb, 'get_cached_tmdb_ids',
+                            lambda: pytest.fail('must not load cache'))
+        aliases = {'f1': {'f1 the movie'}, 'f1 the movie': {'f1'}}
+        items = [
+            {'title': 'F1', 'year': 2025, 'source': 'debrid', 'date_added': 0},
+            {'title': 'F1 The Movie', 'source': 'debrid', 'date_added': 0},
+        ]
+        result = LibraryScanner._dedup_by_tmdb(items, aliases)
+        assert len(result) == 1
+
+    # -- debrid↔local merge veto in _scan_read ---------------------------
+
+    def _make_scanner(self):
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._mount_path = '/mnt/debrid'
+        scanner._local_movies_path = None
+        scanner._local_tv_path = None
+        scanner._cache = None
+        scanner._cache_time = 0
+        scanner._ttl = 600
+        scanner._lock = threading.Lock()
+        scanner._scanning = False
+        scanner._effects_running = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
+        scanner._capabilities_path = '/dev/null/library_capabilities.json'
+        return scanner
+
+    def _run_scan_read(self, monkeypatch, debrid_shows, local_shows,
+                       show_aliases):
+        scanner = self._make_scanner()
+
+        def raise_unsupported(*a, **kw):
+            raise library._WebDAVUnsupportedError('memoized')
+        monkeypatch.setattr(scanner, '_webdav_scan_mount', raise_unsupported)
+        monkeypatch.setattr(scanner, '_scan_mount',
+                            lambda *a, **kw: ([], debrid_shows))
+        monkeypatch.setattr(scanner, '_scan_local_movies', lambda: [])
+        monkeypatch.setattr(scanner, '_scan_local_shows', lambda: local_shows)
+        monkeypatch.setattr(library, '_build_tmdb_aliases',
+                            lambda: (show_aliases, {}))
+        monkeypatch.setattr(library, '_enrich_with_tmdb_cache',
+                            lambda movies, shows, **kw: [])
+        monkeypatch.setattr(library, '_apply_sonarr_monitored_filter',
+                            lambda shows, **kw: None)
+        from utils import library_prefs
+        monkeypatch.setattr(library_prefs, 'get_all_preferences', lambda: {})
+        return scanner._scan_read()
+
+    def test_local_merge_vetoed_for_season_mismatch(self, monkeypatch):
+        """Debrid bare 'Daredevil' S03 must not merge into the LOCAL
+        'Daredevil Born Again' entry via the alias hop — the second site
+        of the same bug."""
+        self._patch_tmdb(monkeypatch)
+        local = {'title': 'Daredevil Born Again', 'year': 2025,
+                 'source': 'local', 'episodes': 1, 'seasons': 1,
+                 'date_added': 0,
+                 '_episodes': {(1, 1): {'path': '/tv/ba/S01E01.mkv', 'file': 'S01E01.mkv',
+                                        'source': 'local'}}}
+        data = self._run_scan_read(
+            monkeypatch, [self._bare_item()], [local], dict(self._ALIASES))
+        shows = data['shows']
+        assert len(shows) == 2
+        by_title = {s['title']: s for s in shows}
+        ba_seasons = {sd['number'] for sd in
+                      by_title['Daredevil Born Again'].get('season_data', [])}
+        assert 3 not in ba_seasons, \
+            'phantom S03 injected into Born Again via local alias merge'
+        assert by_title['Daredevil Born Again']['source'] == 'local'
+
+    def test_local_merge_still_works_when_seasons_agree(self, monkeypatch):
+        import utils.tmdb as _tmdb
+        monkeypatch.setattr(
+            _tmdb, 'get_cached_tmdb_ids',
+            lambda: {'shows': {'andor': 300, 'star wars andor': 300},
+                     'movies': {}})
+        monkeypatch.setattr(_tmdb, 'find_show_tmdb_id_by_season',
+                            lambda k, mx, yr=None: 300)
+        aliases = {'andor': {'star wars andor'},
+                   'star wars andor': {'andor'}}
+        debrid = {'title': 'Star Wars Andor', 'source': 'debrid',
+                  'episodes': 1, 'seasons': 1, 'date_added': 0,
+                  '_episodes': {(2, 1): {'path': '/mnt/a/S02E01.mkv', 'file': 'S02E01.mkv',
+                                         'source': 'debrid'}}}
+        local = {'title': 'Andor', 'source': 'local', 'episodes': 1,
+                 'seasons': 1, 'date_added': 0,
+                 '_episodes': {(1, 1): {'path': '/tv/a/S01E01.mkv', 'file': 'S01E01.mkv',
+                                        'source': 'local'}}}
+        data = self._run_scan_read(monkeypatch, [debrid], [local], aliases)
+        shows = data['shows']
+        assert len(shows) == 1
+        assert shows[0]['source'] == 'both'
+
+    def test_prefix_fallback_vetoed_on_canon_key_side(self, monkeypatch):
+        """Bug-hunter HIGH: a long parsed title with NO direct cache
+        entry fail-opens the key-side veto, so the prefix hop's target
+        (canon_key) must be checked with the ITEM's seasons — otherwise
+        'Daredevil Blood in the Streets' S03 prefix-resolves to the
+        ambiguous 'daredevil' entry and merges into local Born Again."""
+        self._patch_tmdb(monkeypatch)
+        monkeypatch.setattr(
+            library, '_find_canonical_tmdb_via_prefix',
+            lambda *a, **kw: {'title': 'Daredevil', 'tmdb_id': 100})
+        debrid = {'title': 'Daredevil Blood in the Streets', 'year': 2015,
+                  'source': 'debrid', 'episodes': 1, 'seasons': 1,
+                  'date_added': 0,
+                  '_episodes': {(3, 8): {'path': '/mnt/dd/S03E08.mkv',
+                                         'file': 'S03E08.mkv',
+                                         'source': 'debrid'}}}
+        local = {'title': 'Daredevil', 'source': 'local', 'episodes': 1,
+                 'seasons': 1, 'date_added': 0,
+                 '_episodes': {(1, 1): {'path': '/tv/ba/S01E01.mkv',
+                                        'file': 'S01E01.mkv',
+                                        'source': 'local'}}}
+        data = self._run_scan_read(monkeypatch, [debrid], [local], {})
+        shows = data['shows']
+        assert len(shows) == 2, \
+            'prefix hop must be vetoed when canon_key cannot cover S03'
+        by_title = {s['title']: s for s in shows}
+        local_seasons = {sd['number'] for sd in
+                         by_title['Daredevil'].get('season_data', [])}
+        assert local_seasons == {1}
+
+    def test_prefix_fallback_still_merges_when_seasons_agree(self, monkeypatch):
+        import utils.tmdb as _tmdb
+        monkeypatch.setattr(
+            _tmdb, 'get_cached_tmdb_ids',
+            lambda: {'shows': {'andor': 300}, 'movies': {}})
+        monkeypatch.setattr(_tmdb, 'find_show_tmdb_id_by_season',
+                            lambda k, mx, yr=None: 300)
+        monkeypatch.setattr(
+            library, '_find_canonical_tmdb_via_prefix',
+            lambda *a, **kw: {'title': 'Andor', 'tmdb_id': 300})
+        debrid = {'title': 'Andor Diego Luna Complete', 'source': 'debrid',
+                  'episodes': 1, 'seasons': 1, 'date_added': 0,
+                  '_episodes': {(2, 1): {'path': '/mnt/a/S02E01.mkv',
+                                         'file': 'S02E01.mkv',
+                                         'source': 'debrid'}}}
+        local = {'title': 'Andor', 'source': 'local', 'episodes': 1,
+                 'seasons': 1, 'date_added': 0,
+                 '_episodes': {(1, 1): {'path': '/tv/a/S01E01.mkv',
+                                        'file': 'S01E01.mkv',
+                                        'source': 'local'}}}
+        data = self._run_scan_read(monkeypatch, [debrid], [local], {})
+        shows = data['shows']
+        assert len(shows) == 1
+        assert shows[0]['source'] == 'both'
+
+    def test_max_episode_season_seasons_count_fallback(self):
+        """Bug-hunter MEDIUM: local shows whose episode filenames didn't
+        parse carry _episodes={} but a seasons count — the veto must not
+        be silently disabled for them."""
+        from utils.library import _max_episode_season
+        assert _max_episode_season(
+            {'_episodes': {}, 'seasons': 3}) == 3
+        assert _max_episode_season(
+            {'_episodes': {(5, 1): {}}, 'seasons': 1}) == 5
+        assert _max_episode_season({'title': 'A Movie'}) == 0
+        assert _max_episode_season({'seasons': 0}) == 0
+
+
 class TestSearchForMissingEpisodesSkipGhosts:
     """Ghost entries (source='wanted') MUST NOT be processed by the
     gap-fill search loop. Reviewer-flagged CRITICAL from commit

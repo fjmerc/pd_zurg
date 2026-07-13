@@ -8,6 +8,7 @@ isn't here, open a [GitHub issue](https://github.com/fjmerc/zurgarr/issues).
 - [DMM shows torrents at 0% with no seeds](#dmm-shows-torrents-at-0--with-no-seeds)
 - [Uncached torrents pile up on my debrid account from the blackhole](#uncached-torrents-pile-up-on-my-debrid-account-from-the-blackhole)
 - [Duplicate torrents in my debrid account](#duplicate-torrents-in-my-debrid-account)
+- [Search results show `–` in the Cached column](#search-results-show---in-the-cached-column)
 - [Sonarr/Radarr keeps re-grabbing the same failed torrent](#sonarrradarr-keeps-re-grabbing-the-same-failed-torrent)
 - [Mount not available / empty `/data` directory](#mount-not-available--empty-data-directory)
 - [TorBox mount fails to authenticate / 401 Invalid credentials](#torbox-mount-fails-to-authenticate--401-invalid-credentials)
@@ -86,6 +87,23 @@ If you're still seeing duplicates:
   adds are gated. Clear the backlog from DMM / the RD web UI once.
 - Torrents added **before** v2.21 won't be caught retroactively — the
   feature only filters new submissions.
+
+## Search results show `–` in the Cached column
+
+`–` means the cache status is **unknown**, and for most providers that's
+permanent: only TorBox still exposes a working pre-add cache probe.
+Real-Debrid deprecated its endpoint in Nov 2024 and AllDebrid
+discontinued its endpoint in May 2026 — there is no way to know whether
+a hash is cached on RD/AD before adding it.
+
+- **TorBox key configured** (alone or alongside RD/AD): badges show
+  `TB ✓` (cached on TorBox) or `✗` (confirmed not cached). A few `–`
+  entries below the top results are normal — probing is capped to the
+  best 25 releases per search to keep the modal fast.
+- **RD or AD only**: every row shows `–`. This is expected, not a bug.
+
+Note the badge is a *TorBox* verdict — a `TB ✓` release added to
+Real-Debrid may still be uncached there.
 
 ## Sonarr/Radarr keeps re-grabbing the same failed torrent
 

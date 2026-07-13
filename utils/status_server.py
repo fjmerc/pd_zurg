@@ -29,6 +29,11 @@ logger = get_logger()
 # free text out of history.jsonl and the per-show Activity sidebar.
 _EPISODE_TAG_RE = re.compile(r'^S\d{1,4}E\d{1,4}$')
 
+# 40-char hex info hash — validated at the endpoint (rejected, NOT truncated:
+# slicing a longer hex-looking string to 40 chars could silently add a
+# different, valid torrent).
+_INFO_HASH_RE = re.compile(r'^[a-fA-F0-9]{40}$')
+
 
 # ---------------------------------------------------------------------------
 # Gzip compression cache (content hash → compressed bytes)
@@ -2930,9 +2935,14 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     except (ValueError, TypeError):
                         self._send_json_response(400, json.dumps({'error': 'episode must be integer'}))
                         return
-                from utils.search import search_torrents
-                results = search_torrents(imdb_id, media_type, season, episode)
-                self._send_json_response(200, json.dumps({'results': results}))
+                from utils.search import search_torrents, list_configured_services
+                results = search_torrents(imdb_id, media_type, season, episode,
+                                          annotate_cache=True,
+                                          cache_service='auto_probe')
+                self._send_json_response(200, json.dumps({
+                    'results': results,
+                    'providers': list_configured_services(),
+                }))
             except json.JSONDecodeError:
                 self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
             except Exception:
@@ -2952,7 +2962,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 # Reject non-string fields explicitly so {"media_title": 123}
                 # returns a clean 400 instead of a 500 from .strip()
                 # AttributeError caught by the bare-Exception fallthrough.
-                for _f in ('info_hash', 'title', 'media_title', 'episode'):
+                for _f in ('info_hash', 'title', 'media_title', 'episode', 'service'):
                     if _f in values and values[_f] is not None and not isinstance(values[_f], str):
                         self._send_json_response(400, json.dumps({'error': f'{_f} must be a string'}))
                         return
@@ -2960,6 +2970,13 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 title = (values.get('title') or '').strip()[:500]
                 media_title = (values.get('media_title') or '').strip()[:500] or None
                 episode = (values.get('episode') or '').strip()[:16] or None
+                service = (values.get('service') or '').strip()[:64] or None
+                if service is not None:
+                    from utils.search import is_service_configured
+                    if not is_service_configured(service):
+                        self._send_json_response(400, json.dumps(
+                            {'error': f'service {service!r} is not configured'}))
+                        return
                 # Episode tag is server-trusted as 'SxxEyy' shape — clients
                 # may post any string; reject anything that isn't the shape
                 # we expect rather than letting garbage land in history.jsonl
@@ -2970,10 +2987,15 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 if not info_hash:
                     self._send_json_response(400, json.dumps({'error': 'info_hash required'}))
                     return
+                if not _INFO_HASH_RE.match(info_hash):
+                    self._send_json_response(400, json.dumps(
+                        {'error': 'info_hash must be a 40-character hex string'}))
+                    return
                 from utils.search import add_to_debrid
                 result = add_to_debrid(info_hash, title=title,
                                        media_title=media_title,
-                                       episode=episode)
+                                       episode=episode,
+                                       service=service)
                 status_code = 200 if result.get('success') else 400
                 self._send_json_response(status_code, json.dumps(result))
             except json.JSONDecodeError:

@@ -474,6 +474,11 @@ body.has-bulk-bar{padding-bottom:60px}
 .btn-add-debrid:hover:not(:disabled){background:#3fb95018;border-color:var(--green)}
 .btn-add-debrid:disabled{opacity:.5;cursor:not-allowed}
 .btn-add-debrid.added{border-color:var(--green);color:var(--green);cursor:default}
+.btn-add-debrid+.btn-add-debrid{margin-left:4px}
+.badge-cached{font-size:.78em;white-space:nowrap}
+.badge-cached.yes{color:var(--green);font-weight:600}
+.badge-cached.no{color:var(--text3)}
+.badge-cached.unknown{color:var(--text3)}
 .search-empty{text-align:center;color:var(--text3);padding:24px 0;font-size:.88em}
 .search-count{font-size:.75em;color:var(--text3);margin-left:auto}
 </style>
@@ -4201,11 +4206,13 @@ function startTsRefresh() {
 // Debrid Search Modal (F9)
 // ---------------------------------------------------------------------------
 var _searchResults = [];
+var _searchProviders = [];
 var _searchSortCol = 'quality';
 var _searchSortAsc = false;
 var _searchQualityFilter = 0;
 var _searchMediaTitle = '';
 var _searchEpisodeTag = '';
+var _SVC_ABBR = {realdebrid: 'RD', alldebrid: 'AD', torbox: 'TB'};
 
 function openSearchFromBtn(btn) {
   var imdbId = btn.getAttribute('data-imdb');
@@ -4269,6 +4276,7 @@ function openSearchModal(imdbId, mediaType, season, episode, displayTitle, media
   .then(function(r) { return r.json(); })
   .then(function(data) {
     _searchResults = data.results || [];
+    _searchProviders = data.providers || [];
     _renderSearchResults();
   })
   .catch(function(err) {
@@ -4303,6 +4311,7 @@ function _renderSearchResults() {
     if (_searchSortCol === 'quality') { va = a.quality.score; vb = b.quality.score; }
     else if (_searchSortCol === 'size') { va = a.size_bytes; vb = b.size_bytes; }
     else if (_searchSortCol === 'seeds') { va = a.seeds; vb = b.seeds; }
+    else if (_searchSortCol === 'cached') { va = a.cached === true ? 1 : 0; vb = b.cached === true ? 1 : 0; }
     else { va = a.quality.score; vb = b.quality.score; }
     if (va === vb) {
       if (_searchSortCol !== 'quality' && a.quality.score !== b.quality.score) return b.quality.score - a.quality.score;
@@ -4335,6 +4344,7 @@ function _renderSearchResults() {
     {key: 'quality', label: 'Quality'},
     {key: 'size', label: 'Size'},
     {key: 'seeds', label: 'Seeds'},
+    {key: 'cached', label: 'Cached'},
     {key: 'action', label: ''},
   ];
   for (var ci = 0; ci < cols.length; ci++) {
@@ -4358,9 +4368,25 @@ function _renderSearchResults() {
     html += '<td><span class="badge-quality ' + qCls + '">' + esc(r.quality.label) + '</span></td>';
     html += '<td>' + _formatBytes(r.size_bytes) + '</td>';
     html += '<td>' + (r.seeds || 0) + '</td>';
+    if (r.cached === true) {
+      var svcAbbr = _SVC_ABBR[r.cached_service] || (r.cached_service || '').toUpperCase();
+      html += '<td><span class="badge-cached yes" title="Cached on ' + escAttr(r.cached_service || '') + '">' + esc(svcAbbr) + ' &#10003;</span></td>';
+    } else if (r.cached === false) {
+      html += '<td><span class="badge-cached no" title="Not cached">&#10007;</span></td>';
+    } else {
+      html += '<td><span class="badge-cached unknown" title="Cache status unknown">&ndash;</span></td>';
+    }
     html += '<td>';
     if (r._added) {
       html += '<span style="color:var(--green);font-size:.82em">&#10003; Added</span>';
+    } else if (_searchProviders.length > 0) {
+      // One labelled button per configured provider — even for a single
+      // provider, so the user always sees WHERE the torrent will land.
+      for (var pi = 0; pi < _searchProviders.length; pi++) {
+        var svc = _searchProviders[pi];
+        var lbl = _SVC_ABBR[svc] || svc.toUpperCase();
+        html += '<button class="btn-add-debrid" data-hash="' + escAttr(r.info_hash) + '" data-service="' + escAttr(svc) + '" title="Add to ' + escAttr(svc) + '" onclick="addSearchResult(this)">+ ' + esc(lbl) + '</button>';
+      }
     } else {
       html += '<button class="btn-add-debrid" data-hash="' + escAttr(r.info_hash) + '" onclick="addSearchResult(this)">Add</button>';
     }
@@ -4390,10 +4416,13 @@ function addSearchResult(btn) {
   }
   if (!r) return;
 
+  var service = btn.getAttribute('data-service') || '';
+  var origLabel = btn.textContent;
   btn.disabled = true;
   btn.textContent = '\u2026';
 
   var addBody = {info_hash: r.info_hash, title: r.title};
+  if (service) addBody.service = service;
   if (_searchMediaTitle) addBody.media_title = _searchMediaTitle;
   if (_searchEpisodeTag) addBody.episode = _searchEpisodeTag;
   fetch('/api/search/add', {
@@ -4417,13 +4446,13 @@ function addSearchResult(btn) {
       _showSearchMsg(msg, 'success');
     } else {
       btn.disabled = false;
-      btn.textContent = 'Add';
+      btn.textContent = origLabel;
       _showSearchMsg('Failed: ' + (data.error || 'Unknown error'), 'error');
     }
   })
   .catch(function(err) {
     btn.disabled = false;
-    btn.textContent = 'Add';
+    btn.textContent = origLabel;
     _showSearchMsg('Error: ' + String(err), 'error');
   });
 }

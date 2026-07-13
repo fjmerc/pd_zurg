@@ -24,6 +24,9 @@ from utils.search import (
     _existing_hashes,
     remember_added_hash,
     invalidate_existing_hashes_cache,
+    list_configured_services,
+    is_service_configured,
+    _cache_probe_service,
 )
 
 
@@ -799,6 +802,131 @@ class TestSearchTorrentsCacheAnnotation:
             results = search_torrents('tt1234567')  # defaults
             mock_check.assert_not_called()
         assert results[0]['info_hash'] == 'b' * 40
+
+
+class TestConfiguredServicesHelpers:
+    """list_configured_services / is_service_configured / _cache_probe_service."""
+
+    @patch('utils.search.load_secret_or_env')
+    def test_list_configured_services_stable_order(self, mock_load):
+        keys = {'rd_api_key': 'rk', 'torbox_api_key': 'tk'}
+        mock_load.side_effect = lambda name: keys.get(name)
+        assert list_configured_services() == ['realdebrid', 'torbox']
+
+    @patch('utils.search.load_secret_or_env')
+    def test_list_configured_services_none_configured(self, mock_load):
+        mock_load.return_value = None
+        assert list_configured_services() == []
+
+    @patch('utils.search.load_secret_or_env')
+    def test_is_service_configured(self, mock_load):
+        keys = {'torbox_api_key': 'tk'}
+        mock_load.side_effect = lambda name: keys.get(name)
+        assert is_service_configured('torbox') is True
+        assert is_service_configured('realdebrid') is False
+        # Unknown ids never resolve a key name → False, not a KeyError
+        assert is_service_configured('bogus') is False
+
+    @patch('utils.search.load_secret_or_env')
+    def test_cache_probe_service_prefers_torbox(self, mock_load):
+        """TB is the only provider with a working pre-add probe, so it
+        wins even when RD (the add-priority leader) is also configured."""
+        keys = {'rd_api_key': 'rk', 'torbox_api_key': 'tk'}
+        mock_load.side_effect = lambda name: keys.get(name)
+        assert _cache_probe_service() == ('torbox', 'tk')
+
+    @patch('utils.search.load_secret_or_env')
+    def test_cache_probe_service_falls_back_to_autodetect(self, mock_load):
+        keys = {'rd_api_key': 'rk'}
+        mock_load.side_effect = lambda name: keys.get(name)
+        assert _cache_probe_service() == ('realdebrid', 'rk')
+
+
+class TestCacheServiceSelection:
+    """search_torrents cache_service kwarg (multi-provider search UI)."""
+
+    _RESULT = {'info_hash': 'a' * 40, 'title': 'R1', 'seeds': 100,
+               'quality': {'label': '1080p', 'score': 3},
+               'size_bytes': 1000, 'source_name': 'S'}
+
+    @patch('utils.search.check_debrid_cache')
+    @patch('utils.search._cache_probe_service')
+    @patch('utils.search.search_torrentio')
+    def test_auto_probe_uses_probe_service(self, mock_search, mock_probe,
+                                           mock_check):
+        mock_search.return_value = [dict(self._RESULT)]
+        mock_probe.return_value = ('torbox', 'tb-key')
+        mock_check.return_value = {'a' * 40: True}
+        results = search_torrents('tt1234567', annotate_cache=True,
+                                  cache_service='auto_probe')
+        assert results[0]['cached'] is True
+        assert results[0]['cached_service'] == 'torbox'
+        _, kwargs = mock_check.call_args
+        assert kwargs['service'] == 'torbox'
+        assert kwargs['api_key'] == 'tb-key'
+
+    @patch('utils.search.check_debrid_cache')
+    @patch('utils.search._cache_probe_service')
+    @patch('utils.search._get_debrid_service')
+    @patch('utils.search.search_torrentio')
+    def test_default_never_uses_auto_probe(self, mock_search, mock_service,
+                                           mock_probe, mock_check):
+        """Compromise-engine regression guard: without an explicit
+        cache_service, annotation must stay on the RD-first auto-detected
+        service — a TB "cached" verdict says nothing about whether the
+        primary provider (where compromise grabs land) has it cached."""
+        mock_search.return_value = [dict(self._RESULT)]
+        mock_service.return_value = ('realdebrid', 'rd-key')
+        mock_check.return_value = {'a' * 40: None}
+        results = search_torrents('tt1234567', annotate_cache=True)
+        mock_probe.assert_not_called()
+        assert mock_service.call_count == 1
+        assert results[0]['cached_service'] == 'realdebrid'
+
+    @patch('utils.search.check_debrid_cache')
+    @patch('utils.search._get_debrid_service')
+    @patch('utils.search.search_torrentio')
+    def test_probe_hash_list_is_quality_ranked(self, mock_search,
+                                               mock_service, mock_check):
+        """The TB probe caps its batch at _TORBOX_MAX_PROBES, so the hash
+        list must lead with the best releases, not raw Torrentio order."""
+        mock_search.return_value = [
+            {'info_hash': 'a' * 40, 'title': '720p', 'seeds': 10,
+             'quality': {'label': '720p', 'score': 2},
+             'size_bytes': 500, 'source_name': 'S'},
+            {'info_hash': 'b' * 40, 'title': '2160p', 'seeds': 5,
+             'quality': {'label': '2160p', 'score': 4},
+             'size_bytes': 8000, 'source_name': 'S'},
+            {'info_hash': 'c' * 40, 'title': '1080p', 'seeds': 50,
+             'quality': {'label': '1080p', 'score': 3},
+             'size_bytes': 4000, 'source_name': 'S'},
+        ]
+        mock_service.return_value = ('torbox', 'k')
+        mock_check.return_value = {}
+        search_torrents('tt1234567', annotate_cache=True)
+        args, _ = mock_check.call_args
+        assert args[0] == ['b' * 40, 'c' * 40, 'a' * 40]
+
+
+class TestAddToDebridErrorRedaction:
+
+    @patch('utils.search._add_to_rd')
+    @patch('utils.search._get_debrid_service')
+    def test_returned_error_is_redacted(self, mock_service, mock_add):
+        """The result dict is returned verbatim to the browser by
+        /api/search/add, so credential patterns in provider error strings
+        must be scrubbed from the RETURNED dict — not only from the
+        history copy."""
+        mock_service.return_value = ('realdebrid', 'rd-key')
+        mock_add.return_value = {
+            'success': False, 'torrent_id': '',
+            'error': 'GET https://api.example/x?apikey=SECRET123 failed '
+                     '(Authorization: Bearer TOKEN456)',
+        }
+        result = add_to_debrid('a' * 40, title='T')
+        assert 'SECRET123' not in result['error']
+        assert 'TOKEN456' not in result['error']
+        assert 'apikey=***' in result['error']
 
 
 # ---------------------------------------------------------------------------

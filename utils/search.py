@@ -13,6 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 from base import load_secret_or_env
 from utils.logger import get_logger
@@ -75,6 +76,33 @@ def _resolve_service_key(service):
     if not key_name:
         return None
     return load_secret_or_env(key_name)
+
+
+def list_configured_services():
+    """Return the ids of all configured debrid services, in the stable
+    RD → AD → TB priority order used by ``_get_debrid_service``."""
+    return [s for s in ('realdebrid', 'alldebrid', 'torbox')
+            if load_secret_or_env(_SERVICE_KEY_NAMES[s])]
+
+
+def is_service_configured(service):
+    """True when ``service`` is a known debrid id with a configured key."""
+    return bool(_resolve_service_key(service))
+
+
+def _cache_probe_service():
+    """Pick the service to use for cache-annotation probes.
+
+    TorBox is the only provider whose pre-add cache endpoint still works
+    (RD deprecated instantAvailability in Nov 2024, AD discontinued
+    /v4/magnet/instant in May 2026), so prefer TB whenever a key is
+    configured — otherwise fall back to the RD-first auto-detect, whose
+    stub probes return all-None.
+    """
+    tb = load_secret_or_env('torbox_api_key')
+    if tb:
+        return 'torbox', tb
+    return _get_debrid_service()
 
 
 def _safe_log_url(url):
@@ -416,48 +444,81 @@ def _check_cache_ad(hashes, api_key):
     return {h: None for h in hashes}
 
 
+def _probe_tb_hash(info_hash, headers):
+    """Probe one hash against TorBox checkcached.  Returns True/False/None.
+
+    TorBox returns {"success": true, "data": {<hash>: {...}} } when
+    cached, and {"success": true, "data": {}} / [] when not.  An
+    unexpected type (None, string, etc.) is "unknown" per I4 — we must
+    not conflate API error with a confirmed-uncached.
+    """
+    url = f'https://api.torbox.app/v1/api/torrents/checkcached?hash={info_hash}'
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=_CACHE_PROBE_TIMEOUT) as resp:
+            raw = resp.read(1 * 1024 * 1024)
+            if not raw:
+                return None
+            data = json.loads(raw.decode('utf-8'))
+    except (urllib.error.URLError, urllib.error.HTTPError,
+            json.JSONDecodeError, OSError, ValueError) as e:
+        logger.warning(
+            f"[search] TB cache probe {_safe_log_url(url)} "
+            f"(hash={info_hash[:8]}…): {type(e).__name__}"
+        )
+        return None
+    if not data.get('success'):
+        return None
+    payload = data.get('data')
+    if not isinstance(payload, dict):
+        return None
+    return info_hash in payload
+
+
+# Concurrency for the TB per-hash probe fan-out.  8 keeps a 25-probe batch
+# at ~3 sequential rounds (worst case ~30 s instead of ~4 min when TB is
+# timing out) without hammering the API.  The pool is a shared module-level
+# singleton so concurrent callers (status-server request threads, the
+# compromise engine, the Wanted→TB recovery pass) share ONE budget of 8
+# in-flight probes — per-call pools would multiply thread count and TB API
+# pressure by the number of stacked searches.
+_TORBOX_PROBE_WORKERS = 8
+_tb_probe_pool = None
+_tb_probe_pool_lock = threading.Lock()
+
+
+def _get_tb_probe_pool():
+    global _tb_probe_pool
+    with _tb_probe_pool_lock:
+        if _tb_probe_pool is None:
+            _tb_probe_pool = ThreadPoolExecutor(
+                max_workers=_TORBOX_PROBE_WORKERS,
+                thread_name_prefix='tb-probe')
+        return _tb_probe_pool
+
+
 def _check_cache_tb(hashes, api_key):
     """TorBox per-hash cache probe via ``/api/torrents/checkcached``.
 
     TB's endpoint is per-hash; the batch is capped at
-    ``_TORBOX_MAX_PROBES`` so a large Torrentio result set cannot
-    blow out the ``_CACHE_PROBE_TIMEOUT`` budget linearly (25 × 10 s
-    = ~4 min worst case instead of unbounded).  Hashes beyond the cap
-    stay as ``None`` (unknown) — the compromise engine already ranks
-    candidates so the top few always get probed.
+    ``_TORBOX_MAX_PROBES`` and fanned out across the shared probe pool so
+    a large Torrentio result set cannot blow out the
+    ``_CACHE_PROBE_TIMEOUT`` budget linearly.  Hashes beyond the cap
+    stay as ``None`` (unknown) — callers rank candidates before probing
+    so the top few always get probed.
     """
     headers = {
         'Authorization': f'Bearer {api_key}',
         'User-Agent': 'zurgarr/1.0',
     }
-    base_url = 'https://api.torbox.app/v1/api/torrents/checkcached'
     result = {h: None for h in hashes}
-    for h in hashes[:_TORBOX_MAX_PROBES]:
-        url = f'{base_url}?hash={h}'
-        req = urllib.request.Request(url, headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=_CACHE_PROBE_TIMEOUT) as resp:
-                raw = resp.read(1 * 1024 * 1024)
-                if not raw:
-                    continue
-                data = json.loads(raw.decode('utf-8'))
-        except (urllib.error.URLError, urllib.error.HTTPError,
-                json.JSONDecodeError, OSError, ValueError) as e:
-            logger.warning(
-                f"[search] TB cache probe {_safe_log_url(url)} "
-                f"(hash={h[:8]}…): {type(e).__name__}"
-            )
-            continue
-        # TorBox returns {"success": true, "data": {<hash>: {...}} } when
-        # cached, and {"success": true, "data": {}} / [] when not.
-        # An unexpected type (None, string, etc.) is "unknown" per I4 —
-        # we must not conflate API error with a confirmed-uncached.
-        if not data.get('success'):
-            continue
-        payload = data.get('data')
-        if not isinstance(payload, dict):
-            continue
-        result[h] = h in payload
+    batch = hashes[:_TORBOX_MAX_PROBES]
+    if not batch:
+        return result
+    pool = _get_tb_probe_pool()
+    for h, verdict in zip(batch, pool.map(
+            lambda x: _probe_tb_hash(x, headers), batch)):
+        result[h] = verdict
     return result
 
 
@@ -707,7 +768,8 @@ def list_torbox_torrents(api_key, timeout=_MYLIST_TIMEOUT):
 # ---------------------------------------------------------------------------
 
 def search_torrents(imdb_id, media_type='movie', season=None, episode=None,
-                    annotate_cache=False, sort_mode='quality'):
+                    annotate_cache=False, sort_mode='quality',
+                    cache_service=None):
     """Search Torrentio for torrents, sorted by quality then seeds.
 
     Args:
@@ -715,15 +777,24 @@ def search_torrents(imdb_id, media_type='movie', season=None, episode=None,
             ``search_torrentio`` (see that function for details).
         annotate_cache: When True, every result carries ``cached``
             (``True``/``False``/``None``) and ``cached_service`` fields
-            populated by ``check_debrid_cache`` for the auto-detected
-            provider.  Default False — the manual-search UI preserves
-            its existing behaviour unless the caller opts in.
+            populated by ``check_debrid_cache``.  Default False — the
+            manual-search UI preserves its existing behaviour unless the
+            caller opts in.
         sort_mode: ``'quality'`` (default) sorts by quality score then
             seeders.  ``'cached_first'`` sorts by
             (cached desc, quality desc, seeders desc) so a cached 1080p
             outranks an uncached 2160p — useful when the caller wants
             to grab something that will actually stream immediately.
             Implies ``annotate_cache=True``.
+        cache_service: Which provider to probe for cache annotation.
+            ``None`` (default) uses the RD-first auto-detected service —
+            this MUST stay the default because the quality-compromise
+            engine's grabs land on the primary provider, and a TB
+            "cached" verdict says nothing about RD cache state.
+            ``'auto_probe'`` prefers TorBox when a TB key is configured
+            (the only provider with a working pre-add probe) — used by
+            the manual-search UI, where ``cached_service`` labels the
+            badge and the user picks the add target themselves.
 
     Returns list of dicts sorted per the chosen ``sort_mode``.
     Blocklisted hashes are filtered out.
@@ -745,6 +816,14 @@ def search_torrents(imdb_id, media_type='movie', season=None, episode=None,
     except ImportError:
         pass
 
+    # Rank by quality BEFORE probing — TB caps the probe batch at
+    # _TORBOX_MAX_PROBES, so the hash list must lead with the releases
+    # the caller actually cares about, not raw Torrentio order.
+    results.sort(key=lambda r: (
+        r['quality']['score'],
+        r['seeds'],
+    ), reverse=True)
+
     # Cache annotation — requested explicitly, or implied by cached_first
     # sort.  A single batched probe per search keeps the UI snappy.  We
     # resolve the service once and pass it into ``check_debrid_cache``
@@ -753,7 +832,10 @@ def search_torrents(imdb_id, media_type='movie', season=None, episode=None,
     # read, no chance of a mid-call key rotation causing divergence.
     want_cache = annotate_cache or sort_mode == 'cached_first'
     if want_cache:
-        service, api_key = _get_debrid_service()
+        if cache_service == 'auto_probe':
+            service, api_key = _cache_probe_service()
+        else:
+            service, api_key = _get_debrid_service()
         cache_map = check_debrid_cache(
             [r['info_hash'] for r in results],
             service=service, api_key=api_key,
@@ -768,11 +850,6 @@ def search_torrents(imdb_id, media_type='movie', season=None, episode=None,
         # equal to uncached — we never promote an unverified release.
         results.sort(key=lambda r: (
             1 if r.get('cached') is True else 0,
-            r['quality']['score'],
-            r['seeds'],
-        ), reverse=True)
-    else:
-        results.sort(key=lambda r: (
             r['quality']['score'],
             r['seeds'],
         ), reverse=True)
@@ -880,11 +957,11 @@ def add_to_debrid(info_hash, title='', media_title=None, episode=None,
         with _existing_hashes_lock:
             _inflight_adds.discard(inflight_key)
 
-    # Emit history event.  Scrub well-known credential patterns from the
-    # provider error string before it lands in history.jsonl — debrid
-    # clients have been seen to echo the request URL (with apikey
-    # querystring) in failure messages, and history is a plain file that
-    # is often shared verbatim when troubleshooting.
+    # Scrub well-known credential patterns from the provider error string
+    # IN PLACE, so every downstream consumer gets the sanitized version:
+    # history.jsonl, the notification body, AND the HTTP response returned
+    # to the browser by /api/search/add — debrid clients have been seen to
+    # echo the request URL (with apikey querystring) in failure messages.
     import re as _re
 
     def _redact(s):
@@ -895,6 +972,8 @@ def add_to_debrid(info_hash, title='', media_title=None, episode=None,
         s = _re.sub(r'(Authorization:\s*Bearer\s+)\S+', r'\1***', s,
                     flags=_re.IGNORECASE)
         return s
+
+    result['error'] = _redact(result.get('error', ''))
 
     try:
         from utils import history as _hist
@@ -912,7 +991,7 @@ def add_to_debrid(info_hash, title='', media_title=None, episode=None,
                       'torrent_id': result.get('torrent_id', '')},
             )
         else:
-            err = _redact(result.get('error', ''))
+            err = result.get('error', '')
             _hist.log_event(
                 'debrid_add_failed',
                 title or info_hash[:16],

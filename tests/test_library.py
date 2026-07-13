@@ -427,6 +427,99 @@ class TestCollectEpisodes:
         assert key[0] == 3
         assert key[1] >= 1000
 
+    def test_qualified_season_dirs_collected(self, tmp_dir):
+        """Season packs qualify per-season subdirs with a bracketed
+        source tag — 'Season 1 (BluRay)' — which the old anchored
+        pattern missed, leaving the whole pack invisible (prod: The
+        Americans S01-S06 mega-pack sat unlinked forever). Bare-word
+        suffixes ('Season 1 Extras') and non-season dirs (Featurettes)
+        must stay excluded."""
+        folder = os.path.join(tmp_dir, "pack")
+        s1 = os.path.join(folder, "Season 1 (BluRay)")
+        s2 = os.path.join(folder, "Season 2 (AMZN WEB-DL)")
+        extras = os.path.join(folder, "Season 1 Extras")
+        feats = os.path.join(folder, "Featurettes")
+        for d in (s1, s2, extras, feats):
+            os.makedirs(d)
+        open(os.path.join(s1, "Show (2013) - S01E01 - Pilot.mkv"), 'w').close()
+        open(os.path.join(s2, "Show (2013) - S02E01 - Comrades.mkv"), 'w').close()
+        open(os.path.join(extras, "gag-reel.mkv"), 'w').close()
+        open(os.path.join(feats, "making-of.mkv"), 'w').close()
+        eps = _collect_episodes(folder)
+        assert set(eps.keys()) == {(1, 1), (2, 1)}
+
+
+class TestSeasonDirPattern:
+    """_SEASON_DIR_PATTERN accepts plain and bracket-qualified season
+    dirs; bare-word suffixes stay excluded so junk files can't ride the
+    sequential-key fallback into season_data as phantom episodes."""
+
+    @pytest.mark.parametrize("name,season", [
+        ("Season 1", 1),
+        ("Season 01", 1),
+        ("season 3", 3),
+        ("Season 1 (BluRay)", 1),
+        ("Season 2 (AMZN WEB-DL)", 2),
+        ("Season 3 [1080p x265]", 3),
+        ("Season 12(BluRay)", 12),
+        ("Season 1 (Complete)", 1),
+        ("Season 4 (2160p Remux)", 4),
+    ])
+    def test_accepts(self, name, season):
+        from utils.library import _SEASON_DIR_PATTERN
+        m = _SEASON_DIR_PATTERN.match(name)
+        assert m and int(m.group(1)) == season
+
+    @pytest.mark.parametrize("name", [
+        "Season 1 Extras",
+        "Season 1 Featurettes",
+        "Seasons 1-6",
+        "Season One",
+        "The Season 1",
+        "Featurettes",
+        "S01",
+        # Bracketed junk qualifiers — denylisted so their contents can't
+        # ride the sequential-key fallback in as phantom episodes.
+        "Season 1 (Extras)",
+        "Season 1 (Extra)",
+        "Season 2 (Featurettes)",
+        "Season 2 (Bonus)",
+        "Season 3 (Bonuses)",
+        "Season 3 (Specials)",
+        "Season 4 (Behind the Scenes)",
+        "Season 4 [Behind.the.Scenes]",
+        "Season 5 (Deleted Scenes)",
+        "Season 5 (Sample)",
+        "Season 6 (Subs)",
+        "Season 6 (Subtitles)",
+        "Season 7 (Trailers)",
+        "Season 7 (Interviews)",
+    ])
+    def test_rejects(self, name):
+        from utils.library import _SEASON_DIR_PATTERN
+        assert _SEASON_DIR_PATTERN.match(name) is None
+
+    def test_webdav_collect_qualified_season_bucket(self):
+        """The TB mylist / WebDAV collector sees the same qualified
+        subdir names via season_files buckets — the exact prod
+        regression shape."""
+        from utils.library import LibraryScanner
+        contents = {
+            'files': [],
+            'season_files': {
+                'Season 1 (BluRay)': [
+                    ('The Americans (2013) - S01E01 - Pilot.mkv',
+                     1000, '/data/torbox/pack/Season 1 (BluRay)/e1.mkv'),
+                ],
+                'Featurettes': [
+                    ('making-of.mkv', 500, '/data/torbox/pack/Featurettes/m.mkv'),
+                ],
+            },
+        }
+        eps = LibraryScanner._collect_episodes_from_webdav(contents, 'pack')
+        assert set(eps.keys()) == {(1, 1)}
+        assert eps[(1, 1)]['folder'] == 'pack'
+
 
 # ---------------------------------------------------------------------------
 # _count_show_content
@@ -1987,6 +2080,103 @@ class TestCreateDebridSymlinksPhantomSource:
         assert show_dirs == ['Some Show (2024)']
         link = os.path.join(scanner._local_tv_path, 'Some Show (2024)',
                             'Season 03', 'Some Show S03E08.mkv')
+        assert os.path.islink(link)
+
+
+class TestCreateDebridSymlinksBlocklistReleaseFolder:
+    """The TV blocklist check must key on the release folder = the FIRST
+    path component under the debrid mount. A flat torrent literally named
+    'Season 3 (BluRay)' at mount root used to defeat the old climb
+    heuristic (it climbed past the 'Season N' name to the mount root and
+    the block silently no-opped)."""
+
+    def _make_scanner(self, tmp_dir, monkeypatch):
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_ENABLED', 'true')
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', os.path.join(tmp_dir, 'mount'))
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_movies_path = os.path.join(tmp_dir, 'local_movies')
+        scanner._local_tv_path = os.path.join(tmp_dir, 'local_tv')
+        os.makedirs(scanner._local_movies_path)
+        os.makedirs(scanner._local_tv_path)
+        scanner._last_had_local = True
+        scanner._local_drop_alerted = False
+        scanner._last_symlinked_files = {}
+        scanner._pending_rescan_prior_ids = {}
+        scanner._discover_torbox_mount = lambda: None
+        return scanner
+
+    def _mock_blocklist(self, monkeypatch, blocked_names, seen):
+        import utils.library as _lib
+        mock = type('MockBL', (), {
+            'is_blocked_title': staticmethod(
+                lambda name: seen.append(name) or name in blocked_names),
+        })
+        monkeypatch.setattr(_lib, '_blocklist', mock)
+
+    def _shows_and_index(self, src):
+        from utils.library import _normalize_title
+        norm = _normalize_title('Some Show')
+        shows = [
+            {'title': 'Anchor Show', 'year': 2020, 'source': 'local',
+             'season_data': []},
+            {'title': 'Some Show', 'year': 2024, 'source': 'debrid',
+             'season_data': [{'number': 3, 'episodes': [
+                 {'number': 1, 'source': 'debrid'}]}]},
+        ]
+        return shows, {(norm, 3, 1): src}
+
+    def test_flat_release_named_season_dir_is_blocked(self, tmp_dir, monkeypatch):
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        rel = os.path.join(tmp_dir, 'mount', 'Season 3 (BluRay)')
+        os.makedirs(rel)
+        src = os.path.join(rel, 'Some Show S03E01.mkv')
+        open(src, 'w').close()
+
+        seen = []
+        self._mock_blocklist(monkeypatch, {'Season 3 (BluRay)'}, seen)
+        shows, path_index = self._shows_and_index(src)
+        scanner._create_debrid_symlinks(shows, [], path_index)
+
+        assert 'Season 3 (BluRay)' in seen
+        assert os.listdir(scanner._local_tv_path) == []
+
+    def test_nested_release_blocked_by_top_folder(self, tmp_dir, monkeypatch):
+        """Season-pack shape: block keys on the pack's top folder, not
+        the qualified season subdir."""
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        rel = os.path.join(tmp_dir, 'mount', 'Pack S01-S06 1080p',
+                           'Season 3 (BluRay)')
+        os.makedirs(rel)
+        src = os.path.join(rel, 'Some Show S03E01.mkv')
+        open(src, 'w').close()
+
+        seen = []
+        self._mock_blocklist(monkeypatch, {'Pack S01-S06 1080p'}, seen)
+        shows, path_index = self._shows_and_index(src)
+        scanner._create_debrid_symlinks(shows, [], path_index)
+
+        assert 'Pack S01-S06 1080p' in seen
+        assert os.listdir(scanner._local_tv_path) == []
+
+    def test_unblocked_release_still_symlinked(self, tmp_dir, monkeypatch):
+        """Control: same shapes with nothing blocked ARE linked."""
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        rel = os.path.join(tmp_dir, 'mount', 'Season 3 (BluRay)')
+        os.makedirs(rel)
+        src = os.path.join(rel, 'Some Show S03E01.mkv')
+        open(src, 'w').close()
+
+        seen = []
+        self._mock_blocklist(monkeypatch, set(), seen)
+        shows, path_index = self._shows_and_index(src)
+        scanner._create_debrid_symlinks(shows, [], path_index)
+
+        assert seen == ['Season 3 (BluRay)']
+        link = os.path.join(scanner._local_tv_path, 'Some Show (2024)',
+                            'Season 03', 'Some Show S03E01.mkv')
         assert os.path.islink(link)
 
 

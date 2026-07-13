@@ -450,7 +450,27 @@ def _parse_folder_name(name):
 
 _EPISODE_PATTERN = re.compile(r'S\d{1,2}E\d{1,2}', re.IGNORECASE)
 _EPISODE_ID_PATTERN = re.compile(r'S(\d{1,2})E(\d{1,2})', re.IGNORECASE)
-_SEASON_DIR_PATTERN = re.compile(r'^Season\s+(\d+)$', re.IGNORECASE)
+# Season packs commonly qualify their per-season subdirs with a bracketed
+# source/quality tag — "Season 1 (BluRay)", "Season 2 (AMZN WEB-DL)",
+# "Season 3 [1080p x265]".  The strict ``^Season N$`` form missed those,
+# so every episode inside a qualified subdir was invisible to collection:
+# the pack sat fully-materialized on the mount while its episodes stayed
+# "wanted" (and the recovery pass re-selected the same owned pack forever).
+# The qualifier must be BRACKETED — bare-word suffixes ("Season 1 Extras")
+# stay excluded so junk files can't ride the no-SxxEyy sequential-key
+# fallback into season_data as phantom episodes.  Bracketed junk qualifiers
+# ("Season 1 (Extras)", "Season 2 (Featurettes)") are denylisted the same
+# way — the lookahead vocabulary mirrors ``_SKIP_FOLDERS``.  Source/quality
+# tags like "(Complete)" or "(BluRay)" stay allowed.
+_SEASON_DIR_PATTERN = re.compile(
+    r'^Season\s+(\d+)'
+    r'(?:\s*[([]'
+    r'(?!\s*(?:extras?|featurettes?|bonus(?:es)?|specials?|samples?'
+    r'|subs?|subtitles?|trailers?|interviews?|deleted[\s.-]scenes'
+    r'|behind[\s.-]the[\s.-]scenes)\b)'
+    r'.*)?$',
+    re.IGNORECASE,
+)
 
 # Plan 41 phase B.1 — TV markers beyond ``SxxExx``.  Without these,
 # season packs (``S22.COMPLETE``), multi-season packs (``S01-S04``),
@@ -873,12 +893,11 @@ def _count_show_content(show_path):
     seasons = 0
     episodes = 0
     flat_episodes = 0
-    season_re = re.compile(r'^Season\s+\d+$', re.IGNORECASE)
     try:
         with os.scandir(show_path) as it:
             for entry in it:
                 if entry.is_dir(follow_symlinks=False):
-                    if season_re.match(entry.name):
+                    if _SEASON_DIR_PATTERN.match(entry.name):
                         seasons += 1
                         try:
                             with os.scandir(entry.path) as season_it:
@@ -4799,7 +4818,21 @@ class LibraryScanner:
                     self._memo_wanted(self._wanted_tb_cooldown, key)
                     if result.get('success'):
                         tb_added += 1
-                    elif not result.get('duplicate'):
+                    elif result.get('duplicate'):
+                        # The account already holds a release covering this
+                        # target, yet the target is still "wanted" — the
+                        # content exists but never materialized into the
+                        # library. Usually a layout-parsing gap (e.g. a
+                        # season-subdir naming the collector doesn't
+                        # recognize), not a supply problem: surface it
+                        # instead of silently re-cooling forever.
+                        logger.warning(
+                            f"[library] Wanted recovery target {media_title!r}"
+                            f" {add_ep} is covered by a release already in the"
+                            f" TB account ({(cached.get('title') or '')[:80]!r})"
+                            f" but its files never reached the library —"
+                            f" likely an unparsed folder layout")
+                    else:
                         # Enforcement check: an add failure WHILE the account
                         # cooldown flag is set means TB is actually rejecting
                         # creates (HTTP 400 DOWNLOAD_SERVER_ERROR surfaces as
@@ -6243,15 +6276,26 @@ class LibraryScanner:
                         # Skip blocklisted items by release folder name.
                         # Only match on the release folder — not the parsed title — so
                         # that blocking one release doesn't block replacements.
-                        # debrid_path may be .../release/Season N/ep.mkv or .../release/ep.mkv;
-                        # climb past Season dirs to reach the actual release folder.
+                        # The release folder is the FIRST path component under the
+                        # debrid mount — derived from the mount prefix, not by
+                        # climbing past Season-dir names (a flat torrent literally
+                        # named "Season 3 (BluRay)" at mount root would make the
+                        # climb overshoot to the mount root and silently no-op
+                        # the block).  Climb heuristic kept only as fallback for
+                        # paths under no known mount.
                         if _blocklist:
-                            parent = os.path.dirname(debrid_path)
-                            parent_name = os.path.basename(parent)
-                            if _SEASON_DIR_PATTERN.match(parent_name):
-                                release_folder = os.path.basename(os.path.dirname(parent))
-                            else:
-                                release_folder = parent_name
+                            release_folder = None
+                            for _m, _b in _mount_target_pairs:
+                                if debrid_path.startswith(_m + os.sep):
+                                    release_folder = debrid_path[len(_m) + 1:].split(os.sep, 1)[0]
+                                    break
+                            if release_folder is None:
+                                parent = os.path.dirname(debrid_path)
+                                parent_name = os.path.basename(parent)
+                                if _SEASON_DIR_PATTERN.match(parent_name):
+                                    release_folder = os.path.basename(os.path.dirname(parent))
+                                else:
+                                    release_folder = parent_name
                             if _blocklist.is_blocked_title(release_folder):
                                 continue
 

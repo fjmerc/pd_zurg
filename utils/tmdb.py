@@ -992,6 +992,81 @@ def get_cached_tmdb_ids():
     return result
 
 
+def get_yearless_collision_bases():
+    """Return normalized yearless bases claimed by multiple distinct titles.
+
+    A "collision base" is a bare normalized title (e.g. ``icarly``) for
+    which the cache holds 2+ fresh year-qualified entries with *different*
+    TMDB IDs — a reboot family like iCarly (2007) vs iCarly (2021).  The
+    library scanner uses this set to switch those titles to year-qualified
+    grouping keys so the siblings never aggregate into one item.
+
+    Returns: ``{'shows': set(), 'movies': set()}``.
+    """
+    with _cache_lock:
+        cache = _load_cache()
+
+    _year_re = re.compile(r'^(.+)\s+\(\d{4}\)$')
+
+    result = {}
+    for section in ('shows', 'movies'):
+        seen = {}  # base -> tmdb_id
+        collisions = set()
+        for norm_title, entry in cache.get(section, {}).items():
+            if not _is_fresh(entry):
+                continue
+            tmdb_id = entry.get('tmdb_id')
+            if not tmdb_id:
+                continue
+            m = _year_re.match(norm_title)
+            base = m.group(1) if m else norm_title
+            if base in seen and seen[base] != tmdb_id:
+                collisions.add(base)
+            seen[base] = tmdb_id
+        result[section] = collisions
+    return result
+
+
+def resolve_show_year_by_episodes(base_norm, ep_keys):
+    """Attribute a yearless release in a reboot family by episode shape.
+
+    Given a bare collision base (e.g. ``icarly``) and the release's
+    ``(season, episode)`` keys, check every fresh year-qualified sibling
+    entry (``icarly (2007)``, ``icarly (2021)``) for structural coverage:
+    a sibling "fits" when its cached episode list contains every key the
+    release carries (2007's S01 has 25 episodes, 2021's only 13 — so
+    S01E20 fits exactly one).  Returns the sibling's year (int) when
+    exactly ONE fits; ``None`` when zero or multiple fit, so ambiguous
+    releases stay unattributed rather than guessed.
+    """
+    ep_keys = set(ep_keys or ())
+    if not ep_keys or not base_norm:
+        return None
+    with _cache_lock:
+        cache = _load_cache()
+
+    pattern = re.compile(r'^' + re.escape(base_norm) + r'\s+\((\d{4})\)$')
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    fits = []
+    for norm_title, entry in cache.get('shows', {}).items():
+        m = pattern.match(norm_title)
+        if not m or not _is_fresh(entry):
+            continue
+        have = set()
+        for s in entry.get('seasons', []):
+            snum = s.get('number')
+            for ep in s.get('episodes', []):
+                # A release cannot contain unaired episodes — counting
+                # announced-but-unaired ones would let a sibling claim
+                # coverage it doesn't really have yet.
+                ad = ep.get('air_date', '')
+                if ad and ad <= today:
+                    have.add((snum, ep.get('number')))
+        if ep_keys <= have:
+            fits.append(int(m.group(1)))
+    return fits[0] if len(fits) == 1 else None
+
+
 # ---------------------------------------------------------------------------
 # Background cache population
 # ---------------------------------------------------------------------------

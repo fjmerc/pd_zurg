@@ -2200,14 +2200,40 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 to_switch = []
                 not_on_debrid = 0
                 with scanner._path_lock:
+                    # Reboot-family items are indexed under a year-qualified
+                    # norm ("icarly (2007)").  Derive it from a trailing
+                    # (YYYY) in the display title; failing that, fall back
+                    # to a UNIQUE qualified sibling in the indexes.  Two or
+                    # more siblings stay ambiguous → fail-safe no-match.
+                    lookup_norms = [norm]
+                    m = re.search(r'\((\d{4})\)\s*$', title)
+                    if m:
+                        lookup_norms.insert(0, f'{norm} ({m.group(1)})')
+                    else:
+                        qual_re = re.compile(
+                            re.escape(norm) + r' \(\d{4}\)$')
+                        quals = {
+                            k[0]
+                            for idx in (scanner._local_path_index,
+                                        scanner._path_index)
+                            for k in idx
+                            if qual_re.match(k[0])
+                        }
+                        if len(quals) == 1:
+                            lookup_norms.append(quals.pop())
                     for ep in season_eps:
                         try:
                             s = int(ep.get('season', 0))
                             e = int(ep.get('episode', 0))
                         except (ValueError, TypeError):
                             continue
-                        local_p = scanner._local_path_index.get((norm, s, e))
-                        debrid_p = scanner._path_index.get((norm, s, e))
+                        local_p = debrid_p = None
+                        for cn in lookup_norms:
+                            lp = scanner._local_path_index.get((cn, s, e))
+                            dp = scanner._path_index.get((cn, s, e))
+                            if lp or dp:
+                                local_p, debrid_p = lp, dp
+                                break
                         if local_p and debrid_p:
                             to_switch.append({
                                 'local_path': local_p,

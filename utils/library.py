@@ -588,6 +588,64 @@ def _merge_show_group(show_groups, key, title, year, episodes, path):
         show_groups[key]['title'] = title
 
 
+def _show_collision_bases():
+    """Bare show norms with 2+ distinct-TMDB same-title siblings.
+
+    Fail-open: an empty set on any error restores the pre-fix bare-key
+    grouping, matching the fail-open stance of the season-merge veto.
+    """
+    try:
+        from utils.tmdb import get_yearless_collision_bases
+        return get_yearless_collision_bases().get('shows', set())
+    except Exception as e:
+        logger.debug("[library] collision-base load failed: %s", e)
+        return set()
+
+
+def _show_group_key(title, year, collision_bases, episodes):
+    """Return ``(group_key, year)`` for a scanned show folder.
+
+    Non-collision titles keep the plain normalized key (the common case —
+    zero behavior change).  Reboot-family titles get a year-qualified key
+    (``icarly (2007)``) so the siblings never merge into one item.  A
+    yearless release in a collision family is attributed by episode shape
+    (the unique sibling whose cached episode list covers the release);
+    when that fails it stays on the ambiguous bare key — downstream treats
+    bare-key collision items as identity-unknown and excludes them from
+    symlink creation rather than linking content into the wrong show.
+    """
+    norm = _normalize_title(title)
+    if norm not in collision_bases:
+        return norm, year
+    if not year:
+        try:
+            from utils.tmdb import resolve_show_year_by_episodes
+            year = resolve_show_year_by_episodes(norm, episodes.keys())
+        except Exception as e:
+            logger.debug("[library] episode-shape year resolve failed for %r: %s", norm, e)
+            year = None
+        if year:
+            logger.debug(
+                "[library] reboot family %r: yearless release attributed to "
+                "(%s) by episode shape", norm, year)
+    if year:
+        return f"{norm} ({year})", year
+    return norm, None
+
+
+def _stamp_reboot_identity(item, key, collision_bases):
+    """Mark a built show item with its reboot-family identity.
+
+    ``_norm_key`` (year-qualified) when the group key was disambiguated;
+    ``_ambiguous_reboot`` when the title is a collision base but the item
+    couldn't be attributed to a sibling — symlink creation skips those.
+    """
+    if key != _normalize_title(item.get('title') or ''):
+        item['_norm_key'] = key
+    elif key in collision_bases:
+        item['_ambiguous_reboot'] = True
+
+
 def _detect_tv_marker(folder_name):
     """Return ``True`` when *folder_name* carries any TV-content marker.
 
@@ -1697,7 +1755,11 @@ def _dedup_shows_by_external_id(shows):
     no_id = []
     for show in shows:
         imdb = show.get('imdb_id')
-        if imdb:
+        # Identity-unknown reboot-family items carry whichever sibling's
+        # imdb_id the bare TMDB cache key happened to resolve to — merging
+        # by it would attribute their episodes to a show that episode-shape
+        # resolution already declined to pick.
+        if imdb and not show.get('_ambiguous_reboot'):
             groups.setdefault(imdb, []).append(show)
         else:
             no_id.append(show)
@@ -2005,6 +2067,18 @@ def _normalize_title(title):
     t = re.sub(r'\s*\(\d{4}\)\s*$', '', t)
     t = t.strip()
     return t
+
+
+def _show_norm(item):
+    """Grouping/index key for a show item.
+
+    Reboot families (same normalized title, different-year siblings with
+    distinct TMDB IDs — e.g. iCarly 2007 vs iCarly 2021) carry a
+    year-qualified ``_norm_key`` stamped at scan time so the merge
+    pipeline and path indexes never aggregate the siblings; every other
+    item keys by plain ``_normalize_title``.
+    """
+    return item.get('_norm_key') or _normalize_title(item.get('title') or '')
 
 
 def _norm_for_matching(title):
@@ -2710,13 +2784,22 @@ class LibraryScanner:
             return None
 
     def _get_pref(self, norm, preferences):
-        """Look up a preference by normalized title, checking aliases if needed."""
+        """Look up a preference by normalized title, checking aliases if needed.
+
+        Year-qualified reboot-family norms (``icarly (2007)``) fall back to
+        the bare base — the UI saves prefs under the bare title, and a
+        title-level preference reasonably applies to every sibling.
+        """
         pref = preferences.get(norm)
         if not pref:
             for alias in self._alias_norms.get(norm, ()):
                 pref = preferences.get(alias)
                 if pref:
                     break
+        if not pref:
+            m = re.match(r'^(.+)\s+\(\d{4}\)$', norm)
+            if m:
+                pref = preferences.get(m.group(1))
         return pref
 
     def _route_for(self, norm, preferences):
@@ -2840,18 +2923,18 @@ class LibraryScanner:
         drop them to "Wanted". Movies and shows are unioned separately by the
         caller, so there's no cross-type key collision.
 
-        Keyed by ``_normalize_title`` to match the keying ``_scan_mount`` and
-        ``_merge_alt_debrid_items`` already use — same-normalized titles that
-        differ only by year (e.g. ``Dune (1984)`` vs ``Dune (2021)``) already
-        collapse to one entry inside a single scan, so the union introduces no
-        new title-loss beyond that pre-existing pipeline limitation.
-        ``title`` is coerced via ``or ''`` so a None value can't raise.
+        Keyed by ``_show_norm`` to match the keying ``_scan_mount`` and
+        ``_merge_alt_debrid_items`` already use — reboot-family shows carry
+        a year-qualified ``_norm_key`` so siblings stay separate; same-title
+        movies (e.g. ``Dune (1984)`` vs ``Dune (2021)``) still collapse to
+        one entry inside a single scan, so the union introduces no new
+        title-loss beyond that pre-existing pipeline limitation.
         """
         by_key = {}
         for it in (last_good or []):
-            by_key[_normalize_title(it.get('title') or '')] = it
+            by_key[_show_norm(it)] = it
         for it in (partial or []):
-            by_key[_normalize_title(it.get('title') or '')] = it
+            by_key[_show_norm(it)] = it
         return list(by_key.values())
 
     @staticmethod
@@ -2865,18 +2948,19 @@ class LibraryScanner:
         ``alt_source_debrid=<alt name>`` so the UI can render a
         "RD + TB" pair-badge instead of two cards.
 
-        Match is by ``_normalize_title`` only — the same key the rest of
-        the merge pipeline uses.  Year-aware tie-break could land later;
-        for the MVP, same-title-different-year (e.g. ``Dune (1984)`` vs
-        ``Dune (2021)``) collapses into one card if both mounts have
-        both.  That's a known limitation; in practice the cache rarely
-        holds two films of the same title on the same provider.
+        Match is by ``_show_norm`` — the same key the rest of the merge
+        pipeline uses.  Reboot-family shows carry a year-qualified
+        ``_norm_key`` so siblings stay separate; movies still key by bare
+        normalized title, so same-title-different-year films (e.g.
+        ``Dune (1984)`` vs ``Dune (2021)``) collapse into one card if
+        both mounts have both.  That's a known limitation; in practice
+        the cache rarely holds two films of the same title.
         """
         if not (alt_movies or alt_shows):
             return primary_movies, primary_shows
 
         def _key(item):
-            return _normalize_title(item.get('title', ''))
+            return _show_norm(item)
 
         primary_movie_keys = {_key(m): m for m in primary_movies}
         primary_show_keys = {_key(s): s for s in primary_shows}
@@ -2956,7 +3040,7 @@ class LibraryScanner:
         key_max_season = {}
         key_year = {}
         for item in items:
-            k = _normalize_title(item['title'])
+            k = _show_norm(item)
             if not aliases.get(k):
                 continue
             mx = _max_episode_season(item)
@@ -2980,16 +3064,34 @@ class LibraryScanner:
                 veto_memo[k] = conflict
             return veto_memo[k]
 
+        # Keys held by identity-unknown reboot-family items.  Guarded in
+        # BOTH directions: an ambiguous item must not hop into a sibling,
+        # and an attributed sibling must not hop into the ambiguous item's
+        # bare key (the bare cache entry shares a tmdb_id with one sibling,
+        # making them aliases of each other).
+        ambiguous_keys = {
+            _show_norm(i) for i in items if i.get('_ambiguous_reboot')
+        }
+
         # Map each norm key to its canonical (first-seen) key via aliases
         canon = {}  # norm_key -> canonical norm_key
         for item in items:
-            key = _normalize_title(item['title'])
+            key = _show_norm(item)
             if key in canon:
+                continue
+            # Identity-unknown reboot-family items must not alias-hop into
+            # a year-qualified sibling — that would attribute their episodes
+            # to a show that episode-shape resolution already declined to
+            # pick.  They stay on their own (bare) key.
+            if item.get('_ambiguous_reboot') or key in ambiguous_keys:
+                canon[key] = key
                 continue
             # Check if any existing canonical key is an alias of this key
             for alias in sorted(aliases.get(key, ())):
                 if alias in canon:
                     if _vetoed(key) or _vetoed(alias):
+                        continue
+                    if alias in ambiguous_keys or canon[alias] in ambiguous_keys:
                         continue
                     canon[key] = canon[alias]
                     break
@@ -2999,7 +3101,7 @@ class LibraryScanner:
         # Group items by canonical key
         groups = {}  # canonical_key -> list of items
         for item in items:
-            key = _normalize_title(item['title'])
+            key = _show_norm(item)
             ckey = canon[key]
             groups.setdefault(ckey, []).append(item)
 
@@ -3041,9 +3143,9 @@ class LibraryScanner:
                 merged['seasons'] = len({ek[0] for ek in merged_eps})
                 merged['episodes'] = len(merged_eps)
 
-            merged_key = _normalize_title(merged['title'])
+            merged_key = _show_norm(merged)
             for item in group:
-                item_key = _normalize_title(item['title'])
+                item_key = _show_norm(item)
                 if item_key != merged_key:
                     logger.debug(
                         f"[library] TMDB dedup (debrid): '{item_key}' merged into '{merged_key}'"
@@ -3205,7 +3307,7 @@ class LibraryScanner:
 
         # Build normalized title index for cross-referencing
         debrid_movie_keys = {_normalize_title(m['title']): m for m in debrid_movies}
-        debrid_show_keys = {_normalize_title(s['title']): s for s in debrid_shows}
+        debrid_show_keys = {_show_norm(s): s for s in debrid_shows}
 
         local_movie_keys = {_normalize_title(lm['title']) for lm in local_movies}
         local_movie_map = {_normalize_title(lm['title']): lm for lm in local_movies}
@@ -3313,7 +3415,7 @@ class LibraryScanner:
             logger.debug(f"[library] Injected {ghosts_added} Radarr wanted movie(s) as ghost entries")
 
         # Merge debrid + local shows with episode-level cross-referencing
-        local_show_map = {_normalize_title(ls['title']): ls for ls in local_shows}
+        local_show_map = {_show_norm(ls): ls for ls in local_shows}
 
         shows = []
         merged_local_show_keys = set()
@@ -3335,15 +3437,23 @@ class LibraryScanner:
             return _local_veto_memo[memo_key]
 
         for item in debrid_shows:
-            key = _normalize_title(item['title'])
+            key = _show_norm(item)
             local_key = None
+            # Identity-unknown reboot-family items never alias/prefix hop
+            # into a local sibling; only an exact bare-key match (another
+            # identity-unknown item) may merge.
+            _ambiguous = bool(item.get('_ambiguous_reboot'))
             if key in local_show_map:
                 local_key = key
-            else:
+            elif not _ambiguous:
                 for alias in sorted(show_aliases.get(key, ())):
                     if alias not in local_show_map:
                         continue
                     local_candidate = local_show_map[alias]
+                    # Symmetric guard: an attributed sibling must not hop
+                    # into an identity-unknown local item's bare key.
+                    if local_candidate.get('_ambiguous_reboot'):
+                        continue
                     if (_local_merge_vetoed(
                             key, _max_episode_season(item), item.get('year'))
                         or _local_merge_vetoed(
@@ -3356,7 +3466,7 @@ class LibraryScanner:
                         continue
                     local_key = alias
                     break
-            if local_key is None:
+            if local_key is None and not _ambiguous:
                 # Final fallback: token-aligned prefix lookup against the
                 # TMDB cache — symmetric with the movies merge cascade.
                 parsed_t = item.get('_parsed_title') or item.get('title') or ''
@@ -3378,6 +3488,9 @@ class LibraryScanner:
                     item_mx = _max_episode_season(item)
                     if (canon_key and canon_key != key
                             and canon_key in local_show_map
+                            # Symmetric guard — as in the alias hop above.
+                            and not local_show_map[canon_key].get(
+                                '_ambiguous_reboot')
                             and not _local_merge_vetoed(
                                 key, item_mx, item.get('year'))
                             and not _local_merge_vetoed(
@@ -3432,7 +3545,7 @@ class LibraryScanner:
             shows.append(item)
 
         for ls in local_shows:
-            key = _normalize_title(ls['title'])
+            key = _show_norm(ls)
             if key not in debrid_show_keys and key not in merged_local_show_keys:
                 shows.append(ls)
 
@@ -3510,7 +3623,7 @@ class LibraryScanner:
         local_path_index = {}
         for show in shows:
             eps = show.get('_episodes', {})
-            norm = _normalize_title(show['title'])
+            norm = _show_norm(show)
             show_source = show.get('source', 'debrid')
             for (sn, en), info in eps.items():
                 src = info.get('source', show_source)
@@ -3911,7 +4024,7 @@ class LibraryScanner:
         # Enforce prefer-debrid: replace local files with symlinks for source=both episodes
         if rclone_mount and symlink_base and self._local_tv_path:
             for show in shows:
-                norm = _normalize_title(show['title'])
+                norm = _show_norm(show)
                 pref = self._get_pref(norm, preferences)
                 if pref != 'prefer-debrid':
                     continue
@@ -4090,7 +4203,7 @@ class LibraryScanner:
         # This prevents deleting seasons/episodes that have no local backup.
         prefer_local_safe = {}
         for show in shows:
-            norm = _normalize_title(show['title'])
+            norm = _show_norm(show)
             if self._get_pref(norm, preferences) != 'prefer-local':
                 continue
             has_debrid_only = False
@@ -4355,9 +4468,22 @@ class LibraryScanner:
                 # dual-path overlap that self-corrects at import time.
                 if show.get('source') == 'wanted':
                     continue
-                norm = _normalize_title(show['title'])
+                # Identity-unknown reboot-family items: missing-episode math
+                # runs against whichever sibling's TMDB entry the bare cache
+                # key resolved to, so derived searches would target an
+                # arbitrary sibling in Sonarr.  Skip until attribution works.
+                if show.get('_ambiguous_reboot'):
+                    continue
+                norm = _show_norm(show)
                 route = self._route_for(norm, preferences)
                 direction = {True: 'to-debrid', False: 'to-local', None: 'to-any'}[route]
+
+                # Pending state is keyed by the BARE title norm, not the
+                # year-qualified reboot-family key: the UI writes pending
+                # under the bare norm, and pre-collision behavior was one
+                # shared row per title.  Keying by _show_norm would split
+                # the row and orphan UI-written entries.
+                pending_key = _normalize_title(show.get('title') or '')
 
                 # Check pending state — skip debrid-unavailable, allow retries
                 # for stale entries whose direction matches the current route.
@@ -4365,7 +4491,7 @@ class LibraryScanner:
                 # by pending_keys below, so non-pending episodes of the same
                 # show can still be searched.
                 pending_norm, verdict, pending_keys = \
-                    self._check_pending_freshness(norm, pending, direction)
+                    self._check_pending_freshness(pending_key, pending, direction)
                 if verdict == 'give-up':
                     continue  # escalated — stop retrying
                 is_retry = verdict == 'retry'
@@ -4791,6 +4917,8 @@ class LibraryScanner:
             for s in shows:
                 if s.get('source') == 'wanted':
                     continue  # ghosts are handled above
+                if s.get('_ambiguous_reboot'):
+                    continue  # imdb_id is a sibling guess — never probe on it
                 if not s.get('imdb_id'):
                     continue
                 me = s.get('missing_episodes')
@@ -5567,15 +5695,26 @@ class LibraryScanner:
         # the debrid or local title can be resolved.
         source_map = {}
         for show in shows:
-            norm = _normalize_title(show['title'])
+            norm = _show_norm(show)
             ep_sources = {}
             for sd in show.get('season_data', []):
                 for ep in sd.get('episodes', []):
                     ep_sources[(sd['number'], ep['number'])] = ep.get('source', '')
-            source_map[norm] = ep_sources
+            # Merge (never overwrite): an ambiguous reboot-family item's
+            # _show_norm IS the bare norm, so plain assignment would clobber
+            # the bare-key dict an attributed sibling already registered
+            # below — losing its episodes and leaving pending rows uncleared.
+            merged_sources = source_map.setdefault(norm, {})
+            merged_sources.update(ep_sources)
+            # Reboot-family items carry a year-qualified norm, but pending
+            # entries are keyed by the bare title norm — register it too,
+            # merging siblings (matches pre-collision aggregated semantics).
+            bare = _normalize_title(show.get('title') or '')
+            if bare != norm:
+                source_map.setdefault(bare, {}).update(ep_sources)
             for alias in self._alias_norms.get(norm, ()):
                 if alias not in source_map:
-                    source_map[alias] = ep_sources
+                    source_map[alias] = merged_sources
 
         for movie in movies:
             norm = _normalize_title(movie['title'])
@@ -5767,15 +5906,26 @@ class LibraryScanner:
         # Build source map
         source_map = {}
         for show in shows:
-            norm = _normalize_title(show['title'])
+            norm = _show_norm(show)
             ep_sources = {}
             for sd in show.get('season_data', []):
                 for ep in sd.get('episodes', []):
                     ep_sources[(sd['number'], ep['number'])] = ep.get('source', '')
-            source_map[norm] = ep_sources
+            # Merge (never overwrite): an ambiguous reboot-family item's
+            # _show_norm IS the bare norm, so plain assignment would clobber
+            # the bare-key dict an attributed sibling already registered
+            # below — losing its episodes and leaving pending rows uncleared.
+            merged_sources = source_map.setdefault(norm, {})
+            merged_sources.update(ep_sources)
+            # Reboot-family items carry a year-qualified norm, but pending
+            # entries are keyed by the bare title norm — register it too,
+            # merging siblings (matches pre-collision aggregated semantics).
+            bare = _normalize_title(show.get('title') or '')
+            if bare != norm:
+                source_map.setdefault(bare, {}).update(ep_sources)
             for alias in self._alias_norms.get(norm, ()):
                 if alias not in source_map:
-                    source_map[alias] = ep_sources
+                    source_map[alias] = merged_sources
 
         for movie in movies:
             norm = _normalize_title(movie['title'])
@@ -5826,7 +5976,12 @@ class LibraryScanner:
         except Exception:
             movie_client, movie_svc = None, None
 
-        show_norms = {_normalize_title(s['title']): s for s in shows}
+        show_norms = {_show_norm(s): s for s in shows}
+        # Pending entries are bare-keyed; register bare norms for
+        # reboot-family items too (first sibling wins, matching the
+        # pre-collision single-row semantics).
+        for s in shows:
+            show_norms.setdefault(_normalize_title(s.get('title') or ''), s)
         movie_norms = {_normalize_title(m['title']): m for m in movies}
 
         def _resolve_via_aliases(norm, mapping):
@@ -6180,6 +6335,10 @@ class LibraryScanner:
         # event ids can never leak into this cycle's rescan calls — even
         # when this scan creates zero symlinks.
         self._pending_rescan_prior_ids = {}
+        # NOTE: keyed by DISPLAY title, not _show_norm — if two reboot-family
+        # siblings share a display title AND both symlink in the same scan,
+        # the later one's year wins.  Rare and self-correcting (the rescan
+        # match falls back to the TMDB-ID cascade level), so not re-keyed.
         _symlink_years = {}       # title -> parsed year (for year-aware rescan matching)
         # canonical title -> parsed-folder title (when display was upgraded
         # via TMDB rename).  Lets the rescan-trigger TMDB cache fallback use
@@ -6419,12 +6578,21 @@ class LibraryScanner:
             real_tv_root = os.path.realpath(self._local_tv_path)
 
             for show in shows:
-                norm = _normalize_title(show['title'])
+                norm = _show_norm(show)
                 title = show['title']
                 year = show.get('year')
                 # Same obfuscated-payload guard as the movie loop above
                 # (title AND mount folder, for Sonarr/Radarr parity).
                 if _is_obfuscated_name(title) or _is_obfuscated_name(os.path.basename(show.get('path', ''))):
+                    continue
+                # Identity-unknown reboot-family item (same-title siblings
+                # with distinct TMDB IDs, episode-shape attribution failed):
+                # linking it could put content inside the wrong show's folder.
+                if show.get('_ambiguous_reboot'):
+                    logger.info(
+                        "[library] Skipping symlinks for %r — reboot-family "
+                        "identity is ambiguous (add a year to the release or "
+                        "wait for episode-shape attribution)", title)
                     continue
                 arr_info = _match_arr_entry(
                     title, year, show.get('_parsed_title'),
@@ -6866,7 +7034,8 @@ class LibraryScanner:
             logger.debug(f"[library] Scanning mount categories: {scan_dirs}")
 
         # Collect raw per-folder data
-        show_groups = {}   # normalized_title -> {title, year, episodes, path}
+        show_groups = {}   # group key (normalized title, year-qualified for reboot families) -> {title, year, episodes, path}
+        collision_bases = _show_collision_bases()
         movie_groups = {}  # normalized_title -> {title, year, path}
         timed_out = False
 
@@ -6976,7 +7145,8 @@ class LibraryScanner:
                             for ep_key in episodes:
                                 episodes[ep_key]['_folder_ep_count'] = season_counts[ep_key[0]]
 
-                            key = _normalize_title(title)
+                            key, year = _show_group_key(
+                                title, year, collision_bases, episodes)
                             _merge_show_group(show_groups, key, title, year, episodes, entry.path)
                         else:
                             key = _normalize_title(title)
@@ -7025,10 +7195,10 @@ class LibraryScanner:
             })
 
         shows = []
-        for g in show_groups.values():
+        for key, g in show_groups.items():
             eps = g['episodes']
             unique_seasons = {s for s, _e in eps} if eps else set()
-            shows.append({
+            item = {
                 'title': g['title'],
                 'year': g['year'],
                 'source': 'debrid',
@@ -7039,7 +7209,9 @@ class LibraryScanner:
                 '_episodes': eps,
                 'path': g['path'],
                 'date_added': _get_folder_mtime(g['path']),
-            })
+            }
+            _stamp_reboot_identity(item, key, collision_bases)
+            shows.append(item)
 
         return movies, shows
 
@@ -7302,6 +7474,7 @@ class LibraryScanner:
         # Step 2: PROPFIND each category with depth infinity
         show_groups = {}
         movie_groups = {}
+        collision_bases = _show_collision_bases()
 
         # Aggregate detection state — only conclude that Zurg lacks recursive
         # PROPFIND if EVERY category that returned folders returned zero
@@ -7426,7 +7599,8 @@ class LibraryScanner:
                     for ep_key in episodes:
                         episodes[ep_key]['_folder_ep_count'] = season_counts[ep_key[0]]
 
-                    key = _normalize_title(title)
+                    key, year = _show_group_key(
+                        title, year, collision_bases, episodes)
                     _merge_show_group(
                         show_groups, key, title, year, episodes,
                         os.path.join(self._mount_path, category, folder_name),
@@ -7492,10 +7666,10 @@ class LibraryScanner:
             })
 
         shows = []
-        for g in show_groups.values():
+        for key, g in show_groups.items():
             eps = g['episodes']
             unique_seasons = {s for s, _e in eps} if eps else set()
-            shows.append({
+            item = {
                 'title': g['title'],
                 'year': g['year'],
                 'source': 'debrid',
@@ -7505,7 +7679,9 @@ class LibraryScanner:
                 '_episodes': eps,
                 'path': g['path'],
                 'date_added': 0,
-            })
+            }
+            _stamp_reboot_identity(item, key, collision_bases)
+            shows.append(item)
 
         return movies, shows
 
@@ -7678,6 +7854,7 @@ class LibraryScanner:
 
         show_groups = {}
         movie_groups = {}
+        collision_bases = _show_collision_bases()
         for folder_name, contents in folders.items():
             title, year = _parse_folder_name(folder_name)
             if not title:
@@ -7697,7 +7874,8 @@ class LibraryScanner:
                     season_counts[ep_key[0]] = season_counts.get(ep_key[0], 0) + 1
                 for ep_key in episodes:
                     episodes[ep_key]['_folder_ep_count'] = season_counts[ep_key[0]]
-                key = _normalize_title(title)
+                key, year = _show_group_key(
+                    title, year, collision_bases, episodes)
                 _merge_show_group(show_groups, key, title, year, episodes,
                                   os.path.join(tb_mount, folder_name))
                 g = show_groups[key]
@@ -7738,10 +7916,10 @@ class LibraryScanner:
             })
 
         shows = []
-        for g in show_groups.values():
+        for key, g in show_groups.items():
             eps = g['episodes']
             unique_seasons = {s for s, _e in eps} if eps else set()
-            shows.append({
+            item = {
                 'title': g['title'],
                 'year': g['year'],
                 'source': 'debrid',
@@ -7752,7 +7930,9 @@ class LibraryScanner:
                 '_episodes': eps,
                 'path': g['path'],
                 'date_added': g.get('date_added', 0),
-            })
+            }
+            _stamp_reboot_identity(item, key, collision_bases)
+            shows.append(item)
 
         logger.debug(
             f"[library] TB API scan: {len(torrents)} torrents → "
@@ -7930,6 +8110,7 @@ class LibraryScanner:
             return items
         symlink_prefixes = _all_debrid_symlink_prefixes()
         from utils.blackhole import is_obfuscated_name as _is_obfuscated_name
+        collision_bases = _show_collision_bases()
         try:
             with os.scandir(self._local_tv_path) as it:
                 for entry in it:
@@ -7948,8 +8129,10 @@ class LibraryScanner:
                         continue
                     eps = _collect_episodes(entry.path)
                     if eps:
+                        key, year = _show_group_key(
+                            title, year, collision_bases, eps)
                         unique_seasons = {s for s, _e in eps}
-                        items.append({
+                        item = {
                             'title': title,
                             'year': year,
                             'source': 'local',
@@ -7959,7 +8142,9 @@ class LibraryScanner:
                             '_episodes': eps,
                             'path': entry.path,
                             'date_added': _get_folder_mtime(entry.path),
-                        })
+                        }
+                        _stamp_reboot_identity(item, key, collision_bases)
+                        items.append(item)
                     else:
                         # Fallback for shows without parseable episode patterns
                         seasons, ep_count = _count_show_content(entry.path)
@@ -7967,7 +8152,9 @@ class LibraryScanner:
                         # or dirs whose symlinks were deleted
                         if ep_count == 0:
                             continue
-                        items.append({
+                        key, year = _show_group_key(
+                            title, year, collision_bases, {})
+                        item = {
                             'title': title,
                             'year': year,
                             'source': 'local',
@@ -7977,7 +8164,9 @@ class LibraryScanner:
                             '_episodes': {},
                             'path': entry.path,
                             'date_added': _get_folder_mtime(entry.path),
-                        })
+                        }
+                        _stamp_reboot_identity(item, key, collision_bases)
+                        items.append(item)
         except (PermissionError, OSError) as e:
             logger.warning(f"[library] Cannot scan local TV: {e}")
         return items

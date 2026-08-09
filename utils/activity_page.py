@@ -35,8 +35,9 @@ __NAV_HTML__
 
 /* Tabs */
 .tabs{display:flex;gap:0;margin-bottom:0;border-bottom:2px solid var(--border)}
-.tab{padding:10px 20px;cursor:pointer;color:var(--text2);font-size:.9em;font-weight:500;border-bottom:2px solid transparent;margin-bottom:-2px;transition:color .15s,border-color .15s;user-select:none}
+.tab{padding:10px 20px;cursor:pointer;color:var(--text2);font-size:.9em;font-weight:500;background:none;border:none;border-bottom:2px solid transparent;margin-bottom:-2px;transition:color .15s,border-color .15s;user-select:none;font-family:inherit}
 .tab:hover{color:var(--text)}
+.tab:focus-visible{outline:2px solid var(--input-focus);outline-offset:-2px}
 .tab.active{color:var(--blue);border-bottom-color:var(--blue)}
 .tab .badge{display:inline-block;background:var(--border);color:var(--text2);border-radius:10px;font-size:.72em;font-weight:600;padding:1px 7px;margin-left:6px;vertical-align:middle;min-width:22px;text-align:center}
 .tab.active .badge{background:#58a6ff26;color:var(--blue)}
@@ -47,29 +48,37 @@ __NAV_HTML__
 
 <h2 style="font-size:1.1em;margin-bottom:12px">Activity</h2>
 
-<div class="tabs">
-  <div class="tab active" data-kb="tab-1" onclick="switchTab('history')">History</div>
-  <div class="tab" data-kb="tab-2" onclick="switchTab('blocklist')">Blocklist <span class="badge" id="bl-tab-count" style="display:none">0</span></div>
-  <div class="tab" data-kb="tab-3" onclick="switchTab('stuck')">Stuck <span class="badge" id="stuck-tab-count" style="display:none">0</span></div>
+<div class="tabs" role="tablist" aria-label="Activity views">
+  <button type="button" class="tab active" role="tab" id="tab-history" aria-selected="true" aria-controls="panel-history" tabindex="0" data-kb="tab-1" onclick="switchTab('history')">History</button>
+  <button type="button" class="tab" role="tab" id="tab-blocklist" aria-selected="false" aria-controls="panel-blocklist" tabindex="-1" data-kb="tab-2" onclick="switchTab('blocklist')">Blocklist <span class="badge" id="bl-tab-count" style="display:none">0</span></button>
+  <button type="button" class="tab" role="tab" id="tab-stuck" aria-selected="false" aria-controls="panel-stuck" tabindex="-1" data-kb="tab-3" onclick="switchTab('stuck')">Stuck <span class="badge" id="stuck-tab-count" style="display:none">0</span></button>
 </div>
 
 <!-- History Tab -->
-<div class="tab-panel active" id="panel-history">
+<div class="tab-panel active" id="panel-history" role="tabpanel" aria-labelledby="tab-history" tabindex="0">
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
     <select id="activity-type" onchange="loadActivity(1)" style="background:var(--input-bg);color:var(--text);border:1px solid var(--input-border);border-radius:4px;padding:4px 8px;font-size:.8em">
       <option value="">All Types</option>
-      <option value="grabbed">Grabbed</option>
-      <option value="cached">Cached</option>
-      <option value="symlink_created">Symlink</option>
-      <option value="failed">Failed</option>
-      <option value="cleanup">Cleanup</option>
-      <option value="switched_source">Source Switch</option>
-      <option value="search_triggered">Search</option>
-      <option value="rescan_triggered">Rescan</option>
-      <option value="task_completed">Task</option>
-      <option value="blocklisted">Blocklisted</option>
-      <option value="blocklist_added">Auto-Blocked</option>
-      <option value="debrid">Debrid Health</option>
+      <optgroup label="Lifecycle">
+        <option value="grabbed">Grabbed</option>
+        <option value="cached">Cached</option>
+        <option value="symlink_created">Symlink</option>
+        <option value="failed">Failed</option>
+        <option value="cleanup">Cleanup</option>
+        <option value="switched_source">Source Switch</option>
+      </optgroup>
+      <optgroup label="Triggers">
+        <option value="search_triggered">Search</option>
+        <option value="rescan_triggered">Rescan</option>
+        <option value="task_completed">Task</option>
+      </optgroup>
+      <optgroup label="Blocklist">
+        <option value="blocklisted">Blocklisted</option>
+        <option value="blocklist_added">Auto-Blocked</option>
+      </optgroup>
+      <optgroup label="Health">
+        <option value="debrid">Debrid Health</option>
+      </optgroup>
     </select>
     <input type="text" id="activity-search" data-kb="search" placeholder="Search titles... (/)" oninput="loadActivity(1)" style="flex:1;background:var(--input-bg);border:1px solid var(--input-border);border-radius:4px;padding:4px 8px;font-size:.8em;color:var(--text);outline:none;min-width:120px">
     <label style="font-size:.78em;color:var(--text2);display:inline-flex;align-items:center;gap:4px;user-select:none">
@@ -85,7 +94,7 @@ __NAV_HTML__
 </div>
 
 <!-- Blocklist Tab -->
-<div class="tab-panel" id="panel-blocklist">
+<div class="tab-panel" id="panel-blocklist" role="tabpanel" aria-labelledby="tab-blocklist" tabindex="0">
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
     <button class="btn btn-ghost btn-sm" onclick="clearBlocklist()" id="blocklist-clear-btn" style="display:none">Clear All</button>
     <button class="btn btn-ghost btn-sm" data-kb="refresh" onclick="loadBlocklist()">Refresh</button>
@@ -95,10 +104,10 @@ __NAV_HTML__
 </div>
 
 <!-- Stuck Tab -->
-<div class="tab-panel" id="panel-stuck">
+<div class="tab-panel" id="panel-stuck" role="tabpanel" aria-labelledby="tab-stuck" tabindex="0">
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
-    <span style="font-size:.78em;color:var(--text3)">Titles caught in retry loops with no progress. Retry clears give-up caps so the next scan tries again.</span>
-    <span id="stuck-dismissed-note" style="font-size:.78em;color:var(--text3);margin-left:auto;display:none"></span>
+    <span style="font-size:.78em;color:var(--text2)">Titles caught in retry loops with no progress. Retry clears give-up caps so the next scan tries again.</span>
+    <button type="button" id="stuck-dismissed-note" class="stuck-dismissed-note" style="display:none"></button>
     <button class="btn btn-ghost btn-sm" data-kb="refresh" onclick="loadStuck()">Refresh</button>
   </div>
   <table><thead><tr><th>Title</th><th>Why</th><th style="width:80px;text-align:center">Since</th><th style="width:70px;text-align:center">Attempts</th><th>Last event</th><th style="width:180px;text-align:center" id="stuck-actions-hdr"></th></tr></thead>
@@ -110,17 +119,40 @@ __NAV_HTML__
 <script>
 __THEME_TOGGLE_JS__
 
-/* Tab switching */
+/* Tab switching — state derived from aria-controls, not DOM index. */
 function switchTab(name){
-  document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});
-  document.querySelectorAll('.tab-panel').forEach(function(p){p.classList.remove('active')});
-  document.getElementById('panel-'+name).classList.add('active');
-  var idx=name==='history'?0:name==='blocklist'?1:2;
-  document.querySelectorAll('.tab')[idx].classList.add('active');
+  document.querySelectorAll('.tab').forEach(function(t){
+    var on=t.getAttribute('aria-controls')==='panel-'+name;
+    t.classList.toggle('active',on);
+    t.setAttribute('aria-selected',on?'true':'false');
+    t.tabIndex=on?0:-1;
+  });
+  document.querySelectorAll('.tab-panel').forEach(function(p){
+    p.classList.toggle('active',p.id==='panel-'+name);
+  });
 }
+/* Roving-focus arrow-key nav for the tablist (WAI-ARIA tabs pattern). */
+(function(){
+  var list=document.querySelector('[role="tablist"]');
+  if(!list)return;
+  list.addEventListener('keydown',function(e){
+    if(e.key!=='ArrowLeft'&&e.key!=='ArrowRight'&&e.key!=='Home'&&e.key!=='End')return;
+    var tabs=Array.prototype.slice.call(list.querySelectorAll('[role="tab"]'));
+    var cur=tabs.indexOf(document.activeElement);
+    if(cur<0)return;
+    var next=e.key==='Home'?0:e.key==='End'?tabs.length-1:
+      (cur+(e.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;
+    e.preventDefault();
+    tabs[next].focus();
+    tabs[next].click();
+  });
+})();
 
 /* Activity (History) */
 var _actPage=1;
+/* One-shot-until-recovery flags so a sustained outage toasts once per
+   loader, not on every 15/30/60s poll. Reset on the next successful load. */
+var _loadErr={act:false,bl:false,stuck:false};
 function loadActivity(page){
   if(page)_actPage=page; else if(!arguments.length){}else{_actPage=1;}
   var t=document.getElementById('activity-type').value;
@@ -129,8 +161,9 @@ function loadActivity(page){
   if(t)url+='&type='+encodeURIComponent(t);
   if(q)url+='&title='+encodeURIComponent(q);
   fetch(url).then(function(r){return r.json()}).then(function(d){
+    _loadErr.act=false;
     var el=document.getElementById('activity-body');
-    if(!d.events||!d.events.length){el.innerHTML='<tr><td colspan="5" style="color:var(--text3);text-align:center;padding:16px">No activity recorded yet</td></tr>';document.getElementById('activity-pager').innerHTML='';return}
+    if(!d.events||!d.events.length){el.innerHTML='<tr><td colspan="5" style="color:var(--text2);text-align:center;padding:16px">No activity recorded yet</td></tr>';document.getElementById('activity-pager').innerHTML='';return}
     /* Collapse adjacent (type, source, cause, media) runs into one summary
        row when "Collapse repeats" is on.  Threshold 3 keeps distinct
        events visible while taming the 6-hour retry spam on long-unmet
@@ -167,7 +200,7 @@ function loadActivity(page){
         timeCell = timeAgo(e.ts);
       }
       var countBadge = runInfo ? (' <span class="act-run-count">' + runInfo.events.length + '×</span>') : '';
-      var row='<tr><td style="font-size:.8em;color:var(--text3);white-space:nowrap">'+timeCell+'</td>';
+      var row='<tr><td style="font-size:.8em;color:var(--text2);white-space:nowrap">'+timeCell+'</td>';
       row+='<td><span class="type-badge type-'+esc(e.type)+'">'+esc(e.type.replace(/_/g,' '))+countBadge+'</span></td>';
       /* Link titles to the library detail page when we have a canonical
          name: either the event was enriched with media_title (blackhole/arr),
@@ -180,7 +213,7 @@ function loadActivity(page){
       var _titleCell=_canLink&&_name?'<a class="act-link" href="/library?detail='+encodeURIComponent(_name)+'&type='+_mediaType+'&from=activity">'+esc(_name)+'</a>':esc(_name);
       row+='<td style="font-size:.85em">'+_titleCell+(e.episode?' <span style="color:var(--text2)">'+esc(e.episode)+'</span>':'')+'</td>';
       row+='<td style="font-size:.8em;color:var(--text2)">'+esc(fmt.short||e.detail||'')+'</td>';
-      row+='<td style="font-size:.75em;color:var(--text3)">'+esc(e.source||'')+'</td></tr>';
+      row+='<td style="font-size:.75em;color:var(--text2)">'+esc(e.source||'')+'</td></tr>';
       return row;
     }
     var h='';
@@ -223,7 +256,7 @@ function loadActivity(page){
     }
     document.getElementById('activity-pager').innerHTML=pg;
     if(window._hasAuth)document.getElementById('activity-clear-btn').style.display='';
-  }).catch(function(){});
+  }).catch(function(){if(!_loadErr.act){_loadErr.act=true;showToast('Failed to load activity','error');}});
 }
 function clearHistory(){
   showConfirm('Clear history?','This will remove all activity history entries.').then(function(ok){
@@ -235,10 +268,11 @@ function clearHistory(){
 /* Blocklist */
 function loadBlocklist(){
   fetch('/api/blocklist').then(function(r){return r.json()}).then(function(entries){
+    _loadErr.bl=false;
     var el=document.getElementById('blocklist-body');
     var cnt=document.getElementById('bl-tab-count');
     if(!entries||!entries.length){
-      el.innerHTML='<tr><td colspan="6" style="color:var(--text3);text-align:center;padding:16px">No blocklisted torrents</td></tr>';
+      el.innerHTML='<tr><td colspan="6" style="color:var(--text2);text-align:center;padding:16px">No blocklisted torrents</td></tr>';
       cnt.style.display='none';
       return;
     }
@@ -250,25 +284,34 @@ function loadBlocklist(){
       var srcBadge=e.source==='auto'?'<span style="color:var(--orange);font-size:.75em">\u2699 auto</span>':'<span style="font-size:.75em">manual</span>';
       h+='<tr>';
       h+='<td style="font-size:.85em">'+esc(e.title||'')+'</td>';
-      h+='<td class="bl-hash" style="font-size:.75em;font-family:monospace;color:var(--text2);cursor:pointer" title="Click to copy" data-hash="'+esc(e.info_hash||'')+'">'+esc(shortHash)+'</td>';
+      h+='<td style="font-size:.75em"><button type="button" class="bl-hash" title="Copy full hash" data-hash="'+esc(e.info_hash||'')+'">'+esc(shortHash)+'</button></td>';
       h+='<td style="font-size:.8em;color:var(--text2)">'+esc(e.reason||'')+'</td>';
-      h+='<td style="font-size:.8em;color:var(--text3);white-space:nowrap">'+timeAgo(e.date)+'</td>';
+      h+='<td style="font-size:.8em;color:var(--text2);white-space:nowrap">'+timeAgo(e.date)+'</td>';
       h+='<td>'+srcBadge+'</td>';
       h+='<td>';
       if(window._hasAuth)h+='<button class="btn btn-ghost btn-sm bl-remove" style="font-size:.7em;padding:2px 6px" data-id="'+esc(e.id)+'">Remove</button>';
       h+='</td></tr>';
     });
     el.innerHTML=h;
-    el.querySelectorAll('.bl-hash').forEach(function(td){td.addEventListener('click',function(){navigator.clipboard.writeText(this.dataset.hash||'')})});
+    el.querySelectorAll('.bl-hash').forEach(function(b){b.addEventListener('click',function(){
+      var hash=this.dataset.hash||'';
+      if(!hash)return;
+      if(navigator.clipboard&&navigator.clipboard.writeText){
+        navigator.clipboard.writeText(hash).then(
+          function(){showToast('Hash copied','success')},
+          function(){showToast('Copy failed','error')});
+      }else{showToast('Copy failed','error');}
+    })});
     el.querySelectorAll('.bl-remove').forEach(function(btn){btn.addEventListener('click',function(){removeBlocklistEntry(this.dataset.id)})});
     if(window._hasAuth)document.getElementById('blocklist-clear-btn').style.display='';
     if(window._hasAuth)document.getElementById('bl-actions-hdr').textContent='Actions';
-  }).catch(function(){});
+  }).catch(function(){if(!_loadErr.bl){_loadErr.bl=true;showToast('Failed to load blocklist','error');}});
 }
 function removeBlocklistEntry(id){
   fetch('/api/blocklist/'+encodeURIComponent(id),{method:'DELETE'}).then(function(r){
+    showToast(r.ok?'Removed from blocklist':'Remove failed',r.ok?'success':'error');
     if(r.ok)loadBlocklist();
-  }).catch(function(){});
+  }).catch(function(){showToast('Remove failed','error')});
 }
 function clearBlocklist(){
   showConfirm('Clear blocklist?','Remove all blocklisted torrents? They may be re-downloaded.').then(function(ok){
@@ -290,11 +333,11 @@ function stuckRowHtml(it,i,dismissed){
     last=esc(fmt.short||it.last_event.detail||'')+' <span style="color:var(--text3)">('+timeAgo(it.last_event.ts)+')</span>';
   }
   var mt=it.media_type==='show'?'show':'movie';
-  var titleCell=it.title?'<a class="act-link" href="/library?detail='+encodeURIComponent(it.title)+'&type='+mt+'&from=activity">'+esc(it.title)+'</a>':'<span style="color:var(--text3)">(unknown)</span>';
+  var titleCell=it.title?'<a class="act-link" href="/library?detail='+encodeURIComponent(it.title)+'&type='+mt+'&from=activity">'+esc(it.title)+'</a>':'<span style="color:var(--text2)">(unknown)</span>';
   var h='<tr'+(dismissed?' style="opacity:.55"':'')+'>';
   h+='<td style="font-size:.85em">'+titleCell+(it.provider?' <span style="color:var(--text3);font-size:.8em">['+esc(it.provider)+']</span>':'')+'</td>';
   h+='<td>'+chips+'</td>';
-  h+='<td style="font-size:.8em;color:var(--text3);white-space:nowrap">'+(it.since?timeAgo(it.since):'—')+'</td>';
+  h+='<td style="font-size:.8em;color:var(--text2);white-space:nowrap">'+(it.since?timeAgo(it.since):'—')+'</td>';
   h+='<td style="font-size:.85em;font-family:monospace">'+(it.attempts||0)+'</td>';
   h+='<td style="font-size:.8em;color:var(--text2)">'+last+'</td>';
   h+='<td class="stuck-actions">';
@@ -315,6 +358,7 @@ function stuckRowHtml(it,i,dismissed){
 }
 function loadStuck(){
   fetch('/api/stuck').then(function(r){return r.json()}).then(function(d){
+    _loadErr.stuck=false;
     var el=document.getElementById('stuck-body');
     var cnt=document.getElementById('stuck-tab-count');
     var note=document.getElementById('stuck-dismissed-note');
@@ -324,11 +368,12 @@ function loadStuck(){
       var label=d.dismissed+' dismissed';
       if(_showDismissed&&dItems.length<d.dismissed)label=d.dismissed+' dismissed (showing '+dItems.length+')';
       note.textContent=label+' '+(_showDismissed?'▾':'▸');
-      note.style.display='';note.style.cursor='pointer';
+      note.setAttribute('aria-expanded',_showDismissed?'true':'false');
+      note.style.display='';
     }else{note.style.display='none';_showDismissed=false;}
     var h='';
     if(!d.items||!d.items.length){
-      h+='<tr><td colspan="6" style="color:var(--text3);text-align:center;padding:16px">Nothing stuck — all retry loops are making progress</td></tr>';
+      h+='<tr><td colspan="6" style="color:var(--text2);text-align:center;padding:16px">Nothing stuck — all retry loops are making progress</td></tr>';
       cnt.style.display='none';
     }else{
       cnt.textContent=d.total;
@@ -350,7 +395,7 @@ function loadStuck(){
     el.querySelectorAll('.stuck-dismiss').forEach(function(b){b.addEventListener('click',function(){stuckDismiss(_stuckList[+this.dataset.i])})});
     el.querySelectorAll('.stuck-undismiss').forEach(function(b){b.addEventListener('click',function(){stuckUndismiss(_dismissedList[+this.dataset.i])})});
     if(window._hasAuth)document.getElementById('stuck-actions-hdr').textContent='Actions';
-  }).catch(function(){});
+  }).catch(function(){if(!_loadErr.stuck){_loadErr.stuck=true;showToast('Failed to load stuck items','error');}});
 }
 document.getElementById('stuck-dismissed-note').addEventListener('click',function(){
   _showDismissed=!_showDismissed;loadStuck();
@@ -382,7 +427,7 @@ function stuckRetry(it){
         });
       }
       showToast('Retry state cleared — next scan will retry','success');
-    }).then(function(){loadStuck()}).catch(function(){showToast('Retry failed','error')});
+    }).catch(function(){showToast('Retry failed','error')}).then(function(){loadStuck()});
   });
 }
 function stuckBlock(it){
@@ -425,11 +470,27 @@ window.onKbEscape=function(){
   }
 })();
 
-/* Initial load (wait for auth detection) + polling */
+/* Initial load (wait for auth detection) + polling.
+   Guards keep the auto-refresh from rewriting a table the user is actively
+   reading or interacting with: never poll a backgrounded tab, and skip the
+   History refresh while it's off-screen, paginated past page 1, or while the
+   user is mid-search. The search gate needs a non-empty value too: a native
+   <select> keeps focus after a pick, so gating on focus alone would wedge
+   polling off forever. A refresh only rewrites the results table, not the
+   filter bar, so an empty/idle search box is safe to refresh under. Blocklist/
+   Stuck only gate on visibility so their tab-count badges stay current. */
 window._hasAuthReady.then(function(){loadActivity();loadBlocklist();loadStuck();});
-setInterval(loadActivity,15000);
-setInterval(loadBlocklist,30000);
-setInterval(loadStuck,60000);
+function _pollHistory(){
+  if(document.hidden)return;
+  if(!document.getElementById('panel-history').classList.contains('active'))return;
+  if(_actPage>1)return;
+  var s=document.getElementById('activity-search');
+  if(s&&document.activeElement===s&&s.value)return;
+  loadActivity();
+}
+setInterval(_pollHistory,15000);
+setInterval(function(){if(!document.hidden)loadBlocklist();},30000);
+setInterval(function(){if(!document.hidden)loadStuck();},60000);
 __WANTED_BADGE_JS__
 </script>
 </main>
@@ -446,6 +507,12 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .stuck-chip{display:inline-block;padding:2px 7px;border-radius:4px;font-size:.72em;font-weight:500;white-space:nowrap;background:#d299221a;color:var(--yellow);margin:1px 0}
 .stuck-chip-red{background:#f851491a;color:var(--red)}
 .stuck-actions .btn{font-size:.7em;padding:2px 6px}
+.stuck-dismissed-note{background:none;border:none;font-family:inherit;font-size:.78em;color:var(--text2);margin-left:auto;padding:0;cursor:pointer}
+.stuck-dismissed-note:hover{color:var(--text)}
+.stuck-dismissed-note:focus-visible{outline:2px solid var(--input-focus);outline-offset:2px;border-radius:3px}
+.bl-hash{background:none;border:none;font-family:monospace;font-size:1em;color:var(--text2);cursor:pointer;padding:0}
+.bl-hash:hover{color:var(--text)}
+.bl-hash:focus-visible{outline:2px solid var(--input-focus);outline-offset:2px;border-radius:3px}
 .act-link{color:inherit;text-decoration:none;border-bottom:1px dotted var(--text3);transition:color var(--motion-fast),border-color var(--motion-fast)}
 .act-link:hover{color:var(--blue);border-bottom-color:var(--blue);text-decoration:none}
 .type-badge{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-size:.75em;font-weight:500;white-space:nowrap}

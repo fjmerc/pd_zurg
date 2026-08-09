@@ -679,7 +679,13 @@ function updateScanInfo() {
 // ---------------------------------------------------------------------------
 function _showMsg(text, type) {
   var el = document.getElementById('transfer-msg');
-  if (!el) return;
+  if (!el) {
+    // Detail view is gone (e.g. after hideDetail on delete/switch) — the
+    // inline strip no longer exists, so fall back to the shared toast so
+    // the result is never silently dropped.
+    if (text) showToast(text, type || 'info');
+    return;
+  }
   el.className = 'transfer-msg' + (type === 'success' ? ' msg-success' : type === 'error' ? ' msg-error' : '');
   el.textContent = text;
   _lastTransferText = text;
@@ -2536,7 +2542,7 @@ function _renderMovieDetail(movie, meta) {
     movieActionBtns.push('<button class="btn btn-ghost btn-icon" title="Block this release" onclick="event.stopPropagation();_blockItem()">&#128683;</button>');
   }
   if (_downloadServices.movie === 'radarr') {
-    movieActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" title="Delete from Radarr" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'movie\')})">&#128465; Delete</button>');
+    movieActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" title="Delete from Radarr" onclick="event.stopPropagation();deleteItem(\'movie\')">&#128465; Delete</button>');
   }
   if (_searchEnabled && movie.imdb_id) {
     movieActionBtns.push('<button class="btn btn-ghost btn-sm" data-imdb="' + escAttr(movie.imdb_id) + '" data-mtype="movie" data-label="' + escAttr(movie.title) + '" data-media-title="' + escAttr(movie.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button>');
@@ -2897,7 +2903,7 @@ function _renderShowDetail(show, meta) {
   html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px;line-height:1.5"><strong style="color:var(--text2)">Prefer Local</strong> &mdash; switches debrid-only episodes to local copies.<br><strong style="color:var(--text2)">Prefer Debrid</strong> &mdash; removes local copies and streams from debrid.</div>';
   var showActionBtns = [];
   if (_downloadServices.show === 'sonarr') {
-    showActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" title="Delete from Sonarr" onclick="event.stopPropagation();_confirmBtn(this,function(){deleteItem(\'show\')})">&#128465; Delete</button>');
+    showActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" title="Delete from Sonarr" onclick="event.stopPropagation();deleteItem(\'show\')">&#128465; Delete</button>');
   }
   if (_searchEnabled && show.imdb_id) {
     showActionBtns.push('<button class="btn btn-ghost btn-sm" data-imdb="' + escAttr(show.imdb_id) + '" data-mtype="series" data-label="' + escAttr(show.title) + '" data-media-title="' + escAttr(show.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button>');
@@ -3324,14 +3330,17 @@ function applyPreference() {
     // Case 1: only debrid-only episodes (no both) — download them
     if (totalDlEps > 0 && totalBothEps === 0) {
       var svcLabel = _svcNames[showSvc] || showSvc;
-      if (!confirm(isOverseerr
+      showConfirm(isOverseerr ? 'Request in Overseerr' : 'Switch to Local',
+        isOverseerr
         ? 'Request ' + dlTasks.length + ' season(s) in Overseerr?'
-        : 'Switch ' + totalDlEps + ' episode(s) to local via ' + svcLabel + '?')) return;
-      _runSequential(dlTasks).then(function(ok) {
-        if (ok) {
-          _savePref(nk, pref);
-          if (dlPendingEps.length) _setPending(_detailItem.title, dlPendingEps, 'to-local');
-        }
+        : 'Switch ' + totalDlEps + ' episode(s) to local via ' + svcLabel + '?').then(function(confirmed) {
+        if (!confirmed) return;
+        _runSequential(dlTasks).then(function(ok) {
+          if (ok) {
+            _savePref(nk, pref);
+            if (dlPendingEps.length) _setPending(_detailItem.title, dlPendingEps, 'to-local');
+          }
+        });
       });
       return;
     }
@@ -3346,15 +3355,17 @@ function applyPreference() {
     }
     // Case 3: mixed — download debrid-only, then remove debrid for both-source
     var svcLabel2 = _svcNames[showSvc] || showSvc;
-    if (!confirm('Switch ' + totalDlEps + ' episode(s) to local via ' + svcLabel2
-      + ' and remove ' + totalBothEps + ' debrid duplicate(s)?')) return;
-    _runSequential(dlTasks).then(function(ok) {
-      if (!ok) return false;
-      return _postRemoveDebrid(_detailItem.title, _detailItem.year);
-    }).then(function(ok) {
-      if (ok) _savePref(nk, pref);
-    }).catch(function(e) {
-      _showMsg('Operation failed: ' + e, 'error');
+    showConfirm('Switch to Local', 'Switch ' + totalDlEps + ' episode(s) to local via ' + svcLabel2
+      + ' and remove ' + totalBothEps + ' debrid duplicate(s)?').then(function(confirmed) {
+      if (!confirmed) return;
+      _runSequential(dlTasks).then(function(ok) {
+        if (!ok) return false;
+        return _postRemoveDebrid(_detailItem.title, _detailItem.year);
+      }).then(function(ok) {
+        if (ok) _savePref(nk, pref);
+      }).catch(function(e) {
+        _showMsg('Operation failed: ' + e, 'error');
+      });
     });
 
   } else if (pref === 'prefer-debrid') {
@@ -3434,53 +3445,55 @@ function applyPreference() {
     var confirmMsg2 = 'Switch ' + totalSwitchable + ' episode(s) to debrid streaming?'
       + '\n\nLocal files will be removed. Playback will stream from your debrid service instead.';
     if (totalSearchable > 0) confirmMsg2 += '\n\n' + totalSearchable + ' additional episode(s) will be searched for debrid copies.';
-    if (!confirm(confirmMsg2)) return;
-    _actionInFlight = true;
-    _setActionsDisabled(true);
-    _showMsgHtml('<span class="scanning-dot"></span>Switching to debrid...');
-    var capturedTitle2 = _detailItem.title;
-    var capturedTmdbId2 = tmdbId;
-    fetch('/api/library/switch-to-debrid', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({title: capturedTitle2, episodes: switchEps})
-    }).then(function(r) {
-      return r.json().then(function(d) { return {ok: r.ok, d: d}; });
-    }).then(function(res) {
-      if (res.ok && res.d.switched > 0) {
-        // Clear action-in-flight before triggering searches (which use _postDownload)
-        // Keep buttons disabled until the full chain completes
-        _actionInFlight = false;
-        _savePref(nk, pref).then(function(saved) {
-          if (!saved) { _showMsg('Switched ' + res.d.switched + ' episode(s) but failed to save preference.', 'error'); return; }
-          if (searchEps.length) {
-            _setPending(capturedTitle2, searchEps, 'to-debrid');
-            _searchForDebrid(capturedTitle2, capturedTmdbId2, searchEps, function(ok) {
-              if (ok) {
-                _showMsg('Switched ' + res.d.switched + ' episode(s). Searching for debrid copies of ' + totalSearchable + ' more.', 'success');
-              } else {
-                _showMsg('Switched ' + res.d.switched + ' episode(s) but search failed for remaining.', 'error');
-              }
+    showConfirm('Switch to Debrid', confirmMsg2, {danger: true, confirmLabel: 'Switch'}).then(function(confirmed) {
+      if (!confirmed) return;
+      _actionInFlight = true;
+      _setActionsDisabled(true);
+      _showMsgHtml('<span class="scanning-dot"></span>Switching to debrid...');
+      var capturedTitle2 = _detailItem.title;
+      var capturedTmdbId2 = tmdbId;
+      fetch('/api/library/switch-to-debrid', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({title: capturedTitle2, episodes: switchEps})
+      }).then(function(r) {
+        return r.json().then(function(d) { return {ok: r.ok, d: d}; });
+      }).then(function(res) {
+        if (res.ok && res.d.switched > 0) {
+          // Clear action-in-flight before triggering searches (which use _postDownload)
+          // Keep buttons disabled until the full chain completes
+          _actionInFlight = false;
+          _savePref(nk, pref).then(function(saved) {
+            if (!saved) { _showMsg('Switched ' + res.d.switched + ' episode(s) but failed to save preference.', 'error'); return; }
+            if (searchEps.length) {
+              _setPending(capturedTitle2, searchEps, 'to-debrid');
+              _searchForDebrid(capturedTitle2, capturedTmdbId2, searchEps, function(ok) {
+                if (ok) {
+                  _showMsg('Switched ' + res.d.switched + ' episode(s). Searching for debrid copies of ' + totalSearchable + ' more.', 'success');
+                } else {
+                  _showMsg('Switched ' + res.d.switched + ' episode(s) but search failed for remaining.', 'error');
+                }
+                _scheduleRefresh(1000);
+                _setActionsDisabled(false);
+              });
+            } else {
+              _showMsg('Switched ' + res.d.switched + ' episode(s) to debrid streaming.', 'success');
               _scheduleRefresh(1000);
               _setActionsDisabled(false);
-            });
-          } else {
-            _showMsg('Switched ' + res.d.switched + ' episode(s) to debrid streaming.', 'success');
-            _scheduleRefresh(1000);
-            _setActionsDisabled(false);
-          }
-        }).catch(function() { _setActionsDisabled(false); });
-      } else {
-        _showMsg('Error: ' + (res.d.error || res.d.message || 'Switch failed'), 'error');
-      }
-    }).catch(function(e) {
-      _showMsg('Switch failed: ' + e, 'error');
-    }).finally(function() {
-      // Only clear if not already cleared by the success path above
-      if (_actionInFlight) {
-        _actionInFlight = false;
-        _setActionsDisabled(false);
-      }
+            }
+          }).catch(function() { _setActionsDisabled(false); });
+        } else {
+          _showMsg('Error: ' + (res.d.error || res.d.message || 'Switch failed'), 'error');
+        }
+      }).catch(function(e) {
+        _showMsg('Switch failed: ' + e, 'error');
+      }).finally(function() {
+        // Only clear if not already cleared by the success path above
+        if (_actionInFlight) {
+          _actionInFlight = false;
+          _setActionsDisabled(false);
+        }
+      });
     });
 
   } else {
@@ -3702,33 +3715,38 @@ function deleteItem(mediaType) {
     _showMsg('Waiting for metadata to load — please try again in a moment.', 'error');
     return;
   }
-  _actionInFlight = true;
-  _setActionsDisabled(true);
-  _showMsgHtml('<span class="scanning-dot"></span>Deleting from ' + svc + ' and cleaning up...');
   var titleCopy = _detailItem.title;
-  fetch('/api/library/delete', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({title: titleCopy, type: mediaType, tmdb_id: tmdbId, delete_debrid: true, year: _detailItem.year || null})
-  }).then(function(r) {
-    return r.json().then(function(d) { return {ok: r.ok, d: d}; });
-  }).then(function(res) {
-    if (res.ok && res.d.status === 'deleted') {
-      hideDetail();
-      var parts = ['Deleted ' + titleCopy + ' from ' + svc];
-      var c = res.d.cleanup || {};
-      if (c.debrid_torrents_removed) parts.push(c.debrid_torrents_removed + ' debrid torrent(s) removed');
-      if (c.symlinks_removed) parts.push(c.symlinks_removed + ' symlink dir(s) cleaned');
-      _showMsg(parts.join(' \u2014 '), 'success');
-      fetchLibrary();
-    } else {
-      _showMsg('Failed: ' + (res.d.error || res.d.message || 'Unknown error'), 'error');
-    }
-  }).catch(function(e) {
-    _showMsg('Delete failed: ' + e, 'error');
-  }).finally(function() {
-    _actionInFlight = false;
-    _setActionsDisabled(false);
+  showConfirm('Delete ' + titleCopy + '?',
+    'Removes ' + titleCopy + ' from ' + svc + ', and permanently deletes its debrid torrent(s) and symlink folder(s). This cannot be undone.',
+    {danger: true, confirmLabel: 'Delete'}).then(function(confirmed) {
+    if (!confirmed) return;
+    _actionInFlight = true;
+    _setActionsDisabled(true);
+    _showMsgHtml('<span class="scanning-dot"></span>Deleting from ' + svc + ' and cleaning up...');
+    fetch('/api/library/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({title: titleCopy, type: mediaType, tmdb_id: tmdbId, delete_debrid: true, year: _detailItem.year || null})
+    }).then(function(r) {
+      return r.json().then(function(d) { return {ok: r.ok, d: d}; });
+    }).then(function(res) {
+      if (res.ok && res.d.status === 'deleted') {
+        hideDetail();
+        var parts = ['Deleted ' + titleCopy + ' from ' + svc];
+        var c = res.d.cleanup || {};
+        if (c.debrid_torrents_removed) parts.push(c.debrid_torrents_removed + ' debrid torrent(s) removed');
+        if (c.symlinks_removed) parts.push(c.symlinks_removed + ' symlink dir(s) cleaned');
+        _showMsg(parts.join(' \u2014 '), 'success');
+        fetchLibrary();
+      } else {
+        _showMsg('Failed: ' + (res.d.error || res.d.message || 'Unknown error'), 'error');
+      }
+    }).catch(function(e) {
+      _showMsg('Delete failed: ' + e, 'error');
+    }).finally(function() {
+      _actionInFlight = false;
+      _setActionsDisabled(false);
+    });
   });
 }
 
@@ -3864,11 +3882,13 @@ function applyMoviePreference() {
 
   if (pref === 'prefer-local' && movieSvc && _detailItem.source === 'debrid') {
     var svcLabel = _svcNames[movieSvc] || movieSvc;
-    if (!confirm('Switch ' + _detailItem.title + ' to local via ' + svcLabel + '?')) return;
-    _postDownload({
-      title: _detailItem.title, type: 'movie', tmdb_id: tmdbId,
-      prefer_debrid: false
-    }).then(function(ok) { if (ok) _savePref(nk, pref); });
+    showConfirm('Switch to Local', 'Switch ' + _detailItem.title + ' to local via ' + svcLabel + '?').then(function(confirmed) {
+      if (!confirmed) return;
+      _postDownload({
+        title: _detailItem.title, type: 'movie', tmdb_id: tmdbId,
+        prefer_debrid: false
+      }).then(function(ok) { if (ok) _savePref(nk, pref); });
+    });
 
   } else if (pref === 'prefer-local' && _detailItem.source === 'both') {
     // Movie exists in both — remove debrid copy
@@ -3901,31 +3921,34 @@ function applyMoviePreference() {
       });
     } else {
       // source=both — replace local file with link to debrid mount
-      if (!confirm('Switch ' + _detailItem.title + ' to debrid streaming?'
-        + '\n\nLocal file will be removed. Playback will stream from your debrid service.')) return;
-      var oldPref = _savedPref;
-      var capturedBothTitle = _detailItem.title;
-      _actionInFlight = true;
-      _setActionsDisabled(true);
-      _showMsgHtml('<span class="scanning-dot"></span>Switching to debrid...');
-      _savePref(nk, pref).then(function(saved) {
-        if (!saved) return;
-        // Clear before _postRemove which has its own _actionInFlight guard
-        // Keep buttons disabled until the full chain completes
-        _actionInFlight = false;
-        return _postRemove({
-          title: capturedBothTitle, type: 'movie', tmdb_id: tmdbId,
-          episodes: []
-        }).then(function(ok) {
-          if (!ok) { _savePref(nk, oldPref); }
-          else { _showMsg('Switched to debrid streaming. To get a local copy back, use the Switch to Local button.', 'success'); }
-          _scheduleRefresh(1000);
+      showConfirm('Switch to Debrid', 'Switch ' + _detailItem.title + ' to debrid streaming?'
+        + '\n\nLocal file will be removed. Playback will stream from your debrid service.',
+        {danger: true, confirmLabel: 'Switch'}).then(function(confirmed) {
+        if (!confirmed) return;
+        var oldPref = _savedPref;
+        var capturedBothTitle = _detailItem.title;
+        _actionInFlight = true;
+        _setActionsDisabled(true);
+        _showMsgHtml('<span class="scanning-dot"></span>Switching to debrid...');
+        _savePref(nk, pref).then(function(saved) {
+          if (!saved) return;
+          // Clear before _postRemove which has its own _actionInFlight guard
+          // Keep buttons disabled until the full chain completes
+          _actionInFlight = false;
+          return _postRemove({
+            title: capturedBothTitle, type: 'movie', tmdb_id: tmdbId,
+            episodes: []
+          }).then(function(ok) {
+            if (!ok) { _savePref(nk, oldPref); }
+            else { _showMsg('Switched to debrid streaming. To get a local copy back, use the Switch to Local button.', 'success'); }
+            _scheduleRefresh(1000);
+          });
+        }).catch(function(e) {
+          _showMsg('Operation failed: ' + e, 'error');
+        }).finally(function() {
+          _actionInFlight = false;
+          _setActionsDisabled(false);
         });
-      }).catch(function(e) {
-        _showMsg('Operation failed: ' + e, 'error');
-      }).finally(function() {
-        _actionInFlight = false;
-        _setActionsDisabled(false);
       });
     }
 

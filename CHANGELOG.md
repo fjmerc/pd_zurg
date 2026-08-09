@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## [Unreleased]
+
+### Changed
+
+- **Library: destructive actions now use the shared confirm dialog, and detail-view results survive navigation**: the library detail page had grown its own feedback/confirm layer separate from the app's shared primitives, and the **Delete** button (which permanently removes the debrid torrent(s) and symlink folders) was gated by the *same* generic two-click "Are you sure?" as reversible actions like "Switch to Local" — no disclosure of what actually gets destroyed. Delete now opens the shared `showConfirm` modal (focus-trapped, keyboard-accessible) with an explicit scope line ("Removes X from Radarr/Sonarr, and permanently deletes its debrid torrent(s) and symlink folder(s). This cannot be undone.") and a red **Delete** confirm button. The five detail-view preference-switch confirmations (switch-to-local, switch-to-debrid, and the mixed cases — the destructive switch-to-debrid variants that remove local files now get a red **Switch** button) moved off the browser-native `confirm()` onto the same themed modal. The inline transfer-message helper now falls back to a shared toast whenever the detail view has already closed (e.g. after a successful delete hides the panel), so success/error messages are never silently dropped — previously they wrote to a DOM element that no longer existed. `showConfirm` gained an optional `{confirmLabel, danger}` argument (backward-compatible) so destructive confirmations render a distinct danger button, and its message paragraph now honors line breaks. (The three bulk/Wanted select-mode confirmations still use native `confirm()` — a separate subsystem left for a follow-up.)
+
+
 ## Version [2.21.0] - 2026-08-09
 
 ### Added

@@ -404,12 +404,15 @@ function _ensureDialog(){
   document.body.appendChild(dlg);
   return dlg;
 }
-function showConfirm(title,msg){
+function showConfirm(title,msg,opts){
+  opts=opts||{};
   return new Promise(function(resolve){
     var dlg=_ensureDialog();
     document.getElementById('dlg-title').textContent=title;
     document.getElementById('dlg-msg').textContent=msg;
     var okBtn=document.getElementById('dlg-ok');
+    okBtn.textContent=opts.confirmLabel||'Confirm';
+    okBtn.className='dlg-btn dlg-confirm'+(opts.danger?' dlg-danger':'');
     var handler=function(){dlg.close('ok');};
     okBtn.onclick=handler;
     dlg.onclose=function(){okBtn.onclick=null;resolve(dlg.returnValue==='ok');};
@@ -504,12 +507,13 @@ def get_base_head(title, extra_css=''):
         'border-radius:10px;padding:24px;max-width:min(380px,calc(100vw - 32px));margin:auto;box-shadow:0 8px 32px rgba(0,0,0,.5)}'
         'dialog::backdrop{background:rgba(0,0,0,.6);backdrop-filter:blur(2px)}'
         'dialog h3{margin-bottom:12px;font-size:1em;color:var(--text)}'
-        'dialog p{margin-bottom:20px;font-size:.9em;color:var(--text2)}'
+        'dialog p{margin-bottom:20px;font-size:.9em;color:var(--text2);white-space:pre-line}'
         'dialog .dlg-actions{display:flex;gap:8px;justify-content:flex-end}'
         'dialog .dlg-btn{padding:8px 18px;border-radius:6px;font-size:.85em;cursor:pointer;'
         'border:none;font-weight:500}'
         'dialog .dlg-cancel{background:var(--border);color:var(--text)}'
         'dialog .dlg-confirm{background:var(--blue);color:#fff}'
+        'dialog .dlg-danger{background:var(--red);color:#fff}'
     )
     parts = [
         '<meta charset="utf-8">',

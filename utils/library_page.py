@@ -225,8 +225,7 @@ __NAV_HTML__
 .detail-view{max-width:1200px}
 .detail-back{display:inline-block;background:none;border:none;color:var(--blue);cursor:pointer;font-size:.85em;margin-bottom:12px;user-select:none;padding:0;font-family:inherit}
 .detail-back:hover{text-decoration:underline}
-.detail-header{margin-bottom:16px}
-.detail-header h2{font-size:1.3em;font-weight:600;margin-bottom:6px}
+.detail-info h2{font-size:1.3em;font-weight:600;margin-bottom:6px;overflow-wrap:anywhere;text-wrap:balance}
 
 /* Detail body — single column (Activity renders full-width below seasons) */
 .detail-body{display:block}
@@ -279,6 +278,14 @@ __NAV_HTML__
 .pref-select{background:var(--input-bg);border:1px solid var(--input-border);border-radius:6px;padding:4px 8px;color:var(--text);font-size:.82em;outline:none;cursor:pointer}
 .pref-select:focus{border-color:var(--input-focus)}
 .pref-row .btn{font-size:.82em;padding:4px 12px}
+.pref-label{font-size:.82em;color:var(--text2)}
+.pref-help{font-size:.75em;color:var(--text3);line-height:1.5;margin-top:6px}
+.pref-help summary{cursor:pointer;color:var(--text2);font-weight:600;width:fit-content;user-select:none}
+.pref-help summary:hover{color:var(--text)}
+.pref-help strong{color:var(--text2);font-weight:600}
+.pref-help[open] summary{margin-bottom:4px}
+.pref-config-hint{font-size:.82em;color:var(--text3);margin-top:8px}
+.detail-action-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px}
 /* Library primary buttons use blue instead of green */
 .btn-primary{background:var(--blue);border-color:var(--blue)}
 .btn-primary:hover:not(:disabled){opacity:.85;background:#4c9aff}
@@ -313,11 +320,18 @@ __NAV_HTML__
 .detail-poster{width:150px;min-width:150px;display:flex;flex-direction:column;gap:8px}
 .detail-poster img{width:100%;display:block;border-radius:8px}
 .detail-poster .poster-rating{display:flex;justify-content:center}
+.detail-poster-fill{width:100%;aspect-ratio:2/3;border-radius:8px}
+.detail-poster-empty{background:var(--border);display:flex;align-items:center;justify-content:center;color:var(--text2);font-size:2.6em;font-weight:600;user-select:none}
+.detail-overview-skeleton{margin-top:4px}
 .detail-info{flex:1;min-width:0}
 .detail-info .card-badges{margin-top:6px}
-.detail-overview{font-size:.85em;color:var(--text2);margin-top:8px;line-height:1.5;max-height:7.5em;overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,black 85%,transparent);mask-image:linear-gradient(to bottom,black 85%,transparent);cursor:pointer;transition:max-height .3s ease}
-.detail-overview.expanded{max-height:60em;-webkit-mask-image:none;mask-image:none}
-.detail-status{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:var(--border);color:var(--text2);margin-left:6px}
+.detail-overview{font-size:.85em;color:var(--text2);margin-top:8px;line-height:1.5;max-height:7.5em;overflow:hidden;position:relative;transition:max-height .3s ease}
+.detail-overview.is-short{max-height:none;overflow:visible}
+.detail-overview.is-clamped{cursor:pointer;-webkit-mask-image:linear-gradient(to bottom,black 70%,transparent);mask-image:linear-gradient(to bottom,black 70%,transparent)}
+.detail-overview.is-clamped.expanded{max-height:60em;-webkit-mask-image:none;mask-image:none}
+.detail-overview.is-clamped::after{content:'Show more';position:absolute;right:0;bottom:0;font-size:.92em;font-weight:600;color:var(--blue);background:var(--bg);padding-left:14px}
+.detail-overview.is-clamped.expanded::after{content:'Show less'}
+.detail-status{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:var(--border);color:var(--text);margin-left:6px}
 
 /* Plex-style detail meta */
 .detail-meta-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:6px;font-size:.85em;color:var(--text2)}
@@ -333,6 +347,7 @@ __NAV_HTML__
 .cast-section h3{font-size:1em;font-weight:600;margin-bottom:8px;color:var(--text)}
 .cast-scroll-wrap{position:relative}
 .cast-scroll{display:flex;gap:12px;overflow-x:auto;padding-bottom:4px;scroll-behavior:smooth;scrollbar-width:none;-ms-overflow-style:none}
+@media(prefers-reduced-motion:reduce){.cast-scroll{scroll-behavior:auto}}
 .cast-scroll::-webkit-scrollbar{display:none}
 .cast-card{flex:0 0 92px;text-align:center}
 .cast-photo{width:92px;height:92px;border-radius:50%;background:var(--border);background-size:cover;background-position:center;margin-bottom:4px}
@@ -347,9 +362,9 @@ __NAV_HTML__
 /* Episode titles and missing */
 .ep-title{color:var(--text);font-size:.95em;font-weight:600;display:inline}
 .ep-date{color:var(--text2);font-size:.82em;white-space:nowrap;margin-left:8px}
-.ep-relative{color:var(--text3);font-size:.9em;margin-left:4px}
+.ep-relative{color:var(--text2);font-size:.9em;margin-left:4px}
 .ep-filename{color:var(--text2);font-size:.75em;display:block;word-break:break-all;margin-top:2px}
-.ep-missing td{color:var(--text3)}
+.ep-missing td{color:var(--text2)}
 .badge-missing{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#f851490f;color:var(--red);border:1px solid #f8514933;vertical-align:middle}
 .badge-upcoming{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#58a6ff0f;color:var(--blue);border:1px solid #58a6ff33;vertical-align:middle}
 .badge-tba{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:var(--border);color:var(--text3);border:1px solid var(--border2);vertical-align:middle}
@@ -369,8 +384,10 @@ __NAV_HTML__
 .badge-migrating::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:#2dd4bf;margin-right:4px;vertical-align:middle;animation:pulse-dot 1s ease-in-out infinite}
 [data-theme="light"] .badge-migrating{color:#0d9488;border-color:#0d948840;background:linear-gradient(90deg,#0d94881a 0%,#0d94880a 50%,#0d94881a 100%);background-size:200% 100%}
 [data-theme="light"] .badge-migrating::before{background:#0d9488}
-.badge-unavailable{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:var(--red);border:1px solid #f8514933;background:#f851490f;vertical-align:middle}
-[data-theme="light"] .badge-unavailable{background:#cf222e1a;border-color:#cf222e40;color:#cf222e}
+/* Debrid N/A is the one "you must act" state — solid fill so it out-ranks the
+   flat descriptive pills (quality/size); the fill itself is a non-hue cue. */
+.badge-unavailable{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:#fff;border:1px solid #b62324;background:#b62324;vertical-align:middle}
+[data-theme="light"] .badge-unavailable{background:#cf222e;border-color:#cf222e;color:#fff}
 .badge-fallback{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;color:var(--orange);border:1px solid #db6d2833;background:#db6d280f;vertical-align:middle}
 [data-theme="light"] .badge-fallback{background:#bc4c001a;border-color:#bc4c0040;color:#bc4c00}
 
@@ -457,6 +474,17 @@ body.has-bulk-bar{padding-bottom:60px}
   body.has-bulk-bar{padding-bottom:120px}
   .bulk-bar{padding:8px 12px;gap:6px}
   .wanted-pill{padding:3px 8px;font-size:.72em}
+}
+/* Touch input: enlarge hit areas to >=44px. Keyed on pointer, not width, so
+   the dense pointer:fine desktop layout stays compact; this block sits after
+   the width query so it also wins on phones (narrow AND coarse). */
+@media(pointer:coarse){
+  .btn-icon{width:44px;height:44px;padding:8px}
+  .detail-back{padding:10px 4px;min-height:44px}
+  .season-collapse-footer{padding:14px 0}
+  .ep-actions{white-space:normal}
+  .ep-actions .btn:not(.btn-icon){font-size:.8em;padding:8px 12px;min-height:44px}
+  .cast-arrow{width:44px;height:44px}
 }
 .search-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.65);display:flex;align-items:flex-start;justify-content:center;z-index:1000;padding:40px 16px;overflow-y:auto;backdrop-filter:blur(2px)}
 .search-dialog{background:var(--card);border:1px solid var(--border);border-radius:10px;width:100%;max-width:1000px;animation:modal-in .15s ease-out}
@@ -669,6 +697,26 @@ function esc(s) {
 function _toggleOverview(el) {
   var expanded = el.classList.toggle('expanded');
   el.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  el.setAttribute('aria-label', expanded ? 'Hide full synopsis' : 'Show full synopsis');
+}
+// The synopsis is rendered as static text; only advertise it as an expandable
+// control when it actually overflows its clamp. A short synopsis that fits gets
+// no "Show more" (which would reveal nothing) and no button semantics. Runs
+// synchronously right after the detail innerHTML swap, so the unmarked state
+// never paints.
+function _markClampedOverview(area) {
+  var ov = area.querySelector('.detail-overview');
+  if (!ov) return;
+  if (ov.scrollHeight - ov.clientHeight <= 4) { ov.classList.add('is-short'); return; }
+  ov.classList.add('is-clamped');
+  ov.setAttribute('role', 'button');
+  ov.setAttribute('tabindex', '0');
+  ov.setAttribute('aria-expanded', 'false');
+  ov.setAttribute('aria-label', 'Show full synopsis');
+  ov.addEventListener('click', function() { _toggleOverview(ov); });
+  ov.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); _toggleOverview(ov); }
+  });
 }
 // Shared a11y wiring for the lightweight overlay modals (blocklist + search):
 // remembers pre-open focus, moves focus into the dialog, and traps Tab. The
@@ -2169,7 +2217,7 @@ function _backButtonHtml() {
   if (_detailOrigin === 'activity') {
     return '<button class="detail-back" onclick="location.href=\'/activity\'" tabindex="0">&larr; Back to Activity</button>';
   }
-  return '<button class="detail-back" onclick="hideDetail()" tabindex="0">&larr; Back to Library</button>';
+  return '<button class="detail-back" onclick="hideDetail()" tabindex="0" title="Back to Library (Esc)">&larr; Back to Library</button>';
 }
 
 function _restoreDetailFromUrl() {
@@ -2384,6 +2432,7 @@ function normTitle(title) {
 
 var _detailItem = null;
 var _detailMeta = null;
+var _detailMetaLoading = false;
 var _historySidebarGen = 0;
 
 function showDetail(index) {
@@ -2398,6 +2447,7 @@ function showDetail(index) {
   _inDetailView = true;
   _detailItem = item;
   _detailMeta = null;
+  _detailMetaLoading = false;
   _lastDetailSig = null;  // force first render in this detail view
   _lastTransferText = '';
   _lastTransferType = '';
@@ -2421,6 +2471,9 @@ function showDetail(index) {
   _dUrl.searchParams.set('type', item.type);
   history.replaceState(null, '', _dUrl);
 
+  // Show poster/overview skeletons from the first paint when we know a
+  // metadata fetch is coming, so the info column never reflows when art lands.
+  _detailMetaLoading = !!item.type;
   _renderDetail();
   var backBtn = document.querySelector('.detail-back');
   if (backBtn) backBtn.focus();
@@ -2435,12 +2488,16 @@ function showDetail(index) {
     fetch('/api/library/metadata?' + params)
       .then(function(r) { return r.ok ? r.json() : null; })
       .then(function(meta) {
-        if (meta && _inDetailView && _detailItem === item) {
-          _detailMeta = meta;
-          _renderDetail();
-        }
+        if (!(_inDetailView && _detailItem === item)) return;
+        _detailMetaLoading = false;
+        if (meta) _detailMeta = meta;
+        _renderDetail();  // swap skeletons for real art (or a stable placeholder on empty)
       })
-      .catch(function() {});
+      .catch(function() {
+        if (!(_inDetailView && _detailItem === item)) return;
+        _detailMetaLoading = false;
+        _renderDetail();  // fetch failed — drop skeletons rather than shimmer forever
+      });
   }
 }
 
@@ -2499,6 +2556,30 @@ function _renderPosterRating(meta) {
   return '<div class="poster-rating"><span class="rating-badge">TMDB ' + meta.vote_average.toFixed(1) + '</span></div>';
 }
 
+// Poster column is ALWAYS rendered so the info column never reflows when
+// metadata resolves: real art when available, a shimmer skeleton while the
+// TMDB fetch is in flight, and a stable lettered placeholder when the fetch
+// finished with no artwork (or was never attempted).
+function _detailPosterHtml(title, meta) {
+  if (meta && meta.poster_url) {
+    return '<div class="detail-poster"><img src="' + escAttr(meta.poster_url) + '" alt="' + escAttr('Poster for ' + title) + '">' + _renderPosterRating(meta) + '</div>';
+  }
+  if (_detailMetaLoading) {
+    return '<div class="detail-poster"><div class="detail-poster-fill skeleton-line" aria-label="Loading poster" role="img"></div></div>';
+  }
+  var initial = esc((String(title || '?').trim().charAt(0) || '?').toUpperCase());
+  return '<div class="detail-poster"><div class="detail-poster-fill detail-poster-empty" role="img" aria-label="No poster available for ' + escAttr(title) + '">' + initial + '</div></div>';
+}
+
+function _detailOverviewSkeleton() {
+  return '<div class="detail-overview-skeleton" aria-hidden="true">'
+       + '<div class="skeleton-line" style="height:12px;width:45%;margin-top:8px"></div>'
+       + '<div class="skeleton-line" style="height:12px;width:92%;margin-top:12px"></div>'
+       + '<div class="skeleton-line" style="height:12px;width:88%;margin-top:6px"></div>'
+       + '<div class="skeleton-line" style="height:12px;width:60%;margin-top:6px"></div>'
+       + '</div>';
+}
+
 function _renderCastSection(meta) {
   if (!meta || !meta.cast || !meta.cast.length) return '';
   var out = '<div class="cast-section"><h3>Cast &amp; Crew</h3>';
@@ -2509,8 +2590,8 @@ function _renderCastSection(meta) {
     var bg = p.profile_url ? 'background-image:url(\'' + escAttr(p.profile_url) + '\')' : '';
     out += '<div class="cast-card">'
          + '<div class="cast-photo" style="' + bg + '" role="img" aria-label="' + escAttr(p.name) + '"></div>'
-         + '<div class="cast-name">' + esc(p.name) + '</div>'
-         + (p.character ? '<div class="cast-role">' + esc(p.character) + '</div>' : '')
+         + '<div class="cast-name" title="' + escAttr(p.name) + '">' + esc(p.name) + '</div>'
+         + (p.character ? '<div class="cast-role" title="' + escAttr(p.character) + '">' + esc(p.character) + '</div>' : '')
          + '</div>';
   });
   out += '</div>';
@@ -2524,7 +2605,8 @@ function _castScroll(btn, dir) {
   var scroll = wrap && wrap.querySelector('.cast-scroll');
   if (!scroll) return;
   // Scroll by roughly 3 cards at a time (card ~92px + 12px gap)
-  scroll.scrollBy({left: dir * (scroll.clientWidth * 0.7), behavior: 'smooth'});
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  scroll.scrollBy({left: dir * (scroll.clientWidth * 0.7), behavior: reduce ? 'auto' : 'smooth'});
 }
 
 function _updateCastArrows(scroll) {
@@ -2544,9 +2626,7 @@ function _renderMovieDetail(movie, meta) {
   html += _backButtonHtml();
 
   html += '<div class="detail-hero">';
-  if (meta && meta.poster_url) {
-    html += '<div class="detail-poster"><img src="' + escAttr(meta.poster_url) + '" alt="' + escAttr('Poster for ' + movie.title) + '">' + _renderPosterRating(meta) + '</div>';
-  }
+  html += _detailPosterHtml(movie.title, meta);
   html += '<div class="detail-info">';
   html += '<h2>' + esc(movie.title);
   if (movie.year) html += ' <span class="card-year">(' + esc(String(movie.year)) + ')</span>';
@@ -2576,14 +2656,16 @@ function _renderMovieDetail(movie, meta) {
   }
   if (meta) {
     html += _renderDetailMeta(movie, meta);
-    if (meta.overview) html += '<div class="detail-overview" role="button" tabindex="0" aria-expanded="false" aria-label="Toggle full synopsis" onclick="_toggleOverview(this)" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();_toggleOverview(this)}">' + esc(meta.overview) + '</div>';
+    if (meta.overview) html += '<div class="detail-overview">' + esc(meta.overview) + '</div>';
+  } else if (_detailMetaLoading) {
+    html += _detailOverviewSkeleton();
   }
   // Movie preference dropdown + action buttons
   var movieNk = normTitle(movie.title);
   var moviePref = _preferences[movieNk] || 'none';
   if (_downloadServices.movie) {
     _savedPref = moviePref;
-    html += '<div class="pref-row"><label for="movie-pref-select" style="font-size:.82em;color:var(--text2)">Source preference:</label>';
+    html += '<div class="pref-row"><label class="pref-label" for="movie-pref-select">Source preference:</label>';
     html += '<select class="pref-select" id="movie-pref-select" onchange="onPrefSelectChange(this.value)">';
     html += '<option value="none"' + (moviePref === 'none' ? ' selected' : '') + '>No Preference</option>';
     html += '<option value="prefer-local"' + (moviePref === 'prefer-local' ? ' selected' : '') + '>Prefer Local</option>';
@@ -2593,8 +2675,8 @@ function _renderMovieDetail(movie, meta) {
     html += '</select>';
     html += '<button class="btn btn-primary" id="movie-pref-apply-btn" style="display:none" onclick="applyMoviePreference()">Apply</button>';
     html += '</div>';
-    html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px;line-height:1.5"><strong style="color:var(--text2)">Prefer Local</strong> &mdash; switches the movie to a local copy.<br><strong style="color:var(--text2)">Prefer Debrid</strong> &mdash; removes the local copy and streams from debrid.</div>';
-    html += '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">';
+    html += '<details class="pref-help"><summary>What do these do?</summary><strong>Prefer Local</strong> &mdash; switches the movie to a local copy.<br><strong>Prefer Debrid</strong> &mdash; removes the local copy and streams from debrid.</details>';
+    html += '<div class="detail-action-row">';
     if (moviePeDir === 'debrid-unavailable') {
       html += '<button class="btn btn-ghost btn-sm" onclick="_confirmBtn(this,function(){downloadMovieLocalFallback()})">Download Locally</button>';
     } else if (moviePeDir === 'to-local-fallback') {
@@ -2609,11 +2691,11 @@ function _renderMovieDetail(movie, meta) {
     }
     html += '</div>';
   } else if (movie.source === 'debrid') {
-    html += '<div style="margin-top:10px;font-size:.82em;color:var(--text3)">To switch to local, configure <a href="/settings">Radarr or Overseerr</a> in Settings.</div>';
+    html += '<div class="pref-config-hint">To switch to local, configure <a href="/settings">Radarr or Overseerr</a> in Settings.</div>';
   }
   var movieActionBtns = [];
   if (movie.source === 'debrid' || movie.source === 'both') {
-    movieActionBtns.push('<button class="btn btn-ghost btn-icon" title="Block this release" onclick="event.stopPropagation();_blockItem()">&#128683;</button>');
+    movieActionBtns.push('<button class="btn btn-ghost btn-icon" title="Block this release" aria-label="Block this release" onclick="event.stopPropagation();_blockItem()">&#128683;</button>');
   }
   if (_downloadServices.movie === 'radarr') {
     movieActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" title="Delete from Radarr" onclick="event.stopPropagation();deleteItem(\'movie\')">&#128465; Delete</button>');
@@ -2622,7 +2704,7 @@ function _renderMovieDetail(movie, meta) {
     movieActionBtns.push('<button class="btn btn-ghost btn-sm" data-imdb="' + escAttr(movie.imdb_id) + '" data-mtype="movie" data-label="' + escAttr(movie.title) + '" data-media-title="' + escAttr(movie.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button>');
   }
   if (movieActionBtns.length) {
-    html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">' + movieActionBtns.join('') + '</div>';
+    html += '<div class="detail-action-row">' + movieActionBtns.join('') + '</div>';
   }
   html += '</div></div>';
   html += '<div class="detail-body"><div class="detail-main">';
@@ -2633,6 +2715,7 @@ function _renderMovieDetail(movie, meta) {
   html += '</div>';
   html += '</div>';
   area.innerHTML = html;
+  _markClampedOverview(area);
   _loadHistorySidebar();
   var _cs = area.querySelector('.cast-scroll');
   if (_cs) _updateCastArrows(_cs);
@@ -2735,8 +2818,14 @@ function _relativeDate(dateStr) {
 }
 
 function _seasonProgressPill(season, hasPending) {
-  if (!season.total_episodes) return '';
   var count = season.episode_count || 0;
+  if (!season.total_episodes) {
+    // No known episode total (file-only season / no TMDB data). Show a neutral
+    // count pill for the files present so this reads as parallel to the
+    // "0 / N" missing state instead of rendering no pill at all.
+    if (count <= 0) return '';
+    return '<span class="season-progress-pill progress-empty">' + count + ' file' + (count === 1 ? '' : 's') + '</span>';
+  }
   var total = season.total_episodes;
   var cls = 'progress-empty';
   if (hasPending) cls = 'progress-pending';
@@ -2859,7 +2948,7 @@ function _renderSeasonEpisodes(season, si) {
   }
   html += '</tbody></table>';
   if (eps.length > 10) {
-    html += '<div class="season-collapse-footer" role="button" tabindex="0" onclick="collapseSeason(this)" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();collapseSeason(this)}" title="Collapse season">&#9650; Collapse</div>';
+    html += '<div class="season-collapse-footer" role="button" tabindex="0" aria-label="Collapse season" onclick="collapseSeason(this)" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();collapseSeason(this)}" title="Collapse season">&#9650; Collapse</div>';
   }
   return html;
 }
@@ -2942,9 +3031,7 @@ function _renderShowDetail(show, meta) {
   html += _backButtonHtml();
 
   html += '<div class="detail-hero">';
-  if (meta && meta.poster_url) {
-    html += '<div class="detail-poster"><img src="' + escAttr(meta.poster_url) + '" alt="' + escAttr('Poster for ' + show.title) + '">' + _renderPosterRating(meta) + '</div>';
-  }
+  html += _detailPosterHtml(show.title, meta);
   html += '<div class="detail-info">';
   html += '<h2>' + esc(show.title);
   if (show.year) html += ' <span class="card-year">(' + esc(String(show.year)) + ')</span>';
@@ -2961,12 +3048,14 @@ function _renderShowDetail(show, meta) {
   }
   if (meta) {
     html += _renderDetailMeta(show, meta);
-    if (meta.overview) html += '<div class="detail-overview" role="button" tabindex="0" aria-expanded="false" aria-label="Toggle full synopsis" onclick="_toggleOverview(this)" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();_toggleOverview(this)}">' + esc(meta.overview) + '</div>';
+    if (meta.overview) html += '<div class="detail-overview">' + esc(meta.overview) + '</div>';
+  } else if (_detailMetaLoading) {
+    html += _detailOverviewSkeleton();
   }
   if ((show.source === 'debrid' || show.source === 'both') && !_downloadServices.show) {
-    html += '<div style="font-size:.82em;color:var(--text3);margin-top:8px">To switch episodes to local, configure <a href="/settings">Sonarr or Overseerr</a> in Settings.</div>';
+    html += '<div class="pref-config-hint">To switch episodes to local, configure <a href="/settings">Sonarr or Overseerr</a> in Settings.</div>';
   }
-  html += '<div class="pref-row"><label for="show-pref-select" style="font-size:.82em;color:var(--text2)">Source preference:</label>';
+  html += '<div class="pref-row"><label class="pref-label" for="show-pref-select">Source preference:</label>';
   html += '<select class="pref-select" id="show-pref-select" onchange="onPrefSelectChange(this.value)">';
   html += '<option value="none"' + (curPref === 'none' ? ' selected' : '') + '>No Preference</option>';
   html += '<option value="prefer-local"' + (curPref === 'prefer-local' ? ' selected' : '') + '>Prefer Local</option>';
@@ -2974,7 +3063,7 @@ function _renderShowDetail(show, meta) {
   html += '</select>';
   html += '<button class="btn btn-primary" id="show-pref-apply-btn" style="display:none" onclick="applyPreference()">Apply</button>';
   html += '</div>';
-  html += '<div style="font-size:.75em;color:var(--text3);margin-top:2px;line-height:1.5"><strong style="color:var(--text2)">Prefer Local</strong> &mdash; switches debrid-only episodes to local copies.<br><strong style="color:var(--text2)">Prefer Debrid</strong> &mdash; removes local copies and streams from debrid.</div>';
+  html += '<details class="pref-help"><summary>What do these do?</summary><strong>Prefer Local</strong> &mdash; switches debrid-only episodes to local copies.<br><strong>Prefer Debrid</strong> &mdash; removes local copies and streams from debrid.</details>';
   var showActionBtns = [];
   if (_downloadServices.show === 'sonarr') {
     showActionBtns.push('<button class="btn btn-ghost btn-sm btn-danger" title="Delete from Sonarr" onclick="event.stopPropagation();deleteItem(\'show\')">&#128465; Delete</button>');
@@ -2983,7 +3072,7 @@ function _renderShowDetail(show, meta) {
     showActionBtns.push('<button class="btn btn-ghost btn-sm" data-imdb="' + escAttr(show.imdb_id) + '" data-mtype="series" data-label="' + escAttr(show.title) + '" data-media-title="' + escAttr(show.title) + '" onclick="openSearchFromBtn(this)">&#128269; Search Torrents</button>');
   }
   if (showActionBtns.length) {
-    html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">' + showActionBtns.join('') + '</div>';
+    html += '<div class="detail-action-row">' + showActionBtns.join('') + '</div>';
   }
   html += '</div></div>';
 
@@ -3069,6 +3158,7 @@ function _renderShowDetail(show, meta) {
   html += '</div>';
   html += '</div>';
   area.innerHTML = html;
+  _markClampedOverview(area);
   _loadHistorySidebar();
   var _cs = area.querySelector('.cast-scroll');
   if (_cs) _updateCastArrows(_cs);
@@ -3163,7 +3253,7 @@ function _loadHistorySidebar() {
     .catch(function() {
       if (gen !== _historySidebarGen) return;
       var c = document.getElementById('history-sidebar-content');
-      if (c) c.innerHTML = '<h3>Activity</h3><div class="hs-empty" style="color:var(--red)">Failed to load</div>';
+      if (c) c.innerHTML = '<h3>Activity</h3><div class="hs-empty" style="color:var(--red)">⚠ Failed to load</div>';
     });
 }
 

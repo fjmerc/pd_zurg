@@ -32,7 +32,7 @@ def _post(rc_url, path, payload, timeout=2):
     return json.loads(body) if body else {}
 
 
-def refresh_dir(dir_path='', recursive=False):
+def refresh_dir(dir_path='', recursive=False, exclude_mounts=None):
     """Refresh rclone's dir cache via RC ``vfs/refresh`` on all registered mounts.
 
     Unlike ``vfs/forget``, this re-reads the directory from the backend and
@@ -51,16 +51,21 @@ def refresh_dir(dir_path='', recursive=False):
             ``__all__`` — gets re-listed).
         recursive: Walk into subdirectories. Leave ``False`` for hot paths;
             recursive=True is expensive on large libraries.
+        exclude_mounts: Optional iterable of mount names to skip. Use this to
+            steer a recursive refresh away from mounts that don't benefit from
+            a FUSE walk (e.g. the TorBox mount, enumerated via the mylist API),
+            where a recursive PROPFIND is pure collateral and trips WebDAV
+            listing rate-limits. ``None`` (default) refreshes every mount.
 
     Returns:
         True if at least one mount refreshed successfully, False otherwise.
     """
     try:
-        from rclone.rclone import get_all_rc_urls
+        from rclone.rclone import get_all_rc_urls, get_rc_urls_excluding
     except ImportError:
         return False
 
-    urls = get_all_rc_urls()
+    urls = get_rc_urls_excluding(exclude_mounts) if exclude_mounts else get_all_rc_urls()
     if not urls:
         logger.debug("[rclone-rc] No RC URLs registered, skipping refresh")
         return False

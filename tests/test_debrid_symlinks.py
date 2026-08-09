@@ -588,6 +588,135 @@ class TestCreateDebridSymlinksMovies:
         # sample.mkv should NOT have a symlink
         assert not os.path.exists(os.path.join(local_movies, 'Movie (2025)', 'sample.mkv'))
 
+    def test_creates_symlink_for_nested_folder_movie(self, tmp_dir, monkeypatch):
+        """Movie video nested one folder deep still gets a symlink.
+
+        Regression: some torrents tuck the feature inside a release-named
+        subdir (only .nfo/.txt at the top level).  The movie was detected as
+        on-debrid but never linkable — "available" in zurgarr, "missing" in
+        Radarr.  The symlink must be flat (basename) but point at the nested
+        target.
+        """
+        mount = os.path.join(tmp_dir, 'mount')
+        local_movies = os.path.join(tmp_dir, 'movies')
+        os.makedirs(local_movies)
+
+        release = 'The.Artist.2011.1080p.x264'
+        movie_dir = os.path.join(mount, 'movies', release)
+        os.makedirs(movie_dir)
+        # Top level: only junk, no video
+        with open(os.path.join(movie_dir, 'info.nfo'), 'w') as f:
+            f.write('meta')
+        with open(os.path.join(movie_dir, 'downloaded.txt'), 'w') as f:
+            f.write('tracker')
+        # Real video nested one level deep
+        nested_dir = os.path.join(movie_dir, release)
+        os.makedirs(nested_dir)
+        nested_video = os.path.join(nested_dir, release + '.mkv')
+        with open(nested_video, 'w') as f:
+            f.write('x' * 10000)
+
+        _setup_env(monkeypatch, mount, '/mnt/debrid')
+        scanner = _make_scanner(mount, None, monkeypatch, local_movies_path=local_movies)
+
+        movies = [{
+            'title': 'The Artist',
+            'year': 2011,
+            'source': 'debrid',
+            'type': 'movie',
+            'path': movie_dir,
+        }]
+
+        scanner._create_debrid_symlinks([_LOCAL_SHOW], movies, {})
+
+        # Flat local filename (basename), not the nested relpath
+        expected = os.path.join(local_movies, 'The Artist (2011)', release + '.mkv')
+        assert os.path.islink(expected)
+        target = os.readlink(expected)
+        assert target.startswith('/mnt/debrid/')
+        # Target preserves the nested path so it resolves on the arr side
+        assert target.endswith(os.path.join(release, release + '.mkv'))
+
+    def test_prefers_top_level_video_over_nested(self, tmp_dir, monkeypatch):
+        """A top-level video wins even when a larger file sits in a subdir.
+
+        Guards against descending into ``Sample/``-style subfolders when a
+        real top-level feature exists.
+        """
+        mount = os.path.join(tmp_dir, 'mount')
+        local_movies = os.path.join(tmp_dir, 'movies')
+        os.makedirs(local_movies)
+
+        movie_dir = os.path.join(mount, 'movies', 'Movie.2025')
+        os.makedirs(movie_dir)
+        # Top-level feature (smaller than the nested decoy on purpose)
+        with open(os.path.join(movie_dir, 'Movie.2025.1080p.mkv'), 'w') as f:
+            f.write('x' * 5000)
+        # Larger nested file that must NOT be chosen
+        extras = os.path.join(movie_dir, 'Extras')
+        os.makedirs(extras)
+        with open(os.path.join(extras, 'behind.the.scenes.mkv'), 'w') as f:
+            f.write('x' * 50000)
+
+        _setup_env(monkeypatch, mount, '/mnt/debrid')
+        scanner = _make_scanner(mount, None, monkeypatch, local_movies_path=local_movies)
+
+        movies = [{
+            'title': 'Movie', 'year': 2025, 'source': 'debrid',
+            'type': 'movie', 'path': movie_dir,
+        }]
+
+        scanner._create_debrid_symlinks([_LOCAL_SHOW], movies, {})
+
+        expected = os.path.join(local_movies, 'Movie (2025)', 'Movie.2025.1080p.mkv')
+        assert os.path.islink(expected)
+        assert not os.path.exists(
+            os.path.join(local_movies, 'Movie (2025)', 'behind.the.scenes.mkv'))
+
+    def test_nested_descent_skips_extras_subdir(self, tmp_dir, monkeypatch):
+        """Nested descent ignores Extras/Featurettes even if larger.
+
+        When the top level has no video, the one-level descent must skip
+        _SKIP_FOLDERS subdirs so a large featurette in Extras/ isn't linked
+        instead of the real feature in a release-named subdir.
+        """
+        mount = os.path.join(tmp_dir, 'mount')
+        local_movies = os.path.join(tmp_dir, 'movies')
+        os.makedirs(local_movies)
+
+        release = 'Tigole.Movie.2025.1080p'
+        movie_dir = os.path.join(mount, 'movies', release)
+        os.makedirs(movie_dir)
+        with open(os.path.join(movie_dir, 'info.nfo'), 'w') as f:
+            f.write('meta')
+        # Real feature in a release-named subdir
+        feat_dir = os.path.join(movie_dir, release)
+        os.makedirs(feat_dir)
+        with open(os.path.join(feat_dir, release + '.mkv'), 'w') as f:
+            f.write('x' * 10000)
+        # Larger featurette in an Extras subdir that must be skipped
+        extras = os.path.join(movie_dir, 'Featurettes')
+        os.makedirs(extras)
+        with open(os.path.join(extras, 'making.of.mkv'), 'w') as f:
+            f.write('x' * 90000)
+
+        _setup_env(monkeypatch, mount, '/mnt/debrid')
+        scanner = _make_scanner(mount, None, monkeypatch, local_movies_path=local_movies)
+
+        movies = [{
+            'title': 'Tigole Movie', 'year': 2025, 'source': 'debrid',
+            'type': 'movie', 'path': movie_dir,
+        }]
+
+        scanner._create_debrid_symlinks([_LOCAL_SHOW], movies, {})
+
+        expected = os.path.join(local_movies, 'Tigole Movie (2025)', release + '.mkv')
+        assert os.path.islink(expected)
+        target = os.readlink(expected)
+        assert target.endswith(os.path.join(release, release + '.mkv'))
+        assert not os.path.exists(
+            os.path.join(local_movies, 'Tigole Movie (2025)', 'making.of.mkv'))
+
     def test_skips_local_only_movies(self, tmp_dir, monkeypatch):
         """Movies with source='local' are skipped."""
         mount = os.path.join(tmp_dir, 'mount')

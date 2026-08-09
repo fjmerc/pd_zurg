@@ -1,15 +1,21 @@
 """Config backup & restore.
 
 Creates tar.gz archives bundling the user's config state (.env,
-settings.json, library_prefs.json, blocklist.json) and restores them
-atomically with pre-restore snapshots for rollback.
+settings.json, and the operator-state JSON stores under /config) and
+restores them atomically with pre-restore snapshots for rollback.
 
 Archive layout (flat, no subdirs):
     manifest.json   {version, created_at, zurgarr_version, files}
     env
-    settings.json          (optional)
-    library_prefs.json     (optional)
-    blocklist.json         (optional)
+    settings.json               (optional)
+    library_prefs.json          (optional)
+    blocklist.json              (optional)
+    library_pending.json        (optional)
+    grab_attempts.json          (optional)
+    recovery_snapshots.json     (optional)
+    debrid_health.json          (optional)
+    wanted_memos.json           (optional)
+    history.jsonl               (optional)
 
 Two read paths share the same core validation + apply logic:
   - Upload restore: bytes → restore_from_blob()
@@ -43,12 +49,23 @@ BACKUP_VERSION = 1
 DEFAULT_CONFIG_DIR = '/config'
 DEFAULT_BACKUP_DIR = '/config/backups'
 
-# Size caps — backups are tiny; anything bigger is suspicious.  The
+# Size caps — backups are small; anything bigger is suspicious.  The
 # decompressed cap guards against gzip-bomb archives whose 10 MiB
 # compressed blob expands to gigabytes of zeros during header scan.
+# It is sized so a legitimately maximal archive (every member at its
+# cap) still fits: 32M history + 8 × 5M JSON members + 5M env
+# + manifest = 82M < 96M.
 MAX_ARCHIVE_BYTES             = 10 * 1024 * 1024
-MAX_DECOMPRESSED_ARCHIVE_BYTES = 50 * 1024 * 1024
+MAX_DECOMPRESSED_ARCHIVE_BYTES = 96 * 1024 * 1024
 _MAX_MEMBER_BYTES             =  5 * 1024 * 1024
+# history.jsonl is a 30-day rolling event log that legitimately runs
+# several MB (7+ MB observed in production); give it dedicated headroom
+# while keeping the strict default for everything else.
+_MEMBER_SIZE_CAPS = {'history.jsonl': 32 * 1024 * 1024}
+
+
+def _member_cap(name):
+    return _MEMBER_SIZE_CAPS.get(name, _MAX_MEMBER_BYTES)
 
 # Process-wide serialization for restores.  Without this, two concurrent
 # restores racing through snapshot dir creation or file apply could
@@ -56,16 +73,32 @@ _MAX_MEMBER_BYTES             =  5 * 1024 * 1024
 _restore_lock = threading.Lock()
 
 # Archive member name → relative-to-config-dir target path.
-# Order determines apply order.  'env' is written last so the SIGHUP
-# config reload fires only after the other in-process caches have
-# already consumed the restored on-disk files.
+# Order determines apply order.  Ordering of the other members is not
+# significant — only 'env' must remain last, so the SIGHUP config reload
+# fires only after the other in-process caches have already consumed the
+# restored on-disk files.
 _BACKUP_FILES = [
-    ('settings.json',       'settings.json'),
-    ('library_prefs.json',  'library_prefs.json'),
-    ('blocklist.json',      'blocklist.json'),
-    ('env',                 '.env'),
+    ('settings.json',           'settings.json'),
+    ('library_prefs.json',      'library_prefs.json'),
+    ('blocklist.json',          'blocklist.json'),
+    ('library_pending.json',    'library_pending.json'),
+    ('grab_attempts.json',      'grab_attempts.json'),
+    ('recovery_snapshots.json', 'recovery_snapshots.json'),
+    ('debrid_health.json',      'debrid_health.json'),
+    ('wanted_memos.json',       'wanted_memos.json'),
+    ('history.jsonl',           'history.jsonl'),
+    ('env',                     '.env'),
 ]
 _ALLOWED_MEMBERS = {'manifest.json'} | {name for name, _ in _BACKUP_FILES}
+
+# Members whose content must parse as a single JSON object.  blocklist.json
+# (object or array), history.jsonl (per-line JSON objects) and env get
+# bespoke validation in ``_parse_and_validate``.
+_JSON_OBJECT_MEMBERS = {
+    'settings.json', 'library_prefs.json', 'library_pending.json',
+    'grab_attempts.json', 'recovery_snapshots.json', 'debrid_health.json',
+    'wanted_memos.json',
+}
 
 # Strict filename pattern for saved backups.  Matches both the base shape
 # produced by ``_build_archive_bytes`` and the collision-suffixed form
@@ -133,10 +166,10 @@ def _build_archive_bytes(config_dir):
                 continue
             with open(src, 'rb') as f:
                 data = f.read()
-            if len(data) > _MAX_MEMBER_BYTES:
+            if len(data) > _member_cap(member_name):
                 logger.warning(
                     f'[backup] Skipping {rel_path} — size {len(data)} exceeds '
-                    f'per-member cap {_MAX_MEMBER_BYTES}'
+                    f'per-member cap {_member_cap(member_name)}'
                 )
                 continue
             _add_bytes_to_tar(tar, member_name, data, mtime)
@@ -320,10 +353,10 @@ def _validate_member(member):
         raise RestoreError(f'Non-regular archive member: {member.name}')
     if member.name not in _ALLOWED_MEMBERS:
         raise RestoreError(f'Unknown archive member: {member.name}')
-    if member.size > _MAX_MEMBER_BYTES:
+    if member.size > _member_cap(member.name):
         raise RestoreError(
             f'Archive member {member.name} exceeds per-member size cap '
-            f'({member.size} > {_MAX_MEMBER_BYTES})'
+            f'({member.size} > {_member_cap(member.name)})'
         )
     if member.islnk() or member.issym() or member.isdev():
         raise RestoreError(f'Disallowed member type: {member.name}')
@@ -380,34 +413,52 @@ def _parse_and_validate(tar):
         # Per-format validation: parse-only, not semantic.
         if member_name == 'env':
             # Lines are either comments, blank, or KEY=value.  Reject if
-            # any line (ignoring comments/blank) lacks '='.
-            for raw in data.decode('utf-8', errors='replace').splitlines():
+            # any line (ignoring comments/blank) lacks '='.  Cite only the
+            # line NUMBER — echoing the content could leak a mistyped
+            # secret into the error response and logs.
+            for lineno, raw in enumerate(
+                    data.decode('utf-8', errors='replace').splitlines(),
+                    start=1):
                 line = raw.strip()
                 if not line or line.startswith('#'):
                     continue
                 if '=' not in line:
-                    raise RestoreError(f'env contains invalid line: {raw!r}')
-        elif member_name == 'settings.json':
-            try:
-                parsed = json.loads(data.decode('utf-8'))
-            except (ValueError, UnicodeDecodeError) as exc:
-                raise RestoreError(f'settings.json is not valid JSON: {exc}')
-            if not isinstance(parsed, dict):
-                raise RestoreError('settings.json must be a JSON object')
-        elif member_name == 'library_prefs.json':
-            try:
-                parsed = json.loads(data.decode('utf-8'))
-            except (ValueError, UnicodeDecodeError) as exc:
-                raise RestoreError(f'library_prefs.json is not valid JSON: {exc}')
-            if not isinstance(parsed, dict):
-                raise RestoreError('library_prefs.json must be a JSON object')
+                    raise RestoreError(
+                        f'env line {lineno} is invalid (expected KEY=value)')
         elif member_name == 'blocklist.json':
+            # Deliberately NOT in _JSON_OBJECT_MEMBERS: the on-disk format
+            # is a JSON array (list of entry dicts); accept dict too for
+            # forward compatibility.
             try:
                 parsed = json.loads(data.decode('utf-8'))
             except (ValueError, UnicodeDecodeError) as exc:
                 raise RestoreError(f'blocklist.json is not valid JSON: {exc}')
             if not isinstance(parsed, (dict, list)):
                 raise RestoreError('blocklist.json must be a JSON object or array')
+        elif member_name == 'history.jsonl':
+            try:
+                text = data.decode('utf-8')
+            except UnicodeDecodeError as exc:
+                raise RestoreError(f'history.jsonl is not valid UTF-8: {exc}')
+            for lineno, raw in enumerate(text.splitlines(), start=1):
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    parsed = json.loads(line)
+                except ValueError as exc:
+                    raise RestoreError(
+                        f'history.jsonl line {lineno} is not valid JSON: {exc}')
+                if not isinstance(parsed, dict):
+                    raise RestoreError(
+                        f'history.jsonl line {lineno} must be a JSON object')
+        elif member_name in _JSON_OBJECT_MEMBERS:
+            try:
+                parsed = json.loads(data.decode('utf-8'))
+            except (ValueError, UnicodeDecodeError) as exc:
+                raise RestoreError(f'{member_name} is not valid JSON: {exc}')
+            if not isinstance(parsed, dict):
+                raise RestoreError(f'{member_name} must be a JSON object')
         content[member_name] = data
 
     # Informational: backup taken by a different zurgarr version.  Don't
@@ -454,20 +505,70 @@ def _snapshot_current(targets, backup_dir):
     return snapshot_dir
 
 
+def _resolve_owner_applier(member_name):
+    """Return the owner-module restore function for ``member_name``, or None.
+
+    Each stateful store's owner module exposes a ``restore*_bytes`` function
+    that performs the atomic file write AND the in-memory refresh under the
+    module's OWN lock.  That closes the race where an in-flight
+    read-modify-write (sweep ``_save_state``, ledger ``bump``, blocklist
+    ``add``, prefs ``set_preference``, ``record_snapshot``, history append)
+    persists pre-restore memory over the restored file — ``_restore_lock``
+    alone can't serialize against those, since they take module locks.
+
+    Members without an entry (settings.json, wanted_memos.json, env) have
+    no owner-lock write path to race with, or are handled by
+    ``_reload_services`` (SIGHUP / plex_debrid restart / memo merge).
+    Imports are lazy so tests can monkeypatch the owner functions.
+    """
+    if member_name == 'library_prefs.json':
+        from utils import library_prefs
+        return library_prefs.restore_prefs_bytes
+    if member_name == 'library_pending.json':
+        from utils import library_prefs
+        return library_prefs.restore_pending_bytes
+    if member_name == 'blocklist.json':
+        from utils import blocklist
+        return blocklist.restore_bytes
+    if member_name == 'grab_attempts.json':
+        from utils import attempt_ledger
+        return attempt_ledger.restore_bytes
+    if member_name == 'recovery_snapshots.json':
+        from utils import recovery
+        return recovery.restore_bytes
+    if member_name == 'debrid_health.json':
+        from utils import debrid_health
+        return debrid_health.restore_state_bytes
+    if member_name == 'history.jsonl':
+        from utils import history
+        return history.restore_bytes
+    return None
+
+
 def _apply(content, config_dir, applied_out):
     """Write each validated file atomically.
 
     Appends each successfully-written rel path to ``applied_out`` as it
     lands, so the caller's rollback knows exactly which files were
     touched even if this function raises mid-way.
+
+    Stateful members restore through their owner module (write + in-memory
+    refresh under the owner's lock) — but only for the real ``/config``
+    dir, since owner modules have hardcoded/init-time paths.  Restores to
+    any other dir (tests) take the plain atomic-write path.
     """
+    use_owners = (config_dir == DEFAULT_CONFIG_DIR)
     for member_name, rel_path in _BACKUP_FILES:
         if member_name not in content:
             continue
-        target = os.path.join(config_dir, rel_path)
-        os.makedirs(os.path.dirname(target) or '.', exist_ok=True)
-        with atomic_write(target, mode='wb') as f:
-            f.write(content[member_name])
+        applier = _resolve_owner_applier(member_name) if use_owners else None
+        if applier is not None:
+            applier(content[member_name])
+        else:
+            target = os.path.join(config_dir, rel_path)
+            os.makedirs(os.path.dirname(target) or '.', exist_ok=True)
+            with atomic_write(target, mode='wb') as f:
+                f.write(content[member_name])
         applied_out.append(rel_path)
 
 
@@ -490,11 +591,20 @@ def _rollback(snapshot_dir, applied_rel_paths, config_dir):
 
 
 def _reload_services(restored_rel_paths):
-    """Refresh in-process caches + kick SIGHUP / plex_debrid restart.
+    """Kick post-restore refreshes: SIGHUP, memo merge, plex_debrid restart.
 
     Called only on successful apply.  Best-effort — reload failures are
     logged but do not fail the restore response; the files are already
     on disk.
+
+    Most stores need nothing here: the stateful ones (blocklist, ledger,
+    debrid health, prefs, pending, recovery, history) already refreshed
+    in-memory state inside their owner-lock restore functions (see
+    ``_resolve_owner_applier``), and the re-read-per-use ones pick up the
+    file automatically.  Remaining accepted race: the Wanted-memo merge
+    below is additive/TTL-aware, and a concurrently-persisting scanner
+    could still write memos over the restored file — memos are API-pressure
+    hints, so that's tolerable.
     """
     if '.env' in restored_rel_paths:
         try:
@@ -504,13 +614,15 @@ def _reload_services(restored_rel_paths):
         except OSError as exc:
             logger.warning(f'[backup] SIGHUP failed: {exc}')
 
-    if 'blocklist.json' in restored_rel_paths:
+    if 'wanted_memos.json' in restored_rel_paths:
         try:
-            from utils import blocklist
-            blocklist.init(DEFAULT_CONFIG_DIR)
-            logger.info('[backup] Reloaded blocklist')
+            from utils.library import get_scanner
+            scanner = get_scanner()
+            if scanner is not None:
+                scanner.reload_wanted_memos()
+                logger.info('[backup] Reloaded Wanted-recovery memos')
         except Exception as exc:
-            logger.warning(f'[backup] Blocklist reload failed: {exc}')
+            logger.warning(f'[backup] Wanted-memo reload failed: {exc}')
 
     if 'settings.json' in restored_rel_paths:
         try:

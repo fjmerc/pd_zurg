@@ -74,3 +74,24 @@ class TestLevelFiltering:
 
     def test_error_passes_at_error_level(self):
         assert self._should_notify('error', 'error') is True
+
+
+class TestEventRegistry:
+
+    def test_retry_giveup_registered(self):
+        from utils.notifications import ALL_EVENTS
+        assert 'retry_giveup' in ALL_EVENTS
+
+    def test_all_events_documented_in_settings_help(self):
+        """Every event in ALL_EVENTS must appear in the NOTIFICATION_EVENTS
+        help text (CLAUDE.md rule: register new events in both places)."""
+        from utils.notifications import ALL_EVENTS
+        from utils.settings_api import ENV_SCHEMA
+        help_text = ''
+        for section in ENV_SCHEMA:
+            for field in section['fields']:
+                if field[0] == 'NOTIFICATION_EVENTS':
+                    help_text = field[4]
+        assert help_text, 'NOTIFICATION_EVENTS field not found in ENV_SCHEMA'
+        missing = sorted(ev for ev in ALL_EVENTS if ev not in help_text)
+        assert not missing, f'Events missing from help text: {missing}'

@@ -45,7 +45,11 @@ __all__ = [
     'Config', 'config',
     # Config variables
     'PLEXDEBRID', 'PDLOGLEVEL', 'PLEXUSER', 'PLEXTOKEN',
-    'JFADD', 'JFAPIKEY', 'RDAPIKEY', 'ADAPIKEY', 'GHTOKEN',
+    'JFADD', 'JFAPIKEY', 'RDAPIKEY', 'ADAPIKEY',
+    'TORBOXAPIKEY', 'TORBOXWEBDAVUSER', 'TORBOXWEBDAVPASS', 'TORBOX_MOUNT_NAME',
+    'TORBOX_RCLONE_TPSLIMIT', 'TORBOX_RCLONE_TPSLIMIT_BURST',
+    'TORBOX_RCLONE_DIR_CACHE_TIME', 'TORBOX_SCAN_TIMEOUT',
+    'GHTOKEN',
     'SEERRAPIKEY', 'SEERRADD', 'PLEXADD', 'ZURGUSER', 'ZURGPASS',
     'SHOWMENU', 'LOGFILE', 'PDUPDATE', 'PDREPO',
     'DUPECLEAN', 'CLEANUPINT', 'DUPECLEANKEEP', 'RCLONEMN', 'RCLONELOGLEVEL',
@@ -54,16 +58,20 @@ __all__ = [
     'TRAKTCLIENTID', 'TRAKTCLIENTSECRET',
     'NOTIFICATION_URL', 'NOTIFICATION_EVENTS', 'NOTIFICATION_LEVEL',
     'BLACKHOLE_ENABLED', 'BLACKHOLE_DIR', 'BLACKHOLE_POLL_INTERVAL', 'BLACKHOLE_DEBRID',
+    'BLACKHOLE_DEBRID_ROUTING', 'BLACKHOLE_DEBRID_PRIMARY',
     'BLACKHOLE_SYMLINK_ENABLED', 'BLACKHOLE_COMPLETED_DIR', 'BLACKHOLE_RCLONE_MOUNT',
-    'BLACKHOLE_SYMLINK_TARGET_BASE', 'BLACKHOLE_MOUNT_POLL_TIMEOUT',
+    'BLACKHOLE_SYMLINK_TARGET_BASE', 'BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX',
+    'BLACKHOLE_MOUNT_POLL_TIMEOUT',
     'BLACKHOLE_MOUNT_POLL_INTERVAL', 'BLACKHOLE_SYMLINK_MAX_AGE',
     'STATUS_UI_ENABLED', 'STATUS_UI_PORT', 'STATUS_UI_AUTH',
     'SONARR_URL', 'SONARR_API_KEY', 'RADARR_URL', 'RADARR_API_KEY',
     # Scheduled task intervals
     'ROUTING_AUDIT_INTERVAL', 'QUEUE_CLEANUP_INTERVAL',
-    'LIBRARY_SCAN_INTERVAL', 'SYMLINK_VERIFY_INTERVAL',
+    'LIBRARY_SCAN_INTERVAL', 'LIBRARY_RESCAN_NFS_DELAY',
+    'SYMLINK_VERIFY_INTERVAL',
     'PREFERENCE_ENFORCE_INTERVAL', 'HOUSEKEEPING_INTERVAL',
     'CONFIG_BACKUP_INTERVAL', 'CONFIG_BACKUP_RETENTION', 'MOUNT_LIVENESS_INTERVAL',
+    'MOUNT_SELFHEAL_ENABLED',
     # History
     'HISTORY_RETENTION_DAYS',
     # Notification digest
@@ -72,15 +80,23 @@ __all__ = [
     'BLOCKLIST_AUTO_ADD', 'BLOCKLIST_EXPIRY_DAYS',
     # Symlink repair
     'SYMLINK_REPAIR_AUTO_SEARCH',
+    # Debrid health reconciler (plan 38)
+    'DEBRID_HEALTH_ENABLED', 'DEBRID_HEALTH_AUTO_REMEDIATE',
+    'DEBRID_HEALTH_CROSS_RESCUE',
     # Routing audit
     'ROUTING_AUTO_TAG_UNTAGGED',
     # Gap-fill reconcile
     'GAP_FILL_ENABLED',
+    # Wanted proactive recovery (TorBox + RealDebrid legs)
+    'WANTED_TB_RECOVERY_ENABLED', 'WANTED_TB_RECOVERY_MAX_PER_SCAN',
+    'WANTED_RD_RECOVERY_ENABLED', 'WANTED_RD_RECOVERY_MAX_PER_SCAN',
+    'WANTED_SEASON_RECOVERY_ENABLED',
     # Debrid search
     'TORRENTIO_URL', 'SEARCH_REQUIRE_CACHED', 'SEARCH_DEDUP_ENABLED',
     # Blackhole cache / debrid-account dedup gates
     'BLACKHOLE_REQUIRE_CACHED', 'BLACKHOLE_DEBRID_DEDUP_ENABLED',
-    'BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT',
+    'BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'BLACKHOLE_TB_ALT_RECOVERY_ENABLED',
+    'BLACKHOLE_ARR_FAILED_FEEDBACK_ENABLED',
     # plex_debrid content-version cache-rule enforcer
     'PD_ENFORCE_CACHED_VERSIONS',
     # Quality compromise (plan 33)
@@ -105,6 +121,9 @@ def load_secret_or_env(secret_name, default=None):
 
 def is_port_available(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        # SO_REUSEADDR matches how the Go services (zurg/rclone) bind, so a
+        # port lingering in TIME_WAIT isn't falsely reported as unavailable.
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(('', port))
             return True
@@ -158,6 +177,39 @@ class Config:
         self.JFAPIKEY = load_secret_or_env('jf_api_key')
         self.RDAPIKEY = load_secret_or_env('rd_api_key')
         self.ADAPIKEY = load_secret_or_env('ad_api_key')
+        # TorBox co-debrid (plan 39).  Zurg can't proxy TorBox, so the mount
+        # goes through rclone's native webdav remote against
+        # https://webdav.torbox.app/ — auth is HTTP Basic with the account
+        # email and a *separately configured* WebDAV-only password (set in
+        # TorBox dashboard → Settings → Integrations → WebDAV).  The API key
+        # alone does NOT authenticate the mount; it's the credential used by
+        # the existing search.py / blackhole.py / debrid_client.py code paths.
+        self.TORBOXAPIKEY = load_secret_or_env('torbox_api_key')
+        self.TORBOXWEBDAVUSER = load_secret_or_env('torbox_webdav_user')
+        self.TORBOXWEBDAVPASS = load_secret_or_env('torbox_webdav_pass')
+        # Attr name matches env var name (with underscores) so the
+        # _ENV_DEFAULTS drift guard in tests/test_settings_api.py
+        # ::test_env_defaults_stays_in_sync_with_config can verify it.
+        self.TORBOX_MOUNT_NAME = os.getenv('TORBOX_MOUNT_NAME', 'torbox')
+        # Plan 41 phase D: TB rclone tpslimit knobs.  TB rate-limits
+        # reads aggressively under concurrent Plex/Bazarr scans; default
+        # 5 tps / 10-burst stays under the observed Essential-tier
+        # ceiling.  Set either to '0' to omit the flag entirely.
+        self.TORBOX_RCLONE_TPSLIMIT = os.getenv('TORBOX_RCLONE_TPSLIMIT', '5')
+        self.TORBOX_RCLONE_TPSLIMIT_BURST = os.getenv('TORBOX_RCLONE_TPSLIMIT_BURST', '3')
+        # TB's dir cache must outlive the hourly library scan. With the
+        # default 30m it expires before the next scan, so every scan re-lists
+        # all release folders over the throttled (tpslimit) FUSE mount and
+        # times out — dropping TB titles, which then flip to "Wanted".
+        # Default 2h > LIBRARY_SCAN_INTERVAL (1h); the blackhole grab hook
+        # calls vfs/refresh, so new content still appears promptly between
+        # expiries rather than waiting out the full TTL.
+        self.TORBOX_RCLONE_DIR_CACHE_TIME = os.getenv('TORBOX_RCLONE_DIR_CACHE_TIME', '2h')
+        # Wall-clock budget (seconds) for the TB FUSE walk during a library
+        # scan. The shared scan deadline (30s) can't enumerate a large TB
+        # mount on a cold cache at 5 tps (~450 folders ≈ 90s); give TB its
+        # own budget so cold scans complete instead of truncating.
+        self.TORBOX_SCAN_TIMEOUT = os.getenv('TORBOX_SCAN_TIMEOUT', '180')
         self.GHTOKEN = load_secret_or_env('GITHUB_TOKEN')
         self.SEERRAPIKEY = load_secret_or_env('seerr_api_key')
         self.SEERRADD = load_secret_or_env('seerr_address')
@@ -191,10 +243,22 @@ class Config:
         self.BLACKHOLE_DIR = os.getenv('BLACKHOLE_DIR')
         self.BLACKHOLE_POLL_INTERVAL = os.getenv('BLACKHOLE_POLL_INTERVAL')
         self.BLACKHOLE_DEBRID = os.getenv('BLACKHOLE_DEBRID')
+        # Per-grab debrid routing (plan 39 phase 2).  Both vars resolve
+        # to runtime defaults in utils/debrid_routing.py when left empty:
+        # routing mode defaults to ``cache_aware`` when two or more
+        # debrids are configured, ``primary_only`` otherwise; primary
+        # defaults to the first-configured of RD, AD, TB.
+        self.BLACKHOLE_DEBRID_ROUTING = os.getenv('BLACKHOLE_DEBRID_ROUTING')
+        self.BLACKHOLE_DEBRID_PRIMARY = os.getenv('BLACKHOLE_DEBRID_PRIMARY')
         self.BLACKHOLE_SYMLINK_ENABLED = os.getenv('BLACKHOLE_SYMLINK_ENABLED')
         self.BLACKHOLE_COMPLETED_DIR = os.getenv('BLACKHOLE_COMPLETED_DIR')
         self.BLACKHOLE_RCLONE_MOUNT = os.getenv('BLACKHOLE_RCLONE_MOUNT')
         self.BLACKHOLE_SYMLINK_TARGET_BASE = os.getenv('BLACKHOLE_SYMLINK_TARGET_BASE')
+        # TorBox symlink target base (plan 39 phase 2) — host-side path
+        # for TB-routed symlinks.  When unset and the RD base is set,
+        # debrid_routing.symlink_target_base_for_debrid() falls back to
+        # ``<RD base>_torbox`` so most users get a sensible default.
+        self.BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX = os.getenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX')
         self.BLACKHOLE_MOUNT_POLL_TIMEOUT = os.getenv('BLACKHOLE_MOUNT_POLL_TIMEOUT')
         self.BLACKHOLE_MOUNT_POLL_INTERVAL = os.getenv('BLACKHOLE_MOUNT_POLL_INTERVAL')
         self.BLACKHOLE_SYMLINK_MAX_AGE = os.getenv('BLACKHOLE_SYMLINK_MAX_AGE')
@@ -209,12 +273,18 @@ class Config:
         self.ROUTING_AUDIT_INTERVAL = os.getenv('ROUTING_AUDIT_INTERVAL')
         self.QUEUE_CLEANUP_INTERVAL = os.getenv('QUEUE_CLEANUP_INTERVAL')
         self.LIBRARY_SCAN_INTERVAL = os.getenv('LIBRARY_SCAN_INTERVAL')
+        # Delay (seconds, default '0') inserted between symlink creation
+        # and the immediate arr rescan trigger to let an NFS attribute
+        # cache invalidate before Sonarr/Radarr walks the share.  Plan
+        # 41 phase B.2 — see TROUBLESHOOTING entry for the symptom.
+        self.LIBRARY_RESCAN_NFS_DELAY = os.getenv('LIBRARY_RESCAN_NFS_DELAY', '0')
         self.SYMLINK_VERIFY_INTERVAL = os.getenv('SYMLINK_VERIFY_INTERVAL')
         self.PREFERENCE_ENFORCE_INTERVAL = os.getenv('PREFERENCE_ENFORCE_INTERVAL')
         self.HOUSEKEEPING_INTERVAL = os.getenv('HOUSEKEEPING_INTERVAL')
         self.CONFIG_BACKUP_INTERVAL = os.getenv('CONFIG_BACKUP_INTERVAL')
         self.CONFIG_BACKUP_RETENTION = os.getenv('CONFIG_BACKUP_RETENTION', '7')
         self.MOUNT_LIVENESS_INTERVAL = os.getenv('MOUNT_LIVENESS_INTERVAL')
+        self.MOUNT_SELFHEAL_ENABLED = os.getenv('MOUNT_SELFHEAL_ENABLED', 'true')
         # History
         self.HISTORY_RETENTION_DAYS = os.getenv('HISTORY_RETENTION_DAYS')
         # Notification digest
@@ -225,11 +295,37 @@ class Config:
         self.BLOCKLIST_EXPIRY_DAYS = os.getenv('BLOCKLIST_EXPIRY_DAYS', '0')
         # Symlink repair
         self.SYMLINK_REPAIR_AUTO_SEARCH = os.getenv('SYMLINK_REPAIR_AUTO_SEARCH', 'false')
+        # Debrid health reconciler (plan 38) — detects RD's May 2026 keyword
+        # filter blocks on the existing torrent set. Default ON for detection;
+        # remediation (delete + arr re-search) gates separately via
+        # AUTO_REMEDIATE — opt-in because the remediation path mutates RD
+        # account state (deletes torrents) and triggers arr searches.
+        self.DEBRID_HEALTH_ENABLED = os.getenv('DEBRID_HEALTH_ENABLED', 'true')
+        self.DEBRID_HEALTH_AUTO_REMEDIATE = os.getenv('DEBRID_HEALTH_AUTO_REMEDIATE', 'false')
+        # Cross-debrid rescue (plan 39 phase 3) — when RD filter-blocks
+        # a torrent and TB has it cached, re-host on TB instead of just
+        # deleting + asking the arr to find a different release (which
+        # loops on the same filter).  Default-resolved at runtime in
+        # ``utils.debrid_health._cross_rescue_enabled``: on when both
+        # RD_API_KEY and TORBOX_API_KEY are set, off otherwise.  Explicit
+        # ``true``/``false`` overrides the default.
+        self.DEBRID_HEALTH_CROSS_RESCUE = os.getenv('DEBRID_HEALTH_CROSS_RESCUE')
         # Routing audit (auto-tag untagged monitored series/movies with debrid tag)
         self.ROUTING_AUTO_TAG_UNTAGGED = os.getenv('ROUTING_AUTO_TAG_UNTAGGED', 'true')
         # Gap-fill reconcile — unconditional missing-episode search across
         # debrid + local.  Also auto-enables verify_symlinks re-search.
         self.GAP_FILL_ENABLED = os.getenv('GAP_FILL_ENABLED', 'true')
+        # Wanted→TorBox proactive recovery — grab TB-cached copies of Wanted
+        # ghosts the arr never grabbed, bounded per scan.
+        self.WANTED_TB_RECOVERY_ENABLED = os.getenv('WANTED_TB_RECOVERY_ENABLED', 'true')
+        self.WANTED_TB_RECOVERY_MAX_PER_SCAN = os.getenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', '2')
+        # RD leg: RD's cache probe is dead, so the add is the probe — add,
+        # keep if instantly ready, delete + fall back to the TB leg if not.
+        self.WANTED_RD_RECOVERY_ENABLED = os.getenv('WANTED_RD_RECOVERY_ENABLED', 'true')
+        self.WANTED_RD_RECOVERY_MAX_PER_SCAN = os.getenv('WANTED_RD_RECOVERY_MAX_PER_SCAN', '4')
+        # Season-pack extension: probe TB packs for partial-show seasons
+        # with missing aired episodes (TB-only, shares the TB budget).
+        self.WANTED_SEASON_RECOVERY_ENABLED = os.getenv('WANTED_SEASON_RECOVERY_ENABLED', 'true')
         # Debrid search
         self.TORRENTIO_URL = os.getenv('TORRENTIO_URL')
         # Refuse the interactive "Add" button when the chosen hash is not
@@ -257,6 +353,25 @@ class Config:
         # to survive past Zurgarr's patience.
         self.BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT = os.getenv(
             'BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'false'
+        )
+        # When ON, an uncached blackhole grab that would otherwise be
+        # rejected triggers a search for a same-title, same-tier release
+        # cached on TorBox to grab instead — so a well-cached title isn't
+        # dropped to "Wanted" just because the specific hash the arr picked
+        # is uncached.  Read live from os.environ in blackhole.py so a UI
+        # change applies on the next grab; declared here for the globals
+        # export + settings drift guard.  No-op without TorBox configured.
+        self.BLACKHOLE_TB_ALT_RECOVERY_ENABLED = os.getenv(
+            'BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true'
+        )
+        # When ON, an uncached-rejected grab is reported back to the owning
+        # arr via the failed-download API (blocklist + immediate re-search)
+        # instead of being silently deleted — which otherwise makes the arr
+        # re-grab the identical release on every RSS pass, forever.  Read
+        # live from os.environ in blackhole.py; declared here for the
+        # globals export + settings drift guard.
+        self.BLACKHOLE_ARR_FAILED_FEEDBACK_ENABLED = os.getenv(
+            'BLACKHOLE_ARR_FAILED_FEEDBACK_ENABLED', 'true'
         )
         # When ON, plex_debrid setup injects the ``cache status / requirement
         # / cached`` rule into every content version on startup so the
@@ -291,6 +406,14 @@ JFADD = config.JFADD
 JFAPIKEY = config.JFAPIKEY
 RDAPIKEY = config.RDAPIKEY
 ADAPIKEY = config.ADAPIKEY
+TORBOXAPIKEY = config.TORBOXAPIKEY
+TORBOXWEBDAVUSER = config.TORBOXWEBDAVUSER
+TORBOXWEBDAVPASS = config.TORBOXWEBDAVPASS
+TORBOX_MOUNT_NAME = config.TORBOX_MOUNT_NAME
+TORBOX_RCLONE_TPSLIMIT = config.TORBOX_RCLONE_TPSLIMIT
+TORBOX_RCLONE_TPSLIMIT_BURST = config.TORBOX_RCLONE_TPSLIMIT_BURST
+TORBOX_RCLONE_DIR_CACHE_TIME = config.TORBOX_RCLONE_DIR_CACHE_TIME
+TORBOX_SCAN_TIMEOUT = config.TORBOX_SCAN_TIMEOUT
 GHTOKEN = config.GHTOKEN
 SEERRAPIKEY = config.SEERRAPIKEY
 SEERRADD = config.SEERRADD
@@ -324,10 +447,13 @@ BLACKHOLE_ENABLED = config.BLACKHOLE_ENABLED
 BLACKHOLE_DIR = config.BLACKHOLE_DIR
 BLACKHOLE_POLL_INTERVAL = config.BLACKHOLE_POLL_INTERVAL
 BLACKHOLE_DEBRID = config.BLACKHOLE_DEBRID
+BLACKHOLE_DEBRID_ROUTING = config.BLACKHOLE_DEBRID_ROUTING
+BLACKHOLE_DEBRID_PRIMARY = config.BLACKHOLE_DEBRID_PRIMARY
 BLACKHOLE_SYMLINK_ENABLED = config.BLACKHOLE_SYMLINK_ENABLED
 BLACKHOLE_COMPLETED_DIR = config.BLACKHOLE_COMPLETED_DIR
 BLACKHOLE_RCLONE_MOUNT = config.BLACKHOLE_RCLONE_MOUNT
 BLACKHOLE_SYMLINK_TARGET_BASE = config.BLACKHOLE_SYMLINK_TARGET_BASE
+BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX = config.BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX
 BLACKHOLE_MOUNT_POLL_TIMEOUT = config.BLACKHOLE_MOUNT_POLL_TIMEOUT
 BLACKHOLE_MOUNT_POLL_INTERVAL = config.BLACKHOLE_MOUNT_POLL_INTERVAL
 BLACKHOLE_SYMLINK_MAX_AGE = config.BLACKHOLE_SYMLINK_MAX_AGE
@@ -341,26 +467,38 @@ RADARR_API_KEY = config.RADARR_API_KEY
 ROUTING_AUDIT_INTERVAL = config.ROUTING_AUDIT_INTERVAL
 QUEUE_CLEANUP_INTERVAL = config.QUEUE_CLEANUP_INTERVAL
 LIBRARY_SCAN_INTERVAL = config.LIBRARY_SCAN_INTERVAL
+LIBRARY_RESCAN_NFS_DELAY = config.LIBRARY_RESCAN_NFS_DELAY
 SYMLINK_VERIFY_INTERVAL = config.SYMLINK_VERIFY_INTERVAL
 PREFERENCE_ENFORCE_INTERVAL = config.PREFERENCE_ENFORCE_INTERVAL
 HOUSEKEEPING_INTERVAL = config.HOUSEKEEPING_INTERVAL
 CONFIG_BACKUP_INTERVAL = config.CONFIG_BACKUP_INTERVAL
 CONFIG_BACKUP_RETENTION = config.CONFIG_BACKUP_RETENTION
 MOUNT_LIVENESS_INTERVAL = config.MOUNT_LIVENESS_INTERVAL
+MOUNT_SELFHEAL_ENABLED = config.MOUNT_SELFHEAL_ENABLED
 HISTORY_RETENTION_DAYS = config.HISTORY_RETENTION_DAYS
 NOTIFICATION_DIGEST_ENABLED = config.NOTIFICATION_DIGEST_ENABLED
 NOTIFICATION_DIGEST_TIME = config.NOTIFICATION_DIGEST_TIME
 BLOCKLIST_AUTO_ADD = config.BLOCKLIST_AUTO_ADD
 BLOCKLIST_EXPIRY_DAYS = config.BLOCKLIST_EXPIRY_DAYS
 SYMLINK_REPAIR_AUTO_SEARCH = config.SYMLINK_REPAIR_AUTO_SEARCH
+DEBRID_HEALTH_ENABLED = config.DEBRID_HEALTH_ENABLED
+DEBRID_HEALTH_AUTO_REMEDIATE = config.DEBRID_HEALTH_AUTO_REMEDIATE
+DEBRID_HEALTH_CROSS_RESCUE = config.DEBRID_HEALTH_CROSS_RESCUE
 ROUTING_AUTO_TAG_UNTAGGED = config.ROUTING_AUTO_TAG_UNTAGGED
 GAP_FILL_ENABLED = config.GAP_FILL_ENABLED
+WANTED_TB_RECOVERY_ENABLED = config.WANTED_TB_RECOVERY_ENABLED
+WANTED_TB_RECOVERY_MAX_PER_SCAN = config.WANTED_TB_RECOVERY_MAX_PER_SCAN
+WANTED_RD_RECOVERY_ENABLED = config.WANTED_RD_RECOVERY_ENABLED
+WANTED_RD_RECOVERY_MAX_PER_SCAN = config.WANTED_RD_RECOVERY_MAX_PER_SCAN
+WANTED_SEASON_RECOVERY_ENABLED = config.WANTED_SEASON_RECOVERY_ENABLED
 TORRENTIO_URL = config.TORRENTIO_URL
 SEARCH_REQUIRE_CACHED = config.SEARCH_REQUIRE_CACHED
 SEARCH_DEDUP_ENABLED = config.SEARCH_DEDUP_ENABLED
 BLACKHOLE_REQUIRE_CACHED = config.BLACKHOLE_REQUIRE_CACHED
 BLACKHOLE_DEBRID_DEDUP_ENABLED = config.BLACKHOLE_DEBRID_DEDUP_ENABLED
 BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT = config.BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT
+BLACKHOLE_TB_ALT_RECOVERY_ENABLED = config.BLACKHOLE_TB_ALT_RECOVERY_ENABLED
+BLACKHOLE_ARR_FAILED_FEEDBACK_ENABLED = config.BLACKHOLE_ARR_FAILED_FEEDBACK_ENABLED
 PD_ENFORCE_CACHED_VERSIONS = config.PD_ENFORCE_CACHED_VERSIONS
 QUALITY_COMPROMISE_ENABLED = config.QUALITY_COMPROMISE_ENABLED
 QUALITY_COMPROMISE_DWELL_DAYS = config.QUALITY_COMPROMISE_DWELL_DAYS

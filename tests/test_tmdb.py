@@ -112,6 +112,9 @@ class TestSearch:
         assert len(calls) == 2  # first with year, then without
 
     def test_search_movie_retries_without_year(self, monkeypatch):
+        """fallback_no_year retries the search without the year filter.
+        Result year within the drift window (±5 years) is accepted —
+        legitimate festival/wide-release dating jitter."""
         calls = []
         def _fake_get(path, params=None):
             calls.append(params)
@@ -120,7 +123,7 @@ class TestSearch:
             return {'results': [{
                 'id': 47211, 'title': 'Faster, Faster',
                 'overview': '', 'poster_path': '/ff.jpg',
-                'release_date': '1981-01-01',
+                'release_date': '2018-01-01',  # 2 years off — within drift
             }]}
         monkeypatch.setattr(tmdb, '_api_get', _fake_get)
         result = tmdb.search_movie('Faster and Faster', 2020, fallback_no_year=True)
@@ -291,16 +294,206 @@ class TestSearch:
         # Should take results[0] from the retry, NOT prefer the 2022 match
         assert result['tmdb_id'] == 100
 
-    def test_search_movie_fallback_no_year_skips_year_preference(self, monkeypatch):
-        """Movie fallback retry also skips year preference."""
+    def test_search_show_fallback_no_year_rejects_far_year_drift(self, monkeypatch):
+        """Regression for the TMDB cache-poisoning bug: searching
+        ``Alien`` + 1979 returns zero TV results (no show called Alien
+        premiered in 1979), the fallback retries without the year
+        filter, and TMDB returns ``Resident Alien`` (2021+).  Pre-fix
+        this got cached under key ``alien (1979)`` and poisoned every
+        downstream lookup.  Post-fix the >5-year drift causes the
+        function to return None so nothing gets cached."""
+        calls = []
+        def _fake_get(path, params=None):
+            calls.append(params)
+            if params and params.get('first_air_date_year'):
+                return {'results': []}  # no TV show called "Alien" 1979
+            return {'results': [{
+                'id': 96580, 'name': 'Resident Alien',
+                'overview': '', 'poster_path': '/r.jpg',
+                'first_air_date': '2021-01-27',  # 42 years off
+            }]}
+        monkeypatch.setattr(tmdb, '_api_get', _fake_get)
+        result = tmdb.search_show('Alien', 1979, fallback_no_year=True)
+        assert result is None, \
+            'fallback retry must reject a result whose year drifts >5 years'
+        assert len(calls) == 2, 'must still attempt the retry'
+
+    def test_search_movie_fallback_no_year_rejects_far_year_drift(self, monkeypatch):
+        """Symmetric movie regression — searching ``65`` + 2023 with no
+        movie match falls back to a Japanese music special from a
+        completely different decade, must be rejected."""
         calls = []
         def _fake_get(path, params=None):
             calls.append(params)
             if params and params.get('year'):
                 return {'results': []}
+            return {'results': [{
+                'id': 240318, 'title': 'Livejack 2023 SMASH BEAT SP',
+                'overview': '', 'poster_path': '/lj.jpg',
+                'release_date': '2010-07-15',  # 13 years off
+            }]}
+        monkeypatch.setattr(tmdb, '_api_get', _fake_get)
+        result = tmdb.search_movie('65', 2023, fallback_no_year=True)
+        assert result is None
+        assert len(calls) == 2
+
+    def test_search_show_fallback_no_year_accepts_drift_within_window(self, monkeypatch):
+        """Drift up to ``_YEAR_FALLBACK_MAX_DRIFT`` years is accepted.
+        Real-world cases: anime where requested year is the US dub date
+        vs TMDB's original Japanese air year, shelved films released a
+        decade after production (``The Other Side of the Wind`` 1976
+        production / 2018 release), miniseries adapted years after a
+        source novel year used in folder names."""
+        def _fake_get(path, params=None):
+            if params and params.get('first_air_date_year'):
+                return {'results': []}
+            return {'results': [{
+                'id': 100, 'name': 'X', 'overview': '',
+                'poster_path': '/x.jpg', 'first_air_date': '2015-01-01',
+            }]}
+        monkeypatch.setattr(tmdb, '_api_get', _fake_get)
+        # Requested 2025, result is 2015 → drift of 10 (boundary)
+        result = tmdb.search_show('X', 2025, fallback_no_year=True)
+        assert result is not None
+        assert result['tmdb_id'] == 100
+
+    def test_search_show_fallback_no_year_missing_result_year_passes(self, monkeypatch):
+        """When the fallback result has no ``first_air_date`` (legacy
+        cache entries occasionally lack it), the year-drift guard
+        fails-open — better to admit a possibly-wrong result than to
+        reject every year-less entry."""
+        def _fake_get(path, params=None):
+            if params and params.get('first_air_date_year'):
+                return {'results': []}
+            return {'results': [{
+                'id': 200, 'name': 'Y', 'overview': '',
+                'poster_path': '/y.jpg', 'first_air_date': '',  # missing
+            }]}
+        monkeypatch.setattr(tmdb, '_api_get', _fake_get)
+        result = tmdb.search_show('Y', 1979, fallback_no_year=True)
+        assert result is not None
+        assert result['tmdb_id'] == 200
+
+    def test_search_movie_fallback_no_year_missing_result_year_passes(self, monkeypatch):
+        """Symmetric movie case — missing release_date fails open."""
+        def _fake_get(path, params=None):
+            if params and params.get('year'):
+                return {'results': []}
+            return {'results': [{
+                'id': 300, 'title': 'Z', 'overview': '',
+                'poster_path': '/z.jpg', 'release_date': '',
+            }]}
+        monkeypatch.setattr(tmdb, '_api_get', _fake_get)
+        result = tmdb.search_movie('Z', 1979, fallback_no_year=True)
+        assert result is not None
+        assert result['tmdb_id'] == 300
+
+    def test_search_show_coerces_string_year(self, monkeypatch):
+        """Defense against caller-side type mismatch — string year
+        coerces to int so the drift arithmetic doesn't TypeError."""
+        def _fake_get(path, params=None):
+            return {'results': [{
+                'id': 400, 'name': 'A', 'overview': '',
+                'poster_path': '/a.jpg', 'first_air_date': '2020-01-01',
+            }]}
+        monkeypatch.setattr(tmdb, '_api_get', _fake_get)
+        # Pass year as a string — must not raise
+        result = tmdb.search_show('A', '2020', fallback_no_year=True)
+        assert result is not None
+
+    def test_search_show_invalid_year_silently_dropped(self, monkeypatch):
+        """Non-numeric year strings drop to year=None rather than
+        raising — preserves search behavior when callers pass garbage."""
+        def _fake_get(path, params=None):
+            return {'results': [{
+                'id': 500, 'name': 'B', 'overview': '',
+                'poster_path': '/b.jpg', 'first_air_date': '2020-01-01',
+            }]}
+        monkeypatch.setattr(tmdb, '_api_get', _fake_get)
+        result = tmdb.search_show('B', 'not-a-year', fallback_no_year=True)
+        assert result is not None
+        assert result['tmdb_id'] == 500
+
+
+class TestCacheLookupOnReadSanity:
+    """On-read year-drift guard in ``_cache_lookup``.
+
+    Catches pre-existing poisoned cache entries (where prior bugs wrote
+    unrelated content under a year-qualified key) without forcing
+    operators to clear ``/config/tmdb_cache.json`` whenever a fix lands.
+    """
+
+    def test_lookup_rejects_year_drifted_entry(self):
+        """A cached entry whose ``first_air_date`` year drifts >drift
+        from the requested year is treated as a miss — caller will
+        refetch from TMDB and get the right entry."""
+        section = {
+            'alien (1979)': {
+                'tmdb_id': 96580, 'title': 'Resident Alien',
+                'first_air_date': '2021-01-27',  # 42 years off
+            },
+        }
+        # Year-qualified lookup misses because the cached year is way off
+        assert tmdb._cache_lookup(section, 'alien', 1979) is None
+
+    def test_lookup_accepts_entry_within_drift_window(self):
+        """An entry whose stored year is within the drift window
+        passes through (admits anime/shelved-film legitimate drift)."""
+        section = {
+            'x (2025)': {
+                'tmdb_id': 100, 'title': 'X',
+                'first_air_date': '2018-01-01',  # 7 years off, within 10
+            },
+        }
+        entry = tmdb._cache_lookup(section, 'x', 2025)
+        assert entry is not None
+        assert entry['tmdb_id'] == 100
+
+    def test_lookup_yearless_query_bypasses_drift_check(self):
+        """When no year is requested, no drift check fires — entries
+        always returned by key match alone."""
+        section = {
+            'q': {'tmdb_id': 700, 'title': 'Q', 'first_air_date': '1950-01-01'},
+        }
+        entry = tmdb._cache_lookup(section, 'q', year=None)
+        assert entry is not None
+        assert entry['tmdb_id'] == 700
+
+    def test_lookup_entry_without_date_passes_through(self):
+        """Legacy entries lacking release_date/first_air_date pass — we
+        can't verify them so we trust them.  Same fail-open semantics as
+        the search-path drift guard."""
+        section = {
+            'old (2010)': {'tmdb_id': 800, 'title': 'Old'},  # no date
+        }
+        entry = tmdb._cache_lookup(section, 'old', 2010)
+        assert entry is not None
+        assert entry['tmdb_id'] == 800
+
+    def test_lookup_uses_release_date_for_movie_entries(self):
+        """Movie entries store release_date, not first_air_date — the
+        drift check must check both for forward-compat."""
+        section = {
+            '65 (2023)': {
+                'tmdb_id': 240318, 'title': 'Livejack 2023',
+                'release_date': '2010-07-15',  # 13 years off
+            },
+        }
+        assert tmdb._cache_lookup(section, '65', 2023) is None
+
+    def test_search_movie_fallback_no_year_skips_year_preference(self, monkeypatch):
+        """Movie fallback retry also skips year preference — picks the
+        first (most popular) result rather than reordering by year."""
+        calls = []
+        def _fake_get(path, params=None):
+            calls.append(params)
+            if params and params.get('year'):
+                return {'results': []}
+            # Both within drift window so the year-drift guard doesn't kick in;
+            # the test asserts the no-year-reorder behavior independently of it.
             return {'results': [
                 {'id': 100, 'title': 'Faster', 'overview': '',
-                 'poster_path': '/f.jpg', 'release_date': '1981-01-01'},
+                 'poster_path': '/f.jpg', 'release_date': '2017-01-01'},
                 {'id': 999, 'title': 'Faster Again', 'overview': '',
                  'poster_path': '/x.jpg', 'release_date': '2020-06-01'},
             ]}

@@ -46,6 +46,8 @@ ALL_EVENTS = {
     'blocklist_added',            # Torrent added to blocklist
     'arr_deleted',                # Movie/series deleted from Sonarr/Radarr
     'health_error',               # Process crash, mount failure
+    'debrid_filtered',            # Debrid filter-block detected (and remediated if AUTO_REMEDIATE)
+    'debrid_rescued',             # Filter-blocked content auto-rehosted on the alt debrid (plan 39 phase 3)
     # Repair
     'symlink_repaired',           # Broken symlink repaired or re-search triggered
     # Debrid search
@@ -53,6 +55,8 @@ ALL_EVENTS = {
     'debrid_add_failed',          # Failed to add torrent to debrid
     # Quality compromise (plan 33)
     'compromise_grabbed',         # Grabbed a lower tier after dwell at preferred failed
+    # Retry give-ups
+    'retry_giveup',               # Automatic retries exhausted — operator action needed (Stuck tab)
     # Digest
     'daily_digest',               # Daily summary notification
 }

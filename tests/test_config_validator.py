@@ -74,6 +74,69 @@ class TestConfigValidation:
         assert len(debrid_errors) == 1
         assert 'realdebird' in debrid_errors[0]
 
+    # --- TorBox WebDAV mount (plan 39 phase 1) ---
+
+    def test_torbox_api_only_warns_missing_webdav_creds(self, clean_env, env_vars):
+        """TORBOX_API_KEY set without WEBDAV creds is a warn, not an error —
+        the API-key-only path (search/cache/blackhole) still works."""
+        env_vars(TORBOX_API_KEY='tb-trial-key')
+        result = _validate_with_reload()
+        torbox_warns = [w for w in result.warnings if 'TORBOX_API_KEY' in w]
+        assert len(torbox_warns) == 1
+        assert 'TORBOX_WEBDAV_USER' in torbox_warns[0]
+        assert 'TORBOX_WEBDAV_PASS' in torbox_warns[0]
+        # And not an error — partial config must not block container startup.
+        assert not [e for e in result.errors if 'TORBOX' in e]
+
+    def test_torbox_full_config_no_warn(self, clean_env, env_vars):
+        """API key + both WebDAV creds → no warning."""
+        env_vars(
+            TORBOX_API_KEY='tb-trial-key',
+            TORBOX_WEBDAV_USER='me@example.com',
+            TORBOX_WEBDAV_PASS='secret',
+        )
+        result = _validate_with_reload()
+        torbox_issues = [
+            m for m in result.errors + result.warnings
+            if 'TORBOX_API_KEY' in m or 'TORBOX_WEBDAV' in m
+        ]
+        assert torbox_issues == []
+
+    def test_torbox_user_only_warns_about_pass(self, clean_env, env_vars):
+        """Half-configured WebDAV (user but no pass) names only the missing var."""
+        env_vars(
+            TORBOX_API_KEY='tb-trial-key',
+            TORBOX_WEBDAV_USER='me@example.com',
+        )
+        result = _validate_with_reload()
+        torbox_warns = [w for w in result.warnings if 'TORBOX_API_KEY' in w]
+        assert len(torbox_warns) == 1
+        assert 'TORBOX_WEBDAV_PASS' in torbox_warns[0]
+        assert 'TORBOX_WEBDAV_USER' not in torbox_warns[0]
+
+    def test_torbox_mount_name_collision_errors(self, clean_env, env_vars):
+        """TORBOX_MOUNT_NAME identical to RCLONE_MOUNT_NAME is a hard error —
+        overlapping /data/<name>/ would corrupt RD's view."""
+        env_vars(
+            TORBOX_API_KEY='tb-trial-key',
+            RCLONE_MOUNT_NAME='zurgarr',
+            TORBOX_MOUNT_NAME='zurgarr',
+        )
+        result = _validate_with_reload()
+        collision = [e for e in result.errors if 'TORBOX_MOUNT_NAME' in e]
+        assert len(collision) == 1
+        assert 'collides' in collision[0].lower()
+
+    def test_no_torbox_no_warning(self, clean_env, env_vars):
+        """Single-debrid users (no TORBOX_API_KEY) see zero TorBox messages."""
+        env_vars(RD_API_KEY='rd-key')
+        result = _validate_with_reload()
+        torbox_msgs = [
+            m for m in result.errors + result.warnings
+            if 'TORBOX' in m
+        ]
+        assert torbox_msgs == []
+
     def test_invalid_notification_level(self, clean_env, env_vars):
         """Invalid NOTIFICATION_LEVEL should error."""
         env_vars(NOTIFICATION_LEVEL='verbose')

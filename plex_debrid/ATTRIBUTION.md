@@ -17,8 +17,9 @@ plex_debrid should contact the upstream author (itsToggle).
 Local modifications to the vendored tree are visible in the Zurgarr git
 history (`git log -- plex_debrid/`). Notable areas of change include
 content service additions (e.g. `content/services/mdblist.py`), debrid
-service tweaks (`debrid/services/realdebrid.py`), and scraper adjustments
-(`scraper/services/torrentio.py`). The Zurgarr-authored wrappers that
+service tweaks (`debrid/services/realdebrid.py`, `debrid/services/torbox.py`
+— createtorrent pacing to respect TorBox's 60/hour account limit), and
+scraper adjustments (`scraper/services/torrentio.py`). The Zurgarr-authored wrappers that
 launch and supervise plex_debrid live in `plex_debrid_/` (with trailing
 underscore) and are covered by Zurgarr's own LICENSE.
 

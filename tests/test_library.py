@@ -13,6 +13,7 @@ from utils.library import (
     _build_season_data,
     _discover_mount,
     _norm_for_matching,
+    _release_matches_title,
     get_wanted_counts,
     compute_library_stats,
     LibraryScanner,
@@ -426,6 +427,163 @@ class TestCollectEpisodes:
         assert key[0] == 3
         assert key[1] >= 1000
 
+    def test_qualified_season_dirs_collected(self, tmp_dir):
+        """Season packs qualify per-season subdirs with a bracketed
+        source tag — 'Season 1 (BluRay)' — which the old anchored
+        pattern missed, leaving the whole pack invisible (prod: The
+        Americans S01-S06 mega-pack sat unlinked forever). Bare-word
+        suffixes ('Season 1 Extras') and non-season dirs (Featurettes)
+        must stay excluded."""
+        folder = os.path.join(tmp_dir, "pack")
+        s1 = os.path.join(folder, "Season 1 (BluRay)")
+        s2 = os.path.join(folder, "Season 2 (AMZN WEB-DL)")
+        extras = os.path.join(folder, "Season 1 Extras")
+        feats = os.path.join(folder, "Featurettes")
+        for d in (s1, s2, extras, feats):
+            os.makedirs(d)
+        open(os.path.join(s1, "Show (2013) - S01E01 - Pilot.mkv"), 'w').close()
+        open(os.path.join(s2, "Show (2013) - S02E01 - Comrades.mkv"), 'w').close()
+        open(os.path.join(extras, "gag-reel.mkv"), 'w').close()
+        open(os.path.join(feats, "making-of.mkv"), 'w').close()
+        eps = _collect_episodes(folder)
+        assert set(eps.keys()) == {(1, 1), (2, 1)}
+
+    def test_bare_snn_season_dirs_collected(self, tmp_dir):
+        """Second and third live pack dialects: bare 'S01' subdirs
+        (Broadchurch/Barry shape) and unbracketed allowlisted qualifiers
+        ('S01 Bluray', 'S04 WEB-DL' — Arrested Development shape).
+        Non-allowlisted bare words stay excluded."""
+        folder = os.path.join(tmp_dir, "pack")
+        s1 = os.path.join(folder, "S01")
+        s2 = os.path.join(folder, "S02 Bluray")
+        s4 = os.path.join(folder, "S04 WEB-DL")
+        junk = os.path.join(folder, "S01 Bloopers")
+        for d in (s1, s2, s4, junk):
+            os.makedirs(d)
+        open(os.path.join(s1, "Show - S01E01.mkv"), 'w').close()
+        open(os.path.join(s2, "Show - S02E01.mkv"), 'w').close()
+        open(os.path.join(s4, "Show - S04E01.mkv"), 'w').close()
+        open(os.path.join(junk, "gag-reel.mkv"), 'w').close()
+        eps = _collect_episodes(folder)
+        assert set(eps.keys()) == {(1, 1), (2, 1), (4, 1)}
+
+
+class TestSeasonDirPattern:
+    """_SEASON_DIR_PATTERN accepts plain and bracket-qualified season
+    dirs; junk qualifiers (anywhere in the tail, bracketed or not) are
+    denylisted by _match_season_dir so junk files can't ride the
+    sequential-key fallback into season_data as phantom episodes."""
+
+    @pytest.mark.parametrize("name,season", [
+        ("Season 1", 1),
+        ("Season 01", 1),
+        ("season 3", 3),
+        ("Season 1 (BluRay)", 1),
+        ("Season 2 (AMZN WEB-DL)", 2),
+        ("Season 3 [1080p x265]", 3),
+        ("Season 12(BluRay)", 12),
+        ("Season 1 (Complete)", 1),
+        ("Season 4 (2160p Remux)", 4),
+        # Bare-SNN pack dialect (prod: Broadchurch S01-S03 pack subdirs).
+        ("S01", 1),
+        ("S1", 1),
+        ("s03", 3),
+        ("S02 (BluRay)", 2),
+        # Unbracketed source/quality qualifier — allowlisted keywords only
+        # (prod: Arrested Development pack subdirs).
+        ("S01 Bluray", 1),
+        ("S04 WEB-DL", 4),
+        ("S03 WEB", 3),
+        ("S02 1080p x265", 2),
+        ("Season 3 WEB-DL", 3),
+        ("Season 2 Complete", 2),
+        # Year-based seasons (daily shows) must survive the digit cap.
+        ("Season 2023", 2023),
+    ])
+    def test_accepts(self, name, season):
+        from utils.library import _match_season_dir
+        m = _match_season_dir(name)
+        assert m and int(m.group(1)) == season
+
+    @pytest.mark.parametrize("name", [
+        "Season 1 Extras",
+        "Season 1 Featurettes",
+        "Seasons 1-6",
+        "Season One",
+        "The Season 1",
+        "Featurettes",
+        # Bare-SNN accepts only exact/bracket-qualified/allowlisted-keyword
+        # forms — episode tags, ranges, release-name shrapnel, and
+        # non-allowlisted bare words stay rejected.
+        "S01E01",
+        "S01-S03",
+        "S01.COMPLETE",
+        "S01 Extras",
+        "S01 (Extras)",
+        "S01 Bloopers",
+        "S99999",
+        "Sample",
+        # Bracketed junk qualifiers — denylisted so their contents can't
+        # ride the sequential-key fallback in as phantom episodes.
+        "Season 1 (Extras)",
+        "Season 1 (Extra)",
+        "Season 2 (Featurettes)",
+        "Season 2 (Bonus)",
+        "Season 3 (Bonuses)",
+        "Season 3 (Specials)",
+        "Season 3 (Scenes)",
+        "Season 4 (Behind the Scenes)",
+        "Season 4 [Behind.the.Scenes]",
+        "Season 5 (Deleted Scenes)",
+        "Season 5 (Sample)",
+        "Season 6 (Subs)",
+        "Season 6 (Subtitles)",
+        "Season 7 (Trailers)",
+        "Season 7 (Interviews)",
+        # S-prefix siblings of the bracketed junk forms.
+        "S02 (Bonus)",
+        "S03 (Specials)",
+        "S04 (Behind the Scenes)",
+        "S05 (Featurettes)",
+        "S06 (Subs)",
+        "S07 (Trailers)",
+        # Junk ANYWHERE in the qualifier tail — a leading allowlisted
+        # keyword is not a permission slip for trailing junk words.
+        "S01 Bluray Extras",
+        "S01 Bluray Bonus Disc",
+        "S01 DVD Sample",
+        "S01 Complete Bloopers",
+        "Season 1 Bluray Extras",
+        "Season 1 Complete Extras",
+        "Season 1 (BluRay Extras)",
+        "S01 (Complete Sample)",
+        "S01 (1080p Trailers)",
+    ])
+    def test_rejects(self, name):
+        from utils.library import _match_season_dir
+        assert _match_season_dir(name) is None
+
+    def test_webdav_collect_qualified_season_bucket(self):
+        """The TB mylist / WebDAV collector sees the same qualified
+        subdir names via season_files buckets — the exact prod
+        regression shape."""
+        from utils.library import LibraryScanner
+        contents = {
+            'files': [],
+            'season_files': {
+                'Season 1 (BluRay)': [
+                    ('The Americans (2013) - S01E01 - Pilot.mkv',
+                     1000, '/data/torbox/pack/Season 1 (BluRay)/e1.mkv'),
+                ],
+                'Featurettes': [
+                    ('making-of.mkv', 500, '/data/torbox/pack/Featurettes/m.mkv'),
+                ],
+            },
+        }
+        eps = LibraryScanner._collect_episodes_from_webdav(contents, 'pack')
+        assert set(eps.keys()) == {(1, 1)}
+        assert eps[(1, 1)]['folder'] == 'pack'
+
 
 # ---------------------------------------------------------------------------
 # _count_show_content
@@ -450,6 +608,18 @@ class TestCountShowContent:
         seasons, episodes = _count_show_content(show_path)
         assert seasons == 2
         assert episodes == 0
+
+    def test_mixed_dialects_dedupe_by_season_number(self, tmp_dir):
+        """'Season 01' and a legacy 'S01 Bluray' sibling are ONE season —
+        the wider dir pattern must not inflate the season count."""
+        show_path = _make_show(tmp_dir, "Mixed Show", {
+            "Season 01": ["ep1.mkv"],
+            "S01 Bluray": ["ep2.mkv"],
+            "Season 02": ["ep1.mkv"],
+        })
+        seasons, episodes = _count_show_content(show_path)
+        assert seasons == 2
+        assert episodes == 3
 
     def test_no_season_dirs(self, tmp_dir):
         show_path = os.path.join(tmp_dir, "Flat Show")
@@ -724,6 +894,36 @@ class TestLibraryScannerScanDebrid:
         assert show["seasons"] == 1
         assert show["episodes"] == 2
         assert show["source"] == "debrid"
+
+    def test_scan_debrid_skips_obfuscated_folders(self, tmp_dir, monkeypatch):
+        movies_dir = os.path.join(tmp_dir, "movies")
+        os.makedirs(os.path.join(movies_dir, "050bd19ee9934249a2ce4c9762c0d710[EZTVx.to]"))
+        os.makedirs(os.path.join(movies_dir, "Inception (2010)"))
+        shows_dir = os.path.join(tmp_dir, "shows")
+        os.makedirs(os.path.join(
+            shows_dir, "1f9da83faaf847949e043d0dae9684aa[eztv.re]"))
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        result = scanner.scan()
+
+        titles = ({m["title"] for m in result["movies"]}
+                  | {s["title"] for s in result["shows"]})
+        assert "Inception" in titles
+        assert not any("050bd19" in t.lower() or "1f9da83" in t.lower()
+                       for t in titles)
+
+    def test_scan_mount_flat_layout_skips_obfuscated(self, tmp_dir, monkeypatch):
+        os.makedirs(os.path.join(
+            tmp_dir, "050bd19ee9934249a2ce4c9762c0d710[EZTVx.to]"))
+        os.makedirs(os.path.join(tmp_dir, "Inception (2010)"))
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        movies, shows = scanner._scan_mount(
+            tmp_dir, flat_layout=True, source_debrid='torbox')
+
+        titles = {m["title"] for m in movies} | {s["title"] for s in shows}
+        assert "Inception" in titles
+        assert not any("050bd19" in t.lower() for t in titles)
 
     def test_scan_result_has_required_keys(self, tmp_dir, monkeypatch):
         os.makedirs(os.path.join(tmp_dir, "movies"))
@@ -1027,6 +1227,42 @@ class TestLibraryScannerScanLocal:
 
         assert len(result["movies"]) == 0
 
+    def test_scan_local_movies_skips_dangling_symlink_only_dir(self, tmp_dir):
+        """A folder whose only video is a dangling symlink is NOT local content.
+
+        Regression: `_has_media_files` counted any `is_symlink()` media entry,
+        so a broken video symlink (e.g. after a symlink-target-base rename, or
+        a non-debrid symlink whose target vanished) inflated the recovery
+        metric and hid the title from "Wanted", blocking symlink recreation.
+        """
+        local_movies = os.path.join(tmp_dir, "local_movies")
+        movie_dir = os.path.join(local_movies, "Dune (2021)")
+        os.makedirs(movie_dir)
+        # Symlink to a target that doesn't exist (and isn't a debrid prefix)
+        os.symlink(os.path.join(tmp_dir, "gone", "Dune.2021.mkv"),
+                   os.path.join(movie_dir, "Dune.2021.mkv"))
+
+        scanner = self._make_local_scanner(local_movies=local_movies)
+        result = scanner.scan()
+
+        assert len(result["movies"]) == 0
+
+    def test_scan_local_movies_keeps_resolving_symlink_dir(self, tmp_dir):
+        """A folder whose video symlink RESOLVES is still genuine local content."""
+        local_movies = os.path.join(tmp_dir, "local_movies")
+        target = os.path.join(tmp_dir, "real", "Dune.2021.mkv")
+        os.makedirs(os.path.dirname(target))
+        open(target, "w").close()
+        movie_dir = os.path.join(local_movies, "Dune (2021)")
+        os.makedirs(movie_dir)
+        os.symlink(target, os.path.join(movie_dir, "Dune.2021.mkv"))
+
+        scanner = self._make_local_scanner(local_movies=local_movies)
+        result = scanner.scan()
+
+        assert len(result["movies"]) == 1
+        assert result["movies"][0]["source"] == "local"
+
     def test_scan_local_tv_source_is_local(self, tmp_dir):
         local_tv = os.path.join(tmp_dir, "local_tv")
         _make_show(local_tv, "The Wire (2002)", {
@@ -1051,6 +1287,354 @@ class TestLibraryScannerScanLocal:
         scanner = self._make_local_scanner(local_tv=missing)
         result = scanner.scan()
         assert result["shows"] == []
+
+
+class TestMountHasContent:
+    """Unit guards for _mount_has_content — the per-mount health check that
+    keeps symlink cleanup from mass-deleting links on a throttled/stalled
+    mount (os.path.exists False for everything)."""
+
+    def test_missing_mount_is_unhealthy(self, tmp_dir):
+        from utils.library import _mount_has_content
+        assert _mount_has_content(os.path.join(tmp_dir, 'nope')) is False
+
+    def test_empty_mount_is_unhealthy(self, tmp_dir):
+        from utils.library import _mount_has_content
+        empty = os.path.join(tmp_dir, 'empty')
+        os.makedirs(empty)
+        assert _mount_has_content(empty) is False
+        assert _mount_has_content(empty, flat=True) is False
+
+    def test_categorized_mount_needs_non_empty_category(self, tmp_dir):
+        from utils.library import _mount_has_content
+        mount = os.path.join(tmp_dir, 'rd')
+        os.makedirs(os.path.join(mount, 'movies'))  # category exists but empty
+        assert _mount_has_content(mount) is False
+        os.makedirs(os.path.join(mount, 'shows', 'A.Release'))
+        assert _mount_has_content(mount) is True
+
+    def test_flat_mount_healthy_when_non_empty(self, tmp_dir):
+        from utils.library import _mount_has_content
+        mount = os.path.join(tmp_dir, 'tb')
+        os.makedirs(os.path.join(mount, 'Some.Release'))
+        # Flat mount has no categories — non-empty top level is enough.
+        assert _mount_has_content(mount, flat=True) is True
+        # Same dir treated as categorized would look unhealthy.
+        assert _mount_has_content(mount, flat=False) is False
+
+
+class TestDebridSymlinkPrefixesDualDebrid:
+    """Guards for the dual-debrid symlink-prefix recognition that drives
+    local-scanner debrid-vs-local classification.
+
+    Regression: with plan 39's per-debrid target bases, TorBox content
+    landed under ``BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX`` (or the
+    auto-derived ``<RD>_torbox`` suffix).  The pre-fix scanner checked
+    only against ``BLACKHOLE_SYMLINK_TARGET_BASE``, so TB-only symlink
+    folders looked like genuine local content — appearing as movie or
+    TV cards in the wrong bucket of the library UI (the user-visible
+    surface: 'Why is Grey's Anatomy showing up as a movie in Recently
+    Added?').
+    """
+
+    def test_all_debrid_symlink_prefixes_includes_tb_auto_derived(self, monkeypatch):
+        """When TB is not explicitly configured but RD is set, the TB
+        prefix auto-derives as ``<RD>_torbox`` and must be included."""
+        from utils.library import _all_debrid_symlink_prefixes
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+        prefixes = _all_debrid_symlink_prefixes()
+        assert '/mnt/debrid/' in prefixes
+        assert '/mnt/debrid_torbox/' in prefixes
+
+    def test_all_debrid_symlink_prefixes_explicit_tb_wins(self, monkeypatch):
+        from utils.library import _all_debrid_symlink_prefixes
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/rd')
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', '/mnt/tb')
+        prefixes = _all_debrid_symlink_prefixes()
+        assert '/mnt/rd/' in prefixes
+        assert '/mnt/tb/' in prefixes
+        assert '/mnt/rd_torbox/' not in prefixes  # explicit beats auto-derived
+
+    def test_all_debrid_symlink_prefixes_single_debrid_no_dup(self, monkeypatch):
+        """RD-only setup (no TB env): TB's auto-derived `_torbox` suffix is
+        included (harmless over-include — the helper deliberately doesn't
+        couple to configured_debrids detection).  Critical assertion: no
+        duplicates regardless of how many bases get added."""
+        from utils.library import _all_debrid_symlink_prefixes
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+        prefixes = _all_debrid_symlink_prefixes()
+        assert '/mnt/debrid/' in prefixes
+        # Verify actual dedup behavior: if user sets RD and explicit-TB to
+        # the SAME path (legitimate "share one mount" config), the result
+        # collapses to a single prefix instead of duplicating it.
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', '/mnt/debrid')
+        deduped = _all_debrid_symlink_prefixes()
+        assert deduped.count('/mnt/debrid/') == 1, \
+            'identical RD+TB bases must dedup to one entry'
+
+    def test_all_debrid_symlink_prefixes_normalises_paths(self, monkeypatch):
+        """Helper must collapse consecutive separators and resolve relative
+        segments — raw env values like ``/mnt//debrid`` or ``./debrid``
+        would otherwise produce prefixes that no real symlink target
+        starts with."""
+        from utils.library import _all_debrid_symlink_prefixes
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt//debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+        prefixes = _all_debrid_symlink_prefixes()
+        # normpath collapses consecutive separators
+        assert '/mnt/debrid/' in prefixes
+        assert '/mnt//debrid/' not in prefixes
+
+    def test_all_debrid_symlink_prefixes_tb_only_install(self, monkeypatch):
+        """TB-only setup: RD unset, TB explicit.  Pre-fix the local-scanner
+        gate ``if symlink_base`` skipped the dedup-check entirely when RD
+        was unset; post-fix it runs because TB is configured.  This was
+        previously broken — TB-only users had no debrid-symlink detection."""
+        from utils.library import _all_debrid_symlink_prefixes
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE', raising=False)
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', '/mnt/torbox_only')
+        prefixes = _all_debrid_symlink_prefixes()
+        assert '/mnt/torbox_only/' in prefixes
+        assert prefixes, 'TB-only install must produce a non-empty prefix tuple'
+
+    def test_all_debrid_symlink_prefixes_empty_when_no_rd_no_tb(self, monkeypatch):
+        from utils.library import _all_debrid_symlink_prefixes
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE', raising=False)
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+        prefixes = _all_debrid_symlink_prefixes()
+        assert prefixes == ()
+
+    def test_movie_dir_with_tb_symlink_skipped(self, tmp_dir, monkeypatch):
+        """The user's exact reported scenario: a show-named folder under
+        local_movies containing a single symlink pointing at the TB mount.
+        Pre-fix: classified as local movie (because TB prefix wasn't
+        checked).  Post-fix: recognized as all-debrid → skipped → no
+        movie entry created."""
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+
+        local_movies = os.path.join(tmp_dir, 'local_movies')
+        misclassified = os.path.join(local_movies, 'Greys Anatomy')
+        os.makedirs(misclassified)
+        sym = os.path.join(misclassified, 'Greys.Anatomy.S19E09.mkv')
+        os.symlink('/mnt/debrid_torbox/some/path/Greys.Anatomy.S19E09.mkv', sym)
+
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_movies_path = local_movies
+        items = scanner._scan_local_movies()
+        assert items == [], \
+            'TB-routed show symlinks must NOT classify as local movies'
+
+    def test_tv_dir_with_tb_symlink_skipped(self, tmp_dir, monkeypatch):
+        """Sonarr/Radarr-parity counterpart: TB-routed show symlinks
+        under local_tv must also skip (otherwise they'd show as
+        spurious source='local' shows blocking debrid symlink recreation)."""
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+
+        local_tv = os.path.join(tmp_dir, 'local_tv')
+        show_dir = os.path.join(local_tv, 'Pagan Peak')
+        os.makedirs(os.path.join(show_dir, 'Season 03'))
+        sym = os.path.join(show_dir, 'Season 03', 'Pagan.Peak.S03E05.mkv')
+        os.symlink('/mnt/debrid_torbox/some/Pagan.Peak.S03E05.mkv', sym)
+
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_tv_path = local_tv
+        items = scanner._scan_local_shows()
+        assert items == [], \
+            'TB-routed show symlinks under local_tv must skip too (Sonarr parity)'
+
+    def test_mixed_rd_and_tb_symlinks_skipped(self, tmp_dir, monkeypatch):
+        """A real local Plex library may have content split across both
+        debrids during migration.  Mixed RD+TB symlinks must still skip
+        as 'all-debrid' — neither prefix alone disqualifies the dir."""
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+
+        local_movies = os.path.join(tmp_dir, 'local_movies')
+        d = os.path.join(local_movies, 'Mixed Show')
+        os.makedirs(d)
+        os.symlink('/mnt/debrid/some/rd-path.mkv', os.path.join(d, 'rd.mkv'))
+        os.symlink('/mnt/debrid_torbox/some/tb-path.mkv', os.path.join(d, 'tb.mkv'))
+
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_movies_path = local_movies
+        items = scanner._scan_local_movies()
+        assert items == [], 'mixed RD+TB symlink dirs must skip'
+
+    def test_genuine_local_file_alongside_tb_symlink_classified_local(
+        self, tmp_dir, monkeypatch,
+    ):
+        """A real local file (not a symlink) alongside a TB symlink means
+        the user has genuine content there — classify as local so the
+        existing rich-source-merge logic can pair it with a debrid sibling
+        in the source='both' bucket."""
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+
+        local_movies = os.path.join(tmp_dir, 'local_movies')
+        d = os.path.join(local_movies, 'Real Movie (2024)')
+        os.makedirs(d)
+        # Real on-disk file, not a symlink
+        open(os.path.join(d, 'Real.Movie.2024.mkv'), 'w').close()
+        # Plus a TB symlink (could be a sample / different cut)
+        os.symlink('/mnt/debrid_torbox/some/tb.mkv', os.path.join(d, 'sample.mkv'))
+
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_movies_path = local_movies
+        items = scanner._scan_local_movies()
+        assert len(items) == 1
+        assert items[0]['source'] == 'local'
+
+    def test_cleanup_removes_broken_tb_symlinks(self, tmp_dir, monkeypatch):
+        """Regression for the cleanup-not-updated finding: broken symlinks
+        under the auto-derived TB base must be removable too.  Pre-fix
+        the cleanup only matched the RD prefix → TB symlinks fell through
+        the prefix-check and stayed on disk forever even when their
+        targets had gone."""
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_ENABLED', 'true')
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', os.path.join(tmp_dir, 'rd_mount'))
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+
+        # Populate the RD mount with a category dir so the "categories empty"
+        # guard doesn't short-circuit the function.
+        rd_mount = os.path.join(tmp_dir, 'rd_mount')
+        os.makedirs(os.path.join(rd_mount, 'shows', '_keep'))
+        # TB mount must be non-empty (healthy) — the per-mount health gate
+        # skips deletion on an empty/throttled mount.  Add an unrelated release
+        # so the mount is live, but the broken symlink below points at a
+        # DIFFERENT (non-existent) release so it's still removed.
+        tb_mount = os.path.join(tmp_dir, 'tb_mount')
+        os.makedirs(os.path.join(tb_mount, 'Some.Other.Release'))
+
+        # Local TV folder with a broken TB symlink (target doesn't exist).
+        local_tv = os.path.join(tmp_dir, 'local_tv')
+        show_dir = os.path.join(local_tv, 'Pagan Peak', 'Season 03')
+        os.makedirs(show_dir)
+        broken_tb_link = os.path.join(show_dir, 'Pagan.Peak.S03E05.mkv')
+        # Use the auto-derived TB base /mnt/debrid_torbox to match the helper.
+        os.symlink('/mnt/debrid_torbox/Pagan.Peak.S03E05/Pagan.Peak.S03E05.mkv',
+                   broken_tb_link)
+
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_movies_path = None
+        scanner._local_tv_path = local_tv
+        scanner._discover_torbox_mount = lambda: tb_mount
+        scanner._cleanup_broken_debrid_symlinks()
+
+        assert not os.path.lexists(broken_tb_link), \
+            'broken TB symlink under the auto-derived TB base must be removed'
+
+    def test_cleanup_keeps_intact_rd_symlinks(self, tmp_dir, monkeypatch):
+        """Cleanup MUST NOT remove RD symlinks whose targets still exist —
+        regression guard for false-positive removal during the multi-prefix
+        refactor.  Sets up a real RD-mount file that the symlink points to."""
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_ENABLED', 'true')
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', os.path.join(tmp_dir, 'rd_mount'))
+        # Use the test tmp_dir as the RD symlink base so the existence check
+        # finds the real file.  Symlink targets are translated from
+        # symlink_base → rclone_mount; pointing them at the same dir
+        # produces a passthrough translation.
+        rd_base = os.path.join(tmp_dir, 'rd_mount')
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', rd_base)
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+
+        rd_mount = os.path.join(tmp_dir, 'rd_mount')
+        os.makedirs(os.path.join(rd_mount, 'shows', '_keep'))
+        # Real file on the "rclone mount" that the symlink will target.
+        real_file_dir = os.path.join(rd_mount, 'shows', 'real-release')
+        os.makedirs(real_file_dir)
+        real_file = os.path.join(real_file_dir, 'real.mkv')
+        open(real_file, 'w').close()
+
+        local_tv = os.path.join(tmp_dir, 'local_tv')
+        show_dir = os.path.join(local_tv, 'Real Show', 'Season 01')
+        os.makedirs(show_dir)
+        live_link = os.path.join(show_dir, 'real.mkv')
+        # Symlink target uses the rd_base prefix; translation: rd_base → rd_mount
+        # which produces the actual real_file path that exists.
+        os.symlink(os.path.join(rd_base, 'shows', 'real-release', 'real.mkv'),
+                   live_link)
+
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_movies_path = None
+        scanner._local_tv_path = local_tv
+        scanner._discover_torbox_mount = lambda: None
+        scanner._cleanup_broken_debrid_symlinks()
+
+        assert os.path.lexists(live_link), \
+            'intact RD symlink whose target exists must NOT be removed'
+
+    def test_cleanup_keeps_tb_symlinks_when_tb_mount_unhealthy(self, tmp_dir, monkeypatch):
+        """Regression for the TB-throttle symlink-thrash bug: when the TorBox
+        mount is empty/stalled/throttled (os.path.exists False for everything)
+        but the RD mount is healthy, the old RD-only guard let cleanup proceed
+        and mass-deleted every TB symlink — which the next scan re-created,
+        looping forever.  The per-mount health gate must SKIP deletion for
+        symlinks routed to the unhealthy TB mount."""
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_ENABLED', 'true')
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', os.path.join(tmp_dir, 'rd_mount'))
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+
+        # RD mount healthy (category non-empty); TB mount EMPTY (throttled).
+        rd_mount = os.path.join(tmp_dir, 'rd_mount')
+        os.makedirs(os.path.join(rd_mount, 'shows', '_keep'))
+        tb_mount = os.path.join(tmp_dir, 'tb_mount')
+        os.makedirs(tb_mount)
+
+        local_tv = os.path.join(tmp_dir, 'local_tv')
+        show_dir = os.path.join(local_tv, 'Pagan Peak', 'Season 03')
+        os.makedirs(show_dir)
+        tb_link = os.path.join(show_dir, 'Pagan.Peak.S03E05.mkv')
+        # Target resolves under the throttled TB mount — exists() would be False.
+        os.symlink('/mnt/debrid_torbox/Pagan.Peak.S03E05/Pagan.Peak.S03E05.mkv',
+                   tb_link)
+
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_movies_path = None
+        scanner._local_tv_path = local_tv
+        scanner._discover_torbox_mount = lambda: tb_mount
+        scanner._cleanup_broken_debrid_symlinks()
+
+        assert os.path.lexists(tb_link), \
+            'TB symlink must survive when the TB mount is unhealthy/throttled'
+
+    def test_non_debrid_symlink_classified_local(self, tmp_dir, monkeypatch):
+        """A *resolving* symlink to a non-debrid path (e.g. NAS mount, secondary
+        drive) means genuine local content via symlink farm — must classify as
+        local, not skip. (A dangling such symlink is covered separately and is
+        NOT local — it can't be played and would inflate the recovery metric.)"""
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+
+        # Real target outside the debrid base (a mounted NAS, here a tmp path).
+        nas_target = os.path.join(tmp_dir, 'nas', 'NAS.Movie.2024.mkv')
+        os.makedirs(os.path.dirname(nas_target))
+        open(nas_target, 'w').close()
+
+        local_movies = os.path.join(tmp_dir, 'local_movies')
+        d = os.path.join(local_movies, 'NAS Movie (2024)')
+        os.makedirs(d)
+        os.symlink(nas_target, os.path.join(d, 'NAS.Movie.2024.mkv'))
+
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_movies_path = local_movies
+        items = scanner._scan_local_movies()
+        assert len(items) == 1, \
+            'resolving symlinks pointing outside known debrid mounts are genuine local content'
+        assert items[0]['source'] == 'local'
 
 
 # ---------------------------------------------------------------------------
@@ -1405,6 +1989,271 @@ class TestExtractTmdbEntryYear:
         assert _extract_tmdb_entry_year({'release_date': None}) is None
         assert _extract_tmdb_entry_year({'release_date': 1997}) is None
         assert _extract_tmdb_entry_year({'release_date': ['1997']}) is None
+
+
+class TestCreateDebridSymlinksSkipsObfuscated:
+    """_create_debrid_symlinks must NOT import anti-DMCA obfuscated payloads
+    (hex mount folder + tracker tag, e.g. EZTV) as junk hex 'movies'/'shows'.
+    The blackhole monitor handles their real identity via the .magnet name."""
+
+    def _make_scanner(self, tmp_dir, monkeypatch):
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_ENABLED', 'true')
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', os.path.join(tmp_dir, 'mount'))
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_movies_path = os.path.join(tmp_dir, 'local_movies')
+        scanner._local_tv_path = os.path.join(tmp_dir, 'local_tv')
+        os.makedirs(scanner._local_movies_path)
+        os.makedirs(scanner._local_tv_path)
+        scanner._last_had_local = True
+        scanner._local_drop_alerted = False
+        scanner._last_symlinked_files = {}
+        scanner._pending_rescan_prior_ids = {}
+        scanner._discover_torbox_mount = lambda: None
+        return scanner
+
+    def test_obfuscated_movie_not_imported(self, tmp_dir, monkeypatch):
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        mount = os.path.join(tmp_dir, 'mount')
+
+        hexname = '050bd19ee9934249a2ce4c9762c0d710[EZTVx.to]'
+        mdir = os.path.join(mount, hexname)
+        os.makedirs(mdir)
+        # A real media file — absent the guard, a symlink WOULD be created.
+        open(os.path.join(mdir, hexname + '.mkv'), 'w').close()
+
+        movies = [
+            # Local companion keeps the "library appears empty" guard happy so
+            # the debrid loop actually runs (and can try to import the hex one).
+            {'title': 'Anchor', 'year': 2020, 'source': 'local', 'path': None},
+            {'title': hexname, 'year': None, 'source': 'debrid',
+             'path': mdir, '_parsed_title': hexname},
+        ]
+        scanner._create_debrid_symlinks([], movies, {})
+
+        # Nothing imported into the local movie library.
+        assert os.listdir(scanner._local_movies_path) == []
+
+    def test_normal_movie_still_imported(self, tmp_dir, monkeypatch):
+        """Control: a non-obfuscated movie in the same setup IS imported —
+        proves the guard, not a broken setup, is what skips the hex one."""
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        mount = os.path.join(tmp_dir, 'mount')
+
+        rel = 'Real.Movie.2024.1080p-GROUP'
+        mdir = os.path.join(mount, rel)
+        os.makedirs(mdir)
+        open(os.path.join(mdir, rel + '.mkv'), 'w').close()
+
+        movies = [
+            {'title': 'Anchor', 'year': 2020, 'source': 'local', 'path': None},
+            {'title': 'Real Movie', 'year': 2024, 'source': 'debrid',
+             'path': mdir, '_parsed_title': 'Real Movie'},
+        ]
+        scanner._create_debrid_symlinks([], movies, {})
+
+        entries = os.listdir(scanner._local_movies_path)
+        assert entries and entries[0].startswith('Real Movie')
+
+    def test_obfuscated_show_not_imported(self, tmp_dir, monkeypatch):
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        mount = os.path.join(tmp_dir, 'mount')
+
+        hexname = '1f9da83faaf847949e043d0dae9684aa[eztv.re]'
+        sdir = os.path.join(mount, hexname)
+        os.makedirs(sdir)
+        open(os.path.join(sdir, hexname + '.mkv'), 'w').close()
+
+        from utils.library import _normalize_title
+        norm = _normalize_title(hexname)
+        shows = [
+            {'title': 'Anchor Show', 'year': 2020, 'source': 'local',
+             'season_data': []},
+            {'title': hexname, 'year': None, 'source': 'debrid',
+             'season_data': [{'number': 5, 'episodes': [
+                 {'number': 3, 'source': 'debrid'}]}]},
+        ]
+        path_index = {(norm, 5, 3): os.path.join(sdir, hexname + '.mkv')}
+        scanner._create_debrid_symlinks(shows, [], path_index)
+
+        assert os.listdir(scanner._local_tv_path) == []
+
+
+class TestCreateDebridSymlinksPhantomSource:
+    """Enumeration (TB mylist API / Zurg WebDAV) can report folder names the
+    FUSE layer renames (e.g. TorBox strips '&' from on-disk folders), so a
+    path_index entry may point at a path that doesn't exist on the mount.
+    Creating a symlink to it makes a born-broken link that the cleanup pass
+    deletes next scan — churning create→cleanup forever. The TV branch must
+    verify the source exists before linking."""
+
+    def _make_scanner(self, tmp_dir, monkeypatch):
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_ENABLED', 'true')
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', os.path.join(tmp_dir, 'mount'))
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_movies_path = os.path.join(tmp_dir, 'local_movies')
+        scanner._local_tv_path = os.path.join(tmp_dir, 'local_tv')
+        os.makedirs(scanner._local_movies_path)
+        os.makedirs(scanner._local_tv_path)
+        scanner._last_had_local = True
+        scanner._local_drop_alerted = False
+        scanner._last_symlinked_files = {}
+        scanner._pending_rescan_prior_ids = {}
+        scanner._discover_torbox_mount = lambda: None
+        return scanner
+
+    def test_nonexistent_source_not_symlinked(self, tmp_dir, monkeypatch):
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        mount = os.path.join(tmp_dir, 'mount')
+        os.makedirs(mount)
+
+        from utils.library import _normalize_title
+        norm = _normalize_title('Some Show')
+        shows = [
+            {'title': 'Anchor Show', 'year': 2020, 'source': 'local',
+             'season_data': []},
+            {'title': 'Some Show', 'year': 2024, 'source': 'debrid',
+             'season_data': [{'number': 3, 'episodes': [
+                 {'number': 8, 'source': 'debrid'}]}]},
+        ]
+        # Enumerated path with '&' that the mount never materialized.
+        phantom = os.path.join(
+            mount, 'Some Show S03E08 Upstairs&Downstairs 1080p',
+            'Some Show S03E08.mkv')
+        path_index = {(norm, 3, 8): phantom}
+        scanner._create_debrid_symlinks(shows, [], path_index)
+
+        assert os.listdir(scanner._local_tv_path) == []
+
+    def test_existing_source_still_symlinked(self, tmp_dir, monkeypatch):
+        """Control: same setup with a real source file IS linked — proves
+        the guard, not a broken harness, is what skips the phantom."""
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        mount = os.path.join(tmp_dir, 'mount')
+        rel = os.path.join(mount, 'Some Show S03E08 1080p')
+        os.makedirs(rel)
+        src = os.path.join(rel, 'Some Show S03E08.mkv')
+        open(src, 'w').close()
+
+        from utils.library import _normalize_title
+        norm = _normalize_title('Some Show')
+        shows = [
+            {'title': 'Anchor Show', 'year': 2020, 'source': 'local',
+             'season_data': []},
+            {'title': 'Some Show', 'year': 2024, 'source': 'debrid',
+             'season_data': [{'number': 3, 'episodes': [
+                 {'number': 8, 'source': 'debrid'}]}]},
+        ]
+        path_index = {(norm, 3, 8): src}
+        scanner._create_debrid_symlinks(shows, [], path_index)
+
+        show_dirs = os.listdir(scanner._local_tv_path)
+        assert show_dirs == ['Some Show (2024)']
+        link = os.path.join(scanner._local_tv_path, 'Some Show (2024)',
+                            'Season 03', 'Some Show S03E08.mkv')
+        assert os.path.islink(link)
+
+
+class TestCreateDebridSymlinksBlocklistReleaseFolder:
+    """The TV blocklist check must key on the release folder = the FIRST
+    path component under the debrid mount. A flat torrent literally named
+    'Season 3 (BluRay)' at mount root used to defeat the old climb
+    heuristic (it climbed past the 'Season N' name to the mount root and
+    the block silently no-opped)."""
+
+    def _make_scanner(self, tmp_dir, monkeypatch):
+        from utils.library import LibraryScanner
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_ENABLED', 'true')
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', os.path.join(tmp_dir, 'mount'))
+        monkeypatch.setenv('BLACKHOLE_SYMLINK_TARGET_BASE', '/mnt/debrid')
+        monkeypatch.delenv('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', raising=False)
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._local_movies_path = os.path.join(tmp_dir, 'local_movies')
+        scanner._local_tv_path = os.path.join(tmp_dir, 'local_tv')
+        os.makedirs(scanner._local_movies_path)
+        os.makedirs(scanner._local_tv_path)
+        scanner._last_had_local = True
+        scanner._local_drop_alerted = False
+        scanner._last_symlinked_files = {}
+        scanner._pending_rescan_prior_ids = {}
+        scanner._discover_torbox_mount = lambda: None
+        return scanner
+
+    def _mock_blocklist(self, monkeypatch, blocked_names, seen):
+        import utils.library as _lib
+        mock = type('MockBL', (), {
+            'is_blocked_title': staticmethod(
+                lambda name: seen.append(name) or name in blocked_names),
+        })
+        monkeypatch.setattr(_lib, '_blocklist', mock)
+
+    def _shows_and_index(self, src):
+        from utils.library import _normalize_title
+        norm = _normalize_title('Some Show')
+        shows = [
+            {'title': 'Anchor Show', 'year': 2020, 'source': 'local',
+             'season_data': []},
+            {'title': 'Some Show', 'year': 2024, 'source': 'debrid',
+             'season_data': [{'number': 3, 'episodes': [
+                 {'number': 1, 'source': 'debrid'}]}]},
+        ]
+        return shows, {(norm, 3, 1): src}
+
+    def test_flat_release_named_season_dir_is_blocked(self, tmp_dir, monkeypatch):
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        rel = os.path.join(tmp_dir, 'mount', 'Season 3 (BluRay)')
+        os.makedirs(rel)
+        src = os.path.join(rel, 'Some Show S03E01.mkv')
+        open(src, 'w').close()
+
+        seen = []
+        self._mock_blocklist(monkeypatch, {'Season 3 (BluRay)'}, seen)
+        shows, path_index = self._shows_and_index(src)
+        scanner._create_debrid_symlinks(shows, [], path_index)
+
+        assert 'Season 3 (BluRay)' in seen
+        assert os.listdir(scanner._local_tv_path) == []
+
+    def test_nested_release_blocked_by_top_folder(self, tmp_dir, monkeypatch):
+        """Season-pack shape: block keys on the pack's top folder, not
+        the qualified season subdir."""
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        rel = os.path.join(tmp_dir, 'mount', 'Pack S01-S06 1080p',
+                           'Season 3 (BluRay)')
+        os.makedirs(rel)
+        src = os.path.join(rel, 'Some Show S03E01.mkv')
+        open(src, 'w').close()
+
+        seen = []
+        self._mock_blocklist(monkeypatch, {'Pack S01-S06 1080p'}, seen)
+        shows, path_index = self._shows_and_index(src)
+        scanner._create_debrid_symlinks(shows, [], path_index)
+
+        assert 'Pack S01-S06 1080p' in seen
+        assert os.listdir(scanner._local_tv_path) == []
+
+    def test_unblocked_release_still_symlinked(self, tmp_dir, monkeypatch):
+        """Control: same shapes with nothing blocked ARE linked."""
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        rel = os.path.join(tmp_dir, 'mount', 'Season 3 (BluRay)')
+        os.makedirs(rel)
+        src = os.path.join(rel, 'Some Show S03E01.mkv')
+        open(src, 'w').close()
+
+        seen = []
+        self._mock_blocklist(monkeypatch, set(), seen)
+        shows, path_index = self._shows_and_index(src)
+        scanner._create_debrid_symlinks(shows, [], path_index)
+
+        assert seen == ['Season 3 (BluRay)']
+        link = os.path.join(scanner._local_tv_path, 'Some Show (2024)',
+                            'Season 03', 'Some Show S03E01.mkv')
+        assert os.path.islink(link)
 
 
 class TestFindCanonicalTmdbViaPrefix:
@@ -2492,51 +3341,86 @@ class TestLibraryScannerGetData:
         assert "shows" in data
 
     def test_get_data_caches_result(self, mocker):
+        """On cold start, get_data returns empty payload and triggers one background refresh.
+
+        A second immediate call (while refresh is running) returns the empty payload
+        again without triggering a second refresh (dedup via _scanning flag).
+        """
         scanner = self._bare_scanner()
-        mock_scan = mocker.patch.object(scanner, "scan", wraps=scanner.scan)
-        scanner.get_data()
-        scanner.get_data()
-        assert mock_scan.call_count == 1
+        def mock_refresh_sets_scanning(_rescan_depth=0):
+            # Mimic real refresh: set _scanning=True under the lock before spawning thread
+            with scanner._lock:
+                scanner._scanning = True
+        mocker.patch.object(scanner, "refresh", side_effect=mock_refresh_sets_scanning)
+        result1 = scanner.get_data()
+        result2 = scanner.get_data()
+        # Both results are the empty payload
+        assert result1 == result2
+        assert result1['movies'] == []
+        assert result1['shows'] == []
+        # Verify that refresh was called exactly once
+        # (second call saw _scanning=True and didn't call refresh)
+        assert scanner.refresh.call_count == 1
 
     def test_get_data_returns_cached_data_within_ttl(self, mocker):
+        """Within TTL, cached data is returned without refresh."""
         scanner = self._bare_scanner()
+        # Pre-populate the cache with fresh timestamp
+        scanner._cache = {"movies": ["old"], "shows": [], "last_scan": "x", "scan_duration_ms": 0}
+        scanner._cache_time = time.monotonic()
         first = scanner.get_data()
-        # Patch scan to return something different so we can detect whether it ran
-        mocker.patch.object(scanner, "scan", return_value={"movies": ["NEW"], "shows": []})
+        # Patch refresh to detect whether it's called
+        mock_refresh = mocker.patch.object(scanner, "refresh")
         second = scanner.get_data()
         assert second is first
+        # No refresh should be triggered within TTL
+        mock_refresh.assert_not_called()
 
     def test_get_data_rescans_after_ttl_expires(self, mocker):
+        """When TTL expires, stale cache is served and a background refresh is triggered.
+
+        The caller never blocks waiting for fresh data; the UI's polling loop
+        will pick it up when the background refresh completes.
+        """
         scanner = self._bare_scanner()
-        scanner.get_data()
+        stale_payload = {"movies": [], "shows": [], "last_scan": "x", "scan_duration_ms": 0, "preferences": {}, "arr_degraded": []}
+        scanner._cache = stale_payload
         # Expire the cache by rewinding _cache_time
         scanner._cache_time = time.monotonic() - scanner._ttl - 1
-        fresh_payload = {"movies": [], "shows": [], "last_scan": "x", "scan_duration_ms": 0}
-        mocker.patch.object(scanner, "scan", return_value=fresh_payload)
+        mock_refresh = mocker.patch.object(scanner, "refresh")
         result = scanner.get_data()
-        assert result is fresh_payload
+        # Should return the stale cache, not the fresh payload
+        assert result is stale_payload
+        # Should trigger one background refresh
+        assert mock_refresh.call_count == 1
 
     def test_get_data_uses_short_ttl_when_no_mount(self, mocker):
+        """When no mount, short TTL (10s) applies; expired cache triggers refresh.
+
+        Returns stale cache with background refresh, not fresh payload.
+        """
         scanner = self._bare_scanner()
         assert scanner._mount_path is None
-        # First call populates cache
-        scanner.get_data()
+        stale = {"movies": ["stale"], "shows": [], "last_scan": "x", "scan_duration_ms": 0, "preferences": {}, "arr_degraded": []}
+        scanner._cache = stale
         # Rewind cache_time by 11 seconds — short TTL (10s) should expire
         scanner._cache_time = time.monotonic() - 11
-        fresh = {"movies": ["fresh"], "shows": [], "last_scan": "x", "scan_duration_ms": 0}
-        mocker.patch.object(scanner, "scan", return_value=fresh)
+        mock_refresh = mocker.patch.object(scanner, "refresh")
         result = scanner.get_data()
-        assert result is fresh
+        # Should return stale cache
+        assert result is stale
+        # Should trigger one background refresh
+        assert mock_refresh.call_count == 1
 
     def test_get_data_uses_full_ttl_when_mount_present(self, tmp_dir, mocker):
         scanner = self._bare_scanner()
         scanner._mount_path = tmp_dir  # mount exists
-        scanner._cache = {"movies": [], "shows": [], "last_scan": "x", "scan_duration_ms": 0}
-        scanner._cache_time = time.monotonic() - 11  # 11s ago
+        scanner._cache = {"movies": [], "shows": [], "last_scan": "x", "scan_duration_ms": 0, "preferences": {}, "arr_degraded": []}
+        scanner._cache_time = time.monotonic() - 11  # 11s ago, still within 600s TTL
         # With mount present, full 600s TTL applies — cache should still be valid
-        mock_scan = mocker.patch.object(scanner, "scan")
+        mock_refresh = mocker.patch.object(scanner, "refresh")
         result = scanner.get_data()
-        mock_scan.assert_not_called()
+        mock_refresh.assert_not_called()
         assert result is scanner._cache
 
 
@@ -3377,6 +4261,40 @@ class TestApplySonarrMonitoredFilter:
         assert shows[0]['missing_episodes'] == 5
         assert 'unmonitored_seasons' not in shows[0]
 
+    def test_fetch_failure_flags_degraded(self):
+        """A configured Sonarr whose series fetch fails must add
+        'sonarr_series' to the degraded set — the wanted counts fell back
+        to inflated TMDB-only math, so the recovery snapshot must skip."""
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{'title': 'Show', 'missing_episodes': 5}]
+        client = MagicMock()
+        client.get_all_series.side_effect = RuntimeError('dns boom')
+        degraded = set()
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(client, 'sonarr')):
+            _apply_sonarr_monitored_filter(shows, degraded=degraded)
+        assert degraded == {'sonarr_series'}
+
+    def test_empty_series_list_not_degraded(self):
+        """An empty Sonarr library is a valid state — no degradation flag."""
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{'title': 'Show', 'missing_episodes': 5}]
+        degraded = set()
+        with _fake_sonarr([]):
+            _apply_sonarr_monitored_filter(shows, degraded=degraded)
+        assert degraded == set()
+
+    def test_not_configured_not_degraded(self):
+        """No Sonarr configured → TMDB-only math is the normal state,
+        not a degradation."""
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{'title': 'Show', 'missing_episodes': 5}]
+        degraded = set()
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(None, None)):
+            _apply_sonarr_monitored_filter(shows, degraded=degraded)
+        assert degraded == set()
+
     def test_sonarr_not_configured_no_op(self):
         """Without Sonarr configured, monitored filtering is skipped entirely."""
         from utils.library import _apply_sonarr_monitored_filter
@@ -3500,6 +4418,45 @@ class TestApplyRadarrWantedMovies:
         assert ghost['size_bytes'] == 0
         assert ghost['_radarr_id'] == 1
         assert ghost['_radarr_tmdb_id'] == 100
+        # Regression for the TMDB cache-poisoning bug — the detail-view
+        # fetch JS uses item.type to build /api/library/metadata?type=...
+        # Without the type field the URL serialised type=undefined and
+        # the server defaulted to 'show', writing show data under
+        # movie-style cache keys.
+        assert ghost['type'] == 'movie', \
+            'ghost movie must carry type=movie so the detail-view fetch ' \
+            'does not poison the TMDB cache via type=undefined'
+
+    def test_fetch_failure_flags_degraded(self):
+        """A configured Radarr whose movie fetch fails must add
+        'radarr_movies' — ghost injection was skipped, deflating wanted."""
+        from utils.library import _apply_radarr_wanted_movies
+        client = MagicMock()
+        client.get_all_movies.side_effect = RuntimeError('dns boom')
+        degraded = set()
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(client, 'radarr')):
+            count = _apply_radarr_wanted_movies([], degraded=degraded)
+        assert count == 0
+        assert degraded == {'radarr_movies'}
+
+    def test_empty_movie_list_not_degraded(self):
+        """An empty Radarr library is a valid state — no degradation flag."""
+        from utils.library import _apply_radarr_wanted_movies
+        degraded = set()
+        with _fake_radarr([]):
+            _apply_radarr_wanted_movies([], degraded=degraded)
+        assert degraded == set()
+
+    def test_not_configured_not_degraded(self):
+        """No Radarr configured → skipping ghost injection is the normal
+        state, not a degradation."""
+        from utils.library import _apply_radarr_wanted_movies
+        degraded = set()
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(None, None)):
+            _apply_radarr_wanted_movies([], degraded=degraded)
+        assert degraded == set()
 
     def test_skips_monitored_with_file(self):
         """A monitored movie that DOES have a file is already on disk,
@@ -3661,6 +4618,302 @@ class TestApplyRadarrWantedMovies:
         assert injected_titles == ['A', 'B']
 
 
+class TestSonarrMonitoredMissingHelper:
+    """The shared monitored-aware missing-episode math, factored out of
+    the filter so the ghost-show injector agrees on the same arithmetic."""
+
+    def test_sums_monitored_skips_unmonitored_and_specials(self):
+        from utils.library import _sonarr_monitored_missing
+        series = {
+            'seasons': [
+                {'seasonNumber': 0, 'monitored': False,
+                 'statistics': {'episodeCount': 4, 'episodeFileCount': 0}},
+                {'seasonNumber': 1, 'monitored': False,
+                 'statistics': {'episodeCount': 9, 'episodeFileCount': 9}},
+                {'seasonNumber': 2, 'monitored': True,
+                 'statistics': {'episodeCount': 10, 'episodeFileCount': 6}},
+            ],
+        }
+        missing, monitored_total, unmonitored = _sonarr_monitored_missing(series)
+        assert missing == 4
+        assert monitored_total == 10
+        assert unmonitored == [1]
+
+    def test_clamps_negative_and_handles_no_seasons(self):
+        from utils.library import _sonarr_monitored_missing
+        series = {'seasons': [
+            {'seasonNumber': 1, 'monitored': True,
+             'statistics': {'episodeCount': 3, 'episodeFileCount': 5}},
+        ]}
+        assert _sonarr_monitored_missing(series) == (0, 3, [])
+        assert _sonarr_monitored_missing({}) == (0, 0, [])
+
+
+class TestApplySonarrMonitoredFilterReturnsMatchedIds:
+    """The filter now returns the set of matched Sonarr series ids so the
+    ghost injector can skip series already represented by a real show."""
+
+    def test_returns_matched_series_id(self):
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{'title': 'Show', 'year': None}]
+        series = [{
+            'id': 77, 'title': 'Show', 'tmdbId': 42,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 10, 'episodeFileCount': 6}}],
+        }]
+        with _fake_sonarr(series):
+            matched = _apply_sonarr_monitored_filter(shows)
+        assert matched == {77}
+
+    def test_returns_empty_set_when_unmatched(self):
+        from utils.library import _apply_sonarr_monitored_filter
+        shows = [{'title': 'Orphan', 'year': None, 'missing_episodes': 7}]
+        with _fake_sonarr([]):
+            matched = _apply_sonarr_monitored_filter(shows)
+        assert matched == set()
+
+    def test_returns_empty_set_when_sonarr_not_configured(self):
+        from utils.library import _apply_sonarr_monitored_filter
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(None, None)):
+            matched = _apply_sonarr_monitored_filter([{'title': 'X'}])
+        assert matched == set()
+
+
+class TestApplySonarrWantedShows:
+    """Inject Sonarr-monitored series with zero on-disk episodes as ghost
+    show entries — the TV mirror of ``_apply_radarr_wanted_movies``.
+
+    Without this, a series you've downloaded nothing of never reaches the
+    library shows list, so the recovery metric's wanted-TV denominator
+    reads low and the Wanted view hides it.
+    """
+
+    def test_injects_ghost_for_fully_absent_monitored_series(self):
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = []
+        series = [{
+            'id': 5, 'tmdbId': 100, 'imdbId': 'tt123', 'title': 'Absent Show',
+            'year': 2022, 'monitored': True,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 8, 'episodeFileCount': 0}}],
+        }]
+        with _fake_sonarr(series):
+            count = _apply_sonarr_wanted_shows(shows, set())
+        assert count == 1
+        ghost = shows[0]
+        assert ghost['title'] == 'Absent Show'
+        assert ghost['year'] == 2022
+        assert ghost['source'] == 'wanted'
+        assert ghost['missing'] is True
+        assert ghost['missing_episodes'] == 8
+        assert ghost['monitored_episodes'] == 8
+        assert ghost['type'] == 'show'
+        assert ghost['size_bytes'] == 0
+        assert ghost['season_data'] == []
+        assert ghost['_episodes'] == {}
+        assert ghost['_sonarr_id'] == 5
+        assert ghost['imdb_id'] == 'tt123'
+        assert ghost['tmdb_id'] == 100
+
+    def test_fetch_failure_flags_degraded(self):
+        """A configured Sonarr whose series fetch fails must add
+        'sonarr_series' — ghost injection was skipped, deflating wanted."""
+        from utils.library import _apply_sonarr_wanted_shows
+        client = MagicMock()
+        client.get_all_series.side_effect = RuntimeError('dns boom')
+        degraded = set()
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(client, 'sonarr')):
+            count = _apply_sonarr_wanted_shows(shows=[], matched_ids=set(),
+                                               degraded=degraded)
+        assert count == 0
+        assert degraded == {'sonarr_series'}
+
+    def test_empty_series_list_not_degraded(self):
+        """An empty Sonarr library is a valid state — no degradation flag."""
+        from utils.library import _apply_sonarr_wanted_shows
+        degraded = set()
+        with _fake_sonarr([]):
+            _apply_sonarr_wanted_shows(shows=[], matched_ids=set(),
+                                       degraded=degraded)
+        assert degraded == set()
+
+    def test_not_configured_not_degraded(self):
+        """No Sonarr configured → skipping ghost injection is the normal
+        state, not a degradation."""
+        from utils.library import _apply_sonarr_wanted_shows
+        degraded = set()
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(None, None)):
+            _apply_sonarr_wanted_shows(shows=[], matched_ids=set(),
+                                       degraded=degraded)
+        assert degraded == set()
+
+    def test_skips_series_already_matched_to_a_library_show(self):
+        """A series whose id is in ``matched_ids`` already has a real
+        library show carrying its missing count — don't double-count."""
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = []
+        series = [{
+            'id': 5, 'tmdbId': 100, 'title': 'Present', 'monitored': True,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 8, 'episodeFileCount': 0}}],
+        }]
+        with _fake_sonarr(series):
+            count = _apply_sonarr_wanted_shows(shows, {5})
+        assert count == 0
+        assert shows == []
+
+    def test_skips_unmonitored_series(self):
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = []
+        series = [{
+            'id': 5, 'title': 'Unmon', 'monitored': False,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 8, 'episodeFileCount': 0}}],
+        }]
+        with _fake_sonarr(series):
+            count = _apply_sonarr_wanted_shows(shows, set())
+        assert count == 0
+        assert shows == []
+
+    def test_skips_series_sonarr_considers_satisfied(self):
+        """A monitored series with all monitored episodes on file (per
+        Sonarr) has missing==0 — not wanted, don't inject."""
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = []
+        series = [{
+            'id': 5, 'title': 'Complete', 'monitored': True,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 8, 'episodeFileCount': 8}}],
+        }]
+        with _fake_sonarr(series):
+            count = _apply_sonarr_wanted_shows(shows, set())
+        assert count == 0
+        assert shows == []
+
+    def test_pending_series_suppressed(self):
+        """A series currently downloading is represented by the pending
+        bucket; skip its ghost to avoid double-counting."""
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = []
+        series = [{
+            'id': 5, 'title': 'Pending Show', 'monitored': True,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 8, 'episodeFileCount': 0}}],
+        }]
+        pending = {'pending show': {'direction': 'to-debrid'}}
+        with _fake_sonarr(series):
+            count = _apply_sonarr_wanted_shows(shows, set(), pending=pending)
+        assert count == 0
+        assert shows == []
+
+    def test_sonarr_not_configured_no_op(self):
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = []
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(None, None)):
+            count = _apply_sonarr_wanted_shows(shows, set())
+        assert count == 0
+        assert shows == []
+
+    def test_fetch_failure_graceful(self):
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = [{'title': 'Real', 'source': 'debrid'}]
+        client = MagicMock()
+        client.get_all_series.side_effect = RuntimeError('sonarr down')
+        with patch('utils.arr_client.get_download_service',
+                   return_value=(client, 'sonarr')):
+            count = _apply_sonarr_wanted_shows(shows, set())
+        assert count == 0
+        assert len(shows) == 1
+
+    def test_skips_series_matching_on_disk_show_by_tmdb_id(self):
+        """A partially-on-disk show the title cascade MISSED (so its id is
+        not in matched_ids) must still be deduped against the real shows
+        list by tmdbId — otherwise its real entry and a ghost both count."""
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = [{'title': 'On Disk', 'source': 'debrid', 'tmdb_id': 100,
+                  'missing_episodes': 3}]
+        series = [{
+            'id': 5, 'tmdbId': 100, 'title': 'Different Folder Name',
+            'monitored': True,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 8, 'episodeFileCount': 0}}],
+        }]
+        with _fake_sonarr(series):
+            count = _apply_sonarr_wanted_shows(shows, set())
+        assert count == 0
+        assert len(shows) == 1
+
+    def test_skips_series_matching_on_disk_show_by_imdb_id(self):
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = [{'title': 'On Disk', 'source': 'debrid', 'imdb_id': 'tt999',
+                  'missing_episodes': 3}]
+        series = [{
+            'id': 5, 'imdbId': 'tt999', 'title': 'Different Folder Name',
+            'monitored': True,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 8, 'episodeFileCount': 0}}],
+        }]
+        with _fake_sonarr(series):
+            count = _apply_sonarr_wanted_shows(shows, set())
+        assert count == 0
+        assert len(shows) == 1
+
+    def test_skips_series_matching_on_disk_show_by_norm_title_year(self):
+        """No external IDs on either side (TVDB-only / cache miss): the
+        (norm_title, year) fallback still prevents the double-inject."""
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = [{'title': 'The Show', 'source': 'debrid', 'year': 2021,
+                  'missing_episodes': 3}]
+        series = [{
+            'id': 5, 'title': 'The Show', 'year': 2021, 'monitored': True,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 8, 'episodeFileCount': 0}}],
+        }]
+        with _fake_sonarr(series):
+            count = _apply_sonarr_wanted_shows(shows, set())
+        assert count == 0
+        assert len(shows) == 1
+
+    def test_ghost_entries_in_shows_list_not_used_for_dedup(self):
+        """A pre-existing source='wanted' entry must not seed the dedup
+        sets (it's not a real on-disk show)."""
+        from utils.library import _apply_sonarr_wanted_shows
+        shows = [{'title': 'Ghosty', 'source': 'wanted', 'tmdb_id': 100}]
+        series = [{
+            'id': 5, 'tmdbId': 100, 'title': 'Ghosty', 'monitored': True,
+            'seasons': [{'seasonNumber': 1, 'monitored': True,
+                         'statistics': {'episodeCount': 8, 'episodeFileCount': 0}}],
+        }]
+        with _fake_sonarr(series):
+            count = _apply_sonarr_wanted_shows(shows, set())
+        # Pre-existing ghost doesn't block injection; but the freshly
+        # injected ghost's own keys prevent a second copy of the same id.
+        assert count == 1
+
+    def test_ghost_show_not_counted_in_composition_stats(self):
+        """A source='wanted' ghost show must NOT inflate the on-disk
+        library composition (mirrors the ghost-movie skip)."""
+        from utils.library import compute_library_stats
+        data = {
+            'movies': [],
+            'shows': [
+                {'title': 'Real', 'source': 'debrid', 'season_data': [
+                    {'number': 1, 'episodes': [
+                        {'number': 1, 'source': 'debrid', 'size_bytes': 100}]}]},
+                {'title': 'Ghost', 'source': 'wanted', 'missing_episodes': 8,
+                 'season_data': [], '_episodes': {}},
+            ],
+        }
+        stats = compute_library_stats(data)
+        assert stats['shows']['total'] == 1  # ghost excluded
+        assert stats['shows']['by_source'] == {'local': 0, 'debrid': 1, 'both': 0}
+        assert stats['shows']['episodes']['total'] == 1
+
+
 class TestStripGhostDuplicates:
     """Post-enrichment ghost-deduplication pass.
 
@@ -3750,6 +5003,689 @@ class TestStripGhostDuplicates:
         assert movies == []
 
 
+class TestDedupShowsByExternalId:
+    """Post-enrichment shows-dedup pass.
+
+    The alias-map dedup in ``_dedup_by_tmdb`` keys by normalized
+    parsed-folder titles and runs pre-enrichment.  Three debrid folders
+    that parse to distinct norms (``your friends and neighbors`` vs
+    ``your friends neighbors`` vs ``your friends and neighbours``)
+    survive as three groups when the TMDB alias map doesn't carry all
+    three variants.  Enrichment then stamps the same canonical title +
+    imdb_id on every entry → UI renders three cards for one show.
+
+    Reworked after reviewer-flagged CRITICAL/HIGH findings on the v1
+    implementation: this version rebuilds ``season_data`` from the
+    unioned ``_episodes``, preserves the survivor's Sonarr-aware
+    ``missing_episodes`` from ``_apply_sonarr_monitored_filter``,
+    per-episode quality compare on collisions (larger size wins),
+    ``size_bytes`` summed from merged episodes (no double-count), and
+    drops the dead tmdb_id fallback (enrichment never stamps it).
+    """
+
+    def _ep(self, file_name, size_bytes=1_000_000_000):
+        """Build a minimal _episodes value dict matching _build_season_data
+        expectations: 'file' and 'size_bytes' minimum."""
+        return {'file': file_name, 'size_bytes': size_bytes}
+
+    def test_three_debrid_folders_collapse_with_unioned_episodes(self):
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'Your Friends & Neighbors', 'imdb_id': 'tt30459041',
+             'source': 'debrid', 'path': '/data/zurgarr/path1',
+             'size_bytes': 100, 'total_episodes': 18, 'missing_episodes': 16,
+             '_episodes': {(1, 1): self._ep('s1e1.mkv'),
+                           (1, 2): self._ep('s1e2.mkv')}},
+            {'title': 'Your Friends & Neighbors', 'imdb_id': 'tt30459041',
+             'source': 'debrid', 'path': '/data/torbox/path2',
+             'size_bytes': 200, 'total_episodes': 18, 'missing_episodes': 16,
+             '_episodes': {(2, 1): self._ep('s2e1.mkv'),
+                           (2, 8): self._ep('s2e8.mkv')}},
+            {'title': 'Your Friends & Neighbors', 'imdb_id': 'tt30459041',
+             'source': 'debrid', 'path': '/data/torbox/path3',
+             'size_bytes': 50, 'total_episodes': 18, 'missing_episodes': 16,
+             '_episodes': {(1, 3): self._ep('s1e3.mkv')}}
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 1
+        m = shows[0]
+        # Episodes from all three folders unioned: 5 distinct keys
+        assert len(m['_episodes']) == 5
+        # Two seasons represented (1 and 2)
+        assert m['seasons'] == 2
+        assert m['episodes'] == 5
+
+    def test_season_data_rebuilt_from_merged_episodes(self):
+        """CRITICAL #1 fix: downstream consumers iterate ``season_data``,
+        not ``_episodes`` — composition card, prefs enforcer, gap-fill,
+        search loops.  Without rebuilding, sibling-folder episodes are
+        invisible to all of them."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             'season_data': [{'number': 1, 'episode_count': 1,
+                              'episodes': [{'number': 1, 'file': 's1e1.mkv',
+                                            'source': 'debrid', 'size_bytes': 100,
+                                            'quality': {}}]}],
+             '_episodes': {(1, 1): self._ep('s1e1.mkv', 100)}},
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             'season_data': [{'number': 2, 'episode_count': 1,
+                              'episodes': [{'number': 1, 'file': 's2e1.mkv',
+                                            'source': 'debrid', 'size_bytes': 200,
+                                            'quality': {}}]}],
+             '_episodes': {(2, 1): self._ep('s2e1.mkv', 200)}},
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 1
+        sd = shows[0]['season_data']
+        seasons = {s['number'] for s in sd}
+        assert seasons == {1, 2}, \
+            f'season_data must contain both merged seasons, got {seasons}'
+        total_eps = sum(s['episode_count'] for s in sd)
+        assert total_eps == 2, \
+            'season_data episode_count must reflect merged episodes'
+
+    def test_missing_episodes_preserves_sonarr_filtered_value(self):
+        """CRITICAL #2 fix: ``_apply_sonarr_monitored_filter`` runs
+        pre-merge and writes monitored-aware ``missing_episodes`` that
+        accounts for unmonitored seasons.  The v1 implementation
+        recomputed from ``total_episodes - merged_have`` (TMDB-all math),
+        which would re-inflate missing on Grey's Anatomy (22 seasons,
+        most unmonitored) — exactly the bug ``_apply_sonarr_monitored_filter``
+        exists to prevent.  Preserve survivor's value instead."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            # Survivor: Sonarr filter wrote missing_episodes=1 because
+            # only S22 is monitored. total_episodes=430 (all seasons).
+            {'title': 'Greys Anatomy', 'imdb_id': 'tt0413573',
+             'source': 'debrid',
+             'total_episodes': 430, 'missing_episodes': 1,
+             'monitored_episodes': 20,
+             '_episodes': {(22, 1): self._ep('s22e1.mkv', 100)}},
+            # Sibling: same show, different debrid folder
+            {'title': 'Greys Anatomy', 'imdb_id': 'tt0413573',
+             'source': 'debrid',
+             'total_episodes': 430, 'missing_episodes': 1,
+             'monitored_episodes': 20,
+             '_episodes': {(1, 1): self._ep('s1e1.mkv', 100)}},  # S1 unmonitored
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 1
+        merged = shows[0]
+        # CRITICAL: must NOT recompute as 430 - 2 = 428 (TMDB-all math)
+        # MUST preserve survivor's Sonarr-aware value
+        assert merged['missing_episodes'] == 1, \
+            f'must preserve Sonarr-filtered missing_episodes=1 (Greys Anatomy ' \
+            f'unmonitored-seasons regression), got {merged["missing_episodes"]}'
+        # monitored_episodes must also survive
+        assert merged.get('monitored_episodes') == 20
+
+    def test_episode_collision_higher_size_wins(self):
+        """HIGH #4 fix: per-episode quality compare.  v1 was first-seen
+        wins regardless of quality — would silently keep a 720p episode
+        when a 2160p REMUX sibling existed."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             '_episodes': {(1, 1): self._ep('s1e1.720p.mkv', 1_000_000_000)}},
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             '_episodes': {(1, 1): self._ep('s1e1.2160p.mkv', 30_000_000_000)}},
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 1
+        ep = shows[0]['_episodes'][(1, 1)]
+        assert '2160p' in ep['file'], \
+            f'larger-size episode (2160p) must win collision, got {ep["file"]!r}'
+
+    def test_size_bytes_summed_from_merged_episodes_not_show_field(self):
+        """HIGH #5 fix: don't sum show-level size_bytes (which would
+        double-count overlapping releases — same S01E01 in three
+        qualities triple-counted).  Sum per-episode size from the merged
+        ``_episodes`` dict instead."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             'size_bytes': 10_000_000_000,  # stale show-level field
+             '_episodes': {(1, 1): self._ep('a.mkv', 1_000_000)}},
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             'size_bytes': 10_000_000_000,
+             '_episodes': {(1, 2): self._ep('b.mkv', 2_000_000)}},
+        ]
+        _dedup_shows_by_external_id(shows)
+        # Correct: 1_000_000 + 2_000_000 from merged episodes
+        # Wrong (v1): 10B + 10B from show-level fields
+        assert shows[0]['size_bytes'] == 3_000_000, \
+            f'size_bytes must sum merged episode sizes, got {shows[0]["size_bytes"]}'
+
+    def test_distinct_imdb_ids_left_alone(self):
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'A', 'imdb_id': 'tt1', 'source': 'debrid'},
+            {'title': 'B', 'imdb_id': 'tt2', 'source': 'debrid'},
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 2
+
+    def test_shows_without_imdb_id_passed_through(self):
+        """Items lacking imdb_id can't safely merge — risk of
+        distinct-shows-same-title collisions."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'Mystery 1', 'source': 'debrid'},
+            {'title': 'Mystery 2', 'source': 'debrid'},
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 2
+
+    def test_tmdb_id_alone_does_not_merge(self):
+        """HIGH #3 fix: tmdb_id-only fallback was dead code in v1
+        because enrichment never stamps tmdb_id on shows.  We dropped
+        the fallback; shows with only tmdb_id are now treated as
+        no-external-id (passed through, not merged)."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'X', 'tmdb_id': 123, 'source': 'debrid',
+             '_episodes': {(1, 1): self._ep('a.mkv')}},
+            {'title': 'X', 'tmdb_id': 123, 'source': 'debrid',
+             '_episodes': {(1, 2): self._ep('b.mkv')}},
+        ]
+        _dedup_shows_by_external_id(shows)
+        # Both pass through unmerged — there is no imdb_id either, so
+        # they hit the no_id list.
+        assert len(shows) == 2
+
+    def test_source_promotion_to_both_when_local_present(self):
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             '_episodes': {(1, 1): self._ep('a.mkv')}},
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'local',
+             '_episodes': {(1, 2): self._ep('b.mkv')}},
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 1
+        assert shows[0]['source'] == 'both'
+
+    def test_best_entry_preferred_by_rank(self):
+        """Source ranking: 'both' > 'local' > 'debrid'.  When ranks
+        tie, prefer entries with a year populated, then most episodes."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             'year': None, 'path': '/data/path1', '_episodes': {}},
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             'year': 2024, 'path': '/data/path2',
+             '_episodes': {(1, 1): self._ep('a.mkv'),
+                           (1, 2): self._ep('b.mkv')}},
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 1
+        # path2 wins: has year AND more episodes
+        assert shows[0]['path'] == '/data/path2'
+
+    def test_single_show_no_op(self):
+        from utils.library import _dedup_shows_by_external_id
+        shows = [{'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid'}]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 1
+
+    def test_empty_shows_no_op(self):
+        from utils.library import _dedup_shows_by_external_id
+        shows = []
+        _dedup_shows_by_external_id(shows)
+        assert shows == []
+
+    def test_mixed_groups_only_dupes_collapsed(self):
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'A', 'imdb_id': 'tt1', 'source': 'debrid',
+             '_episodes': {(1, 1): self._ep('a.mkv')}},
+            {'title': 'A', 'imdb_id': 'tt1', 'source': 'debrid',
+             '_episodes': {(1, 2): self._ep('b.mkv')}},
+            {'title': 'B', 'imdb_id': 'tt2', 'source': 'debrid'},
+            {'title': 'C', 'source': 'debrid'},  # no external id
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 3
+        merged = next(s for s in shows if s.get('imdb_id') == 'tt1')
+        assert len(merged['_episodes']) == 2
+
+    # ── Reviewer-flagged v2 edge cases ──
+
+    def test_sonarr_filtered_sibling_wins_survivor_pick(self):
+        """v2 reviewer HIGH: survivor selection must prefer entries that
+        ``_apply_sonarr_monitored_filter`` matched (i.e. have
+        ``monitored_episodes`` set).  Without this, a non-Sonarr-matched
+        rank-winner inherits TMDB-all missing math and the
+        Grey's-Anatomy unmonitored-seasons regression returns."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            # Would-be rank-winner under old logic: more episodes, no Sonarr
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             'total_episodes': 430, 'missing_episodes': 428,
+             # No monitored_episodes set → no Sonarr filter
+             '_episodes': {(1, 1): self._ep('a.mkv'), (1, 2): self._ep('b.mkv')}},
+            # Sonarr-matched: fewer episodes but correct monitored math
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             'total_episodes': 430, 'missing_episodes': 1,
+             'monitored_episodes': 20,
+             '_episodes': {(22, 1): self._ep('s22e1.mkv')}},
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 1
+        merged = shows[0]
+        # Sonarr-aware values must survive even though the sibling has
+        # more episodes — reviewer-confirmed regression.
+        assert merged['missing_episodes'] == 1
+        assert merged.get('monitored_episodes') == 20
+
+    def test_debrid_only_sibling_episode_not_tagged_both(self):
+        """v2 reviewer HIGH: when merged source is 'both' (local present
+        in one sibling), debrid-only sibling episodes WITHOUT an explicit
+        ``source`` key in their info dict must NOT be tagged 'both' by
+        the season_data rebuild.  Pre-fix the show-level merged 'both'
+        was passed as ``default_source``, falsely promoting debrid-only
+        episodes."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            # Local entry with explicit per-episode source='local'
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'local',
+             '_episodes': {(1, 1): {'file': 'local.mkv', 'size_bytes': 100,
+                                    'source': 'local'}}},
+            # Debrid entry whose episode info dict has NO 'source' key
+            # (FUSE/WebDAV scanners don't write one).
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             '_episodes': {(2, 1): {'file': 'debrid.mkv', 'size_bytes': 200}}},
+        ]
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 1
+        merged = shows[0]
+        # Show-level promoted to 'both' (local + debrid)
+        assert merged['source'] == 'both'
+        # But the debrid-only episode must NOT inherit 'both'
+        sd_by_season = {s['number']: s for s in merged['season_data']}
+        s2_ep1 = sd_by_season[2]['episodes'][0]
+        assert s2_ep1['source'] == 'debrid', \
+            f'debrid-only sibling episode falsely tagged {s2_ep1["source"]!r} after rebuild'
+
+    def test_size_bytes_falls_back_to_show_level_when_per_episode_zero(self):
+        """v2 reviewer MEDIUM: legacy scanner paths emit empty info dicts
+        with no size_bytes.  Summing 0 across them would silently zero
+        the composition-card footprint.  Falls back to max sibling
+        show-level size when per-episode sum is 0."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             'size_bytes': 5_000_000_000,
+             '_episodes': {(1, 1): {'file': 'a.mkv'}}},  # no size_bytes
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             'size_bytes': 8_000_000_000,
+             '_episodes': {(1, 2): {'file': 'b.mkv'}}},  # no size_bytes
+        ]
+        _dedup_shows_by_external_id(shows)
+        # Per-episode sum is 0 → use max show-level fallback
+        assert shows[0]['size_bytes'] == 8_000_000_000
+
+    def test_episodes_missing_file_key_skipped_not_crashed(self):
+        """v2 reviewer MEDIUM: ``_build_season_data`` does
+        ``info['file']`` unconditionally — empty/file-less dicts crash
+        it with KeyError.  ``_normalize_episodes_for_merge`` legacy
+        list-of-tuples path emits ``{}`` shells.  Dedup must skip them
+        rather than propagate into the rebuild."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             '_episodes': {(1, 1): self._ep('a.mkv'),
+                           (1, 99): {}}},  # legacy empty shell
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             '_episodes': {(1, 2): self._ep('b.mkv')}},
+        ]
+        # Must not raise KeyError
+        _dedup_shows_by_external_id(shows)
+        assert len(shows) == 1
+        # Empty shell dropped
+        assert (1, 99) not in shows[0]['_episodes']
+        # Real episodes preserved
+        assert (1, 1) in shows[0]['_episodes']
+        assert (1, 2) in shows[0]['_episodes']
+
+    def test_equal_size_collision_keeps_first_seen(self):
+        """v2 reviewer MEDIUM: equal-size collisions keep first-seen
+        (the survivor's release) so folder/blocklist tracking stays on
+        the survivor's release name.  Documented behavior, asserted."""
+        from utils.library import _dedup_shows_by_external_id
+        shows = [
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             '_episodes': {(1, 1): self._ep('survivor-release.mkv', 100)}},
+            {'title': 'X', 'imdb_id': 'tt1', 'source': 'debrid',
+             '_episodes': {(1, 1): self._ep('sibling-release.mkv', 100)}},
+        ]
+        _dedup_shows_by_external_id(shows)
+        ep = shows[0]['_episodes'][(1, 1)]
+        assert ep['file'] == 'survivor-release.mkv', \
+            f'equal-size collision should keep first-seen, got {ep["file"]!r}'
+
+
+class TestSeasonAwareMergeVeto:
+    """Wrong-show alias merges must be blocked pre-enrichment.
+
+    The TMDB cache maps each parsed title to exactly ONE show, so a bare
+    reboot-family title (cache key "daredevil" → "Daredevil: Born Again")
+    puts the bare key and the sibling's key in the same alias group.  A
+    "Daredevil" S03 release must NOT merge into Born Again (S01 only) —
+    once merged, enrichment's season-aware guard can never recover
+    because its word-subset search runs on the merged title.  Kept
+    separate, enrichment renames the item to "Marvel's Daredevil" and
+    _dedup_shows_by_external_id folds it into the right entry.
+    """
+
+    # TMDB fixture: id 100 = Born Again (covers S01 only),
+    # id 200 = Marvel's Daredevil (covers S01-S03).
+    _SHOW_IDS = {
+        'daredevil': 100,
+        'daredevil born again': 100,
+        'marvels daredevil': 200,
+    }
+
+    def _patch_tmdb(self, monkeypatch, alt_lookup=None):
+        import utils.tmdb as _tmdb
+        monkeypatch.setattr(
+            _tmdb, 'get_cached_tmdb_ids',
+            lambda: {'shows': dict(self._SHOW_IDS), 'movies': {}})
+        if alt_lookup is None:
+            def alt_lookup(norm_key, max_season, year=None):
+                # Season-aware resolution: any daredevil-family key at
+                # S02+ belongs to Marvel's Daredevil; S01 keeps the
+                # direct entry.
+                if norm_key in self._SHOW_IDS and max_season > 1:
+                    return 200
+                return self._SHOW_IDS.get(norm_key)
+        monkeypatch.setattr(_tmdb, 'find_show_tmdb_id_by_season', alt_lookup)
+
+    _ALIASES = {
+        'daredevil': {'daredevil born again'},
+        'daredevil born again': {'daredevil'},
+    }
+
+    @staticmethod
+    def _bare_item():
+        return {'title': 'Daredevil', 'source': 'debrid', 'episodes': 1,
+                'seasons': 1, 'date_added': 0,
+                '_episodes': {(3, 8): {'path': '/mnt/dd/S03E08.mkv', 'file': 'S03E08.mkv',
+                                       'source': 'debrid'}}}
+
+    @staticmethod
+    def _born_again_item():
+        return {'title': 'Daredevil Born Again', 'year': 2025,
+                'source': 'debrid', 'episodes': 1, 'seasons': 1,
+                'date_added': 0,
+                '_episodes': {(1, 1): {'path': '/mnt/ba/S01E01.mkv', 'file': 'S01E01.mkv',
+                                       'source': 'debrid'}}}
+
+    # -- _season_merge_conflict unit behavior --------------------------
+
+    def test_conflict_when_season_lookup_redirects(self, monkeypatch):
+        self._patch_tmdb(monkeypatch)
+        from utils.library import _season_merge_conflict
+        assert _season_merge_conflict('daredevil', 3) is True
+
+    def test_no_conflict_when_direct_entry_covers_season(self, monkeypatch):
+        self._patch_tmdb(monkeypatch)
+        from utils.library import _season_merge_conflict
+        assert _season_merge_conflict('daredevil born again', 1, 2025) is False
+
+    def test_fail_open_when_no_alternative_found(self, monkeypatch):
+        """Cache merely lagging the newest season (alt lookup → None)
+        must NOT veto — legitimate alias merges keep working."""
+        self._patch_tmdb(monkeypatch, alt_lookup=lambda *a, **kw: None)
+        from utils.library import _season_merge_conflict
+        assert _season_merge_conflict('daredevil', 3) is False
+
+    def test_fail_open_when_key_has_no_direct_entry(self, monkeypatch):
+        self._patch_tmdb(monkeypatch)
+        from utils.library import _season_merge_conflict
+        assert _season_merge_conflict('unknown show', 5) is False
+
+    def test_no_lookup_without_season_data(self, monkeypatch):
+        import utils.tmdb as _tmdb
+        monkeypatch.setattr(_tmdb, 'get_cached_tmdb_ids',
+                            lambda: pytest.fail('must not load cache'))
+        from utils.library import _season_merge_conflict
+        assert _season_merge_conflict('daredevil', 0) is False
+
+    def test_fail_open_on_tmdb_error(self, monkeypatch):
+        import utils.tmdb as _tmdb
+        def boom():
+            raise OSError('cache unreadable')
+        monkeypatch.setattr(_tmdb, 'get_cached_tmdb_ids', boom)
+        from utils.library import _season_merge_conflict
+        assert _season_merge_conflict('daredevil', 3) is False
+
+    # -- _dedup_by_tmdb veto --------------------------------------------
+
+    def test_dedup_keeps_season_mismatched_siblings_separate(self, monkeypatch):
+        self._patch_tmdb(monkeypatch)
+        items = [self._born_again_item(), self._bare_item()]
+        result = LibraryScanner._dedup_by_tmdb(items, dict(self._ALIASES))
+        assert len(result) == 2, \
+            'S03 bare-title item must not merge into the S01-only sibling'
+        titles = {i['title'] for i in result}
+        assert titles == {'Daredevil', 'Daredevil Born Again'}
+
+    def test_dedup_veto_is_order_independent(self, monkeypatch):
+        """Bare item first: Born Again must not be dragged into ITS group
+        either (the veto checks both sides of the pairing)."""
+        self._patch_tmdb(monkeypatch)
+        items = [self._bare_item(), self._born_again_item()]
+        result = LibraryScanner._dedup_by_tmdb(items, dict(self._ALIASES))
+        assert len(result) == 2
+
+    def test_dedup_still_merges_when_seasons_agree(self, monkeypatch):
+        """Same show under two parsed names (Andor / Star Wars Andor)
+        with covered seasons merges exactly as before."""
+        import utils.tmdb as _tmdb
+        monkeypatch.setattr(
+            _tmdb, 'get_cached_tmdb_ids',
+            lambda: {'shows': {'andor': 300, 'star wars andor': 300},
+                     'movies': {}})
+        monkeypatch.setattr(_tmdb, 'find_show_tmdb_id_by_season',
+                            lambda k, mx, yr=None: 300)
+        aliases = {'andor': {'star wars andor'},
+                   'star wars andor': {'andor'}}
+        items = [
+            {'title': 'Andor', 'source': 'debrid', 'episodes': 1,
+             'seasons': 1, 'date_added': 0,
+             '_episodes': {(1, 1): {'path': '/mnt/a/S01E01.mkv', 'file': 'S01E01.mkv'}}},
+            {'title': 'Star Wars Andor', 'source': 'debrid', 'episodes': 1,
+             'seasons': 1, 'date_added': 0,
+             '_episodes': {(2, 1): {'path': '/mnt/a/S02E01.mkv', 'file': 'S02E01.mkv'}}},
+        ]
+        result = LibraryScanner._dedup_by_tmdb(items, aliases)
+        assert len(result) == 1
+        assert set(result[0]['_episodes']) == {(1, 1), (2, 1)}
+
+    def test_dedup_fail_open_merges_on_stale_cache(self, monkeypatch):
+        """Alt lookup returning None (no covering sibling in cache) keeps
+        the pre-fix merge behavior."""
+        self._patch_tmdb(monkeypatch, alt_lookup=lambda *a, **kw: None)
+        items = [self._born_again_item(), self._bare_item()]
+        result = LibraryScanner._dedup_by_tmdb(items, dict(self._ALIASES))
+        assert len(result) == 1
+
+    def test_dedup_movies_unaffected(self, monkeypatch):
+        """Movie items carry no _episodes — the veto must never fire and
+        never load the TMDB cache for them."""
+        import utils.tmdb as _tmdb
+        monkeypatch.setattr(_tmdb, 'get_cached_tmdb_ids',
+                            lambda: pytest.fail('must not load cache'))
+        aliases = {'f1': {'f1 the movie'}, 'f1 the movie': {'f1'}}
+        items = [
+            {'title': 'F1', 'year': 2025, 'source': 'debrid', 'date_added': 0},
+            {'title': 'F1 The Movie', 'source': 'debrid', 'date_added': 0},
+        ]
+        result = LibraryScanner._dedup_by_tmdb(items, aliases)
+        assert len(result) == 1
+
+    # -- debrid↔local merge veto in _scan_read ---------------------------
+
+    def _make_scanner(self):
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._mount_path = '/mnt/debrid'
+        scanner._local_movies_path = None
+        scanner._local_tv_path = None
+        scanner._cache = None
+        scanner._cache_time = 0
+        scanner._ttl = 600
+        scanner._lock = threading.Lock()
+        scanner._scanning = False
+        scanner._effects_running = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
+        scanner._capabilities_path = '/dev/null/library_capabilities.json'
+        return scanner
+
+    def _run_scan_read(self, monkeypatch, debrid_shows, local_shows,
+                       show_aliases):
+        scanner = self._make_scanner()
+
+        def raise_unsupported(*a, **kw):
+            raise library._WebDAVUnsupportedError('memoized')
+        monkeypatch.setattr(scanner, '_webdav_scan_mount', raise_unsupported)
+        monkeypatch.setattr(scanner, '_scan_mount',
+                            lambda *a, **kw: ([], debrid_shows))
+        monkeypatch.setattr(scanner, '_scan_local_movies', lambda: [])
+        monkeypatch.setattr(scanner, '_scan_local_shows', lambda: local_shows)
+        monkeypatch.setattr(library, '_build_tmdb_aliases',
+                            lambda: (show_aliases, {}))
+        monkeypatch.setattr(library, '_enrich_with_tmdb_cache',
+                            lambda movies, shows, **kw: [])
+        monkeypatch.setattr(library, '_apply_sonarr_monitored_filter',
+                            lambda shows, **kw: None)
+        from utils import library_prefs
+        monkeypatch.setattr(library_prefs, 'get_all_preferences', lambda: {})
+        return scanner._scan_read()
+
+    def test_local_merge_vetoed_for_season_mismatch(self, monkeypatch):
+        """Debrid bare 'Daredevil' S03 must not merge into the LOCAL
+        'Daredevil Born Again' entry via the alias hop — the second site
+        of the same bug."""
+        self._patch_tmdb(monkeypatch)
+        local = {'title': 'Daredevil Born Again', 'year': 2025,
+                 'source': 'local', 'episodes': 1, 'seasons': 1,
+                 'date_added': 0,
+                 '_episodes': {(1, 1): {'path': '/tv/ba/S01E01.mkv', 'file': 'S01E01.mkv',
+                                        'source': 'local'}}}
+        data = self._run_scan_read(
+            monkeypatch, [self._bare_item()], [local], dict(self._ALIASES))
+        shows = data['shows']
+        assert len(shows) == 2
+        by_title = {s['title']: s for s in shows}
+        ba_seasons = {sd['number'] for sd in
+                      by_title['Daredevil Born Again'].get('season_data', [])}
+        assert 3 not in ba_seasons, \
+            'phantom S03 injected into Born Again via local alias merge'
+        assert by_title['Daredevil Born Again']['source'] == 'local'
+
+    def test_local_merge_still_works_when_seasons_agree(self, monkeypatch):
+        import utils.tmdb as _tmdb
+        monkeypatch.setattr(
+            _tmdb, 'get_cached_tmdb_ids',
+            lambda: {'shows': {'andor': 300, 'star wars andor': 300},
+                     'movies': {}})
+        monkeypatch.setattr(_tmdb, 'find_show_tmdb_id_by_season',
+                            lambda k, mx, yr=None: 300)
+        aliases = {'andor': {'star wars andor'},
+                   'star wars andor': {'andor'}}
+        debrid = {'title': 'Star Wars Andor', 'source': 'debrid',
+                  'episodes': 1, 'seasons': 1, 'date_added': 0,
+                  '_episodes': {(2, 1): {'path': '/mnt/a/S02E01.mkv', 'file': 'S02E01.mkv',
+                                         'source': 'debrid'}}}
+        local = {'title': 'Andor', 'source': 'local', 'episodes': 1,
+                 'seasons': 1, 'date_added': 0,
+                 '_episodes': {(1, 1): {'path': '/tv/a/S01E01.mkv', 'file': 'S01E01.mkv',
+                                        'source': 'local'}}}
+        data = self._run_scan_read(monkeypatch, [debrid], [local], aliases)
+        shows = data['shows']
+        assert len(shows) == 1
+        assert shows[0]['source'] == 'both'
+
+    def test_prefix_fallback_vetoed_on_canon_key_side(self, monkeypatch):
+        """Bug-hunter HIGH: a long parsed title with NO direct cache
+        entry fail-opens the key-side veto, so the prefix hop's target
+        (canon_key) must be checked with the ITEM's seasons — otherwise
+        'Daredevil Blood in the Streets' S03 prefix-resolves to the
+        ambiguous 'daredevil' entry and merges into local Born Again."""
+        self._patch_tmdb(monkeypatch)
+        monkeypatch.setattr(
+            library, '_find_canonical_tmdb_via_prefix',
+            lambda *a, **kw: {'title': 'Daredevil', 'tmdb_id': 100})
+        debrid = {'title': 'Daredevil Blood in the Streets', 'year': 2015,
+                  'source': 'debrid', 'episodes': 1, 'seasons': 1,
+                  'date_added': 0,
+                  '_episodes': {(3, 8): {'path': '/mnt/dd/S03E08.mkv',
+                                         'file': 'S03E08.mkv',
+                                         'source': 'debrid'}}}
+        local = {'title': 'Daredevil', 'source': 'local', 'episodes': 1,
+                 'seasons': 1, 'date_added': 0,
+                 '_episodes': {(1, 1): {'path': '/tv/ba/S01E01.mkv',
+                                        'file': 'S01E01.mkv',
+                                        'source': 'local'}}}
+        data = self._run_scan_read(monkeypatch, [debrid], [local], {})
+        shows = data['shows']
+        assert len(shows) == 2, \
+            'prefix hop must be vetoed when canon_key cannot cover S03'
+        by_title = {s['title']: s for s in shows}
+        local_seasons = {sd['number'] for sd in
+                         by_title['Daredevil'].get('season_data', [])}
+        assert local_seasons == {1}
+
+    def test_prefix_fallback_still_merges_when_seasons_agree(self, monkeypatch):
+        import utils.tmdb as _tmdb
+        monkeypatch.setattr(
+            _tmdb, 'get_cached_tmdb_ids',
+            lambda: {'shows': {'andor': 300}, 'movies': {}})
+        monkeypatch.setattr(_tmdb, 'find_show_tmdb_id_by_season',
+                            lambda k, mx, yr=None: 300)
+        monkeypatch.setattr(
+            library, '_find_canonical_tmdb_via_prefix',
+            lambda *a, **kw: {'title': 'Andor', 'tmdb_id': 300})
+        debrid = {'title': 'Andor Diego Luna Complete', 'source': 'debrid',
+                  'episodes': 1, 'seasons': 1, 'date_added': 0,
+                  '_episodes': {(2, 1): {'path': '/mnt/a/S02E01.mkv',
+                                         'file': 'S02E01.mkv',
+                                         'source': 'debrid'}}}
+        local = {'title': 'Andor', 'source': 'local', 'episodes': 1,
+                 'seasons': 1, 'date_added': 0,
+                 '_episodes': {(1, 1): {'path': '/tv/a/S01E01.mkv',
+                                        'file': 'S01E01.mkv',
+                                        'source': 'local'}}}
+        data = self._run_scan_read(monkeypatch, [debrid], [local], {})
+        shows = data['shows']
+        assert len(shows) == 1
+        assert shows[0]['source'] == 'both'
+
+    def test_max_episode_season_seasons_count_fallback(self):
+        """Bug-hunter MEDIUM: local shows whose episode filenames didn't
+        parse carry _episodes={} but a seasons count — the veto must not
+        be silently disabled for them."""
+        from utils.library import _max_episode_season
+        assert _max_episode_season(
+            {'_episodes': {}, 'seasons': 3}) == 3
+        assert _max_episode_season(
+            {'_episodes': {(5, 1): {}}, 'seasons': 1}) == 5
+        assert _max_episode_season({'title': 'A Movie'}) == 0
+        assert _max_episode_season({'seasons': 0}) == 0
+
+
 class TestSearchForMissingEpisodesSkipGhosts:
     """Ghost entries (source='wanted') MUST NOT be processed by the
     gap-fill search loop. Reviewer-flagged CRITICAL from commit
@@ -3810,6 +5746,48 @@ class TestSearchForMissingEpisodesSkipGhosts:
         # called for the ghost. Pre-fix this fired on every scan and
         # caused the self-erase bug.
         assert radarr_client.ensure_and_search.call_count == 0
+
+    def test_ghost_show_skipped_in_search_loop(self, monkeypatch):
+        """TV mirror of the ghost-movie skip. A source='wanted' show has
+        empty season_data, but _compute_missing_episodes derives candidates
+        from the TMDB episode cache — so without the guard it would fire
+        Sonarr searches and write a self-erasing set_pending entry."""
+        from utils.library import LibraryScanner
+
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._alias_norms = {}
+        scanner._search_cooldown = {}
+        scanner._lock = __import__('threading').RLock()
+
+        sonarr_client = MagicMock()
+        sonarr_client.configured = True
+        sonarr_client.ensure_and_search.return_value = {'status': 'sent'}
+        monkeypatch.setattr(
+            'utils.arr_client.get_download_service',
+            lambda mt: (sonarr_client, 'sonarr') if mt == 'show'
+            else (None, None),
+        )
+        monkeypatch.setattr('utils.library.gap_fill_enabled', lambda: True)
+        monkeypatch.setattr('utils.library_prefs.get_all_pending', lambda: {})
+        monkeypatch.setattr('utils.library_prefs.set_pending', MagicMock())
+        monkeypatch.setattr('utils.library_prefs.touch_pending_searched',
+                            MagicMock())
+        monkeypatch.setattr('utils.library_prefs.update_pending_error',
+                            MagicMock())
+        # If the guard were absent, the loop would reach this and find a
+        # missing episode → fire ensure_and_search. The guard must skip
+        # the ghost before _compute_missing_episodes is consulted.
+        monkeypatch.setattr(LibraryScanner, '_compute_missing_episodes',
+                            lambda self, show: [(1, 1)])
+
+        shows = [
+            {'title': 'Ghost Show', 'year': 2025, 'source': 'wanted',
+             'missing': True, 'missing_episodes': 8, 'season_data': []},
+        ]
+        scanner._search_for_missing_episodes(shows=shows, movies=[],
+                                             preferences={})
+
+        assert sonarr_client.ensure_and_search.call_count == 0
 
 
 class TestGetRadarrMoviesList:
@@ -3992,7 +5970,7 @@ class TestWebDAVUnsupportedMemoization:
         monkeypatch.setattr(library, '_enrich_with_tmdb_cache',
                             lambda movies, shows, **kw: [])
         monkeypatch.setattr(library, '_apply_sonarr_monitored_filter',
-                            lambda shows: None)
+                            lambda shows, **kw: None)
         from utils import library_prefs
         monkeypatch.setattr(library_prefs, 'get_all_preferences', lambda: {})
 
@@ -4055,7 +6033,7 @@ class TestWebDAVUnsupportedMemoization:
         monkeypatch.setattr(library, '_enrich_with_tmdb_cache',
                             lambda movies, shows, **kw: [])
         monkeypatch.setattr(library, '_apply_sonarr_monitored_filter',
-                            lambda shows: None)
+                            lambda shows, **kw: None)
         from utils import library_prefs
         monkeypatch.setattr(library_prefs, 'get_all_preferences', lambda: {})
 
@@ -4082,6 +6060,83 @@ class TestWebDAVUnsupportedMemoization:
         assert debug_msgs == []
         assert scanner._webdav_unsupported is False
         assert scanner._webdav_unsupported_logged is False
+
+
+class TestWebDAVScanSkipsObfuscated:
+
+    def test_obfuscated_folder_excluded_from_webdav_scan(self, monkeypatch):
+        scanner = TestWebDAVUnsupportedMemoization._make_scanner(
+            TestWebDAVUnsupportedMemoization())
+        monkeypatch.setattr(library, '_discover_zurg_url',
+                            lambda mp: 'http://zurg:9999')
+        monkeypatch.setattr(library, '_get_zurg_auth', lambda: None)
+
+        hex_dir = '050bd19ee9934249a2ce4c9762c0d710[EZTVx.to]'
+
+        def fake_propfind(url, depth, auth, timeout):
+            if depth == 1:
+                return [
+                    {'href': '/dav/', 'name': '', 'is_collection': True, 'size': 0},
+                    {'href': '/dav/movies/', 'name': 'movies',
+                     'is_collection': True, 'size': 0},
+                ]
+            return [
+                {'href': '/dav/movies/', 'name': 'movies',
+                 'is_collection': True, 'size': 0},
+                {'href': f'/dav/movies/{hex_dir}/', 'name': hex_dir,
+                 'is_collection': True, 'size': 0},
+                {'href': f'/dav/movies/{hex_dir}/{hex_dir}.mkv',
+                 'name': f'{hex_dir}.mkv', 'is_collection': False,
+                 'size': 900_000_000},
+                {'href': '/dav/movies/Inception (2010)/', 'name': 'Inception (2010)',
+                 'is_collection': True, 'size': 0},
+                {'href': '/dav/movies/Inception (2010)/Inception.mkv',
+                 'name': 'Inception.mkv', 'is_collection': False,
+                 'size': 800_000_000},
+            ]
+        monkeypatch.setattr('utils.webdav.propfind', fake_propfind)
+
+        movies, shows = scanner._webdav_scan_mount()
+
+        titles = {m['title'] for m in movies} | {s['title'] for s in shows}
+        assert 'Inception' in titles
+        assert not any('050bd19' in t.lower() for t in titles)
+
+    def test_only_obfuscated_category_does_not_poison_memoization(self, monkeypatch):
+        """A category containing ONLY obfuscated folders yields an empty
+        folders dict, so it must not count toward the folders-but-no-files
+        detection that memoizes WebDAV as unsupported."""
+        scanner = TestWebDAVUnsupportedMemoization._make_scanner(
+            TestWebDAVUnsupportedMemoization())
+        monkeypatch.setattr(library, '_discover_zurg_url',
+                            lambda mp: 'http://zurg:9999')
+        monkeypatch.setattr(library, '_get_zurg_auth', lambda: None)
+
+        hex_dir = '050bd19ee9934249a2ce4c9762c0d710[EZTVx.to]'
+
+        def fake_propfind(url, depth, auth, timeout):
+            if depth == 1:
+                return [
+                    {'href': '/dav/', 'name': '', 'is_collection': True, 'size': 0},
+                    {'href': '/dav/movies/', 'name': 'movies',
+                     'is_collection': True, 'size': 0},
+                ]
+            return [
+                {'href': '/dav/movies/', 'name': 'movies',
+                 'is_collection': True, 'size': 0},
+                {'href': f'/dav/movies/{hex_dir}/', 'name': hex_dir,
+                 'is_collection': True, 'size': 0},
+                {'href': f'/dav/movies/{hex_dir}/{hex_dir}.mkv',
+                 'name': f'{hex_dir}.mkv', 'is_collection': False,
+                 'size': 900_000_000},
+            ]
+        monkeypatch.setattr('utils.webdav.propfind', fake_propfind)
+
+        movies, shows = scanner._webdav_scan_mount()
+
+        assert movies == []
+        assert shows == []
+        assert scanner._webdav_unsupported is False
 
 
 # ---------------------------------------------------------------------------
@@ -4547,6 +6602,17 @@ class TestLibraryCachePersistence:
         assert lpi2 == lpi
         assert an2 == an
 
+    def test_arr_degraded_stripped_on_deserialize(self):
+        """``arr_degraded`` is a per-scan runtime signal for the recovery
+        snapshot writer — a warm-started payload must never replay a
+        previous run's degradation flag."""
+        cache, pi, lpi, an = self._sample_state()
+        cache['arr_degraded'] = ['sonarr_series']
+        env = library._serialize_cache_state(cache, pi, lpi, an)
+        result = library._deserialize_cache_state(env)
+        assert result is not None
+        assert 'arr_degraded' not in result[0]
+
     def test_tuple_keys_round_trip(self):
         """JSON has no tuple keys — serialize as 4-element rows, restore as tuples."""
         cache, pi, _, _ = self._sample_state()
@@ -4610,7 +6676,14 @@ class TestLibraryCachePersistence:
         scanner._load_persisted_cache()
         assert scanner._cache is None
 
-    def test_version_mismatch_rejected(self, tmp_dir):
+    def test_version_mismatch_accepted(self, tmp_dir):
+        """Routine release bumps must not discard the warm-start snapshot.
+
+        ``_LIBRARY_CACHE_SCHEMA`` is the only format gate; the recorded
+        ``zurgarr_version`` is diagnostic.  (Spec 2026-08-09: version-gated
+        rejection caused an empty library + ~53s blocking scan after every
+        release rebuild.)
+        """
         import json
         cache, pi, lpi, an = self._sample_state()
         env = library._serialize_cache_state(cache, pi, lpi, an)
@@ -4620,7 +6693,9 @@ class TestLibraryCachePersistence:
             json.dump(env, fh)
         scanner = self._make_scanner(path)
         scanner._load_persisted_cache()
-        assert scanner._cache is None
+        assert scanner._cache is not None
+        assert scanner._cache['movies'] == cache['movies']
+        assert scanner._path_index == pi
 
     def test_future_dated_ts_rejected(self, tmp_dir):
         import json
@@ -4762,3 +6837,2631 @@ class TestLibraryCachePersistence:
         key, val = mutation
         env['cache'][key] = val
         assert library._deserialize_cache_state(env) is None
+
+
+# ---------------------------------------------------------------------------
+# Never-block get_data (spec 2026-08-09-library-load-design)
+# ---------------------------------------------------------------------------
+
+
+class TestGetDataNeverBlocks:
+    """/api/library must never block on a scan.
+
+    ``get_data()`` serves whatever snapshot exists (any age) and triggers a
+    background ``refresh()`` when stale; with no snapshot it serves an
+    empty placeholder.  The synchronous ``scan()`` fallback is gone.
+    """
+
+    _PAYLOAD_KEYS = {
+        'movies', 'shows', 'preferences', 'last_scan',
+        'scan_duration_ms', 'arr_degraded',
+    }
+
+    def _make_scanner(self, mount='/mnt/debrid'):
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._mount_path = mount
+        scanner._local_movies_path = None
+        scanner._local_tv_path = None
+        scanner._cache = None
+        scanner._cache_time = 0
+        scanner._ttl = 600
+        scanner._lock = threading.Lock()
+        scanner._scanning = False
+        scanner._effects_running = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._library_cache_path = '/nonexistent/library_cache.json'
+
+        # Any scan on the get_data() calling thread is the exact bug this
+        # change removes — fail loudly.
+        def _no_scan(*a, **k):
+            raise AssertionError('get_data() must never scan synchronously')
+        scanner.scan = _no_scan
+
+        # Stub refresh: count calls, mimic the real synchronous
+        # _scanning=True publication (library.py refresh() sets it under
+        # the lock before spawning its worker thread).
+        scanner.refresh_calls = 0
+
+        def _fake_refresh(_rescan_depth=0):
+            scanner.refresh_calls += 1
+            with scanner._lock:
+                scanner._scanning = True
+        scanner.refresh = _fake_refresh
+        return scanner
+
+    def _sample_payload(self):
+        return {
+            'movies': [{'title': 'Some Movie', 'year': 2024}],
+            'shows': [],
+            'preferences': {},
+            'last_scan': '2026-08-09T10:00:00+00:00',
+            'scan_duration_ms': 53241,
+            'arr_degraded': [],
+        }
+
+    def test_fresh_cache_served_without_refresh(self):
+        scanner = self._make_scanner()
+        payload = self._sample_payload()
+        scanner._cache = payload
+        scanner._cache_time = time.monotonic()
+        assert scanner.get_data() is payload
+        assert scanner.refresh_calls == 0
+
+    def test_expired_cache_served_stale_and_refresh_triggered_once(self):
+        scanner = self._make_scanner()
+        payload = self._sample_payload()
+        scanner._cache = payload
+        scanner._cache_time = time.monotonic() - 601  # ttl=600 → expired
+        assert scanner.get_data() is payload          # stale, instantly
+        assert scanner.refresh_calls == 1
+        # Second poll while the (stubbed) refresh is "running" — no stack.
+        assert scanner.get_data() is payload
+        assert scanner.refresh_calls == 1
+
+    def test_no_mount_uses_short_ttl(self):
+        scanner = self._make_scanner(mount=None)
+        payload = self._sample_payload()
+        scanner._cache = payload
+        scanner._cache_time = time.monotonic() - 11   # ttl=10 → expired
+        assert scanner.get_data() is payload
+        assert scanner.refresh_calls == 1
+
+    def test_cold_start_serves_empty_payload_and_triggers_refresh(self):
+        scanner = self._make_scanner()
+        data = scanner.get_data()                     # would raise pre-change
+        assert scanner.refresh_calls == 1
+        assert set(data.keys()) == self._PAYLOAD_KEYS
+        assert data['movies'] == []
+        assert data['shows'] == []
+        assert data['preferences'] == {}
+        assert data['scan_duration_ms'] == 0
+        assert data['arr_degraded'] == []
+
+    def test_cold_start_while_already_scanning_no_extra_refresh(self):
+        scanner = self._make_scanner()
+        scanner._scanning = True                      # startup refresh running
+        data = scanner.get_data()
+        assert scanner.refresh_calls == 0
+        assert set(data.keys()) == self._PAYLOAD_KEYS
+
+    def test_empty_payload_matches_scan_read_key_set(self):
+        """Golden: the placeholder's keys mirror _scan_read's return keys.
+
+        status_server overlays scanning/download_services/pending/
+        preferences/search_enabled per-response; everything else the UI
+        destructures must exist here too.
+        """
+        assert set(library._empty_scan_payload().keys()) == self._PAYLOAD_KEYS
+
+    def test_refresh_thread_start_failure_clears_scanning(self, monkeypatch):
+        """A failed worker-thread start must not wedge _scanning=True —
+        with no synchronous fallback left in get_data(), a stuck flag
+        would freeze the library at its last snapshot until restart."""
+        scanner = self._make_scanner()
+
+        def _boom(self_thread):
+            raise RuntimeError('no threads at shutdown')
+        monkeypatch.setattr(threading.Thread, 'start', _boom)
+        with pytest.raises(RuntimeError):
+            LibraryScanner.refresh(scanner)
+        assert scanner._scanning is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: dual-debrid library view
+# ---------------------------------------------------------------------------
+
+class TestPhase4DualDebridMerge:
+    """The library scanner enumerates both the RD mount (existing) and
+    the TB mount (new in plan 39 phase 4).  Items unique to TB are
+    appended; items present on both get ``has_alt_source=True`` so the
+    UI can render a pair-badge."""
+
+    def test_alt_unique_items_appended(self):
+        """A movie only on TB joins the primary list with source_debrid=torbox."""
+        primary_movies = [
+            {'title': 'On RD Only', 'year': 2020,
+             'source': 'debrid', 'source_debrid': 'realdebrid',
+             'type': 'movie'},
+        ]
+        alt_movies = [
+            {'title': 'TB Exclusive', 'year': 2021,
+             'source': 'debrid', 'source_debrid': 'torbox',
+             'type': 'movie'},
+        ]
+        m, s = library.LibraryScanner._merge_alt_debrid_items(
+            primary_movies, [], alt_movies, [],
+        )
+        titles = sorted(x['title'] for x in m)
+        assert titles == ['On RD Only', 'TB Exclusive']
+        tb = next(x for x in m if x['title'] == 'TB Exclusive')
+        assert tb['source_debrid'] == 'torbox'
+        # No has_alt_source flag on uniques
+        assert 'has_alt_source' not in tb
+        assert 'has_alt_source' not in next(x for x in m if x['title'] == 'On RD Only')
+
+    def test_movie_on_both_flagged_with_alt_source(self):
+        """Same movie on both → keep ONE entry, flag with alt-source."""
+        primary_movies = [
+            {'title': 'Dune', 'year': 2021,
+             'source': 'debrid', 'source_debrid': 'realdebrid',
+             'type': 'movie'},
+        ]
+        alt_movies = [
+            {'title': 'Dune', 'year': 2021,
+             'source': 'debrid', 'source_debrid': 'torbox',
+             'type': 'movie'},
+        ]
+        m, s = library.LibraryScanner._merge_alt_debrid_items(
+            primary_movies, [], alt_movies, [],
+        )
+        assert len(m) == 1
+        assert m[0]['source_debrid'] == 'realdebrid'  # primary wins
+        assert m[0]['has_alt_source'] is True
+        assert m[0]['alt_source_debrid'] == 'torbox'
+
+    def test_shows_merge_episode_sets(self):
+        """Show on both mounts: episodes from both should union, increasing
+        the seasons + episodes counts."""
+        primary_shows = [
+            {'title': 'Show', 'year': 2020,
+             'source': 'debrid', 'source_debrid': 'realdebrid', 'type': 'show',
+             '_episodes': [(1, 1), (1, 2)],
+             'seasons': 1, 'episodes': 2, 'path': '/data/zurgarr/shows/Show'},
+        ]
+        alt_shows = [
+            {'title': 'Show', 'year': 2020,
+             'source': 'debrid', 'source_debrid': 'torbox', 'type': 'show',
+             '_episodes': [(1, 2), (2, 1)],   # S01E02 dup + new S02E01
+             'seasons': 1, 'episodes': 2, 'path': '/data/torbox/shows/Show'},
+        ]
+        _, s = library.LibraryScanner._merge_alt_debrid_items(
+            [], primary_shows, [], alt_shows,
+        )
+        assert len(s) == 1
+        merged = s[0]
+        assert merged['has_alt_source'] is True
+        assert merged['alt_source_debrid'] == 'torbox'
+        # S01E01 (RD), S01E02 (both, dedup'd), S02E01 (TB)
+        eps = {tuple(e) if isinstance(e, list) else e for e in merged['_episodes']}
+        assert eps == {(1, 1), (1, 2), (2, 1)}
+        assert merged['seasons'] == 2
+        assert merged['episodes'] == 3
+
+    def test_no_alt_items_is_noop(self):
+        """Empty alt lists → primary returned unchanged."""
+        primary_movies = [
+            {'title': 'X', 'year': 2020, 'source_debrid': 'realdebrid'},
+        ]
+        m, s = library.LibraryScanner._merge_alt_debrid_items(
+            primary_movies, [], [], [],
+        )
+        assert m == primary_movies
+        assert s == []
+        # And no has_alt_source was injected
+        assert 'has_alt_source' not in m[0]
+
+    def test_missing_title_does_not_crash(self):
+        """An item with an empty title (parsed-folder failure upstream)
+        must not match other empty-title items.  Defensive: real data
+        rarely has this but we don't want a TB-side parse failure to
+        silently merge into an RD-side parse failure."""
+        primary_movies = [{'title': '', 'source_debrid': 'realdebrid'}]
+        alt_movies = [{'title': '', 'source_debrid': 'torbox'}]
+        m, _ = library.LibraryScanner._merge_alt_debrid_items(
+            primary_movies, [], alt_movies, [],
+        )
+        # Empty-title items are kept as-is, not merged.
+        assert len(m) == 2
+
+    def test_shows_merge_episode_dicts_from_scan_mount(self):
+        """CRITICAL-2 regression: ``_scan_mount`` produces ``_episodes`` as
+        a DICT keyed by ``(season, ep)`` (library.py:4543 ``'_episodes': eps``
+        where eps comes from ``_collect_episodes``'s dict output).  Pre-fix
+        the merge did ``p_eps + a_eps`` which raises TypeError on dict+dict.
+        The except-Exception at library.py:1926 then swallowed the error
+        and discarded the ENTIRE TB scan silently.
+
+        The merge must accept dict-form ``_episodes`` and produce a merged
+        dict preserving episode-info values from both sources (not just the
+        key tuples).  Sibling test ``test_shows_merge_episode_sets`` uses
+        tuple-list inputs so it doesn't catch the dict path."""
+        primary_shows = [
+            {'title': 'Show', 'year': 2020,
+             'source': 'debrid', 'source_debrid': 'realdebrid', 'type': 'show',
+             '_episodes': {
+                 (1, 1): {'file': 'S01E01.mkv', 'path': '/data/zurgarr/shows/Show/S01E01.mkv',
+                          'size_bytes': 100, 'folder': 'Show'},
+                 (1, 2): {'file': 'S01E02.mkv', 'path': '/data/zurgarr/shows/Show/S01E02.mkv',
+                          'size_bytes': 200, 'folder': 'Show'},
+             },
+             'seasons': 1, 'episodes': 2, 'path': '/data/zurgarr/shows/Show'},
+        ]
+        alt_shows = [
+            {'title': 'Show', 'year': 2020,
+             'source': 'debrid', 'source_debrid': 'torbox', 'type': 'show',
+             '_episodes': {
+                 (1, 2): {'file': 'S01E02.mkv', 'path': '/data/torbox/shows/Show/S01E02.mkv',
+                          'size_bytes': 200, 'folder': 'Show'},
+                 (2, 1): {'file': 'S02E01.mkv', 'path': '/data/torbox/shows/Show/S02E01.mkv',
+                          'size_bytes': 300, 'folder': 'Show'},
+             },
+             'seasons': 2, 'episodes': 2, 'path': '/data/torbox/shows/Show'},
+        ]
+        # Pre-fix this raised TypeError: unsupported operand type(s) for +: 'dict' and 'dict'.
+        _, s = library.LibraryScanner._merge_alt_debrid_items(
+            [], primary_shows, [], alt_shows,
+        )
+        assert len(s) == 1
+        merged = s[0]
+        assert merged['has_alt_source'] is True
+        assert merged['alt_source_debrid'] == 'torbox'
+
+        eps = merged['_episodes']
+        # Must remain dict-shaped so downstream consumers
+        # (library.py:1839, library.py:2103) keep working.
+        assert isinstance(eps, dict)
+        assert set(eps.keys()) == {(1, 1), (1, 2), (2, 1)}
+        # Episode-info values preserved (primary wins on dupes — its path
+        # is the canonical one for the source_debrid badge).
+        assert eps[(1, 1)]['file'] == 'S01E01.mkv'
+        assert eps[(2, 1)]['file'] == 'S02E01.mkv'
+        # Counts reflect the union.
+        assert merged['seasons'] == 2
+        assert merged['episodes'] == 3
+
+
+class TestPhase4DiscoverTorboxMount:
+    """``_discover_torbox_mount`` returns the TB mount path when the
+    provider is configured AND the mount exists; None otherwise."""
+
+    def test_returns_none_without_api_key(self, monkeypatch):
+        monkeypatch.delenv('TORBOX_API_KEY', raising=False)
+        assert library.LibraryScanner._discover_torbox_mount() is None
+
+    def test_returns_none_when_mount_absent(self, monkeypatch, tmp_path):
+        # Set the key but the mount path doesn't exist
+        monkeypatch.setenv('TORBOX_API_KEY', 'tb-key')
+        monkeypatch.setenv('TORBOX_MOUNT_NAME', 'torbox')
+        # Don't create the mount directory
+        assert library.LibraryScanner._discover_torbox_mount() is None
+
+    def test_returns_path_when_mount_exists(self, monkeypatch, tmp_path):
+        """Mount discovery uses utils.debrid_routing.mount_for_debrid
+        which returns ``/data/<TORBOX_MOUNT_NAME>``.  We can't mock
+        ``/data/torbox`` in pytest cleanly without root, so this test
+        asserts the predicate logic via a temp dir that we explicitly
+        configure as the TB mount via monkeypatching the helper."""
+        monkeypatch.setenv('TORBOX_API_KEY', 'tb-key')
+        monkeypatch.setenv('TORBOX_MOUNT_NAME', 'torbox')
+        fake_mount = tmp_path / 'torbox_mount'
+        fake_mount.mkdir()
+        from utils import debrid_routing as _dr
+        monkeypatch.setattr(_dr, 'mount_for_debrid',
+                            lambda d, **kw: str(fake_mount) if d == 'torbox' else None)
+        result = library.LibraryScanner._discover_torbox_mount()
+        assert result == str(fake_mount)
+
+
+class TestScanMountFlatLayout:
+    """``_scan_mount(flat_layout=True)`` treats mount_path itself as the
+    release-folder parent (no shows/movies/anime/__all__ subdivision).
+
+    Regression: pre-fix, plan 39 phase 4 passed only ``source_debrid='torbox'``
+    without ``flat_layout``, so ``_scan_mount`` iterated each TB release
+    folder AS a category and looked for sub-folders inside (finding only
+    media files) — every TB show and movie except the rare ones with
+    internal subdirs got silently dropped, producing a massively under-
+    counted library view (observed: 1 movie + 1 show out of 20+ on mount).
+    """
+
+    def test_flat_layout_finds_show_episodes_in_release_folders(self, tmp_dir):
+        """A flat mount with N show-episode folders surfaces N episodes
+        grouped into a single show entry (matching the existing dedup
+        semantics of categorized scans).
+        """
+        tb_mount = os.path.join(tmp_dir, 'tb')
+        os.makedirs(tb_mount)
+        # Four releases of the same show, different episodes
+        for ep in (1, 2, 3, 4):
+            d = os.path.join(tb_mount, f'My.Show.S01E0{ep}.1080p-FLUX[TGx]')
+            os.makedirs(d)
+            with open(os.path.join(d, f'My.Show.S01E0{ep}.mkv'), 'w') as f:
+                f.write('video')
+        scanner = library.LibraryScanner()
+        movies, shows = scanner._scan_mount(
+            tb_mount, source_debrid='torbox', flat_layout=True,
+        )
+        assert len(movies) == 0
+        assert len(shows) == 1
+        assert shows[0]['title'] == 'My Show'
+        # 4 episodes from 4 distinct release folders, all S01
+        assert shows[0]['episodes'] == 4
+        assert shows[0]['source_debrid'] == 'torbox'
+
+    def test_flat_layout_finds_movies_in_release_folders(self, tmp_dir):
+        """A movie release folder under the flat mount is detected and
+        emerges as a movie entry (not a show)."""
+        tb_mount = os.path.join(tmp_dir, 'tb')
+        os.makedirs(tb_mount)
+        d = os.path.join(tb_mount, 'My.Movie.2024.1080p-FLUX')
+        os.makedirs(d)
+        with open(os.path.join(d, 'My.Movie.2024.mkv'), 'w') as f:
+            f.write('video')
+        scanner = library.LibraryScanner()
+        movies, shows = scanner._scan_mount(
+            tb_mount, source_debrid='torbox', flat_layout=True,
+        )
+        assert len(shows) == 0
+        assert len(movies) == 1
+        assert movies[0]['title'] == 'My Movie'
+        assert movies[0]['year'] == 2024
+        assert movies[0]['source_debrid'] == 'torbox'
+
+    def test_categorized_layout_still_works(self, tmp_dir):
+        """Regression guard: Zurg-style 2-level layout still scans
+        correctly when ``flat_layout=False`` (the default)."""
+        zurg_mount = os.path.join(tmp_dir, 'zurg')
+        os.makedirs(os.path.join(zurg_mount, 'shows'))
+        d = os.path.join(zurg_mount, 'shows', 'My.Show.S01E01-NTb')
+        os.makedirs(d)
+        with open(os.path.join(d, 'My.Show.S01E01.mkv'), 'w') as f:
+            f.write('video')
+        scanner = library.LibraryScanner()
+        movies, shows = scanner._scan_mount(zurg_mount, source_debrid='realdebrid')
+        assert len(shows) == 1
+        assert shows[0]['title'] == 'My Show'
+        assert shows[0]['source_debrid'] == 'realdebrid'
+
+    def test_flat_layout_with_noisy_release_names(self, tmp_dir):
+        """Real TB folder names have indexer tags, dots, and trailing
+        brackets; _parse_folder_name + _collect_episodes must still
+        extract a usable title + season-episode for each.
+        """
+        tb_mount = os.path.join(tmp_dir, 'tb')
+        os.makedirs(tb_mount)
+        noisy_names = [
+            'For All Mankind S05E07 The Sirens of Titan 1080p ATVP WEB-DL DDP5 1 H 264-NTb[EZTVx.to]',
+            'For.All.Mankind.S05E09.Sons.and.Daughters.1080p.WEB-DL-NTb[TGx]',
+            'www.UIndex.org    -    For All Mankind S04E01 Glasnost 1080p ATVP WEB-DL DDPA5 1 H 264-FLUX',
+        ]
+        for name in noisy_names:
+            d = os.path.join(tb_mount, name)
+            os.makedirs(d)
+            # Extract S##E## from the folder name for the file name
+            import re
+            m = re.search(r'S(\d{2})E(\d{2})', name)
+            ep_file = f'ep_s{m.group(1)}e{m.group(2)}.mkv' if m else 'ep.mkv'
+            with open(os.path.join(d, ep_file), 'w') as f:
+                f.write('video')
+        scanner = library.LibraryScanner()
+        movies, shows = scanner._scan_mount(
+            tb_mount, source_debrid='torbox', flat_layout=True,
+        )
+        # All three are "For All Mankind" episodes — one merged show entry
+        # with 3 episodes (S05E07, S05E09, S04E01).
+        assert len(movies) == 0
+        # Title parsing may yield slight variants; check the group
+        # produces ONE show with 3 episodes.
+        assert len(shows) == 1
+        assert shows[0]['episodes'] == 3
+
+
+class TestTbScanTruncationFallback:
+    """A TorBox FUSE walk that gets rate-limited (429) or hits its deadline
+    must not drop TB titles to "Wanted". _scan_mount flags the truncation;
+    _scan_read falls back to the last COMPLETE scan, unioning the partial
+    over it. Regression: pre-fix, _scan_mount discarded its timed_out flag
+    and the caller fed the partial set straight into the merge, so every
+    truncated hourly scan wiped the missing TB titles.
+    """
+
+    def test_scan_mount_sets_truncated_flag_on_deadline(self, tmp_dir):
+        """A deadline already in the past trips the truncation flag."""
+        tb_mount = os.path.join(tmp_dir, 'tb')
+        os.makedirs(tb_mount)
+        d = os.path.join(tb_mount, 'My.Movie.2024.1080p-FLUX')
+        os.makedirs(d)
+        with open(os.path.join(d, 'My.Movie.2024.mkv'), 'w') as f:
+            f.write('video')
+        scanner = library.LibraryScanner()
+        # Deadline 100s in the past → the first entry check trips the timeout.
+        scanner._scan_mount(
+            tb_mount, deadline=time.monotonic() - 100,
+            source_debrid='torbox', flat_layout=True,
+        )
+        assert scanner._last_scan_mount_truncated is True
+
+    def test_scan_mount_clears_truncated_flag_on_clean_scan(self, tmp_dir):
+        """A complete walk leaves the flag False (and resets a prior True)."""
+        tb_mount = os.path.join(tmp_dir, 'tb')
+        os.makedirs(tb_mount)
+        d = os.path.join(tb_mount, 'My.Movie.2024.1080p-FLUX')
+        os.makedirs(d)
+        with open(os.path.join(d, 'My.Movie.2024.mkv'), 'w') as f:
+            f.write('video')
+        scanner = library.LibraryScanner()
+        scanner._last_scan_mount_truncated = True  # stale prior state
+        scanner._scan_mount(
+            tb_mount, source_debrid='torbox', flat_layout=True,
+        )
+        assert scanner._last_scan_mount_truncated is False
+
+    def test_union_tb_items_partial_wins_and_carries_last_good(self):
+        scanner = library.LibraryScanner()
+        last_good = [
+            {'title': 'Alpha', 'year': 2020, 'quality': '720p'},
+            {'title': 'Beta', 'year': 2021, 'quality': '1080p'},
+        ]
+        partial = [
+            {'title': 'Alpha', 'year': 2020, 'quality': '2160p'},  # upgraded
+            {'title': 'Gamma', 'year': 2022, 'quality': '1080p'},  # new
+        ]
+        out = scanner._union_tb_items(last_good, partial)
+        by_title = {it['title']: it for it in out}
+        assert set(by_title) == {'Alpha', 'Beta', 'Gamma'}
+        # Partial wins on collision (fresh quality), Beta carried from last-good.
+        assert by_title['Alpha']['quality'] == '2160p'
+        assert by_title['Beta']['quality'] == '1080p'
+
+    def test_union_tb_items_empty_inputs(self):
+        scanner = library.LibraryScanner()
+        assert scanner._union_tb_items([], []) == []
+        assert scanner._union_tb_items(None, None) == []
+        out = scanner._union_tb_items(None, [{'title': 'X', 'year': 2020}])
+        assert len(out) == 1 and out[0]['title'] == 'X'
+
+    def _make_scanner_for_scan_read(self, monkeypatch, tb_partial, truncated):
+        """Build a scanner whose RD path is a no-op and whose TB scan returns
+        ``tb_partial`` with the given truncation flag, so _scan_read exercises
+        only the TB fallback branch."""
+        scanner = library.LibraryScanner()
+        scanner._mount_path = '/nonexistent/rd'
+        # RD WebDAV + FUSE both yield nothing, no exceptions.
+        monkeypatch.setattr(scanner, '_webdav_scan_mount', lambda *a, **k: ([], []))
+        monkeypatch.setattr(scanner, '_discover_torbox_mount', lambda: '/nonexistent/tb')
+
+        def fake_scan_api(tb_mount):
+            scanner._last_scan_mount_truncated = truncated
+            return tb_partial
+
+        monkeypatch.setattr(scanner, '_scan_torbox_via_api', fake_scan_api)
+        return scanner
+
+    def test_scan_read_complete_scan_promotes_last_good(self, monkeypatch):
+        movies = [{'title': 'Alpha', 'year': 2020, 'type': 'movie', 'source': 'debrid', 'source_debrid': 'torbox'}]
+        scanner = self._make_scanner_for_scan_read(monkeypatch, (movies, []), truncated=False)
+        scanner._scan_read()
+        assert scanner._last_tb_movies is not None
+        assert [m['title'] for m in scanner._last_tb_movies] == ['Alpha']
+
+    def test_scan_read_truncated_falls_back_to_last_good(self, monkeypatch):
+        """A truncated scan that drops 'Beta' still surfaces it via last-good."""
+        full = [
+            {'title': 'Alpha', 'year': 2020, 'type': 'movie', 'source': 'debrid', 'source_debrid': 'torbox'},
+            {'title': 'Beta', 'year': 2021, 'type': 'movie', 'source': 'debrid', 'source_debrid': 'torbox'},
+        ]
+        scanner = self._make_scanner_for_scan_read(monkeypatch, (full, []), truncated=False)
+        scanner._scan_read()  # complete scan → baseline = {Alpha, Beta}
+
+        # Next scan is truncated and only returns Alpha (Beta dropped by 429).
+        partial = [{'title': 'Alpha', 'year': 2020, 'type': 'movie', 'source': 'debrid', 'source_debrid': 'torbox'}]
+
+        def fake_partial(tb_mount):
+            scanner._last_scan_mount_truncated = True
+            return (partial, [])
+
+        monkeypatch.setattr(scanner, '_scan_torbox_via_api', fake_partial)
+        data = scanner._scan_read()
+        titles = {m['title'] for m in data['movies']}
+        # Beta survives via last-good despite being absent from the partial scan.
+        assert 'Alpha' in titles and 'Beta' in titles
+        # Baseline NOT overwritten by the partial.
+        assert {m['title'] for m in scanner._last_tb_movies} == {'Alpha', 'Beta'}
+
+    def test_scan_read_truncated_no_baseline_uses_partial(self, monkeypatch):
+        """First-ever scan truncated, no last-good → use partial, don't promote."""
+        partial = [{'title': 'Alpha', 'year': 2020, 'type': 'movie', 'source': 'debrid', 'source_debrid': 'torbox'}]
+        scanner = self._make_scanner_for_scan_read(monkeypatch, (partial, []), truncated=True)
+        data = scanner._scan_read()
+        assert {m['title'] for m in data['movies']} == {'Alpha'}
+        # Partial must NOT become the baseline.
+        assert scanner._last_tb_movies is None
+
+    def test_scan_read_baseline_isolated_from_downstream_mutation(self, monkeypatch):
+        """The promoted baseline must be a deep copy — downstream stages mutate
+        the returned item dicts in place, and a shallow copy would corrupt the
+        last-good set for the next truncated scan."""
+        movies = [{'title': 'Alpha', 'year': 2020, 'type': 'movie', 'source': 'debrid', 'source_debrid': 'torbox'}]
+        scanner = self._make_scanner_for_scan_read(monkeypatch, (movies, []), truncated=False)
+        data = scanner._scan_read()
+        # Simulate a downstream stage mutating the returned dict in place.
+        for m in data['movies']:
+            if m['title'] == 'Alpha':
+                m['has_alt_source'] = True
+                m['source'] = 'both'
+        # Baseline snapshot must be untouched by that mutation.
+        base = {m['title']: m for m in scanner._last_tb_movies}
+        assert base['Alpha'].get('has_alt_source') is not True
+        assert base['Alpha']['source'] == 'debrid'
+
+    def test_scan_mount_sets_truncated_flag_on_listing_oserror(self, tmp_dir, monkeypatch):
+        """A listing OSError mid-walk (e.g. a TorBox 429) flags truncation."""
+        tb_mount = os.path.join(tmp_dir, 'tb')
+        os.makedirs(tb_mount)
+        scanner = library.LibraryScanner()
+        real_scandir = os.scandir
+
+        def boom(path, *a, **k):
+            # Fail the flat-root listing the way a 429 surfaces through FUSE.
+            if os.path.normpath(path) == os.path.normpath(tb_mount):
+                raise OSError("rate limit exceeded: 429 Too Many Requests")
+            return real_scandir(path, *a, **k)
+
+        monkeypatch.setattr(os, 'scandir', boom)
+        movies, shows = scanner._scan_mount(
+            tb_mount, source_debrid='torbox', flat_layout=True,
+        )
+        assert movies == [] and shows == []
+        assert scanner._last_scan_mount_truncated is True
+
+
+class TestResolveNfsRescanDelay:
+    """Plan 41 phase B.2 — NFS attribute-cache delay between symlink
+    creation and arr rescan trigger."""
+
+    def test_unset_returns_zero(self, monkeypatch):
+        from utils.library import _resolve_nfs_rescan_delay
+        monkeypatch.delenv('LIBRARY_RESCAN_NFS_DELAY', raising=False)
+        assert _resolve_nfs_rescan_delay() == 0
+
+    def test_empty_string_returns_zero(self, monkeypatch):
+        from utils.library import _resolve_nfs_rescan_delay
+        monkeypatch.setenv('LIBRARY_RESCAN_NFS_DELAY', '')
+        assert _resolve_nfs_rescan_delay() == 0
+
+    def test_valid_value_honoured(self, monkeypatch):
+        from utils.library import _resolve_nfs_rescan_delay
+        monkeypatch.setenv('LIBRARY_RESCAN_NFS_DELAY', '30')
+        assert _resolve_nfs_rescan_delay() == 30
+
+    def test_value_at_max_boundary(self, monkeypatch):
+        from utils.library import _resolve_nfs_rescan_delay
+        monkeypatch.setenv('LIBRARY_RESCAN_NFS_DELAY', '300')
+        assert _resolve_nfs_rescan_delay() == 300
+
+    def test_value_clamped_above_max(self, monkeypatch):
+        """A typo (`9999`, `3600` etc.) cannot stall the scan loop indefinitely."""
+        from utils.library import _resolve_nfs_rescan_delay
+        monkeypatch.setenv('LIBRARY_RESCAN_NFS_DELAY', '9999')
+        assert _resolve_nfs_rescan_delay() == 300
+
+    def test_negative_clamped_to_zero(self, monkeypatch):
+        from utils.library import _resolve_nfs_rescan_delay
+        monkeypatch.setenv('LIBRARY_RESCAN_NFS_DELAY', '-5')
+        assert _resolve_nfs_rescan_delay() == 0
+
+    def test_non_integer_falls_back_to_zero(self, monkeypatch):
+        """A typo shouldn't crash the scanner — disable the mitigation."""
+        from utils.library import _resolve_nfs_rescan_delay
+        monkeypatch.setenv('LIBRARY_RESCAN_NFS_DELAY', 'abc')
+        assert _resolve_nfs_rescan_delay() == 0
+
+    def test_float_string_falls_back_to_zero(self, monkeypatch):
+        """``int('30.5')`` raises ValueError — caller treats as misconfigured."""
+        from utils.library import _resolve_nfs_rescan_delay
+        monkeypatch.setenv('LIBRARY_RESCAN_NFS_DELAY', '30.5')
+        assert _resolve_nfs_rescan_delay() == 0
+
+
+class TestDetectTvMarker:
+    """Plan 41 phase B.1 — folder-name TV-marker recognition that
+    rescues TB flat-layout season packs from being mis-bucketed as
+    movies.  Pure-function tests against the helper; the integration
+    with ``_scan_mount`` is covered by the existing flat-layout tests
+    (TestPhase4DualDebridMerge) once the synthetic content is dropped
+    on a tmp dir.
+    """
+
+    def test_canonical_episode_marker(self):
+        from utils.library import _detect_tv_marker
+        # The case _collect_episodes already handles — must still True.
+        assert _detect_tv_marker('Andor.S02E01.1080p.WEB-DL') is True
+
+    def test_season_only_pack(self):
+        """The headline regression — S22.COMPLETE has no episode marker."""
+        from utils.library import _detect_tv_marker
+        assert _detect_tv_marker('Greys.Anatomy.S22.COMPLETE.1080p.WEB.H264-AMB3R') is True
+
+    def test_season_only_with_quality_tag(self):
+        from utils.library import _detect_tv_marker
+        assert _detect_tv_marker('Show.Name.S03.1080p.ATVP.WEB-DL') is True
+
+    def test_multi_season_range(self):
+        """For.All.Mankind.S01-S04 pattern."""
+        from utils.library import _detect_tv_marker
+        assert _detect_tv_marker('For.All.Mankind.S01-S04.COMPLETE') is True
+
+    def test_multi_season_range_alt_form(self):
+        """S01-04 form (no second S) and en-dash form."""
+        from utils.library import _detect_tv_marker
+        assert _detect_tv_marker('Show.Name.S01-04.1080p') is True
+        assert _detect_tv_marker('Show.Name.S01–S04.1080p') is True
+
+    def test_season_word_form(self):
+        from utils.library import _detect_tv_marker
+        assert _detect_tv_marker('Show.Name.Season.3.1080p.WEB-DL') is True
+        assert _detect_tv_marker('Show.Name.Season 3.1080p') is True
+        assert _detect_tv_marker('Show.Name.Seasons.1.Complete') is True
+
+    def test_real_movie_returns_false(self):
+        from utils.library import _detect_tv_marker
+        # No TV markers — should bucket as movie.
+        assert _detect_tv_marker('Dune.Part.Two.2024.1080p.WEB-DL.DDP5.1.x264-NTb') is False
+        assert _detect_tv_marker('Gattaca.1997.1080p.BluRay.x264') is False
+
+    def test_year_only_not_misclassified_as_season(self):
+        """``2024`` mustn't accidentally match — the season-only regex is
+        anchored to ``S`` prefix so a 4-digit year doesn't trigger."""
+        from utils.library import _detect_tv_marker
+        assert _detect_tv_marker('Documentary.2024.1080p.WEB-DL') is False
+
+    def test_empty_string(self):
+        from utils.library import _detect_tv_marker
+        assert _detect_tv_marker('') is False
+        assert _detect_tv_marker(None) is False
+
+    def test_sxxexx_inside_movie_name_still_tv(self):
+        """If a folder name has ``S01E01`` anywhere, classify as TV even
+        if the rest looks movie-ish."""
+        from utils.library import _detect_tv_marker
+        assert _detect_tv_marker('Some.Title.2024.S01E01.1080p') is True
+
+    def test_season_only_in_middle_of_name(self):
+        """``Show.S22.Title`` (season tag not at end) still matches."""
+        from utils.library import _detect_tv_marker
+        assert _detect_tv_marker('Greys.S22.Anatomy.WEB-DL') is True
+
+
+class TestScanMountTvMarkerFallback:
+    """Plan 41 phase B.1 integration: ``_scan_mount`` correctly buckets
+    a season-pack folder as TV even when ``_collect_episodes`` returns
+    empty (no SxxExx files inside the folder).
+    """
+
+    def _make_scanner(self, mount_path, monkeypatch):
+        monkeypatch.delenv("BLACKHOLE_LOCAL_LIBRARY_MOVIES", raising=False)
+        monkeypatch.delenv("BLACKHOLE_LOCAL_LIBRARY_TV", raising=False)
+        library._scanner = None
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._mount_path = mount_path
+        scanner._local_movies_path = None
+        scanner._local_tv_path = None
+        scanner._cache = None
+        scanner._cache_time = 0
+        scanner._ttl = 600
+        scanner._lock = threading.Lock()
+        scanner._scanning = False
+        scanner._effects_running = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
+        scanner._capabilities_path = '/dev/null/library_capabilities.json'
+        return scanner
+
+    def test_season_pack_no_episode_files_classified_as_show(self, tmp_dir, monkeypatch):
+        """The headline regression: TB flat-layout season pack folder
+        without SxxExx-tagged media inside is now a show, not a movie."""
+        # Folder name with S22 marker but EMPTY contents (TB caching).
+        pack_dir = os.path.join(tmp_dir, 'Greys.Anatomy.S22.COMPLETE.1080p.WEB.H264-AMB3R')
+        os.makedirs(pack_dir)
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        movies, shows = scanner._scan_mount(tmp_dir, flat_layout=True)
+
+        # Must be in shows, not movies.
+        show_titles = {s['title'] for s in shows}
+        movie_titles = {m['title'] for m in movies}
+        assert any('grey' in t.lower() or 'anatomy' in t.lower() for t in show_titles), \
+            f"expected Grey's Anatomy in shows; shows={show_titles}, movies={movie_titles}"
+        assert not any('grey' in t.lower() or 'anatomy' in t.lower() for t in movie_titles), \
+            f"Grey's Anatomy should not appear in movies; movies={movie_titles}"
+
+    def test_multi_season_pack_classified_as_show(self, tmp_dir, monkeypatch):
+        pack_dir = os.path.join(tmp_dir, 'For.All.Mankind.S01-S04.COMPLETE.1080p')
+        os.makedirs(pack_dir)
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        movies, shows = scanner._scan_mount(tmp_dir, flat_layout=True)
+
+        show_titles = {s['title'].lower() for s in shows}
+        assert any('mankind' in t for t in show_titles), \
+            f"expected For All Mankind in shows; got {show_titles}"
+
+    def test_real_movie_still_classified_as_movie(self, tmp_dir, monkeypatch):
+        """Regression-guard: a folder with no TV markers stays a movie."""
+        movie_dir = os.path.join(tmp_dir, 'Dune.Part.Two.2024.1080p.WEB-DL.x264-NTb')
+        os.makedirs(movie_dir)
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        movies, shows = scanner._scan_mount(tmp_dir, flat_layout=True)
+
+        movie_titles = {m['title'].lower() for m in movies}
+        show_titles = {s['title'].lower() for s in shows}
+        assert any('dune' in t for t in movie_titles), \
+            f"expected Dune in movies; movies={movie_titles}, shows={show_titles}"
+        assert not any('dune' in t for t in show_titles)
+
+
+class TestScanMountPathSwapOnHeavierFolder:
+    """Plan 41 phase B bug-hunter LOW #3 fix: when the same show is
+    encountered first as an empty-marker entry (B.1 TV-marker fallback,
+    season pack with no SxxExx files cached yet) and later in the same
+    scan as a populated entry, the show's ``path`` field must point at
+    the populated folder so downstream ``date_added``/symlink-target
+    consumers stat a populated dir.
+    """
+
+    def _make_scanner(self, mount_path, monkeypatch):
+        monkeypatch.delenv("BLACKHOLE_LOCAL_LIBRARY_MOVIES", raising=False)
+        monkeypatch.delenv("BLACKHOLE_LOCAL_LIBRARY_TV", raising=False)
+        library._scanner = None
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._mount_path = mount_path
+        scanner._local_movies_path = None
+        scanner._local_tv_path = None
+        scanner._cache = None
+        scanner._cache_time = 0
+        scanner._ttl = 600
+        scanner._lock = threading.Lock()
+        scanner._scanning = False
+        scanner._effects_running = False
+        scanner._path_index = {}
+        scanner._local_path_index = {}
+        scanner._path_lock = threading.Lock()
+        scanner._search_cooldown = {}
+        scanner._alias_norms = {}
+        scanner._debrid_unavailable_days = 3
+        scanner._pending_warning_hours = 24
+        scanner._last_had_local = None
+        scanner._local_drop_alerted = False
+        scanner._webdav_unsupported = False
+        scanner._webdav_unsupported_logged = False
+        scanner._capabilities_path = '/dev/null/library_capabilities.json'
+        return scanner
+
+    def test_populated_folder_wins_over_empty_marker(self, tmp_dir, monkeypatch):
+        """Empty-marker folder seen first, populated folder second —
+        show entry's ``path`` ends up on the populated folder."""
+        empty_dir = os.path.join(tmp_dir, 'Greys.Anatomy.S22.COMPLETE.1080p')
+        os.makedirs(empty_dir)  # zero files inside
+
+        # Same normalised title (Grey's Anatomy → 'greys anatomy') with
+        # SxxExx files inside.  Name AFTER the empty one alphabetically
+        # so os.scandir likely returns empty first.  Both folders share
+        # the same normalised title key.
+        populated_dir = os.path.join(tmp_dir, 'Greys.Anatomy.S22E01.1080p.WEB-DL')
+        os.makedirs(populated_dir)
+        with open(os.path.join(populated_dir, 'Greys.Anatomy.S22E01.mkv'), 'w') as f:
+            f.write('x')
+        with open(os.path.join(populated_dir, 'Greys.Anatomy.S22E02.mkv'), 'w') as f:
+            f.write('x')
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        movies, shows = scanner._scan_mount(tmp_dir, flat_layout=True)
+
+        # Find the Grey's Anatomy show entry.
+        candidates = [s for s in shows if 'grey' in s['title'].lower() or 'anatomy' in s['title'].lower()]
+        assert len(candidates) == 1, \
+            f"expected 1 Grey's Anatomy entry, got {len(candidates)}: {[s['title'] for s in shows]}"
+        show = candidates[0]
+
+        # The show entry's path must point at the populated folder, NOT
+        # the empty marker.  Pre-fix path stayed on whichever os.scandir
+        # returned first — typically the empty one.
+        assert show['path'] == populated_dir, \
+            f"path should be populated folder; got {show['path']} (empty={empty_dir})"
+        assert show['episodes'] == 2
+
+
+class TestMergeShowGroup:
+    """Plan 41 phase B second-pass reviewer fix-up: ``_merge_show_group``
+    is the single source of truth for show-group merging used by both
+    ``_scan_mount`` (FUSE) and ``_webdav_scan_mount`` (WebDAV).  Pin
+    the semantics here so the two scan paths can't drift again.
+    """
+
+    def test_inserts_fresh_entry(self):
+        from utils.library import _merge_show_group
+        groups = {}
+        eps = {(1, 1): {'file': 'ep1.mkv'}}
+        _merge_show_group(groups, 'show1', 'Show One', 2024, eps, '/mnt/show1')
+        assert groups == {
+            'show1': {
+                'title': 'Show One',
+                'year': 2024,
+                'episodes': {(1, 1): {'file': 'ep1.mkv'}},
+                'path': '/mnt/show1',
+            },
+        }
+
+    def test_merge_adds_new_episodes(self):
+        from utils.library import _merge_show_group
+        groups = {
+            'show1': {
+                'title': 'Show One',
+                'year': 2024,
+                'episodes': {(1, 1): {'file': 'ep1.mkv'}},
+                'path': '/mnt/folder_a',
+            },
+        }
+        eps = {(1, 2): {'file': 'ep2.mkv'}}
+        _merge_show_group(groups, 'show1', 'Show One', 2024, eps, '/mnt/folder_b')
+        # Both episodes present.
+        assert set(groups['show1']['episodes'].keys()) == {(1, 1), (1, 2)}
+
+    def test_path_swap_when_new_has_more_episodes(self):
+        """The headline B.1 fix — empty-marker folder seen first loses
+        to populated folder for the same show."""
+        from utils.library import _merge_show_group
+        groups = {
+            'show1': {
+                'title': 'Show One',
+                'year': None,
+                'episodes': {},  # empty marker
+                'path': '/mnt/empty_marker',
+            },
+        }
+        eps = {(1, n): {'file': f'ep{n}.mkv'} for n in range(1, 6)}
+        _merge_show_group(groups, 'show1', 'Show One', 2024, eps, '/mnt/populated')
+        assert groups['show1']['path'] == '/mnt/populated', \
+            "populated folder must win over empty marker"
+
+    def test_path_stays_when_existing_has_more(self):
+        from utils.library import _merge_show_group
+        groups = {
+            'show1': {
+                'title': 'Show One',
+                'year': 2024,
+                'episodes': {(1, n): {'file': f'ep{n}.mkv'} for n in range(1, 11)},
+                'path': '/mnt/heavy',
+            },
+        }
+        eps = {(2, 1): {'file': 'ep21.mkv'}, (2, 2): {'file': 'ep22.mkv'}}
+        _merge_show_group(groups, 'show1', 'Show One', 2024, eps, '/mnt/light')
+        # 2 < 10 — heavy folder stays.
+        assert groups['show1']['path'] == '/mnt/heavy'
+
+    def test_path_stays_on_equal_count(self):
+        """Equal counts keep the first-seen path for stability."""
+        from utils.library import _merge_show_group
+        groups = {
+            'show1': {
+                'title': 'Show One',
+                'year': 2024,
+                'episodes': {(1, 1): {'file': 'ep1.mkv'}, (1, 2): {'file': 'ep2.mkv'}},
+                'path': '/mnt/first',
+            },
+        }
+        # Two new episodes; matches stored count — no swap.
+        eps = {(2, 1): {'file': 'ep21.mkv'}, (2, 2): {'file': 'ep22.mkv'}}
+        _merge_show_group(groups, 'show1', 'Show One', 2024, eps, '/mnt/second')
+        assert groups['show1']['path'] == '/mnt/first'
+
+    def test_year_propagated_when_existing_has_none(self):
+        from utils.library import _merge_show_group
+        groups = {
+            'show1': {
+                'title': 'show one',  # lowercased
+                'year': None,
+                'episodes': {},
+                'path': '/mnt/old',
+            },
+        }
+        _merge_show_group(groups, 'show1', 'Show One', 2024, {}, '/mnt/new')
+        # Year propagated.
+        assert groups['show1']['year'] == 2024
+        # Title swapped to the year-bearing one.
+        assert groups['show1']['title'] == 'Show One'
+
+    def test_per_season_episode_count_preference(self):
+        """Higher per-season count wins on key collision."""
+        from utils.library import _merge_show_group
+        groups = {
+            'show1': {
+                'title': 'Show',
+                'year': 2024,
+                'episodes': {
+                    (1, 1): {'file': 'low_quality.mkv', '_folder_ep_count': 1},
+                },
+                'path': '/mnt/old',
+            },
+        }
+        eps = {
+            (1, 1): {'file': 'high_quality.mkv', '_folder_ep_count': 10},
+        }
+        _merge_show_group(groups, 'show1', 'Show', 2024, eps, '/mnt/new')
+        # Season-pack version wins.
+        assert groups['show1']['episodes'][(1, 1)]['file'] == 'high_quality.mkv'
+
+
+class TestScanTorboxViaApi:
+    """_scan_torbox_via_api enumerates TB via the mylist API (no FUSE walk)."""
+
+    TB_MOUNT = '/data/torbox'
+
+    def _scan(self, torrents, api_key='tbkey'):
+        from unittest.mock import patch
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        with patch('base.load_secret_or_env', return_value=api_key), \
+             patch('utils.search.list_torbox_torrents', return_value=torrents):
+            movies, shows = scanner._scan_torbox_via_api(self.TB_MOUNT)
+        return scanner, movies, shows
+
+    def test_splits_movies_and_shows(self):
+        torrents = [
+            {'name': 'Big.Movie.2021.1080p', 'hash': 'a' * 40,
+             'created_at': '2024-01-15T12:00:00Z',
+             'files': [{'name': 'Big.Movie.2021.1080p/big.mkv', 'size': 10}]},
+            {'name': 'Cool.Show.S01.1080p', 'hash': 'b' * 40,
+             'created_at': '2024-02-01T00:00:00Z',
+             'files': [
+                 {'name': 'Cool.Show.S01.1080p/Cool.Show.S01E01.mkv', 'size': 5},
+                 {'name': 'Cool.Show.S01.1080p/Cool.Show.S01E02.mkv', 'size': 6},
+             ]},
+        ]
+        _, movies, shows = self._scan(torrents)
+        assert [m['title'] for m in movies] == ['Big Movie']
+        assert len(shows) == 1
+        assert shows[0]['episodes'] == 2
+        assert shows[0]['seasons'] == 1
+        for item in movies + shows:
+            assert item['source'] == 'debrid'
+            assert item['source_debrid'] == 'torbox'
+
+    def test_synthesized_paths_are_under_mount(self):
+        """The make-or-break property: every episode/movie path must live
+        under the TB mount so _resolve_symlink_target maps it to the TB
+        symlink base (prefix match against realpath(tb_mount))."""
+        torrents = [
+            {'name': 'Cool.Show.S01.1080p',
+             'files': [{'name': 'Cool.Show.S01.1080p/Cool.Show.S01E01.mkv', 'size': 5}]},
+        ]
+        _, _movies, shows = self._scan(torrents)
+        ep = shows[0]['_episodes'][(1, 1)]
+        assert ep['path'] == os.path.join(
+            self.TB_MOUNT, 'Cool.Show.S01.1080p', 'Cool.Show.S01E01.mkv')
+        assert ep['path'].startswith(self.TB_MOUNT + os.sep)
+
+    def test_movie_quality_and_size_from_api(self):
+        """Movies must carry quality + size derived from the API file data,
+        not all-None / 0 (the UI sorts and displays on these)."""
+        torrents = [
+            {'name': 'Big.Movie.2021.1080p',
+             'files': [{'name': 'Big.Movie.2021.1080p/Big.Movie.2021.1080p.BluRay.x264.mkv',
+                        'size': 1_000_000}]},
+        ]
+        _, movies, _shows = self._scan(torrents)
+        assert movies[0]['quality']['resolution'] == '1080p'
+        assert movies[0]['size_bytes'] == 1_000_000
+
+    def test_obfuscated_folder_skipped(self):
+        hex_dir = '050bd19ee9934249a2ce4c9762c0d710[EZTVx.to]'
+        torrents = [
+            {'name': hex_dir, 'hash': 'c' * 40,
+             'created_at': '2026-07-03T00:25:14Z',
+             'files': [{'name': f'{hex_dir}/{hex_dir}.mkv', 'size': 900}]},
+            {'name': 'Big.Movie.2021.1080p',
+             'files': [{'name': 'Big.Movie.2021.1080p/big.mkv', 'size': 10}]},
+        ]
+        _, movies, shows = self._scan(torrents)
+        titles = {m['title'] for m in movies} | {s['title'] for s in shows}
+        assert 'Big Movie' in titles
+        assert not any('050bd19' in t.lower() for t in titles)
+
+    def test_absolute_subpath_does_not_escape_mount(self):
+        """A file whose stripped sub-path is absolute must not escape the
+        mount (os.path.join would otherwise discard the mount prefix)."""
+        torrents = [
+            {'name': 'Weird.Show.S01',
+             'files': [
+                 {'name': 'Weird.Show.S01//Weird.Show.S01E01.mkv', 'size': 4},
+             ]},
+        ]
+        _, _movies, shows = self._scan(torrents)
+        # The "//" collapses to a single separator and the episode is still
+        # produced (not silently skipped) with a path under the mount — never
+        # an absolute escape. assert shows guards against a vacuous pass.
+        assert shows
+        eps = list(shows[0]['_episodes'].values())
+        assert eps
+        for ep in eps:
+            assert ep['path'].startswith(self.TB_MOUNT + os.sep)
+            assert ep['path'] == os.path.join(
+                self.TB_MOUNT, 'Weird.Show.S01', 'Weird.Show.S01E01.mkv')
+
+    def test_traversal_components_rejected(self):
+        torrents = [
+            {'name': 'Show',
+             'files': [{'name': 'Show/../escape.mkv', 'size': 4}]},
+        ]
+        _, movies, shows = self._scan(torrents)
+        # No episode/movie path may contain a traversal escape.
+        paths = [m['path'] for m in movies]
+        for s in shows:
+            paths += [ep['path'] for ep in s['_episodes'].values()]
+        for p in paths:
+            assert '..' not in p.split(os.sep)
+
+    def test_season_subdir_episodes(self):
+        torrents = [
+            {'name': 'Nested.Show',
+             'files': [
+                 {'name': 'Nested.Show/Season 1/Nested.Show.S01E05.mkv', 'size': 9},
+             ]},
+        ]
+        _, _movies, shows = self._scan(torrents)
+        assert (1, 5) in shows[0]['_episodes']
+        assert shows[0]['_episodes'][(1, 5)]['path'] == os.path.join(
+            self.TB_MOUNT, 'Nested.Show', 'Season 1', 'Nested.Show.S01E05.mkv')
+
+    def test_bare_root_file_is_skipped(self):
+        """A file with no folder component (bare file at the mount root) is
+        skipped: the on-disk folder is the FIRST path component of the file's
+        mylist name, and the old FUSE walk only enumerated top-level dirs. The
+        entry-level `name` is a sanitized display string and must NOT be used
+        to synthesize a folder (it matches disk for only ~20% of torrents)."""
+        torrents = [
+            {'name': 'Odd.Movie.2020',
+             'files': [{'name': 'odd.mkv', 'size': 3}]},
+        ]
+        _, movies, shows = self._scan(torrents)
+        assert movies == []
+        assert shows == []
+
+    def test_folder_derived_from_file_path_not_entry_name(self):
+        """The on-disk folder comes from files[].name's first component, NOT
+        the sanitized entry `name`. Live mylist `name` differs from the rclone
+        folder for ~80% of torrents; keying off it synthesizes dead paths."""
+        torrents = [
+            {'name': 'Big Movie 2021 1080p WEBRip x265',  # sanitized display
+             'files': [{'name': 'Big.Movie.2021.1080p.BluRay.x264-GRP/big.mkv',
+                        'size': 10}]},
+        ]
+        _, movies, _shows = self._scan(torrents)
+        assert len(movies) == 1
+        # path keyed to the FILE's folder, not the entry name
+        assert movies[0]['path'] == os.path.join(
+            self.TB_MOUNT, 'Big.Movie.2021.1080p.BluRay.x264-GRP')
+
+    def test_tv_marker_fallback_classifies_show(self):
+        """A season-pack folder whose files aren't yet SxxExx-named (still
+        caching) is classified as a show via the folder-name marker, with 0
+        episodes — provided at least one file exists to reveal the folder."""
+        torrents = [
+            {'name': 'Pending.Show.S03.COMPLETE.1080p',
+             'files': [{'name': 'Pending.Show.S03.COMPLETE.1080p/readme.nfo',
+                        'size': 1}]},
+        ]
+        _, movies, shows = self._scan(torrents)
+        assert movies == []
+        assert len(shows) == 1
+        assert shows[0]['episodes'] == 0
+
+    def test_malformed_entries_skipped_not_fatal(self):
+        """A malformed mylist element (non-dict entry, None files, non-dict
+        file) degrades to a skip rather than aborting the whole scan — one
+        bad entry must not lose all genuinely-new TB content for the cycle."""
+        torrents = [
+            'not-a-dict',
+            {'name': 'Bad.Files', 'files': None},
+            {'name': 'Bad.Inner', 'files': ['nope', 42]},
+            {'name': 'Good.Movie.2022',
+             'files': [{'name': 'Good.Movie.2022.1080p/g.mkv', 'size': 7}]},
+        ]
+        scanner, movies, shows = self._scan(torrents)
+        assert [m['title'] for m in movies] == ['Good Movie']
+        assert shows == []
+        assert scanner._last_scan_mount_truncated is False
+
+    def test_api_failure_marks_incomplete(self):
+        scanner, movies, shows = self._scan(None)
+        assert (movies, shows) == ([], [])
+        assert scanner._last_scan_mount_truncated is True
+
+    def test_empty_account_is_complete(self):
+        scanner, movies, shows = self._scan([])
+        assert (movies, shows) == ([], [])
+        assert scanner._last_scan_mount_truncated is False
+
+    def test_no_api_key_marks_incomplete(self):
+        scanner, movies, shows = self._scan([{'name': 'x'}], api_key=None)
+        assert (movies, shows) == ([], [])
+        assert scanner._last_scan_mount_truncated is True
+
+    def test_date_added_from_created_at(self):
+        from utils.library import _parse_tb_timestamp
+        ts = '2024-01-15T12:00:00Z'
+        torrents = [
+            {'name': 'Dated.Movie.2021', 'created_at': ts,
+             'files': [{'name': 'Dated.Movie.2021/m.mkv', 'size': 1}]},
+        ]
+        _, movies, _shows = self._scan(torrents)
+        assert movies[0]['date_added'] == _parse_tb_timestamp(ts)
+        assert movies[0]['date_added'] > 0
+
+
+class TestParseTbTimestamp:
+    def test_z_suffix(self):
+        from utils.library import _parse_tb_timestamp
+        assert _parse_tb_timestamp('2024-01-15T12:00:00Z') > 0
+
+    def test_offset_form(self):
+        from utils.library import _parse_tb_timestamp
+        assert _parse_tb_timestamp('2024-01-15T12:00:00+00:00') > 0
+
+    def test_invalid_returns_zero(self):
+        from utils.library import _parse_tb_timestamp
+        assert _parse_tb_timestamp('not-a-date') == 0
+        assert _parse_tb_timestamp('') == 0
+        assert _parse_tb_timestamp(None) == 0
+        assert _parse_tb_timestamp(12345) == 0
+
+
+class TestRecoverWantedViaTorbox:
+    """Wanted→TorBox proactive recovery pass (_recover_wanted_via_debrid)."""
+
+    def _scanner(self):
+        sc = LibraryScanner.__new__(LibraryScanner)
+        sc._wanted_tb_cooldown = {}
+        sc._wanted_rd_miss = {}
+        sc._wanted_no_results = {}
+        return sc
+
+    @pytest.fixture
+    def wire(self, monkeypatch):
+        """Stub the external surfaces and capture add_to_debrid calls.
+
+        Returns a dict so each test can tune cache results / torrentio output
+        and assert on the captured adds.
+        """
+        import base
+        import utils.blackhole as bh
+        import utils.search as search
+
+        monkeypatch.setenv('TORRENTIO_URL', 'https://torrentio.example')
+        monkeypatch.setenv('WANTED_TB_RECOVERY_ENABLED', 'true')
+        monkeypatch.delenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', raising=False)
+
+        state = {
+            'adds': [],
+            'cooldown': 0,
+            'cache_cached': True,   # all probed hashes report cached
+            'torrentio': [
+                {'info_hash': 'a' * 40, 'title': 'The.Substance.2024.1080p.WEB-DL.RelA',
+                 'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+                {'info_hash': 'b' * 40, 'title': 'The.Substance.2024.720p.WEB-DL.RelB',
+                 'seeds': 5, 'quality': {'label': '720p', 'score': 50}},
+            ],
+        }
+
+        monkeypatch.setattr(base, 'load_secret_or_env',
+                            lambda name: 'tb_key' if name == 'torbox_api_key' else None)
+        monkeypatch.setattr(bh, '_check_torbox_cooldown',
+                            lambda *a, **kw: state['cooldown'])
+        monkeypatch.setattr(search, 'search_torrentio',
+                            lambda *a, **kw: list(state['torrentio']))
+
+        def _cache(hashes, service=None, api_key=None):
+            return {h: state['cache_cached'] for h in hashes}
+        monkeypatch.setattr(search, 'check_debrid_cache', _cache)
+
+        def _add(info_hash, **kw):
+            state['adds'].append({'info_hash': info_hash, **kw})
+            return {'success': True, 'torrent_id': 't', 'service': 'torbox'}
+        monkeypatch.setattr(search, 'add_to_debrid', _add)
+
+        return state
+
+    def test_recovers_cached_wanted_movie(self, wire):
+        sc = self._scanner()
+        movies = [{'title': 'The Substance', 'source': 'wanted',
+                   'imdb_id': 'tt1234567', 'is_available': True}]
+        sc._recover_wanted_via_debrid([], movies, {})
+        assert len(wire['adds']) == 1
+        add = wire['adds'][0]
+        # Highest-score release picked, targeted at TorBox with the new cause.
+        assert add['info_hash'] == 'a' * 40
+        assert add['service'] == 'torbox'
+        assert add['cause'] == 'wanted_tb_recovered'
+        assert add['media_title'] == 'The Substance'
+
+    def test_disabled_flag_noops(self, wire, monkeypatch):
+        monkeypatch.setenv('WANTED_TB_RECOVERY_ENABLED', 'false')
+        sc = self._scanner()
+        movies = [{'title': 'X', 'source': 'wanted',
+                   'imdb_id': 'tt1', 'is_available': True}]
+        sc._recover_wanted_via_debrid([], movies, {})
+        assert wire['adds'] == []
+
+    def test_no_torrentio_url_noops(self, wire, monkeypatch):
+        monkeypatch.delenv('TORRENTIO_URL', raising=False)
+        sc = self._scanner()
+        movies = [{'title': 'X', 'source': 'wanted',
+                   'imdb_id': 'tt1', 'is_available': True}]
+        sc._recover_wanted_via_debrid([], movies, {})
+        assert wire['adds'] == []
+
+    def _two_movies(self):
+        return [
+            {'title': 'The Substance', 'source': 'wanted',
+             'imdb_id': 'tt1', 'is_available': True},
+            {'title': 'The Substance', 'source': 'wanted',
+             'imdb_id': 'tt2', 'is_available': True},
+        ]
+
+    def _failing_add(self, wire, monkeypatch, duplicate=False):
+        import utils.search as search
+
+        def _add(info_hash, **kw):
+            wire['adds'].append({'info_hash': info_hash, **kw})
+            result = {'success': False,
+                      'error': 'Failed to add magnet to TorBox'}
+            if duplicate:
+                result['duplicate'] = True
+            return result
+        monkeypatch.setattr(search, 'add_to_debrid', _add)
+
+    def test_tb_advisory_cooldown_proceeds(self, wire):
+        # ``cooldown_until`` is advisory on Pro plans — organic creates
+        # succeed while it's set, so the flag alone must not starve the
+        # leg.  The pass attempts the add anyway.
+        wire['cooldown'] = 3600
+        sc = self._scanner()
+        movies = [{'title': 'The Substance', 'source': 'wanted',
+                   'imdb_id': 'tt1', 'is_available': True}]
+        sc._recover_wanted_via_debrid([], movies, {})
+        assert len(wire['adds']) == 1
+
+    def test_add_failure_with_cooldown_flag_disables_leg(self, wire, monkeypatch):
+        # An add FAILING while the cooldown flag is set is the real
+        # enforcement signal — the leg must stop burning budget this pass.
+        wire['cooldown'] = 3600
+        self._failing_add(wire, monkeypatch)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._two_movies(), {})
+        assert len(wire['adds']) == 1  # second title never attempted
+
+    def test_add_failure_without_cooldown_flag_keeps_leg_alive(self, wire, monkeypatch):
+        # Failure with NO cooldown flag is a transient error — keep going.
+        self._failing_add(wire, monkeypatch)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._two_movies(), {})
+        assert len(wire['adds']) == 2
+
+    def test_duplicate_add_does_not_trigger_backoff(self, wire, monkeypatch):
+        # A duplicate isn't a rejected create — no enforcement inference,
+        # even with the advisory flag set.
+        wire['cooldown'] = 3600
+        self._failing_add(wire, monkeypatch, duplicate=True)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._two_movies(), {})
+        assert len(wire['adds']) == 2
+
+    def test_budget_caps_adds(self, wire, monkeypatch):
+        monkeypatch.setenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', '1')
+        sc = self._scanner()
+        movies = [
+            {'title': 'The Substance', 'source': 'wanted', 'imdb_id': 'tt1', 'is_available': True},
+            {'title': 'The Substance', 'source': 'wanted', 'imdb_id': 'tt2', 'is_available': True},
+        ]
+        sc._recover_wanted_via_debrid([], movies, {})
+        assert len(wire['adds']) == 1
+
+    def test_uncached_title_not_added_and_cooled_down(self, wire):
+        wire['cache_cached'] = False
+        sc = self._scanner()
+        movies = [{'title': 'The Substance', 'source': 'wanted',
+                   'imdb_id': 'tt9', 'is_available': True}]
+        sc._recover_wanted_via_debrid([], movies, {})
+        assert wire['adds'] == []
+        assert 'tt9' in sc._wanted_tb_cooldown
+
+    def test_unreleased_movie_skipped(self, wire):
+        sc = self._scanner()
+        movies = [{'title': 'Future', 'source': 'wanted',
+                   'imdb_id': 'tt1', 'is_available': False}]
+        sc._recover_wanted_via_debrid([], movies, {})
+        assert wire['adds'] == []
+
+    def test_movie_without_imdb_skipped(self, wire):
+        sc = self._scanner()
+        movies = [{'title': 'NoId', 'source': 'wanted', 'is_available': True}]
+        sc._recover_wanted_via_debrid([], movies, {})
+        assert wire['adds'] == []
+
+    def test_non_wanted_movie_ignored(self, wire):
+        sc = self._scanner()
+        movies = [{'title': 'Owned', 'source': 'debrid',
+                   'imdb_id': 'tt1', 'is_available': True}]
+        sc._recover_wanted_via_debrid([], movies, {})
+        assert wire['adds'] == []
+
+    def test_per_title_cooldown_skips_reprobe(self, wire):
+        sc = self._scanner()
+        sc._wanted_tb_cooldown = {'tt1': time.monotonic()}
+        movies = [{'title': 'X', 'source': 'wanted',
+                   'imdb_id': 'tt1', 'is_available': True}]
+        sc._recover_wanted_via_debrid([], movies, {})
+        assert wire['adds'] == []
+
+    def test_show_ghost_recovered_with_episode_string(self, wire):
+        sc = self._scanner()
+        wire['torrentio'] = [
+            {'info_hash': 'a' * 40, 'title': 'Broadchurch.S01E01.1080p.WEB',
+             'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+        ]
+        shows = [{'title': 'Broadchurch', 'source': 'wanted',
+                  'imdb_id': 'tt2249364', 'season_data': []}]
+        sc._recover_wanted_via_debrid(shows, [], {})
+        assert len(wire['adds']) == 1
+        # Default S01E01 when TMDB has no missing-episode ground truth.
+        assert wire['adds'][0]['episode'] == 'S01E01'
+
+
+class TestReleaseCoversSeason:
+    """_release_covers_season release-name classifier."""
+
+    @pytest.mark.parametrize('name,season,episode,expected', [
+        # Season-pack forms.
+        ('The.Americans.S03.1080p.WEB-DL', 3, 2, 'pack'),
+        ('The.Americans.S01-S04.COMPLETE.1080p', 3, 2, 'pack'),
+        ('The.Americans.S01-04.COMPLETE.1080p', 3, 2, 'pack'),
+        ('The Americans Season 3 1080p', 3, 2, 'pack'),
+        ("Grey's.Anatomy.S22.COMPLETE.720p", 22, 1, 'pack'),
+        # Exact-episode fallback.
+        ('The.Americans.S03E02.1080p.WEB', 3, 2, 'episode'),
+        # Rejections: wrong episode, wrong season, wrong range, no marker.
+        ('The.Americans.S03E09.1080p.WEB', 3, 2, None),
+        ('The.Americans.S05.1080p.WEB-DL', 3, 2, None),
+        ('The.Americans.S04-S06.COMPLETE', 3, 2, None),
+        ('The.Americans.2018.1080p.BluRay', 3, 2, None),
+        ('', 3, 2, None),
+    ])
+    def test_classification(self, name, season, episode, expected):
+        from utils.library import _release_covers_season
+        assert _release_covers_season(name, season, episode) == expected
+
+
+class TestWantedSeasonPackRecovery:
+    """Wanted→TB season-pack recovery for partially-present shows."""
+
+    def _scanner(self, missing=None):
+        """``missing`` maps imdb_id → _compute_missing_episodes() result."""
+        sc = LibraryScanner.__new__(LibraryScanner)
+        sc._wanted_tb_cooldown = {}
+        sc._wanted_rd_miss = {}
+        sc._wanted_no_results = {}
+        missing = missing or {}
+        sc._compute_missing_episodes = (
+            lambda show: list(missing.get(show.get('imdb_id'), [])))
+        return sc
+
+    def _partial(self, imdb='tt2149175', title='The Americans',
+                 missing_count=3):
+        # source != 'wanted' + missing_episodes > 0 = partially present.
+        return {'title': title, 'source': 'debrid', 'imdb_id': imdb,
+                'missing_episodes': missing_count}
+
+    @pytest.fixture
+    def wire(self, monkeypatch):
+        """Stub the external surfaces; capture searches + adds."""
+        import base
+        import utils.blackhole as bh
+        import utils.search as search
+
+        monkeypatch.setenv('TORRENTIO_URL', 'https://torrentio.example')
+        monkeypatch.setenv('WANTED_TB_RECOVERY_ENABLED', 'true')
+        monkeypatch.delenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', raising=False)
+        monkeypatch.delenv('WANTED_SEASON_RECOVERY_ENABLED', raising=False)
+
+        state = {
+            'adds': [],
+            'searches': [],
+            'cooldown': 0,
+            'cache_cached': True,
+            'torrentio': [
+                # Pack scores BELOW the single episode so pack preference
+                # is proven against the quality sort, not by it.
+                {'info_hash': 'a' * 40,
+                 'title': 'The.Americans.S03.1080p.WEB-DL.Pack',
+                 'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+                {'info_hash': 'b' * 40,
+                 'title': 'The.Americans.S03E02.1080p.WEB',
+                 'seeds': 20, 'quality': {'label': '1080p', 'score': 120}},
+            ],
+        }
+
+        monkeypatch.setattr(
+            base, 'load_secret_or_env',
+            lambda name: 'tb_key' if name == 'torbox_api_key' else None)
+        monkeypatch.setattr(bh, '_check_torbox_cooldown',
+                            lambda *a, **kw: state['cooldown'])
+
+        def _torrentio(imdb_id, media_type=None, season=None, episode=None,
+                       **kw):
+            state['searches'].append({'imdb': imdb_id,
+                                      'media_type': media_type,
+                                      'season': season, 'episode': episode})
+            return list(state['torrentio'])
+        monkeypatch.setattr(search, 'search_torrentio', _torrentio)
+
+        def _cache(hashes, service=None, api_key=None):
+            return {h: state['cache_cached'] for h in hashes}
+        monkeypatch.setattr(search, 'check_debrid_cache', _cache)
+
+        def _add(info_hash, **kw):
+            state['adds'].append({'info_hash': info_hash, **kw})
+            return {'success': True, 'torrent_id': 't', 'service': 'torbox'}
+        monkeypatch.setattr(search, 'add_to_debrid', _add)
+
+        return state
+
+    def test_pack_added_for_partial_show_season(self, wire):
+        sc = self._scanner({'tt2149175': [(3, 2), (3, 5), (3, 7)]})
+        sc._recover_wanted_via_debrid([self._partial()], [], {})
+        # Torrentio queried at (season, first missing episode) as 'series'.
+        assert wire['searches'] == [
+            {'imdb': 'tt2149175', 'media_type': 'series',
+             'season': 3, 'episode': 2}]
+        assert len(wire['adds']) == 1
+        add = wire['adds'][0]
+        # The pack wins despite the episode release's higher quality score.
+        assert add['info_hash'] == 'a' * 40
+        assert add['episode'] == 'S03'
+        assert add['service'] == 'torbox'
+        assert add['cause'] == 'wanted_tb_recovered'
+        assert add['media_title'] == 'The Americans'
+
+    def test_single_episode_fallback_when_no_pack(self, wire):
+        wire['torrentio'] = [
+            {'info_hash': 'b' * 40,
+             'title': 'The.Americans.S03E02.1080p.WEB',
+             'seeds': 20, 'quality': {'label': '1080p', 'score': 120}},
+        ]
+        sc = self._scanner({'tt2149175': [(3, 2), (3, 5)]})
+        sc._recover_wanted_via_debrid([self._partial()], [], {})
+        assert len(wire['adds']) == 1
+        assert wire['adds'][0]['info_hash'] == 'b' * 40
+        assert wire['adds'][0]['episode'] == 'S03E02'
+
+    def test_non_covering_releases_dropped(self, wire):
+        wire['torrentio'] = [
+            {'info_hash': 'c' * 40,
+             'title': 'The.Americans.S05.1080p.WEB-DL',   # wrong season
+             'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+            {'info_hash': 'd' * 40,
+             'title': 'The.Americans.S03E09.1080p.WEB',   # off-target ep
+             'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+            {'info_hash': 'e' * 40,
+             'title': 'The.Americans.2018.1080p.BluRay',  # no TV marker
+             'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+        ]
+        sc = self._scanner({'tt2149175': [(3, 2)]})
+        sc._recover_wanted_via_debrid([self._partial()], [], {})
+        assert wire['adds'] == []
+        # Everything dropped → the empty-result memo gates re-probing.
+        assert 'tt2149175:3:pack' in sc._wanted_no_results
+
+    def test_ghosts_claim_budget_before_seasons(self, wire, monkeypatch):
+        monkeypatch.setenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', '1')
+        sc = self._scanner({'tt2149175': [(3, 2)]})
+        movies = [{'title': 'The Americans', 'source': 'wanted',
+                   'imdb_id': 'tt0000001', 'is_available': True}]
+        sc._recover_wanted_via_debrid([self._partial()], movies, {})
+        assert len(wire['adds']) == 1
+        # The ghost movie won the single budget slot (episode=None), the
+        # season target never ran.
+        assert wire['adds'][0]['episode'] is None
+
+    def test_season_targets_ordered_by_missing_count(self, wire):
+        wire['torrentio'] = [
+            {'info_hash': 'a' * 40,
+             'title': 'The.Americans.S01.1080p.Pack',
+             'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+            {'info_hash': 'b' * 40,
+             'title': 'The.Americans.S03.1080p.Pack',
+             'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+        ]
+        sc = self._scanner({
+            'tt0000003': [(3, 2), (3, 5), (3, 7)],                # 3 missing
+            'tt0000001': [(1, 1), (1, 2), (1, 3), (1, 4), (1, 5)],  # 5
+        })
+        shows = [
+            self._partial(imdb='tt0000003', missing_count=3),
+            self._partial(imdb='tt0000001', missing_count=5),
+        ]
+        sc._recover_wanted_via_debrid(shows, [], {})
+        # Biggest gap first (default budget of 2 admits both).
+        assert [a['episode'] for a in wire['adds']] == ['S01', 'S03']
+
+    def test_rd_leg_never_fires_for_season_target(self, wire, monkeypatch):
+        import base
+        import utils.debrid_client as dc
+        monkeypatch.setenv('WANTED_RD_RECOVERY_ENABLED', 'true')
+        monkeypatch.setattr(
+            base, 'load_secret_or_env',
+            lambda name: {'torbox_api_key': 'tb_key',
+                          'rd_api_key': 'rd_key'}.get(name))
+        monkeypatch.setattr(dc, 'get_debrid_client',
+                            lambda **kw: (_FakeRdClient(), 'realdebrid'))
+        wire['cache_cached'] = False  # TB miss would normally cue RD leg
+
+        probes = []
+        sc = self._scanner({'tt2149175': [(3, 2)]})
+        sc._wanted_rd_probe_add = (
+            lambda *a, **kw: probes.append(a) or 'skipped')
+        movies = [{'title': 'The Americans', 'source': 'wanted',
+                   'imdb_id': 'tt0000001', 'is_available': True}]
+        sc._recover_wanted_via_debrid([self._partial()], movies, {})
+        # The RD fallback fired exactly once — for the TB-uncached ghost
+        # movie — and never for the season target.
+        assert len(probes) == 1
+        assert probes[0][5] == 'tt0000001'  # key arg of the probe
+        assert 'tt2149175:3:pack' in sc._wanted_tb_cooldown
+
+    def test_disabled_toggle_skips_season_targets(self, wire, monkeypatch):
+        monkeypatch.setenv('WANTED_SEASON_RECOVERY_ENABLED', 'false')
+        sc = self._scanner({'tt2149175': [(3, 2)]})
+        sc._recover_wanted_via_debrid([self._partial()], [], {})
+        assert wire['searches'] == []
+        assert wire['adds'] == []
+
+    def test_ineligible_shows_skipped(self, wire):
+        shows = [
+            # No imdb_id.
+            {'title': 'NoId', 'source': 'debrid', 'missing_episodes': 5},
+            # TMDB can't say which episodes are missing — never probe blind.
+            self._partial(imdb='tt0000002', missing_count=5),
+            # No missing episodes recorded at all.
+            {'title': 'Complete', 'source': 'debrid',
+             'imdb_id': 'tt0000004', 'missing_episodes': 0},
+        ]
+        sc = self._scanner({'tt0000002': []})
+        sc._recover_wanted_via_debrid(shows, [], {})
+        assert wire['searches'] == []
+        assert wire['adds'] == []
+
+    def test_ghost_show_not_duplicated_as_season_target(self, wire):
+        # A fully-absent 'wanted' show gets exactly one ghost probe — the
+        # season-target builder must skip it even though it also has
+        # missing_episodes metadata.
+        wire['torrentio'] = [
+            {'info_hash': 'b' * 40,
+             'title': 'The.Americans.S01E01.1080p.WEB',
+             'seeds': 20, 'quality': {'label': '1080p', 'score': 120}},
+        ]
+        shows = [{'title': 'The Americans', 'source': 'wanted',
+                  'imdb_id': 'tt2149175', 'missing_episodes': 13}]
+        sc = self._scanner({'tt2149175': [(1, 1)]})
+        sc._recover_wanted_via_debrid(shows, [], {})
+        assert len(wire['searches']) == 1
+        assert len(wire['adds']) == 1
+        assert wire['adds'][0]['episode'] == 'S01E01'
+
+    def test_uncached_season_memoized_and_gated(self, wire):
+        wire['cache_cached'] = False
+        sc = self._scanner({'tt2149175': [(3, 2)]})
+        sc._recover_wanted_via_debrid([self._partial()], [], {})
+        assert wire['adds'] == []
+        assert 'tt2149175:3:pack' in sc._wanted_tb_cooldown
+        # Second pass inside the cooldown window: no re-probe.
+        sc._recover_wanted_via_debrid([self._partial()], [], {})
+        assert len(wire['searches']) == 1
+
+
+class _FakeRdClient:
+    """RD client stub for the Wanted RD leg — records probe/delete calls."""
+
+    def __init__(self):
+        self.configured = True
+        self.probe_result = {'status': 'healthy'}
+        self.probe_calls = []
+        self.delete_calls = []
+        self.info_calls = []
+        # ``added`` returned by torrent_info; default = "just now", i.e.
+        # a torrent the probe itself created (deletable).  Tests set an
+        # old timestamp to model RD hash-dedup returning the USER'S
+        # pre-existing torrent, or None to model an info fetch failure.
+        from datetime import datetime, timezone
+        self.info_added = datetime.now(timezone.utc).isoformat()
+
+    def probe_file(self, tid):
+        self.probe_calls.append(tid)
+        return dict(self.probe_result)
+
+    def delete_torrent(self, tid):
+        self.delete_calls.append(tid)
+        return True
+
+    def torrent_info(self, tid):
+        self.info_calls.append(tid)
+        if self.info_added is None:
+            return None
+        return {'id': tid, 'status': 'downloaded', 'added': self.info_added}
+
+    def select_files(self, tid):
+        return True
+
+
+def _wire_wanted_recovery(monkeypatch):
+    """Stub both legs' external surfaces; capture RD rescue attempts, TB
+    adds, and history events.  Shared by TestWantedRdRecovery and
+    TestWantedFilterGiveup so the wiring stays identical."""
+    import base
+    import utils.blackhole as bh
+    import utils.search as search
+    import utils.debrid_client as dc
+    import utils.debrid_routing as routing
+    import utils.history as history
+
+    monkeypatch.setenv('TORRENTIO_URL', 'https://torrentio.example')
+    monkeypatch.setenv('WANTED_TB_RECOVERY_ENABLED', 'true')
+    monkeypatch.setenv('WANTED_RD_RECOVERY_ENABLED', 'true')
+    monkeypatch.delenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', raising=False)
+    monkeypatch.delenv('WANTED_RD_RECOVERY_MAX_PER_SCAN', raising=False)
+
+    rd_client = _FakeRdClient()
+    state = {
+        'tb_adds': [],
+        'events': [],
+        'rescue_calls': [],
+        'cooldown': 0,
+        'cache_cached': True,   # TB cache probe result
+        'existing': set(),      # hashes "already on the RD account"
+        'remembered': [],
+        'rd_client': rd_client,
+        'rd_core': {'rescued': True, 'to': 'realdebrid',
+                    'alt_torrent_id': 'RDTID1', 'alt_client': rd_client},
+        'torrentio': [
+            {'info_hash': 'a' * 40, 'title': 'The.Substance.2024.1080p.WEB-DL.RelA',
+             'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+            {'info_hash': 'b' * 40, 'title': 'The.Substance.2024.720p.WEB-DL.RelB',
+             'seeds': 5, 'quality': {'label': '720p', 'score': 50}},
+        ],
+    }
+
+    monkeypatch.setattr(base, 'load_secret_or_env',
+                        lambda name: {'torbox_api_key': 'tb_key',
+                                      'rd_api_key': 'rd_key'}.get(name))
+    monkeypatch.setattr(bh, '_check_torbox_cooldown',
+                        lambda *a, **kw: state['cooldown'])
+    monkeypatch.setattr(search, 'search_torrentio',
+                        lambda *a, **kw: list(state['torrentio']))
+
+    def _cache(hashes, service=None, api_key=None):
+        return {h: state['cache_cached'] for h in hashes}
+    monkeypatch.setattr(search, 'check_debrid_cache', _cache)
+
+    def _add(info_hash, **kw):
+        state['tb_adds'].append({'info_hash': info_hash, **kw})
+        return {'success': True, 'torrent_id': 't', 'service': 'torbox'}
+    monkeypatch.setattr(search, 'add_to_debrid', _add)
+
+    monkeypatch.setattr(search, '_existing_hashes',
+                        lambda svc, key, **kw: state['existing'])
+    monkeypatch.setattr(search, 'remember_added_hash',
+                        lambda svc, h: state['remembered'].append((svc, h)))
+
+    monkeypatch.setattr(
+        dc, 'get_debrid_client',
+        lambda service=None, api_key=None: (rd_client, service))
+
+    def _rescue(info_hash, source, **kw):
+        state['rescue_calls'].append({'info_hash': info_hash, **kw})
+        return dict(state['rd_core'])
+    monkeypatch.setattr(routing, 'attempt_add_rescue', _rescue)
+
+    def _log(ev_type, title, **kw):
+        state['events'].append({'type': ev_type, 'title': title, **kw})
+    monkeypatch.setattr(history, 'log_event', _log)
+
+    return state
+
+
+class TestWantedRdRecovery:
+    """RD leg of the Wanted recovery pass — the add IS the cache probe."""
+
+    def _scanner(self):
+        sc = LibraryScanner.__new__(LibraryScanner)
+        sc._wanted_tb_cooldown = {}
+        sc._wanted_rd_miss = {}
+        sc._wanted_no_results = {}
+        return sc
+
+    def _movie(self, title='The Substance', imdb='tt1234567'):
+        return [{'title': title, 'source': 'wanted',
+                 'imdb_id': imdb, 'is_available': True}]
+
+    @pytest.fixture
+    def wire(self, monkeypatch):
+        return _wire_wanted_recovery(monkeypatch)
+
+    @pytest.fixture(autouse=True)
+    def ledger(self, tmp_path):
+        # Isolated attempt_ledger: the RD leg now reads/writes persistent
+        # ``rdblock:{hash}`` verdicts, and every test here shares the same
+        # 'a'*40 top hash — without isolation one 451 test would poison
+        # the RD probe for every test after it.
+        import importlib
+        from utils import attempt_ledger
+        importlib.reload(attempt_ledger)
+        attempt_ledger.init(config_dir=str(tmp_path))
+        yield attempt_ledger
+        attempt_ledger._file_path = None
+        attempt_ledger._state = {}
+
+    def _causes(self, wire):
+        return [(e['type'], (e.get('meta') or {}).get('cause'))
+                for e in wire['events']]
+
+    def test_tb_cached_title_never_probes_rd(self, wire):
+        # THE demotion invariant: TB has the title cached (the 93-97%
+        # case), so TB claims it and the RD leg never spends an
+        # add/delete churn on it.
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert len(wire['tb_adds']) == 1
+        assert wire['rescue_calls'] == []
+        assert ('debrid_add', 'wanted_rd_recovered') not in self._causes(wire)
+
+    def test_tb_add_failure_on_cached_title_does_not_fall_through_to_rd(
+            self, wire, monkeypatch):
+        # Even a failed TB add on a CACHED title keeps RD out: the cached
+        # TB copy is the cheaper retry once the cooldown memo expires.
+        import utils.search as search
+
+        def _add(info_hash, **kw):
+            wire['tb_adds'].append({'info_hash': info_hash, **kw})
+            return {'success': False, 'error': 'boom'}
+        monkeypatch.setattr(search, 'add_to_debrid', _add)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert len(wire['tb_adds']) == 1
+        assert wire['rescue_calls'] == []
+        assert 'tt1234567' in sc._wanted_tb_cooldown
+
+    def test_tb_probe_error_lets_rd_fire(self, wire, monkeypatch):
+        # TB can't answer for the cache state → the RD fallback still gets
+        # its shot (unknown ≠ cached).
+        import utils.search as search
+
+        def _boom(*a, **kw):
+            raise RuntimeError('tb api down')
+        monkeypatch.setattr(search, 'check_debrid_cache', _boom)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert len(wire['rescue_calls']) == 1
+        assert ('debrid_add', 'wanted_rd_recovered') in self._causes(wire)
+
+    def test_rd_hit_recovers_tb_uncached_title(self, wire):
+        wire['cache_cached'] = False
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert len(wire['rescue_calls']) == 1
+        assert wire['rescue_calls'][0]['info_hash'] == 'a' * 40
+        assert wire['tb_adds'] == []
+        assert ('debrid_add', 'wanted_rd_recovered') in self._causes(wire)
+        assert ('realdebrid', 'a' * 40) in wire['remembered']
+        assert 'tt1234567' in sc._wanted_tb_cooldown
+        assert sc._wanted_rd_miss == {}
+
+    def test_rd_hit_targets_top_quality_release(self, wire):
+        # Results arrive unsorted; the RD probe must get the ranked top.
+        wire['cache_cached'] = False
+        wire['torrentio'] = list(reversed(wire['torrentio']))
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'][0]['info_hash'] == 'a' * 40
+
+    def test_rd_miss_memoized_for_seven_days(self, wire):
+        wire['cache_cached'] = False
+        wire['rd_core'] = {'rescued': False, 'reason': 'never_ready',
+                           'alt_torrent_id': 'RDTID1'}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert 'tt1234567' in sc._wanted_rd_miss
+        causes = self._causes(wire)
+        assert ('debrid_add_failed', 'wanted_rd_uncached') in causes
+        assert ('debrid_add', 'wanted_rd_recovered') not in causes
+
+    def test_rd_failed_state_records_state_as_reason(self, wire):
+        wire['cache_cached'] = False
+        wire['rd_core'] = {'rescued': False, 'reason': 'failed_state',
+                           'state': 'magnet_error',
+                           'alt_torrent_id': 'RDTID1'}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        miss = [e for e in wire['events']
+                if (e.get('meta') or {}).get('cause') == 'wanted_rd_uncached']
+        assert len(miss) == 1
+        assert miss[0]['meta']['reason'] == 'magnet_error'
+
+    def test_rd_transient_add_error_not_memoized(self, wire):
+        wire['cache_cached'] = False
+        wire['rd_core'] = {'rescued': False, 'reason': 'add_error',
+                           'alt_torrent_id': None}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        # Transient RD failure: no miss memo, no measurement event —
+        # the title gets another RD shot on a later scan.
+        assert sc._wanted_rd_miss == {}
+        assert ('debrid_add_failed', 'wanted_rd_uncached') not in self._causes(wire)
+
+    def test_rd_451_at_add_time_is_filter_block_not_miss(self, wire):
+        # RD's keyword filter rejects at addMagnet time — deterministic and
+        # permanent, NOT a cache miss.  It no longer lands in the 7-day
+        # _wanted_rd_miss memo (that would re-probe a blocked release
+        # forever); the measurement event still fires.
+        wire['cache_cached'] = False
+        wire['rd_core'] = {'rescued': False, 'reason': 'add_failed',
+                           'http_status': 451, 'alt_torrent_id': None}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert sc._wanted_rd_miss == {}
+        miss = [e for e in wire['events']
+                if (e.get('meta') or {}).get('cause') == 'wanted_rd_uncached']
+        assert len(miss) == 1
+        assert miss[0]['meta']['reason'] == 'infringing_add'
+
+    def test_rd_403_add_error_is_filter_block(self, wire):
+        wire['cache_cached'] = False
+        wire['rd_core'] = {'rescued': False, 'reason': 'add_error',
+                           'http_status': 403, 'alt_torrent_id': None}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert sc._wanted_rd_miss == {}  # filter block, not a cache miss
+        assert ('debrid_add_failed', 'wanted_rd_uncached') in self._causes(wire)
+
+    def test_rd_5xx_add_failure_stays_transient(self, wire):
+        wire['cache_cached'] = False
+        wire['rd_core'] = {'rescued': False, 'reason': 'add_failed',
+                           'http_status': 503, 'alt_torrent_id': None}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert sc._wanted_rd_miss == {}
+        assert ('debrid_add_failed', 'wanted_rd_uncached') not in self._causes(wire)
+
+    def test_add_time_filter_block_deletes_probe_torrent(self, wire):
+        wire['cache_cached'] = False
+        wire['rd_client'].probe_result = {
+            'status': 'blocked', 'reason': 'infringing_file', 'http': 451}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rd_client'].delete_calls == ['RDTID1']
+        # Post-add filter block: same permanent class — no cache-miss memo.
+        assert sc._wanted_rd_miss == {}
+        miss = [e for e in wire['events']
+                if (e.get('meta') or {}).get('cause') == 'wanted_rd_uncached']
+        assert len(miss) == 1
+        assert miss[0]['meta']['reason'] == 'infringing_file'
+        assert ('debrid_add', 'wanted_rd_recovered') not in self._causes(wire)
+
+    def test_probe_unknown_keeps_recovery(self, wire):
+        # Network blip on the filter probe must not throw away a good add —
+        # the health sweep re-probes on its own cycle.
+        wire['cache_cached'] = False
+        wire['rd_client'].probe_result = {'status': 'unknown', 'error': 'x'}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rd_client'].delete_calls == []
+        assert ('debrid_add', 'wanted_rd_recovered') in self._causes(wire)
+        assert wire['tb_adds'] == []
+
+    def test_add_time_filter_block_preexisting_torrent_not_deleted(self, wire):
+        """Rank-5B regression: RD's addMagnet hash-dedups — adding a hash
+        already on the account returns the USER'S pre-existing torrent id.
+        When that torrent turns out filter-blocked, the probe's cleanup
+        delete must not fire on a torrent the probe didn't create."""
+        wire['cache_cached'] = False
+        wire['rd_client'].probe_result = {
+            'status': 'blocked', 'reason': 'infringing_file', 'http': 451}
+        wire['rd_client'].info_added = '2020-01-01T00:00:00+00:00'
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rd_client'].delete_calls == []
+        # Still classified as a filter block: no cache-miss memo.
+        assert sc._wanted_rd_miss == {}
+
+    def test_add_time_filter_block_info_unavailable_skips_delete(self, wire):
+        # Unknown ownership (torrent_info fetch failed) → conservative:
+        # an orphaned probe entry beats destroying user data.
+        wire['cache_cached'] = False
+        wire['rd_client'].probe_result = {
+            'status': 'blocked', 'reason': 'infringing_file', 'http': 451}
+        wire['rd_client'].info_added = None
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rd_client'].delete_calls == []
+
+    def test_preexisting_check_wired_into_rescue_core(self, wire):
+        """The same added-timestamp guard must reach attempt_add_rescue's
+        own cleanup deletes (never_ready / failed_state / stop_event)."""
+        wire['cache_cached'] = False
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        check = wire['rescue_calls'][0].get('preexisting_check')
+        assert callable(check)
+        rd = wire['rd_client']
+        # Fresh probe-created torrent → deletable.
+        assert check(rd, 'RDTID1') is False
+        # Old ``added`` → the user's own torrent.
+        rd.info_added = '2020-01-01T00:00:00+00:00'
+        assert check(rd, 'RDTID1') is True
+        # Unparseable timestamp → conservative True.
+        rd.info_added = 'not-a-date'
+        assert check(rd, 'RDTID1') is True
+        # Info fetch failure → conservative True.
+        rd.info_added = None
+        assert check(rd, 'RDTID1') is True
+
+    def test_dedup_listing_bypasses_ttl_cache(self, wire, monkeypatch):
+        """The 30s dedup-cache staleness window is CORRELATED with user
+        adds (a popular new release).  The probe must force-refresh so a
+        just-added user torrent is seen and the probe bails 'skipped'."""
+        import utils.search as search
+        calls = []
+
+        def _existing(svc, key, **kw):
+            calls.append(kw)
+            return set()
+        monkeypatch.setattr(search, '_existing_hashes', _existing)
+        wire['cache_cached'] = False
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert calls and calls[0].get('force_refresh') is True
+
+    def test_advisory_cooldown_does_not_block_rd_fallback(self, wire):
+        # The account cooldown flag is advisory — it must not park the
+        # pass, and the RD fallback still fires on a TB-uncached title.
+        wire['cooldown'] = 999
+        wire['cache_cached'] = False
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert len(wire['rescue_calls']) == 1
+        assert ('debrid_add', 'wanted_rd_recovered') in self._causes(wire)
+        assert wire['tb_adds'] == []
+
+    def test_rd_disabled_leaves_legacy_tb_behavior(self, wire, monkeypatch):
+        monkeypatch.setenv('WANTED_RD_RECOVERY_ENABLED', 'false')
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'] == []
+        assert len(wire['tb_adds']) == 1
+
+    def test_no_rd_key_disables_rd_leg(self, wire, monkeypatch):
+        import base
+        monkeypatch.setattr(base, 'load_secret_or_env',
+                            lambda name: 'tb_key' if name == 'torbox_api_key' else None)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'] == []
+        assert len(wire['tb_adds']) == 1
+
+    def test_rd_budget_counts_attempts_not_successes(self, wire, monkeypatch):
+        monkeypatch.setenv('WANTED_RD_RECOVERY_MAX_PER_SCAN', '1')
+        wire['rd_core'] = {'rescued': False, 'reason': 'never_ready',
+                           'alt_torrent_id': 'RDTID1'}
+        wire['cache_cached'] = False  # TB leg probes but never adds
+        movies = self._movie() + self._movie(title='Other', imdb='tt7654321')
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], movies, {})
+        assert len(wire['rescue_calls']) == 1  # budget spent on the miss
+
+    def test_duplicate_hash_on_rd_account_skips_probe(self, wire):
+        wire['cache_cached'] = False
+        wire['existing'] = {'a' * 40}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'] == []  # never added
+        assert 'tt1234567' in sc._wanted_rd_miss
+
+    def test_rd_miss_memo_skips_reprobe(self, wire):
+        wire['cache_cached'] = False
+        sc = self._scanner()
+        sc._wanted_rd_miss['tt1234567'] = time.monotonic()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'] == []
+
+    def test_blocklisted_hash_excluded_from_both_legs(self, wire, monkeypatch):
+        import utils.blocklist as blocklist
+        monkeypatch.setattr(blocklist, 'is_blocked',
+                            lambda h: h == 'a' * 40)
+        wire['cache_cached'] = False
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        # RD probe got the next-best non-blocklisted release.
+        assert wire['rescue_calls'][0]['info_hash'] == 'b' * 40
+
+    def test_all_results_blocklisted_cools_down(self, wire, monkeypatch):
+        import utils.blocklist as blocklist
+        monkeypatch.setattr(blocklist, 'is_blocked', lambda h: True)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'] == []
+        assert wire['tb_adds'] == []
+        # An empty (or fully-blocklisted) result set is leg-independent —
+        # it lands in the shared no-results memo, not the TB cooldown.
+        assert 'tt1234567' in sc._wanted_no_results
+
+    def test_tb_per_title_cooldown_does_not_block_rd_leg(self, wire):
+        # A prior TB miss cools the TB leg only — RD must still probe.
+        sc = self._scanner()
+        sc._wanted_tb_cooldown['tt1234567'] = time.monotonic()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert len(wire['rescue_calls']) == 1
+        assert ('debrid_add', 'wanted_rd_recovered') in self._causes(wire)
+        assert wire['tb_adds'] == []
+
+    def test_rd_listing_unavailable_skips_add_entirely(self, wire, monkeypatch):
+        # _existing_hashes → None means we can't prove the hash isn't
+        # already on the account; RD returns the PRE-EXISTING torrent id
+        # for a duplicate add, so a probe-miss delete could destroy a
+        # user's in-flight download.  The probe must bail before adding.
+        import utils.search as search
+        monkeypatch.setattr(search, '_existing_hashes',
+                            lambda svc, key, **kw: None)
+        wire['cache_cached'] = False
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'] == []   # no add attempted
+        assert sc._wanted_rd_miss == {}     # transient — no memo
+
+    def test_local_skips_do_not_burn_rd_budget(self, wire, monkeypatch):
+        # Movie 1's hash is already on the account (local skip, no API
+        # add); with a budget of 1 the probe slot must survive to movie 2.
+        monkeypatch.setenv('WANTED_RD_RECOVERY_MAX_PER_SCAN', '1')
+        wire['cache_cached'] = False
+        wire['existing'] = {'a' * 40}
+
+        def _torrentio(imdb, **kw):
+            if imdb == 'tt7654321':
+                return [{'info_hash': 'c' * 40,
+                         'title': 'Other.2024.1080p.WEB.RelC', 'seeds': 3,
+                         'quality': {'label': '1080p', 'score': 90}}]
+            return list(wire['torrentio'])
+        import utils.search as search
+        monkeypatch.setattr(search, 'search_torrentio', _torrentio)
+        movies = self._movie() + self._movie(title='Other', imdb='tt7654321')
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], movies, {})
+        assert len(wire['rescue_calls']) == 1
+        assert wire['rescue_calls'][0]['info_hash'] == 'c' * 40
+
+    def test_mislabeled_top_result_filtered_out(self, wire):
+        # Torrentio's imdb-keyed lists are polluted: a mislabeled 2160p
+        # junk entry outscores the real release.  The title filter must
+        # drop it so the RD probe targets the real release's hash — this
+        # is the live "Fight Club added in The Fountain's slot" bug.
+        wire['cache_cached'] = False
+        wire['torrentio'] = [
+            {'info_hash': 'f' * 40,
+             'title': 'Fight Club (1999) AI UHD - 10th Anniversary Edition',
+             'seeds': 3, 'quality': {'label': '2160p', 'score': 200}},
+        ] + list(wire['torrentio'])
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert len(wire['rescue_calls']) == 1
+        assert wire['rescue_calls'][0]['info_hash'] == 'a' * 40
+
+    def test_all_results_mislabeled_memoizes_no_results(self, wire):
+        wire['torrentio'] = [
+            {'info_hash': 'f' * 40,
+             'title': 'Fight Club (1999) AI UHD - 10th Anniversary Edition',
+             'seeds': 3, 'quality': {'label': '2160p', 'score': 200}},
+        ]
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'] == []
+        assert wire['tb_adds'] == []
+        assert 'tt1234567' in sc._wanted_no_results
+
+    # ---- persisted rdblock verdicts ----------------------------------
+
+    def test_451_add_persists_rdblock_verdict(self, wire, ledger):
+        wire['cache_cached'] = False
+        wire['rd_core'] = {'rescued': False, 'reason': 'add_failed',
+                           'http_status': 451, 'alt_torrent_id': None}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert ledger.get('rdblock:' + 'a' * 40) == 1
+
+    def test_probe_file_block_persists_rdblock_verdict(self, wire, ledger):
+        wire['cache_cached'] = False
+        wire['rd_client'].probe_result = {
+            'status': 'blocked', 'reason': 'infringing_file', 'http': 451}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert ledger.get('rdblock:' + 'a' * 40) == 1
+
+    def test_probe_file_not_found_does_not_persist_rdblock(self, wire, ledger):
+        # probe_file returns status='blocked' for a bare HTTP 404 too
+        # (reason='not_found' — file transiently unresolvable, e.g. RD
+        # hoster indexing lag).  That must NOT persist a 30-day rdblock
+        # verdict, or a possibly-cached hash gets locked out of RD on a
+        # transient error.
+        wire['cache_cached'] = False
+        wire['rd_client'].probe_result = {
+            'status': 'blocked', 'reason': 'not_found', 'http': 404}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert ledger.get('rdblock:' + 'a' * 40) == 0
+
+    def test_transient_rd_failure_does_not_persist_rdblock(self, wire, ledger):
+        wire['cache_cached'] = False
+        wire['rd_core'] = {'rescued': False, 'reason': 'add_failed',
+                           'http_status': 503, 'alt_torrent_id': None}
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert ledger.get('rdblock:' + 'a' * 40) == 0
+
+    def test_persisted_rdblock_skips_rd_add(self, wire, ledger):
+        # Verdict persisted on a previous pass (possibly before a restart —
+        # this is the whole point: the in-memory miss memo dies on restart
+        # and was re-adding known-blocked hashes 6-7× per title).
+        wire['cache_cached'] = False
+        ledger.bump('rdblock:' + 'a' * 40)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'] == []   # no RD re-add
+
+    def test_persisted_rdblock_burns_no_rd_budget(self, wire, ledger, monkeypatch):
+        import utils.search as search
+        monkeypatch.setenv('WANTED_RD_RECOVERY_MAX_PER_SCAN', '1')
+        monkeypatch.setenv('WANTED_TB_RECOVERY_ENABLED', 'false')
+        ledger.bump('rdblock:' + 'a' * 40)
+
+        def _torrentio(imdb, **kw):
+            if imdb == 'tt7654321':
+                return [{'info_hash': 'c' * 40,
+                         'title': 'Other.2024.1080p.WEB.RelC', 'seeds': 3,
+                         'quality': {'label': '1080p', 'score': 90}}]
+            return list(wire['torrentio'])
+        monkeypatch.setattr(search, 'search_torrentio', _torrentio)
+        movies = self._movie() + self._movie(title='Other', imdb='tt7654321')
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], movies, {})
+        # The persisted verdict cost no API call and no budget — the single
+        # RD attempt survived to the second title.
+        assert len(wire['rescue_calls']) == 1
+        assert wire['rescue_calls'][0]['info_hash'] == 'c' * 40
+
+    def test_persisted_rdblock_still_accrues_giveup_strike(self, wire, ledger):
+        # The persisted verdict must count as the "RD filter-blocked" half
+        # of the terminal give-up signature WITHOUT re-adding, so strikes
+        # keep climbing across passes (and restarts).
+        ledger.bump('rdblock:' + 'a' * 40)
+        wire['cache_cached'] = False  # TB uncached → both halves confirmed
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'] == []
+        assert ledger.get('wantedblock:tt1234567') == 1
+
+
+class TestWantedFilterGiveup:
+    """Terminal give-up when a Wanted ghost is RD-filter-blocked AND
+    TorBox-uncached across WANTED_FILTER_GIVEUP_STRIKES recovery passes."""
+
+    def _scanner(self):
+        sc = LibraryScanner.__new__(LibraryScanner)
+        sc._wanted_tb_cooldown = {}
+        sc._wanted_rd_miss = {}
+        sc._wanted_no_results = {}
+        return sc
+
+    def _movie(self, title='The Substance', imdb='tt1234567'):
+        return [{'title': title, 'source': 'wanted',
+                 'imdb_id': imdb, 'is_available': True}]
+
+    def _show(self, title='Some Show', imdb='tt7654321'):
+        return [{'title': title, 'source': 'wanted',
+                 'imdb_id': imdb, 'is_available': True}]
+
+    def _causes(self, wire):
+        return [(e['type'], (e.get('meta') or {}).get('cause'))
+                for e in wire['events']]
+
+    @pytest.fixture
+    def wire(self, monkeypatch):
+        return _wire_wanted_recovery(monkeypatch)
+
+    @pytest.fixture
+    def ledger(self, tmp_path):
+        import importlib
+        from utils import attempt_ledger
+        importlib.reload(attempt_ledger)
+        attempt_ledger.init(config_dir=str(tmp_path))
+        yield attempt_ledger
+        attempt_ledger._file_path = None
+        attempt_ledger._state = {}
+
+    def _filter_block(self, wire):
+        # RD keyword-filters the add; TB has nothing cached.
+        wire['rd_core'] = {'rescued': False, 'reason': 'add_failed',
+                           'http_status': 451, 'alt_torrent_id': None}
+        wire['cache_cached'] = False
+
+    def test_filter_block_plus_tb_uncached_bumps_strike(self, wire, ledger):
+        self._filter_block(wire)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert ledger.get('wantedblock:tt1234567') == 1
+        # A confirmed both-provider failure is NOT a cache miss — it accrues
+        # a persistent strike instead of the transient 7-day RD memo.
+        assert sc._wanted_rd_miss == {}
+        assert wire['tb_adds'] == []
+        # Below the threshold: no terminal event yet.
+        assert ('debrid_add_failed', 'wanted_filter_giveup') not in self._causes(wire)
+
+    def test_three_strikes_logs_terminal_giveup_once_then_skips(self, wire, ledger):
+        self._filter_block(wire)
+        sc = self._scanner()
+        for _ in range(4):
+            sc._recover_wanted_via_debrid([], self._movie(), {})
+        # Strike caps at the threshold — the 4th pass is skipped by the guard
+        # before it can probe, so the count never climbs past 3.
+        assert ledger.get('wantedblock:tt1234567') == 3
+        # Only the FIRST pass re-adds to RD: the 451 verdict is persisted
+        # per hash (rdblock:), so passes 2-3 confirm the filter-block from
+        # the ledger while the strike count still climbs.
+        assert len(wire['rescue_calls']) == 1
+        giveups = [e for e in wire['events']
+                   if (e.get('meta') or {}).get('cause') == 'wanted_filter_giveup']
+        assert len(giveups) == 1  # logged exactly once, on the crossing pass
+        assert giveups[0]['meta']['imdb_id'] == 'tt1234567'
+
+    def test_giveup_sends_retry_giveup_notification_once(self, wire, ledger,
+                                                         monkeypatch):
+        calls = []
+        import utils.notifications
+        monkeypatch.setattr(utils.notifications, 'notify',
+                            lambda *a, **kw: calls.append((a, kw)))
+        self._filter_block(wire)
+        sc = self._scanner()
+        for _ in range(4):
+            sc._recover_wanted_via_debrid([], self._movie(), {})
+        giveup_calls = [c for c in calls if c[0][0] == 'retry_giveup']
+        assert len(giveup_calls) == 1
+        args, kw = giveup_calls[0]
+        assert 'The Substance' in args[1]
+        assert kw.get('level') == 'warning'
+
+    def test_giveup_guard_skips_probing_both_legs(self, wire, ledger):
+        for _ in range(3):
+            ledger.bump('wantedblock:tt1234567')
+        self._filter_block(wire)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert wire['rescue_calls'] == []   # RD leg never ran
+        assert wire['tb_adds'] == []         # TB leg never ran
+
+    def test_tb_unavailable_filter_block_falls_back_to_rd_miss(self, wire, ledger, monkeypatch):
+        # TB leg unavailable (disabled — the account cooldown flag is only
+        # advisory now and no longer parks the leg) → the "uncached" half
+        # can't be confirmed, so no strike; fall back to the 7-day RD-miss
+        # memo instead of hammering RD.
+        self._filter_block(wire)
+        monkeypatch.setenv('WANTED_TB_RECOVERY_ENABLED', 'false')
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert ledger.get('wantedblock:tt1234567') == 0
+        assert 'tt1234567' in sc._wanted_rd_miss
+        assert wire['tb_adds'] == []
+
+    def test_tb_budget_exhausted_filter_block_no_strike(self, wire, ledger,
+                                                        monkeypatch):
+        # TB budget spent mid-pass: the first (TB-cached) title consumes the
+        # only TB slot, so the second title's TB leg never runs — its RD
+        # filter-block can't confirm the "uncached" half of the give-up
+        # signature.  No strike; 7-day RD-miss memo instead.
+        import utils.search as search
+        monkeypatch.setenv('WANTED_TB_RECOVERY_MAX_PER_SCAN', '1')
+        wire['rd_core'] = {'rescued': False, 'reason': 'add_failed',
+                           'http_status': 451, 'alt_torrent_id': None}
+
+        def _cache(hashes, service=None, api_key=None):
+            # First title TB-cached (burns the budget), second uncached.
+            return {h: h == 'a' * 40 for h in hashes}
+        monkeypatch.setattr(search, 'check_debrid_cache', _cache)
+
+        def _torrentio(imdb, **kw):
+            if imdb == 'tt9999999':
+                return [{'info_hash': 'c' * 40,
+                         'title': 'Second.2024.1080p.WEB.RelC', 'seeds': 3,
+                         'quality': {'label': '1080p', 'score': 90}}]
+            return list(wire['torrentio'])
+        monkeypatch.setattr(search, 'search_torrentio', _torrentio)
+
+        movies = self._movie() + self._movie(title='Second',
+                                             imdb='tt9999999')
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], movies, {})
+        assert len(wire['tb_adds']) == 1              # budget consumed
+        assert ledger.get('wantedblock:tt9999999') == 0
+        assert 'tt9999999' in sc._wanted_rd_miss
+
+    def test_tb_probe_error_filter_block_no_strike(self, wire, ledger, monkeypatch):
+        # A TorBox cache-probe error can't confirm "uncached" — be
+        # conservative: no strike, memo RD-miss so RD isn't re-probed hourly.
+        self._filter_block(wire)
+        import utils.search as search
+
+        def _boom(*a, **kw):
+            raise RuntimeError('tb api down')
+        monkeypatch.setattr(search, 'check_debrid_cache', _boom)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid([], self._movie(), {})
+        assert ledger.get('wantedblock:tt1234567') == 0
+        assert 'tt1234567' in sc._wanted_rd_miss
+
+    def test_show_strike_is_episode_scoped(self, wire, ledger, monkeypatch):
+        # A blocked show episode strikes under wantedblock:<imdb>:<s>:<e>, NOT
+        # the bare imdb — so if miss[0] shifts to a different episode later
+        # (e.g. this one gets recovered elsewhere), that episode isn't already
+        # abandoned by strikes accrued against a sibling episode.
+        self._filter_block(wire)
+        wire['torrentio'] = [
+            {'info_hash': 'a' * 40, 'title': 'The.Substance.S02E05.1080p.WEB',
+             'seeds': 10, 'quality': {'label': '1080p', 'score': 100}},
+        ]
+        monkeypatch.setattr(LibraryScanner, '_compute_missing_episodes',
+                            lambda self, s: [(2, 5)])
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid(
+            self._show(title='The Substance', imdb='tt7654321'), [], {})
+        assert ledger.get('wantedblock:tt7654321:2:5') == 1
+        assert ledger.get('wantedblock:tt7654321') == 0
+
+
+class TestWantedMemoPersistence:
+    """The three Wanted-recovery memo dicts survive container restarts via
+    /config/wanted_memos.json, so a restart mid-drain doesn't re-probe the
+    whole backlog through Torrentio + TB checkcached."""
+
+    def _scanner(self):
+        sc = LibraryScanner.__new__(LibraryScanner)
+        sc._wanted_tb_cooldown = {}
+        sc._wanted_rd_miss = {}
+        sc._wanted_no_results = {}
+        return sc
+
+    @pytest.fixture(autouse=True)
+    def config_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv('CONFIG_DIR', str(tmp_path))
+        return tmp_path
+
+    def _memos_path(self, config_dir):
+        return config_dir / 'wanted_memos.json'
+
+    def test_round_trip(self, config_dir):
+        import time as _time
+        sc = self._scanner()
+        now = _time.monotonic()
+        sc._wanted_tb_cooldown['tt0000001'] = now
+        sc._wanted_rd_miss['tt0000002'] = now
+        sc._wanted_no_results['tt0000003:1:1'] = now
+        sc._persist_wanted_memos()
+        assert self._memos_path(config_dir).is_file()
+
+        sc2 = self._scanner()
+        sc2._load_wanted_memos()
+        assert 'tt0000001' in sc2._wanted_tb_cooldown
+        assert 'tt0000002' in sc2._wanted_rd_miss
+        assert 'tt0000003:1:1' in sc2._wanted_no_results
+
+    def test_expired_entries_dropped_on_load(self, config_dir):
+        import json as _json
+        import time as _time
+        # tb_cooldown TTL is 6h, rd_miss is 7d: an 8h-old tb entry must be
+        # dropped while an 8h-old rd_miss entry loads.
+        payload = {
+            'version': 1,
+            'saved_at': _time.time(),
+            'memos': {
+                'tb_cooldown': {'tt0000001': 8 * 3600},
+                'rd_miss': {'tt0000002': 8 * 3600},
+                'no_results': {},
+            },
+        }
+        self._memos_path(config_dir).write_text(_json.dumps(payload))
+        sc = self._scanner()
+        sc._load_wanted_memos()
+        assert sc._wanted_tb_cooldown == {}
+        assert 'tt0000002' in sc._wanted_rd_miss
+
+    def test_downtime_counts_against_ttl(self, config_dir):
+        import json as _json
+        import time as _time
+        # Saved 5h ago with a 2h age → current age 7h > 6h TTL → dropped.
+        payload = {
+            'version': 1,
+            'saved_at': _time.time() - 5 * 3600,
+            'memos': {
+                'tb_cooldown': {'tt0000001': 2 * 3600},
+                'rd_miss': {},
+                'no_results': {},
+            },
+        }
+        self._memos_path(config_dir).write_text(_json.dumps(payload))
+        sc = self._scanner()
+        sc._load_wanted_memos()
+        assert sc._wanted_tb_cooldown == {}
+
+    def test_loaded_age_respected_by_pass_expiry(self, config_dir):
+        import json as _json
+        import time as _time
+        # A loaded 1h-old tb_cooldown entry must still gate the next pass
+        # (1h < 6h TTL) — i.e. the age survives the monotonic conversion.
+        payload = {
+            'version': 1,
+            'saved_at': _time.time(),
+            'memos': {
+                'tb_cooldown': {'tt0000001': 3600},
+                'rd_miss': {},
+                'no_results': {},
+            },
+        }
+        self._memos_path(config_dir).write_text(_json.dumps(payload))
+        sc = self._scanner()
+        sc._load_wanted_memos()
+        now = _time.monotonic()
+        age = now - sc._wanted_tb_cooldown['tt0000001']
+        assert 3500 < age < 3700
+
+    def test_corrupt_file_loads_nothing(self, config_dir):
+        self._memos_path(config_dir).write_text('{not json')
+        sc = self._scanner()
+        sc._load_wanted_memos()  # must not raise
+        assert sc._wanted_tb_cooldown == {}
+        assert sc._wanted_rd_miss == {}
+        assert sc._wanted_no_results == {}
+
+    def test_missing_file_loads_nothing(self):
+        sc = self._scanner()
+        sc._load_wanted_memos()  # must not raise
+        assert sc._wanted_tb_cooldown == {}
+
+    def test_clear_wanted_memos_rewrites_snapshot(self, config_dir):
+        import time as _time
+        sc = self._scanner()
+        sc._wanted_tb_cooldown['tt0000001'] = _time.monotonic()
+        sc._persist_wanted_memos()
+        sc.clear_wanted_memos('tt0000001')
+
+        sc2 = self._scanner()
+        sc2._load_wanted_memos()
+        assert 'tt0000001' not in sc2._wanted_tb_cooldown
+
+    def test_recovery_pass_persists_memos(self, config_dir, monkeypatch):
+        # End-to-end: a TB-cached add during the pass lands in the snapshot
+        # file without any explicit persist call.
+        wire = _wire_wanted_recovery(monkeypatch)
+        sc = self._scanner()
+        sc._recover_wanted_via_debrid(
+            [], [{'title': 'The Substance', 'source': 'wanted',
+                  'imdb_id': 'tt1234567', 'is_available': True}], {})
+        assert len(wire['tb_adds']) == 1
+
+        sc2 = self._scanner()
+        sc2._load_wanted_memos()
+        assert 'tt1234567' in sc2._wanted_tb_cooldown
+
+
+class TestReleaseMatchesTitle:
+    """Golden cases for the Torrentio auto-add title sanity check."""
+
+    def test_exact_with_year_and_quality_tail(self):
+        assert _release_matches_title(
+            'The Fountain 2006 1080p BluRay x264', 'The Fountain')
+
+    def test_mislabeled_release_rejected(self):
+        assert not _release_matches_title(
+            'Fight Club (1999) AI UHD - 10th Anniversary Edition + Extras '
+            '(PROPER) FIX', 'The Fountain')
+
+    def test_unicode_transliteration_matches(self):
+        assert _release_matches_title(
+            'Amelie.2001.1080p.BluRay.x264', 'Amélie')
+
+    def test_media_title_as_prefix_of_release(self):
+        assert _release_matches_title('F1.The.Movie.2025.2160p.WEB-DL', 'F1')
+
+    def test_reverse_prefix_rejected(self):
+        # A short junk release name must not claim a longer media title.
+        assert not _release_matches_title('The 2006 1080p', 'The Fountain')
+
+    def test_tv_episode_release_matches(self):
+        assert _release_matches_title(
+            'Paradise 2025 S01E01 1080p WEB', 'Paradise (2025)')
+
+    def test_media_year_suffix_stripped(self):
+        assert _release_matches_title(
+            'Broadchurch.S01E01.1080p.WEB', 'Broadchurch')
+
+    def test_numeric_title_with_parenthesized_year(self):
+        assert _release_matches_title('1917 (2019) 1080p', '1917')
+
+    def test_empty_norms_rejected(self):
+        assert not _release_matches_title('', 'The Fountain')
+        assert not _release_matches_title('The Fountain 2006 1080p', '')
+        # Titles that collapse to nothing after ASCII transliteration.
+        assert not _release_matches_title('愛.2011.1080p', '愛')
+
+    def test_scene_release_dropping_leading_article_matches(self):
+        # Scene names routinely omit the "The" the arr keeps.
+        assert _release_matches_title(
+            'Big.Bang.Theory.S03E12.1080p.WEB', 'The Big Bang Theory')
+
+    def test_article_only_release_rejected(self):
+        assert not _release_matches_title('The 2006 1080p', 'The Fountain')
+
+    def test_sequel_rejected_by_year_check(self):
+        # "Dune Part Two" passes the prefix rule for "Dune" — the year
+        # cross-check is what rejects it.
+        assert not _release_matches_title(
+            'Dune.Part.Two.2024.1080p.WEB', 'Dune', media_year=2021)
+        assert _release_matches_title(
+            'Dune.2021.1080p.WEB', 'Dune', media_year=2021)
+
+    def test_remake_rejected_by_year_check(self):
+        assert not _release_matches_title(
+            'It.2017.1080p.BluRay', 'It', media_year=1990)
+        assert _release_matches_title(
+            'It.1990.1080p', 'It', media_year=1990)
+
+    def test_year_in_title_not_counted_as_release_year(self):
+        # "1917" the token is the title, not release-year evidence — a
+        # release without an explicit year must still match.
+        assert _release_matches_title(
+            '1917.1080p.BluRay', '1917', media_year=2019)
+
+    def test_year_tolerance_plus_minus_one(self):
+        # Release-date vs production-year tagging is commonly off by one.
+        assert _release_matches_title(
+            'The Fountain 2007 1080p', 'The Fountain', media_year=2006)
+
+    def test_no_years_anywhere_skips_year_check(self):
+        assert _release_matches_title(
+            'Sing.2.1080p.WEB.x264-GRP', 'Sing 2', media_year=2021)

@@ -9,8 +9,15 @@ import threading
 import time
 from datetime import datetime, timezone
 from utils.logger import get_logger
+from utils import heartbeat
 
 logger = get_logger()
+
+# Liveness ceiling for the healthcheck: the loop ticks every 10s, so a
+# 5-minute gap means the thread is dead, not slow (task bodies run in
+# their own threads and never block the loop).
+_HEARTBEAT_NAME = 'task_scheduler'
+_HEARTBEAT_STALE_AFTER = 300
 
 
 class ScheduledTask:
@@ -145,23 +152,44 @@ class TaskScheduler:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=15)
         self._thread = None
+        heartbeat.unregister(_HEARTBEAT_NAME)
         logger.info("[scheduler] Stopped")
 
     def _scheduler_loop(self):
         """Main loop: check for due tasks every 10 seconds."""
+        heartbeat.register(_HEARTBEAT_NAME, _HEARTBEAT_STALE_AFTER)
         while not self._stop_event.is_set():
-            now = time.time()
-            for task in list(self._tasks.values()):
-                if not task.enabled or task.next_run is None or now < task.next_run:
-                    continue
-                with task._lock:
-                    if task.running:
+            heartbeat.beat(_HEARTBEAT_NAME)
+            try:
+                now = time.time()
+                for task in list(self._tasks.values()):
+                    if not task.enabled or task.next_run is None or now < task.next_run:
                         continue
-                    task.running = True
-                threading.Thread(
-                    target=self._execute_task, args=(task,),
-                    daemon=True, name=f'task-{task.name}'
-                ).start()
+                    with task._lock:
+                        if task.running:
+                            continue
+                        task.running = True
+                    try:
+                        threading.Thread(
+                            target=self._execute_task, args=(task,),
+                            daemon=True, name=f'task-{task.name}'
+                        ).start()
+                    except Exception as e:
+                        # Thread.start() can raise (e.g. RuntimeError: can't
+                        # start new thread under resource pressure).  Clear
+                        # the running flag we just set, or the task is
+                        # locked out of ever being scheduled again.
+                        with task._lock:
+                            task.running = False
+                        logger.error(
+                            f"[scheduler] Failed to spawn task "
+                            f"'{task.name}': {e}"
+                        )
+            except Exception as e:
+                # A dead scheduler silently stops ALL periodic work while
+                # the container stays healthy — never let a transient
+                # failure kill the loop.
+                logger.error(f"[scheduler] Loop error: {e}", exc_info=True)
             self._stop_event.wait(10)
 
     def _execute_task(self, task):

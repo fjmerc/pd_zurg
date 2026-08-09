@@ -376,6 +376,68 @@ class _ArrClientBase:
             return int(pid)
         return None
 
+    # -- Failed-download feedback (shared, Sonarr/Radarr parity) -----------
+
+    def mark_download_failed(self, info_hash, search_again=True):
+        """Report the grab identified by *info_hash* as failed so the arr
+        blocklists that release and (with ``search_again``) immediately
+        searches for a different one.
+
+        Torrent-blackhole grabs record the info hash as the queue item's
+        ``downloadId``, so the queue lookup is exact.  When the queue item
+        is already gone (the arr pruned it as stalled), falls back to
+        marking the grab *history* record failed — same blocklist +
+        redownload semantics on both arrs.
+
+        Returns True when the arr accepted the failure report.  Never
+        raises; any HTTP failure returns False.
+        """
+        if not self.configured or not info_hash:
+            return False
+        h = str(info_hash).strip().upper()
+        if not h:
+            return False
+
+        queue = self._get('/api/v3/queue', {'pageSize': 1000})
+        records = (queue or {}).get('records') or []
+        item = next(
+            (r for r in records
+             if isinstance(r, dict)
+             and str(r.get('downloadId') or '').strip().upper() == h),
+            None)
+        if item is not None and item.get('id') is not None:
+            result = self._delete(
+                f'/api/v3/queue/{item["id"]}',
+                {'removeFromClient': 'true', 'blocklist': 'true',
+                 'skipRedownload': 'false' if search_again else 'true'})
+            if result is not None:
+                logger.info(
+                    f"[{self._name}] Marked failed + blocklisted: "
+                    f"{str(item.get('title', '?'))[:70]}")
+                return True
+            return False
+
+        history = self._get('/api/v3/history',
+                            {'downloadId': h, 'pageSize': 20})
+        for rec in (history or {}).get('records') or []:
+            if not isinstance(rec, dict) or rec.get('id') is None:
+                continue
+            if str(rec.get('eventType') or '') != 'grabbed':
+                continue
+            result = self._post(f'/api/v3/history/failed/{rec["id"]}', {})
+            if result is not None:
+                logger.info(
+                    f"[{self._name}] Marked grab-history record failed: "
+                    f"{str(rec.get('sourceTitle', '?'))[:70]}")
+                return True
+            # POST failed for this record — a re-grabbed release can leave
+            # several 'grabbed' records for the same downloadId, so try the
+            # rest before giving up.
+        logger.debug(
+            f"[{self._name}] No queue or grab-history record found for "
+            f"downloadId {h} — cannot report failure")
+        return False
+
 
 # ---------------------------------------------------------------------------
 # Sonarr
@@ -1242,6 +1304,7 @@ class SonarrClient(_ArrClientBase):
                 return {
                     'status': 'sent',
                     'service': 'sonarr',
+                    'grabbed': grabbed,
                     'message': f'Force-grabbed {grabbed} debrid release(s) for {title} S{season_number:02d}',
                 }
             # All interactive grabs failed — no_file_ids already searched above,
@@ -2146,6 +2209,7 @@ class RadarrClient(_ArrClientBase):
                     return {
                         'status': 'sent',
                         'service': 'radarr',
+                        'grabbed': 1,
                         'message': f'Force-grabbed debrid release for {title}',
                     }
                 # Fall through to normal search as last resort

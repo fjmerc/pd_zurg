@@ -9,6 +9,8 @@ from utils import auto_update
 from utils.processes import shutdown_all_processes, start_process_monitor
 from utils import notifications
 from utils import history
+from utils import recovery
+from utils import attempt_ledger
 from utils import blocklist
 from utils import blackhole
 from utils import ffprobe_monitor
@@ -22,14 +24,31 @@ def shutdown(signum, frame):
     logger = get_logger()
     logger.info("Shutdown signal received. Cleaning up...")
 
+    # Signal any in-flight debrid_health rescue poll loop to abort BEFORE
+    # asking the scheduler to stop — otherwise scheduler.stop()'s 15s join
+    # window can race a 60s × N-rescue blocking sweep.
+    try:
+        from utils.debrid_health import request_stop as _dh_stop
+        _dh_stop()
+    except Exception:
+        pass
+
     scheduler.stop()
     shutdown_all_processes(logger)
 
     for mount_point in os.listdir('/data'):
         full_path = os.path.join('/data', mount_point)
-        if os.path.ismount(full_path):
+        try:
+            # ismount raises OSError (ENOTCONN) on a dead FUSE mount — that
+            # still needs unmounting, so treat the error as "is a mount".
+            needs_umount = os.path.ismount(full_path)
+        except OSError:
+            needs_umount = True
+        if needs_umount:
             logger.info(f"Unmounting {full_path}...")
             umount = subprocess.run(['umount', full_path], capture_output=True, text=True)
+            if umount.returncode != 0:
+                umount = subprocess.run(['umount', '-l', full_path], capture_output=True, text=True)
             if umount.returncode == 0:
                 logger.info(f"Successfully unmounted {full_path}")
             else:
@@ -58,6 +77,13 @@ def main():
 
     logger.info(banner)
 
+    # Clear heartbeat entries surviving a `docker restart` — a worker that
+    # legitimately doesn't start this boot must not inherit a ghost entry.
+    # BEFORE run_validation(): a wedge anywhere later in startup must not
+    # leave the previous run's entries aging toward a restart storm.
+    from utils import heartbeat
+    heartbeat.reset()
+
     if not run_validation():
         sys.exit(1)
 
@@ -65,6 +91,8 @@ def main():
     status_server.status_data.add_event('main', f'Zurgarr v{version} starting')
 
     history.init()
+    recovery.init()
+    attempt_ledger.init()
     blocklist.init()
     notifications.init()
     notifications.notify('startup', 'Zurgarr Started', f'Version {version}')

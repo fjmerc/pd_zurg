@@ -197,8 +197,22 @@ textarea{min-height:120px;resize:vertical;font-family:monospace;font-size:.8em;l
 .profile-json textarea{font-size:.75em}
 .versions-toolbar{display:flex;gap:8px;margin-top:10px;align-items:center}
 
+/* "Modified from default" chip — appears next to the field label when the
+   current saved value differs from the application default. Visually
+   distinct from the .field.changed unsaved-edits indicator: that one is a
+   yellow highlight on the row; this is a small teal pill on the label. */
+.field-modified-chip{display:none;align-items:center;font-size:.68em;font-weight:600;color:var(--teal,#27aabc);background:rgba(39,170,188,.12);border:1px solid rgba(39,170,188,.35);border-radius:3px;padding:1px 5px;margin-left:5px;white-space:nowrap;vertical-align:middle;line-height:1.4}
+.field.is-nondefault .field-modified-chip{display:inline-flex}
+[data-theme="light"] .field-modified-chip{color:#0e7a88;background:rgba(14,122,136,.1);border-color:rgba(14,122,136,.3)}
+
+/* "Show only modified" toggle button in the env toolbar */
+.modified-filter-wrap{display:flex;align-items:center;gap:6px;font-size:.82em;color:var(--text2)}
+.modified-filter-wrap input[type="checkbox"]{accent-color:var(--teal,#27aabc);width:14px;height:14px;cursor:pointer;flex-shrink:0}
+.modified-filter-wrap label{cursor:pointer;user-select:none}
+.modified-filter-wrap .modified-count{font-size:.75em;color:var(--text3);white-space:nowrap}
+
 /* Tab toolbar */
-.tab-toolbar{display:flex;gap:8px;margin-bottom:12px;justify-content:flex-end;flex-wrap:wrap}
+.tab-toolbar{display:flex;gap:8px;margin-bottom:12px;justify-content:flex-end;flex-wrap:wrap;align-items:center}
 [data-theme="light"] .cat-header:hover{background:#f0f3f6}
 [data-theme="light"] .toggle .slider{background:var(--border)}
 [data-theme="light"] .toggle .slider:before{background:#fff}
@@ -261,7 +275,7 @@ mark{background:var(--yellow);color:#0d1117;border-radius:2px;padding:0 1px}
 
 <div class="tabs" role="tablist">
   <div class="tab active" role="tab" tabindex="0" aria-selected="true" aria-controls="tab-env" data-kb="tab-1" onclick="switchTab('env')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('env')}">Zurgarr</div>
-  <div class="tab" role="tab" tabindex="0" aria-selected="false" aria-controls="tab-pd" data-kb="tab-2" onclick="switchTab('pd')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('pd')}">plex_debrid</div>
+  <div class="tab" role="tab" tabindex="0" aria-selected="false" aria-controls="tab-pd" data-kb="tab-2" onclick="switchTab('pd')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('pd')}">Watchlist (plex_debrid)</div>
 </div>
 
 <div class="banner" id="banner"></div>
@@ -269,6 +283,11 @@ mark{background:var(--yellow);color:#0d1117;border-radius:2px;padding:0 1px}
 <!-- Zurgarr env vars tab -->
 <div class="tab-content active" id="tab-env" role="tabpanel">
   <div class="tab-toolbar">
+    <span class="modified-filter-wrap">
+      <input type="checkbox" id="modified-only-toggle" onchange="toggleModifiedFilter()">
+      <label for="modified-only-toggle">Show only modified</label>
+      <span class="modified-count" id="modified-count"></span>
+    </span>
     <a class="btn btn-ghost btn-sm" href="/api/settings/export/env" download=".env">Export .env</a>
     <label class="btn btn-ghost btn-sm" style="cursor:pointer">Import .env<input type="file" accept=".env,text/plain" style="display:none" onchange="envImport(this)"></label>
     <button type="button" class="btn btn-ghost btn-sm" onclick="envResetDefaults()">Reset All to Defaults</button>
@@ -312,6 +331,7 @@ __THEME_TOGGLE_JS__
 const ENV_SCHEMA = __ENV_SCHEMA_JSON__;
 const PD_SCHEMA = __PD_SCHEMA_JSON__;
 let envValues = {};
+let envDefaults = {};  // application defaults from /api/settings/reset/env
 let pdValues = {};
 let isDirty = false;  // combined flag for beforeunload
 let envDirty = false;
@@ -554,6 +574,76 @@ function setButtonLoading(id, loading, text) {
 }
 
 // -----------------------------------------------------------------------
+// "Modified from default" chip helpers
+// -----------------------------------------------------------------------
+
+// Returns true when `value` differs from the application default for `key`.
+//
+// Secret-typed fields: the server delivers masked values (e.g. '****') for
+// secrets that are set, so we cannot compare them byte-for-byte against the
+// default. We side-step this by only marking a secret as "modified" when the
+// current value is non-empty and the default is empty (set-vs-unset).
+// Comparing against an empty default is reliable even for masked values
+// because an empty default never masks to '****'.
+function isNonDefault(key, value, fieldType) {
+  // Defaults unknown (fetch failed): don't guess. Comparing against '' would
+  // spuriously flag every server-pre-filled true-default (the booleans/
+  // numerics read_env_values resolves from _ENV_DEFAULTS) as modified.
+  if (Object.keys(envDefaults).length === 0) return false;
+  const dflt = String(envDefaults[key] !== undefined ? envDefaults[key] : '');
+  const cur = String(value !== undefined ? value : '');
+  if (fieldType === 'secret') {
+    // Masked: only reliable signal is set-vs-unset (empty default → user set it)
+    return dflt === '' && cur !== '';
+  }
+  if (fieldType === 'boolean') {
+    // An empty side means OFF: an unset toggle runs as false at runtime,
+    // and a default of '' means the feature is off out of the box.
+    const norm = v => (v === '' ? 'false' : v).toLowerCase();
+    return norm(cur) !== norm(dflt);
+  }
+  // An unset/empty field always runs at the application default
+  if (cur === '') return false;
+  return cur !== dflt;
+}
+
+// Recompute the .is-nondefault class on every env field row, then refresh
+// the modified count display. Called after render and after each input event.
+function updateModifiedChips() {
+  const container = document.getElementById('env-categories');
+  if (!container) return;
+  let modifiedCount = 0;
+  let totalCount = 0;
+  container.querySelectorAll('.field[data-field-key]').forEach(row => {
+    const key = row.dataset.fieldKey;
+    // Find the input for this field
+    const input = document.getElementById('env-' + key);
+    if (!input) return;
+    totalCount++;
+    // Determine the field type from the data-type attribute
+    const ftype = input.dataset.type || 'string';
+    const curVal = ftype === 'boolean' ? (input.checked ? 'true' : 'false') : input.value;
+    const nonDefault = isNonDefault(key, curVal, ftype);
+    row.classList.toggle('is-nondefault', nonDefault);
+    if (nonDefault) modifiedCount++;
+  });
+  // Update the count badge in the toolbar. Blank (not "0 of N") when the
+  // defaults fetch failed — we don't know the modified count, so don't lie.
+  const countEl = document.getElementById('modified-count');
+  if (countEl) {
+    countEl.textContent = (totalCount > 0 && Object.keys(envDefaults).length > 0)
+      ? modifiedCount + ' of ' + totalCount + ' modified'
+      : '';
+  }
+}
+
+// Called by the "Show only modified" checkbox
+function toggleModifiedFilter() {
+  const searchInput = document.getElementById('search-env');
+  filterSettings('env', searchInput ? searchInput.value : '');
+}
+
+// -----------------------------------------------------------------------
 // Zurgarr env var tab
 // -----------------------------------------------------------------------
 function renderEnvField(field, value) {
@@ -590,8 +680,23 @@ function renderEnvField(field, value) {
   const helpHtml = field.help ? `<div class="field-help">${esc(field.help)}</div>` : '';
   const reqMark = field.required ? '<span class="required">*</span>' : '';
   const resetBtn = `<button type="button" class="field-reset" onclick="resetField('env','${escJs(field.key)}')" title="Undo change">\u21BA</button>`;
+  // "modified" chip \u2014 always present in the DOM; visibility driven by
+  // .is-nondefault on the parent .field row (set by updateModifiedChips).
+  const modChip = `<span class="field-modified-chip" aria-label="modified from default">modified</span>`;
 
-  return `<div class="field" id="row-${field.key}" data-field-key="${esc(field.key)}"><div class="field-label"><span><span class="label-text">${esc(field.label)}</span>${reqMark}</span><span class="key">${esc(field.key)}</span></div><div class="field-input"><div style="display:flex;gap:6px;align-items:start">${inputHtml}${resetBtn}</div>${helpHtml}<div class="field-error" id="err-${field.key}"></div></div></div>`;
+  // Compute initial is-nondefault class at render time so the chip is
+  // visible immediately on page load without waiting for an input event.
+  // Same type vocabulary as the inputs' data-type attribute, so this call
+  // and updateModifiedChips() can never diverge on a future type branch.
+  const ftype = field.type === 'boolean' ? 'boolean'
+    : (field.type === 'secret' ? 'secret'
+    : (field.type.startsWith('select:') ? 'select'
+    : (field.type.startsWith('number:') ? 'number'
+    : (field.type === 'url' ? 'url' : 'string'))));
+  const initNonDefault = isNonDefault(field.key, value, ftype);
+  const nonDefaultClass = initNonDefault ? ' is-nondefault' : '';
+
+  return `<div class="field${nonDefaultClass}" id="row-${field.key}" data-field-key="${esc(field.key)}"><div class="field-label"><span><span class="label-text">${esc(field.label)}</span>${reqMark}${modChip}</span><span class="key">${esc(field.key)}</span></div><div class="field-input"><div style="display:flex;gap:6px;align-items:start">${inputHtml}${resetBtn}</div>${helpHtml}<div class="field-error" id="err-${field.key}"></div></div></div>`;
 }
 
 function renderEnvCategories(values) {
@@ -603,6 +708,14 @@ function renderEnvCategories(values) {
     html += `<div class="category" data-cat-idx="${i}" data-tab="env"><div class="cat-header" role="button" tabindex="0" aria-expanded="false" onclick="toggleCategory(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleCategory(this)}"><h2><span class="cat-name">${esc(cat.name)}</span> <span class="desc">\u2014 ${esc(cat.description)}</span></h2><span class="cat-dirty"><span class="cat-dirty-dot"></span><span class="cat-dirty-count"></span></span><span class="arrow" aria-hidden="true">&#9660;</span></div><div class="cat-body">${fieldsHtml}</div></div>`;
   });
   container.innerHTML = html;
+  // Re-run chips and count after every full render (init, undo, post-save)
+  updateModifiedChips();
+  // Re-apply the modified-only filter if it was active before the re-render
+  const modToggle = document.getElementById('modified-only-toggle');
+  if (modToggle && modToggle.checked) {
+    const searchInput = document.getElementById('search-env');
+    filterSettings('env', searchInput ? searchInput.value : '');
+  }
 }
 
 function collectEnvData() {
@@ -1889,6 +2002,12 @@ function filterSettings(tab, query) {
   const countEl = document.getElementById('search-' + tab + '-count');
   let total = 0, shown = 0;
 
+  // "Show only modified" toggle — only active on the env tab
+  const modToggle = tab === 'env' ? document.getElementById('modified-only-toggle') : null;
+  const modifiedOnly = modToggle ? modToggle.checked : false;
+  // Any active filter (text search OR modified-only) triggers auto-expand
+  const anyFilter = q || modifiedOnly;
+
   // Clear previous highlights
   clearHighlights(container);
 
@@ -1901,12 +2020,16 @@ function filterSettings(tab, query) {
     // Check both regular and advanced fields. Match against label *and*
     // help text so a search for "timeout" also surfaces fields whose
     // label doesn't contain the word but whose help text explains it.
+    // Both filters AND together: a field must pass the text search (if
+    // active) AND be non-default (if modified-only is active).
     cat.querySelectorAll('.field').forEach(field => {
       total++;
       const label = (field.querySelector('.field-label') || {}).textContent || '';
       const help = (field.querySelector('.field-help') || {}).textContent || '';
       const haystack = (label + ' ' + help).toLowerCase();
-      if (!q || haystack.includes(q)) {
+      const passesText = !q || haystack.includes(q);
+      const passesModified = !modifiedOnly || field.classList.contains('is-nondefault');
+      if (passesText && passesModified) {
         field.style.display = '';
         shown++;
         catVisible++;
@@ -1922,9 +2045,9 @@ function filterSettings(tab, query) {
       }
     });
 
-    if (q && catVisible > 0) {
-      // Highlight category name if it matches and has visible fields
-      if (catName) highlightText(catName, q);
+    if (anyFilter && catVisible > 0) {
+      // Highlight category name if it matches a text query and has visible fields
+      if (q && catName) highlightText(catName, q);
       // Auto-expand categories with matches
       header.classList.add('open');
       body.classList.add('open');
@@ -1943,7 +2066,7 @@ function filterSettings(tab, query) {
       }
     }
 
-    cat.style.display = (q && catVisible === 0) ? 'none' : '';
+    cat.style.display = (anyFilter && catVisible === 0) ? 'none' : '';
   });
 
   countEl.textContent = q ? (shown + ' of ' + total + ' settings') : '';
@@ -2014,7 +2137,13 @@ function getPdChangedFields() {
 let _dirtyRaf = 0;
 function markDirty() {
   if (!_dirtyRaf) {
-    _dirtyRaf = requestAnimationFrame(() => { _dirtyRaf = 0; updateDirtyUI(); });
+    _dirtyRaf = requestAnimationFrame(() => {
+      _dirtyRaf = 0;
+      updateDirtyUI();
+      // Keep the modified chips current as the user edits env fields.
+      // Only worth running when the env tab is active (pd tab has no chips).
+      if (activeTabName() === 'env') updateModifiedChips();
+    });
   }
 }
 
@@ -2106,6 +2235,13 @@ function resetField(tab, key) {
     el.classList.remove('invalid');
     const errEl = document.getElementById('err-' + key);
     if (errEl) { errEl.textContent = ''; errEl.className = 'field-error'; }
+    // Programmatic value/checked assignment fires no input event, so the
+    // document-level markDirty listener never refreshes the chip — do it
+    // here, and re-apply the modified-only filter so a row reset back to
+    // its default drops out of the filtered view immediately.
+    updateModifiedChips();
+    const modToggle = document.getElementById('modified-only-toggle');
+    if (modToggle && modToggle.checked) toggleModifiedFilter();
   } else {
     // Fast path for simple pd field types — set value directly
     const saved = pdValues[key];
@@ -2148,21 +2284,37 @@ function resetField(tab, key) {
 // -----------------------------------------------------------------------
 async function init() {
   // Placeholder "Loading…" state so the page doesn't look frozen while
-  // the two fetches resolve. Wiped by the render calls below.
+  // the fetches resolve. Wiped by the render calls below.
   const envCats = document.getElementById('env-categories');
   const pdCats = document.getElementById('pd-categories');
   const loadingHtml = '<div class="loading-state"><span class="spinner"></span>Loading settings…</div>';
   if (envCats) envCats.innerHTML = loadingHtml;
   if (pdCats) pdCats.innerHTML = loadingHtml;
 
-  // Load env and plex_debrid values in parallel — they're independent,
-  // so we don't need to wait for env before kicking off pd.
+  // Fetch env values, application defaults, and plex_debrid values in
+  // parallel — they're independent, so we don't need to serialize them.
+  // Defaults are fetched alongside current values so the "modified from
+  // default" chips are available on the first render without a second
+  // round-trip.
   const envFetch = fetch('/api/settings/env')
     .then(async resp => {
       if (resp.ok) envValues = await resp.json();
       else showBanner('error', 'Failed to load Zurgarr settings (HTTP ' + resp.status + '). Check authentication.');
     })
     .catch(e => showBanner('error', 'Failed to load Zurgarr settings: ' + esc(e.message)));
+
+  // POST /api/settings/reset/env is a pure read despite the name — it
+  // returns the defaults map without mutating anything (same call the
+  // reset flow uses before applying client-side).
+  const defaultsFetch = fetch('/api/settings/reset/env', {method: 'POST'})
+    .then(async resp => {
+      if (resp.ok) {
+        const body = await resp.json();
+        if (body && typeof body === 'object' && !Array.isArray(body)) envDefaults = body;
+      }
+      // Silently ignore failures — chips just won't appear, which is safe
+    })
+    .catch(() => {});
 
   const pdFetch = fetch('/api/settings/plex-debrid')
     .then(async resp => {
@@ -2171,7 +2323,7 @@ async function init() {
     })
     .catch(e => showBanner('error', 'Failed to load plex_debrid settings: ' + esc(e.message)));
 
-  await Promise.all([envFetch, pdFetch]);
+  await Promise.all([envFetch, defaultsFetch, pdFetch]);
   renderEnvCategories(envValues);
   renderPdCategories(pdValues);
 }

@@ -5,6 +5,7 @@ unified item list, cross-referencing by title to detect content present
 in both sources.
 """
 
+import copy
 import os
 import re
 import shutil
@@ -30,6 +31,14 @@ except ImportError:
 
 MEDIA_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m4v', '.webm'}
 
+# Wanted-recovery terminal give-up: after this many recovery passes where a
+# title's top release is confirmed RD-filter-blocked AND TorBox-uncached in
+# the SAME pass, stop probing it entirely (persisted in the attempt ledger as
+# ``wantedblock:<imdb>``).  Without this a title doomed on both providers is
+# re-probed on the 7-day RD-miss timer forever.  Read by the /api/stuck
+# collector too, so it stays a single source of truth.
+WANTED_FILTER_GIVEUP_STRIKES = 3
+
 
 def gap_fill_enabled():
     """Return ``True`` when the unconditional episode-completeness reconcile is
@@ -39,6 +48,108 @@ def gap_fill_enabled():
     """
     return os.environ.get('GAP_FILL_ENABLED', 'true').strip().lower() == 'true'
 
+
+def wanted_tb_recovery_enabled():
+    """Return ``True`` when the Wanted→TorBox recovery pass is enabled.
+
+    Default ``true`` — opt-out.  This pass proactively grabs cached TorBox
+    copies of "Wanted" library ghosts (monitored, no file) that the arr's
+    own indexer search never managed to grab.  The arr searches its
+    Prowlarr/Torznab pool, a different population than the Torrentio feed
+    zurgarr queries directly, so cached content can sit in Wanted forever.
+    """
+    return os.environ.get('WANTED_TB_RECOVERY_ENABLED', 'true').strip().lower() == 'true'
+
+
+def wanted_tb_recovery_max_per_scan():
+    """Per-scan cap on Wanted→TorBox recovery adds.  Default 2.
+
+    Bounds TorBox create-API usage (60/hr limit) — but the binding
+    constraint in practice is TB Essential's abuse system, which arms a
+    ~24h account cooldown on create-volume *bursts* (observed live: a
+    5-creates-in-one-minute burst armed it minutes later, capping
+    throughput at ~5/day).  A trickle of 2 per scan (~11 min apart) works
+    the same backlog at up to ~250/day without presenting as a burst.
+    Non-integer/<=0 values fall back to the default rather than disabling
+    the pass silently.
+    """
+    raw = os.environ.get('WANTED_TB_RECOVERY_MAX_PER_SCAN', '2')
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return 2
+    return n if n > 0 else 2
+
+
+def wanted_rd_recovery_enabled():
+    """Return ``True`` when the RD leg of Wanted recovery is enabled.
+
+    Default ``true`` — opt-out.  RD's cache-query endpoint is dead
+    (deprecated Nov 2024), so the RD leg probes by adding: magnet add →
+    instantly ready means cached (keep it), anything else means uncached
+    (delete the probe add and fall back to the TorBox trickle).  RD has
+    no create-volume cooldown, so whenever RD has the content cached this
+    leg drains the Wanted backlog far faster than the TB trickle.
+    """
+    return os.environ.get('WANTED_RD_RECOVERY_ENABLED', 'true').strip().lower() == 'true'
+
+
+def wanted_rd_recovery_max_per_scan():
+    """Per-scan cap on RD probe-adds.  Default 4.
+
+    Counts ATTEMPTS (adds), not successes — the add itself is the
+    expensive unit here (addMagnet + selectFiles + status polls + a
+    delete on miss).  RD has no create-volume abuse cooldown, so this
+    can safely sit higher than the TorBox trickle cap; the binding
+    constraint is the pass's own time budget (each uncached attempt
+    burns up to ``_WANTED_RD_READY_TIMEOUT`` seconds of polling).
+    Non-integer/<=0 values fall back to the default rather than
+    disabling the leg silently.
+    """
+    raw = os.environ.get('WANTED_RD_RECOVERY_MAX_PER_SCAN', '4')
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return 4
+    return n if n > 0 else 4
+
+
+def wanted_season_recovery_enabled():
+    """Return ``True`` when Wanted recovery may also probe season packs for
+    partially-present shows (not just fully-absent ghosts).
+
+    Default ``true`` — opt-out.  Rides the TB leg only (shares its budget
+    and requires ``WANTED_TB_RECOVERY_ENABLED``); a single cached
+    season-pack add fills every gap in that season via the symlink phase,
+    which is how scattered per-episode holes the arr's indexers never
+    close actually drain.
+    """
+    return os.environ.get('WANTED_SEASON_RECOVERY_ENABLED', 'true').strip().lower() == 'true'
+
+
+# Plan 41 phase B.2 — NFS attribute-cache delay between symlink creation
+# and arr rescan trigger.  See ``_create_debrid_symlinks`` for the
+# narrative.  Lifted to a module-level helper so it can be unit-tested
+# in isolation without exercising the entire scanner pipeline.
+_NFS_RESCAN_DELAY_MAX = 300
+
+
+def _resolve_nfs_rescan_delay():
+    """Return the configured rescan delay in seconds, clamped to ``[0, 300]``.
+
+    Empty/unset env yields 0.  Non-integer values yield 0 (best-effort —
+    a typo shouldn't crash the scanner; it just disables the mitigation).
+    Values >300 are clamped — a 5-minute ceiling caps user mistakes
+    without ever blocking the scan loop indefinitely.  Negative values
+    are clamped to 0.
+    """
+    raw = os.environ.get('LIBRARY_RESCAN_NFS_DELAY', '0') or '0'
+    try:
+        delay = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(delay, _NFS_RESCAN_DELAY_MAX))
+
 # Folders to skip during library scans (non-media content)
 _SKIP_FOLDERS = {
     'plex versions', 'subs', 'subtitles', 'featurettes',
@@ -47,6 +158,54 @@ _SKIP_FOLDERS = {
     '.actors', 'bonus', 'bonuses',
     '.recycle', '@eadir', '@recently-snapshot',
 }
+
+
+def _all_debrid_symlink_prefixes():
+    """Return all configured per-debrid symlink-target prefixes (each with
+    trailing ``os.sep`` so ``startswith`` matches whole path components only).
+
+    Plan 39 introduced per-debrid target bases — TorBox content lives under
+    ``BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX`` (or auto-derived ``<RD>_torbox``).
+    Local scanners that only checked the RD base would silently misclassify
+    TB-routed folders as local content, dropping them into the wrong
+    movies/shows bucket and rendering show episodes in the movies UI.
+
+    Iterates ``VALID_DEBRIDS`` rather than hard-coding TB so future providers
+    (AD's pending per-base env var, Premiumize) auto-extend without touching
+    this helper.  Paths are normalised via ``os.path.normpath`` so
+    consecutive separators (``/mnt//debrid``) and relative configs collapse
+    to canonical form before the prefix is built.  Empty bases are dropped;
+    the result is deduped and order-preserved.
+    """
+    bases = []
+    rd = (os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE') or '').strip()
+    if rd:
+        bases.append(rd)
+    try:
+        from utils.debrid_routing import VALID_DEBRIDS, symlink_target_base_for_debrid
+        for svc in VALID_DEBRIDS:
+            try:
+                b = (symlink_target_base_for_debrid(svc) or '').strip()
+            except Exception as e:
+                logger.debug("[library] symlink_target_base_for_debrid(%r) failed: %s", svc, e)
+                continue
+            if b:
+                bases.append(b)
+    except ImportError as e:
+        # debrid_routing import shouldn't fail in production but log it so
+        # a misconfigured install leaves a trace instead of silently
+        # degrading to RD-only behaviour (re-introducing the very bug
+        # this helper exists to prevent).
+        logger.debug("[library] debrid_routing import failed: %s", e)
+    seen = set()
+    result = []
+    for b in bases:
+        # normpath collapses consecutive seps + resolves relative segments
+        prefix = os.path.normpath(b).rstrip(os.sep) + os.sep
+        if prefix not in seen:
+            seen.add(prefix)
+            result.append(prefix)
+    return tuple(result)
 
 # Quality and codec markers stripped when parsing folder names
 _QUALITY_PATTERN = re.compile(
@@ -291,7 +450,267 @@ def _parse_folder_name(name):
 
 _EPISODE_PATTERN = re.compile(r'S\d{1,2}E\d{1,2}', re.IGNORECASE)
 _EPISODE_ID_PATTERN = re.compile(r'S(\d{1,2})E(\d{1,2})', re.IGNORECASE)
-_SEASON_DIR_PATTERN = re.compile(r'^Season\s+(\d+)$', re.IGNORECASE)
+# Season-dir recognition — three live pack dialects (all observed on the
+# TB mount as owned-but-invisible content):
+#   1. "Season 1", "Season 1 (BluRay)", "Season 3 [1080p x265]" — the word
+#      form, optionally bracket-qualified (The Americans mega-pack).
+#   2. "S01" — bare form (Broadchurch, Barry, Bad.Sisters packs).
+#   3. "S01 Bluray", "S04 WEB-DL" — bare form with an UNBRACKETED
+#      qualifier, accepted only when the qualifier starts with a known
+#      source/quality keyword (Arrested Development pack).  Arbitrary bare
+#      words ("Season 1 Extras", "S01 Bloopers") stay rejected.
+#
+# The prefix alternation keeps the season number in group(1) for every
+# consumer.  Digits capped at 4 so year-based seasons ("Season 2023")
+# survive while ``S99999`` shrapnel doesn't.  The end anchor rejects
+# ``S01E01`` (episode tag), ``S01-S03`` (range), and ``S01.COMPLETE``
+# (release-name shrapnel): after the digits only end-of-string, a bracket,
+# or whitespace+allowlisted-keyword may follow.
+#
+# IMPORTANT: never call this pattern directly — use ``_match_season_dir``
+# below, which applies the junk-tail denylist.  A raw match here says
+# nothing about phantom-episode safety.
+_SEASON_DIR_PATTERN = re.compile(
+    r'^(?:Season\s+|S)(\d{1,4})'
+    r'(?:'
+    r'\s*[([].*'
+    r'|\s+(?:blu-?ray|b[dr]-?rip|web-?(?:dl|rip)?|hdtv|dvd(?:rip)?|remux'
+    r'|complete|proper|repack|uhd|4k|hdr10?(?:\+)?|dv|sdr'
+    r'|amzn|dsnp|nf|hulu|hmax|max|atvp|pcok|itunes'
+    r'|\d{3,4}p|[hx]\.?26[45]|hevc|avc|av1|xvid)\b.*'
+    r')?$',
+    re.IGNORECASE,
+)
+
+# Junk vocabulary (mirrors _SKIP_FOLDERS) searched over the WHOLE qualifier
+# tail, not just its first token — "Season 1 (BluRay Extras)" and
+# "S01 Bluray Extras" are junk dirs even though they lead with a legit
+# source tag.  Files inside a matched season dir that lack an SxxEyy tag
+# get synthetic sequential episode keys, so a false-positive season dir
+# injects phantom episodes into season_data (Plex-visible junk); this
+# denylist is the guard.
+_SEASON_DIR_JUNK_TAIL = re.compile(
+    r'\b(?:extras?|featurettes?|bonus(?:es)?|specials?|samples?'
+    r'|subs?|subtitles?|trailers?|interviews?|scenes?|bloopers?'
+    r'|making[\s.-]of|plex[\s.-]versions?)\b',
+    re.IGNORECASE,
+)
+
+
+def _match_season_dir(name):
+    """Match *name* as a season directory.
+
+    Returns the ``re.Match`` (season number in ``group(1)``) or ``None``.
+    The single gate for all season-dir decisions: shape via
+    ``_SEASON_DIR_PATTERN``, then the junk-tail denylist over everything
+    after the season number.
+    """
+    m = _SEASON_DIR_PATTERN.match(name)
+    if not m:
+        return None
+    if _SEASON_DIR_JUNK_TAIL.search(name[m.end(1):]):
+        return None
+    return m
+
+# Plan 41 phase B.1 — TV markers beyond ``SxxExx``.  Without these,
+# season packs (``S22.COMPLETE``), multi-season packs (``S01-S04``),
+# and ``Season 3`` folders that don't carry per-episode markers in the
+# folder name AND lack ``SxxExx``-tagged media inside (TB partial caches,
+# delete-after-watch torrents) get bucketed as movies — Radarr then
+# fields wasted lookups + gap-fill searches that loop indefinitely.
+#
+# Order matters: multi-season range FIRST (otherwise ``S01-S04`` would
+# match the single-season form ``S01`` and over-report a single season).
+# Each pattern has a negative lookahead/lookaround so ``SxxExx`` isn't
+# double-counted by the season-only matcher (the ``SxxExx`` form is
+# already handled by ``_EPISODE_PATTERN`` via ``_collect_episodes``).
+_MULTI_SEASON_RANGE_PATTERN = re.compile(
+    r'\bS(\d{1,2})\s*[-–]\s*S?(\d{1,2})\b', re.IGNORECASE,
+)
+_SEASON_ONLY_PATTERN = re.compile(
+    r'\bS(\d{1,2})(?![Ee\d])', re.IGNORECASE,
+)
+_SEASON_WORD_PATTERN = re.compile(
+    r'\bSeasons?\.?\s*(\d{1,2})\b', re.IGNORECASE,
+)
+
+
+def _merge_show_group(show_groups, key, title, year, episodes, path):
+    """Merge a newly-discovered folder's data into the running show-group dict.
+
+    Single source of truth used by BOTH ``_scan_mount`` (FUSE-mount
+    branch) and ``_webdav_scan_mount`` (WebDAV PROPFIND branch).  Plan
+    41 phase B second-pass reviewer fix-up — the two scan paths
+    previously carried structurally-identical merge code that drifted
+    out of lockstep when the path-swap heuristic was added: the
+    fix landed in the FUSE branch but missed the WebDAV branch (the
+    HOT path, since PROPFIND runs before FUSE fallback).  Lifting
+    the merge into a helper means a future change to merge semantics
+    updates both scan paths atomically.
+
+    Semantics:
+      - If ``key`` is not in ``show_groups``, insert a fresh entry.
+      - Otherwise, union the incoming ``episodes`` dict into the
+        stored one, preferring per-season higher ``_folder_ep_count``
+        on key collisions (season-pack > individual-episode grabs).
+      - Swap ``path`` to the new folder when its episode count
+        (``len(episodes)``) is strictly greater than the stored
+        folder's BEFORE-merge count.  Empty marker (len 0) loses to
+        any populated folder; equal counts keep the first-seen path
+        for stability.
+      - Prefer the title carrying a year over a no-year title.  On
+        no-year tie, prefer title-cased over lower-cased capitalisation.
+
+    Mutates ``show_groups`` in place.  Returns nothing.
+    """
+    if key not in show_groups:
+        show_groups[key] = {
+            'title': title,
+            'year': year,
+            'episodes': dict(episodes),
+            'path': path,
+        }
+        return
+
+    existing = show_groups[key]['episodes']
+    existing_count_before = len(existing)
+    for ep_key, ep_info in episodes.items():
+        if ep_key not in existing:
+            existing[ep_key] = ep_info
+        elif ep_info.get('_folder_ep_count', 1) > existing[ep_key].get('_folder_ep_count', 1):
+            existing[ep_key] = ep_info
+    if len(episodes) > existing_count_before:
+        show_groups[key]['path'] = path
+    if year and not show_groups[key]['year']:
+        show_groups[key]['year'] = year
+        show_groups[key]['title'] = title
+    elif title[0:1].isupper() and not show_groups[key]['title'][0:1].isupper():
+        show_groups[key]['title'] = title
+
+
+def _show_collision_bases():
+    """Bare show norms with 2+ distinct-TMDB same-title siblings.
+
+    Fail-open: an empty set on any error restores the pre-fix bare-key
+    grouping, matching the fail-open stance of the season-merge veto.
+    """
+    try:
+        from utils.tmdb import get_yearless_collision_bases
+        return get_yearless_collision_bases().get('shows', set())
+    except Exception as e:
+        logger.debug("[library] collision-base load failed: %s", e)
+        return set()
+
+
+def _show_group_key(title, year, collision_bases, episodes):
+    """Return ``(group_key, year)`` for a scanned show folder.
+
+    Non-collision titles keep the plain normalized key (the common case —
+    zero behavior change).  Reboot-family titles get a year-qualified key
+    (``icarly (2007)``) so the siblings never merge into one item.  A
+    yearless release in a collision family is attributed by episode shape
+    (the unique sibling whose cached episode list covers the release);
+    when that fails it stays on the ambiguous bare key — downstream treats
+    bare-key collision items as identity-unknown and excludes them from
+    symlink creation rather than linking content into the wrong show.
+    """
+    norm = _normalize_title(title)
+    if norm not in collision_bases:
+        return norm, year
+    if not year:
+        try:
+            from utils.tmdb import resolve_show_year_by_episodes
+            year = resolve_show_year_by_episodes(norm, episodes.keys())
+        except Exception as e:
+            logger.debug("[library] episode-shape year resolve failed for %r: %s", norm, e)
+            year = None
+        if year:
+            logger.debug(
+                "[library] reboot family %r: yearless release attributed to "
+                "(%s) by episode shape", norm, year)
+    if year:
+        return f"{norm} ({year})", year
+    return norm, None
+
+
+def _stamp_reboot_identity(item, key, collision_bases):
+    """Mark a built show item with its reboot-family identity.
+
+    ``_norm_key`` (year-qualified) when the group key was disambiguated;
+    ``_ambiguous_reboot`` when the title is a collision base but the item
+    couldn't be attributed to a sibling — symlink creation skips those.
+    """
+    if key != _normalize_title(item.get('title') or ''):
+        item['_norm_key'] = key
+    elif key in collision_bases:
+        item['_ambiguous_reboot'] = True
+
+
+def _detect_tv_marker(folder_name):
+    """Return ``True`` when *folder_name* carries any TV-content marker.
+
+    Recognises:
+      - ``SxxExx`` per-episode tags (the canonical case).
+      - ``Sxx`` season-only tags (``S22.COMPLETE``, ``S03.1080p``).
+      - ``Sxx-Syy`` or ``Sxx-yy`` multi-season ranges (``S01-S04``).
+      - ``Season N`` / ``Seasons N`` word form (``Season.3.``,
+        ``Seasons 1``).
+
+    Used as a secondary classification gate in ``_scan_mount`` when
+    ``_collect_episodes`` returned empty — common on TB's flat layout
+    when the pack folder names a season range but the files inside are
+    still being cached, or when an indexer sanitises file names to drop
+    the per-episode marker.  Pre-fix these folders bucketed as movies
+    and produced cascading wasted Radarr API calls.
+    """
+    if not folder_name:
+        return False
+    if _EPISODE_PATTERN.search(folder_name):
+        return True
+    if _MULTI_SEASON_RANGE_PATTERN.search(folder_name):
+        return True
+    if _SEASON_ONLY_PATTERN.search(folder_name):
+        return True
+    if _SEASON_WORD_PATTERN.search(folder_name):
+        return True
+    return False
+
+
+def _release_covers_season(release_name, season, episode):
+    """Classify *release_name* against a (season, episode) recovery target.
+
+    Returns ``'pack'`` when the name marks a season pack covering *season*
+    (``S03``, ``S01-S04``, ``Season 3``, ``S22.COMPLETE``), ``'episode'``
+    when it carries an exact ``SxxEyy`` tag for the target episode, and
+    ``None`` for everything else — a different episode, a pack for another
+    season, or a name with no TV marker at all (Torrentio series result
+    lists are imdb-keyed and polluted with mislabeled uploads).
+
+    The ``SxxEyy`` check runs FIRST: an episode tag also matches the
+    season-only pattern's number, so without the early return a
+    wrong-episode release (``S03E09`` when we want ``S03E02``) would
+    misclassify as a season-3 pack.
+    """
+    if not release_name:
+        return None
+    m = _EPISODE_ID_PATTERN.search(release_name)
+    if m:
+        if int(m.group(1)) == season and int(m.group(2)) == episode:
+            return 'episode'
+        return None
+    m = _MULTI_SEASON_RANGE_PATTERN.search(release_name)
+    if m:
+        lo, hi = int(m.group(1)), int(m.group(2))
+        if lo > hi:
+            lo, hi = hi, lo
+        return 'pack' if lo <= season <= hi else None
+    m = _SEASON_ONLY_PATTERN.search(release_name)
+    if m:
+        return 'pack' if int(m.group(1)) == season else None
+    m = _SEASON_WORD_PATTERN.search(release_name)
+    if m:
+        return 'pack' if int(m.group(1)) == season else None
+    return None
 
 
 def _get_folder_mtime(path):
@@ -300,6 +719,25 @@ def _get_folder_mtime(path):
         return int(os.path.getmtime(path))
     except OSError as e:
         logger.debug(f"[library] Cannot stat {path}: {e}")
+        return 0
+
+
+def _parse_tb_timestamp(value):
+    """Parse a TorBox ``created_at`` string to a Unix timestamp, or 0.
+
+    TorBox returns ISO-8601 (``2024-01-15T12:34:56.000Z`` or with a
+    ``+00:00`` offset).  Used to populate ``date_added`` for API-scanned
+    TB items — better than the old FUSE-walk folder mtime, since it's the
+    real torrent-add time rather than whenever rclone materialised the dir.
+    """
+    if not isinstance(value, str) or not value:
+        return 0
+    v = value.strip()
+    if v.endswith('Z'):
+        v = v[:-1] + '+00:00'
+    try:
+        return int(datetime.fromisoformat(v).timestamp())
+    except (ValueError, TypeError):
         return 0
 
 
@@ -316,7 +754,7 @@ def _collect_episodes(folder_path):
         with os.scandir(folder_path) as it:
             for entry in it:
                 if entry.is_dir(follow_symlinks=False):
-                    season_match = _SEASON_DIR_PATTERN.match(entry.name)
+                    season_match = _match_season_dir(entry.name)
                     if not season_match:
                         continue
                     season_num = int(season_match.group(1))
@@ -355,6 +793,103 @@ def _collect_episodes(folder_path):
     except (PermissionError, OSError, FileNotFoundError):
         pass
     return episodes
+
+
+def _find_largest_movie_video(mount_dir):
+    """Return ``(relpath, size)`` of the largest video file in a movie folder.
+
+    Searches the top level first and only descends one level of
+    subdirectories when the top level holds no video — some torrents nest
+    the feature inside a release-named subfolder. The descent skips
+    ``_SKIP_FOLDERS`` (sample/extras/featurettes/subs/...), the same set
+    scan-time detection skips, so a featurette isn't picked as the feature.
+    This mirrors the one-level depth scan-time movie detection uses, so a
+    movie that was *detected* as on-debrid can also be *symlinked*.
+
+    ``relpath`` is relative to *mount_dir* (may contain a subdir component).
+    Returns ``(None, -1)`` when no video is found.
+    """
+    try:
+        with os.scandir(mount_dir) as it:
+            entries = list(it)
+    except OSError:
+        return None, -1
+    best_rel = None
+    best_size = -1
+    for entry in entries:
+        if os.path.splitext(entry.name)[1].lower() not in MEDIA_EXTENSIONS:
+            continue
+        try:
+            if not entry.is_file(follow_symlinks=True):
+                continue
+            sz = entry.stat().st_size
+        except OSError:
+            sz = 0
+        if sz > best_size:
+            best_size = sz
+            best_rel = entry.name
+    if best_rel is not None:
+        return best_rel, best_size
+    # No top-level video — descend one level (nested-folder torrents).
+    # Skip extras/sample/subtitle subdirs (same set scan-time detection
+    # skips) so a featurette or sample isn't mistaken for the feature.
+    for entry in entries:
+        if entry.name.lower() in _SKIP_FOLDERS:
+            continue
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+        except OSError:
+            continue
+        try:
+            with os.scandir(entry.path) as sub:
+                for f in sub:
+                    if os.path.splitext(f.name)[1].lower() not in MEDIA_EXTENSIONS:
+                        continue
+                    try:
+                        if not f.is_file(follow_symlinks=True):
+                            continue
+                        sz = f.stat().st_size
+                    except OSError:
+                        sz = 0
+                    if sz > best_size:
+                        best_size = sz
+                        best_rel = os.path.join(entry.name, f.name)
+        except OSError:
+            continue
+    return best_rel, best_size
+
+
+def _mount_has_content(mount_real, flat=False):
+    """Return True iff *mount_real* looks like a live, populated debrid mount.
+
+    A missing or stalled/throttled FUSE mount makes ``os.path.exists`` return
+    False for every path under it — which the symlink-cleanup pass would read
+    as "all targets gone" and mass-delete valid symlinks.  This guard biases
+    toward safety: when a mount can't be confirmed populated, callers must
+    skip deletion for symlinks routed to it.
+
+    The RD/Zurg mount is categorized (``movies/``, ``shows/``, ``anime/``);
+    Zurg category stubs can persist when all content is gone, so "healthy"
+    means at least one category dir is non-empty.  The TorBox mount is flat
+    (no category dirs), so a non-empty top-level listing is the strongest
+    signal available — pass ``flat=True`` for it.
+    """
+    try:
+        if not os.path.isdir(mount_real) or not os.listdir(mount_real):
+            return False
+        if flat:
+            return True
+        # Single source of truth for the category set, shared with the
+        # verify_symlinks guard and the blackhole scanner.
+        from utils.blackhole import MOUNT_CATEGORIES
+        return any(
+            os.path.isdir(os.path.join(mount_real, c))
+            and os.listdir(os.path.join(mount_real, c))
+            for c in MOUNT_CATEGORIES
+        )
+    except OSError:
+        return False
 
 
 def _build_season_data(episodes_dict, default_source='debrid'):
@@ -453,16 +988,18 @@ def _get_movie_quality_from_webdav(contents):
 
 
 def _count_show_content(show_path):
-    seasons = 0
+    seen_seasons = set()
     episodes = 0
     flat_episodes = 0
-    season_re = re.compile(r'^Season\s+\d+$', re.IGNORECASE)
     try:
         with os.scandir(show_path) as it:
             for entry in it:
                 if entry.is_dir(follow_symlinks=False):
-                    if season_re.match(entry.name):
-                        seasons += 1
+                    season_match = _match_season_dir(entry.name)
+                    if season_match:
+                        # Dedupe by season number — "Season 01" and a
+                        # legacy "S01 Bluray" sibling are one season.
+                        seen_seasons.add(int(season_match.group(1)))
                         try:
                             with os.scandir(entry.path) as season_it:
                                 for file_entry in season_it:
@@ -480,6 +1017,7 @@ def _count_show_content(show_path):
     except (PermissionError, OSError, FileNotFoundError):
         pass
 
+    seasons = len(seen_seasons)
     # If no Season subdirs but flat episode files exist, report as 1 season
     if seasons == 0 and flat_episodes > 0:
         seasons = 1
@@ -804,7 +1342,42 @@ def _get_sonarr_series_list(client, force_refresh=False):
     return series_list
 
 
-def _apply_sonarr_monitored_filter(shows):
+def _sonarr_monitored_missing(series):
+    """Monitored-aware missing-episode math for a single Sonarr series.
+
+    Returns ``(missing, monitored_total, unmonitored_seasons)`` summed from
+    the series' per-season ``statistics`` — aired monitored ``episodeCount``
+    minus ``episodeFileCount`` — skipping specials (season 0) and seasons
+    the user has unmonitored.  Shared by ``_apply_sonarr_monitored_filter``
+    (rebasing real library shows) and ``_apply_sonarr_wanted_shows``
+    (injecting fully-absent monitored series) so both agree on the same
+    arithmetic.
+
+    Note ``episodeFileCount`` counts files across ALL episodes in a season
+    regardless of per-episode monitored flag, so in a mixed season it can
+    exceed the monitored ``episodeCount``; the ``max(0, …)`` clamp keeps
+    that from going negative (at the cost of hiding genuine gaps in such
+    seasons — accepted, see the original call-site note).
+    """
+    missing = 0
+    monitored_total = 0
+    unmonitored_nums = []
+    for sd in series.get('seasons') or []:
+        snum = sd.get('seasonNumber')
+        if snum is None or snum <= 0:
+            continue  # skip specials
+        if not sd.get('monitored'):
+            unmonitored_nums.append(snum)
+            continue
+        stats = sd.get('statistics') or {}
+        ep_count = stats.get('episodeCount', 0) or 0
+        ep_file = stats.get('episodeFileCount', 0) or 0
+        monitored_total += ep_count
+        missing += max(0, ep_count - ep_file)
+    return missing, monitored_total, sorted(unmonitored_nums)
+
+
+def _apply_sonarr_monitored_filter(shows, degraded=None):
     """Rebase show missing-episode counts against Sonarr's monitored view.
 
     The TMDB-only math in ``_enrich_with_tmdb_cache`` counts every aired
@@ -836,20 +1409,35 @@ def _apply_sonarr_monitored_filter(shows):
     Shows without a Sonarr match (or when Sonarr is unreachable) keep
     the TMDB-only calculation — it's conservative but preserves the
     existing behavior for hand-imported libraries.
+
+    Returns the set of Sonarr series ids that matched a real library show,
+    so ``_apply_sonarr_wanted_shows`` can inject ghosts only for the
+    monitored series that remain unmatched (no double-counting).  Returns
+    an empty set on every early exit.
+
+    ``degraded`` is an optional mutable set: when a *configured* Sonarr's
+    series-list fetch fails (returns ``None`` — network/DNS error, not an
+    empty library), ``'sonarr_series'`` is added so the scan payload can
+    flag that wanted counts fell back to the inflated TMDB-only math.
     """
+    matched_ids = set()
     if not shows:
-        return
+        return matched_ids
     try:
         from utils.arr_client import get_download_service
         client, svc = get_download_service('show')
     except Exception as e:
         logger.debug(f"[library] Sonarr unavailable for monitored filter: {e}")
-        return
+        return matched_ids
     if not client or svc != 'sonarr':
-        return
+        return matched_ids
     series_list = _get_sonarr_series_list(client)
+    if series_list is None:
+        if degraded is not None:
+            degraded.add('sonarr_series')
+        return matched_ids
     if not series_list:
-        return
+        return matched_ids
 
     by_tmdb = {}
     by_norm = {}
@@ -938,35 +1526,13 @@ def _apply_sonarr_monitored_filter(shows):
         if not series:
             continue
 
-        seasons = series.get('seasons') or []
-        missing = 0
-        monitored_total = 0
-        unmonitored_nums = []
-        for sd in seasons:
-            snum = sd.get('seasonNumber')
-            if snum is None or snum <= 0:
-                continue  # skip specials
-            if not sd.get('monitored'):
-                unmonitored_nums.append(snum)
-                continue
-            stats = sd.get('statistics') or {}
-            ep_count = stats.get('episodeCount', 0) or 0
-            ep_file = stats.get('episodeFileCount', 0) or 0
-            monitored_total += ep_count
-            # Sonarr's `episodeFileCount` counts files across ALL episodes
-            # in the season regardless of per-episode monitored flag.  In
-            # a mixed season (monitored as a whole, with a few unmonitored
-            # individual episodes that still have files — common after
-            # unmonitoring a pilot you already watched) `ep_file` can
-            # exceed `ep_count`, so the clamp hides genuine monitored
-            # gaps.  Teasing that apart would require a per-series
-            # /episode call (one HTTP round-trip per show), which we
-            # decline for the cost.  Accept that the bar and pill agree
-            # with each other and with Sonarr's own series-stats widget.
-            missing += max(0, ep_count - ep_file)
+        sid = series.get('id')
+        if sid is not None:
+            matched_ids.add(sid)
 
+        missing, monitored_total, unmonitored_nums = _sonarr_monitored_missing(series)
         show['missing_episodes'] = missing
-        show['unmonitored_seasons'] = sorted(unmonitored_nums)
+        show['unmonitored_seasons'] = unmonitored_nums
         # ``monitored_episodes`` is the denominator the UI needs for a
         # progress bar that agrees with the "X missing" pill — otherwise
         # the bar stays red at a low TMDB-based ratio while the pill
@@ -976,6 +1542,352 @@ def _apply_sonarr_monitored_filter(shows):
         # to the TMDB total and doesn't draw a divide-by-zero bar.
         if monitored_total > 0:
             show['monitored_episodes'] = monitored_total
+
+    return matched_ids
+
+
+def _apply_sonarr_wanted_shows(shows, matched_ids, pending=None, degraded=None):
+    """Inject Sonarr-monitored series with no on-disk episodes as "ghost"
+    show entries so fully-absent wanted TV surfaces in the Wanted view and
+    is counted by the recovery metric.
+
+    This is the TV mirror of ``_apply_radarr_wanted_movies``.  The library
+    scanner reads episodes from disk, so a monitored series you haven't
+    downloaded *any* episode of is invisible to the rest of the pipeline —
+    and, crucially, to the recovery denominator, which sums per-show
+    ``missing_episodes``.  A show that's partially on disk already carries
+    a Sonarr-aware ``missing_episodes`` (set by
+    ``_apply_sonarr_monitored_filter``); this adds the missing half for
+    series with zero matched episodes.
+
+    ``matched_ids`` is the set of Sonarr series ids that already matched a
+    real library show (the return value of the monitored filter); those
+    are skipped so we never duplicate a card or double-count episodes.
+    That shortcut alone is not sufficient: a partially-on-disk show whose
+    title-match cascade the filter *missed* never lands in ``matched_ids``,
+    so without a second guard its real entry (carrying a TMDB-based
+    ``missing_episodes``) AND a Sonarr-based ghost would both count toward
+    the recovery denominator — a double-count.  So we also dedup against
+    the on-disk ``shows`` list by ``tmdb_id``, ``imdb_id``, and the
+    ``(norm_title, year)`` pair, mirroring ``_apply_radarr_wanted_movies``.
+    The later ``_dedup_shows_by_external_id`` pass can't be relied on here
+    because it keys on ``imdb_id`` only, which TVDB-only series and cache
+    misses frequently lack.
+
+    Runs AFTER enrichment, so each ghost's ``missing_episodes`` comes from
+    Sonarr's monitored season statistics (aired-monitored only — unaired
+    episodes are excluded) rather than TMDB-total math.  A series is
+    injected only when that count is > 0, so series Sonarr already
+    considers satisfied never appear.
+
+    Ghost entry shape mirrors the movie ghost: ``source='wanted'`` (outside
+    the ``('local','debrid','both')`` set every effect path checks), empty
+    ``_episodes`` / ``season_data`` so symlink, search, preference, and
+    path-index loops naturally no-op.  ``imdb_id`` is carried from Sonarr
+    so a later ``_dedup_shows_by_external_id`` pass collapses any ghost that
+    collides with a real show whose title-match the filter happened to miss.
+
+    Pending suppression mirrors the movie path: a series currently being
+    downloaded is already represented by the pending bucket, so its ghost
+    is skipped to avoid double-counting.
+
+    Returns the count of ghost entries injected (for caller logging).
+
+    ``degraded`` mirrors ``_apply_sonarr_monitored_filter``: a failed
+    series-list fetch from a configured Sonarr adds ``'sonarr_series'``
+    (here the failure *deflates* wanted — ghosts never get injected).
+    """
+    pending = pending or {}
+    matched_ids = matched_ids or set()
+    try:
+        from utils.arr_client import get_download_service
+        client, svc = get_download_service('show')
+    except Exception as e:
+        logger.debug(f"[library] Sonarr unavailable for wanted-shows: {e}")
+        return 0
+    if not client or svc != 'sonarr':
+        return 0
+
+    series_list = _get_sonarr_series_list(client)
+    if series_list is None:
+        if degraded is not None:
+            degraded.add('sonarr_series')
+        return 0
+    if not series_list:
+        return 0
+
+    # Build dedup keys from the real on-disk shows. matched_ids only
+    # captures title-cascade hits; these sets catch a real show the
+    # cascade missed so we never inject a ghost beside it (double-count).
+    existing_tmdb_ids = set()
+    existing_imdb_ids = set()
+    existing_keys = set()
+    for sh in shows:
+        if sh.get('source') == 'wanted':
+            continue
+        tid = sh.get('tmdb_id')
+        if tid:
+            existing_tmdb_ids.add(tid)
+        iid = sh.get('imdb_id')
+        if iid:
+            existing_imdb_ids.add(iid)
+        norm = _normalize_title(sh.get('title') or '')
+        if norm:
+            existing_keys.add((norm, sh.get('year')))
+
+    injected = 0
+    for s in series_list:
+        if not isinstance(s, dict):
+            continue
+        if not s.get('monitored'):
+            continue
+        sid = s.get('id')
+        if sid is not None and sid in matched_ids:
+            continue
+        title = s.get('title') or ''
+        if not title:
+            continue
+
+        year = s.get('year')
+        tmdb_id = s.get('tmdbId')
+        imdb_id = s.get('imdbId')
+        norm = _normalize_title(title)
+        if tmdb_id and tmdb_id in existing_tmdb_ids:
+            continue
+        if imdb_id and imdb_id in existing_imdb_ids:
+            continue
+        if (norm, year) in existing_keys:
+            continue
+
+        missing, monitored_total, unmonitored_nums = _sonarr_monitored_missing(s)
+        if missing <= 0:
+            continue
+
+        # Pending suppression: a title (or any alias) currently downloading
+        # is already counted under the pending bucket; skip its ghost.
+        if pending:
+            pe = pending.get(norm)
+            if not pe and _scanner is not None:
+                for alias in _scanner.aliases_for(norm):
+                    pe = pending.get(alias)
+                    if pe:
+                        break
+            if pe:
+                continue
+
+        ghost = {
+            'title': title,
+            'year': year,
+            'type': 'show',
+            'source': 'wanted',
+            'size_bytes': 0,
+            'path': '',
+            'missing': True,
+            'missing_episodes': missing,
+            'unmonitored_seasons': unmonitored_nums,
+            # Empty so downstream effect loops (symlinks, searches, prefs,
+            # path-index) iterate zero episodes and naturally no-op.
+            'season_data': [],
+            '_episodes': {},
+            '_sonarr_id': sid,
+            '_sonarr_tmdb_id': tmdb_id,
+        }
+        if monitored_total > 0:
+            ghost['monitored_episodes'] = monitored_total
+        if imdb_id:
+            ghost['imdb_id'] = imdb_id
+        if tmdb_id:
+            ghost['tmdb_id'] = tmdb_id
+        shows.append(ghost)
+        injected += 1
+        # Update dedup keys so a duplicate Sonarr entry can't double-inject.
+        if tmdb_id:
+            existing_tmdb_ids.add(tmdb_id)
+        if imdb_id:
+            existing_imdb_ids.add(imdb_id)
+        existing_keys.add((norm, year))
+
+    return injected
+
+
+def _dedup_shows_by_external_id(shows):
+    """Collapse shows that share the same IMDb ID into a single entry.
+
+    Three different debrid folder names for the same series (e.g.
+    ``Your Friends And Neighbors``, ``Your Friends Neighbors``, and
+    ``Your Friends and Neighbours``) survive ``_dedup_by_tmdb`` when
+    the TMDB alias map doesn't carry all three normalized titles.
+    ``_enrich_with_tmdb_cache`` then stamps the same ``imdb_id`` on
+    each — at which point we have N library cards showing the SAME
+    canonical title and external ID but different debrid paths.
+
+    Keys by ``imdb_id`` only.  Enrichment currently does not stamp
+    ``tmdb_id`` on shows, so a tmdb fallback would be dead code; if
+    that changes (an enrichment refactor adds it), this helper can be
+    extended without breaking callers.
+
+    For each multi-entry group:
+      * picks a survivor via ``_rank`` (source 'both' > 'local' > 'debrid',
+        then year-populated, then more episodes)
+      * unions ``_episodes`` with PER-EPISODE quality compare on
+        collisions (larger ``size_bytes`` wins — preserves the better
+        release rather than first-seen)
+      * rebuilds ``season_data`` from the merged dict via
+        ``_build_season_data`` so downstream consumers (composition
+        card, prefs enforcer, gap-fill, search loops) see the full
+        episode set, not just the survivor's
+      * PRESERVES the survivor's Sonarr-aware ``missing_episodes`` /
+        ``monitored_episodes`` from ``_apply_sonarr_monitored_filter``
+        (which ran pre-merge) — naively recomputing against
+        ``total_episodes`` would revert to TMDB-all math and inflate
+        missing counts on shows with unmonitored seasons (Grey's
+        Anatomy regression)
+      * recomputes ``size_bytes`` from the merged ``_episodes`` so
+        overlapping episode releases don't double-count
+      * promotes ``source`` to ``'both'`` when any input is local-or-mixed
+
+    Runs in place on the ``shows`` list. O(n).
+    """
+    if not shows or len(shows) < 2:
+        return
+
+    groups = {}  # imdb_id -> list of show dicts (preserves order)
+    no_id = []
+    for show in shows:
+        imdb = show.get('imdb_id')
+        # Identity-unknown reboot-family items carry whichever sibling's
+        # imdb_id the bare TMDB cache key happened to resolve to — merging
+        # by it would attribute their episodes to a show that episode-shape
+        # resolution already declined to pick.
+        if imdb and not show.get('_ambiguous_reboot'):
+            groups.setdefault(imdb, []).append(show)
+        else:
+            no_id.append(show)
+
+    if not any(len(g) > 1 for g in groups.values()):
+        return  # no collisions, nothing to do
+
+    def _has_sonarr_filter(s):
+        # _apply_sonarr_monitored_filter writes monitored_episodes only
+        # for shows whose title matched a Sonarr series.  Prefer those
+        # as the survivor so the merged entry inherits the Sonarr-aware
+        # counts (Grey's-Anatomy unmonitored-seasons math), not TMDB-all.
+        return s.get('monitored_episodes') is not None
+
+    def _rank(s):
+        # Sonarr-filtered FIRST so a sibling with monitored counts wins
+        # over a survivor that missed the title-match cascade.  Then
+        # source 'both' > 'local' > 'debrid', year populated, most episodes.
+        src = s.get('source', '')
+        src_rank = {'both': 0, 'local': 1, 'debrid': 2}.get(src, 3)
+        return (
+            0 if _has_sonarr_filter(s) else 1,
+            src_rank,
+            0 if s.get('year') else 1,
+            -len(s.get('_episodes') or {}),
+        )
+
+    def _episode_size(info):
+        # Best-effort size extraction — used for collision tie-breaking.
+        # Falls back to 0 so missing-size entries lose ties to known-good
+        # entries.  ``info`` is a per-episode dict from ``_episodes``.
+        try:
+            return int(info.get('size_bytes') or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _resolve_merged_source(group):
+        sources = {s.get('source') for s in group if s.get('source')}
+        if 'both' in sources or ('local' in sources and 'debrid' in sources):
+            return 'both'
+        if 'local' in sources and 'debrid' not in sources:
+            return 'local'
+        return 'debrid'
+
+    result = []
+    for imdb_id, group in groups.items():
+        if len(group) == 1:
+            result.append(group[0])
+            continue
+        best = min(group, key=_rank)
+        merged = dict(best)
+
+        # Compute the merged source FIRST so the season_data rebuild sees
+        # the right default_source.  Episodes from siblings often lack an
+        # explicit 'source' key (FUSE/WebDAV scanners don't stamp one);
+        # _build_season_data falls back to default_source for those, so
+        # passing 'both' here would falsely tag debrid-only sibling
+        # episodes as 'both' and surface bogus source badges in the UI.
+        # Override only the show-level source; per-episode source labels
+        # come from the survivor's explicit per-ep keys when present.
+        merged_source = _resolve_merged_source(group)
+        # The season_data rebuild uses a non-promoted default for the
+        # episode fallback path so debrid-only sibling episodes stay
+        # tagged 'debrid' rather than inheriting the show-level 'both'.
+        episode_default_source = 'debrid' if 'debrid' in (s.get('source') for s in group) else merged_source
+
+        # Union episodes with per-episode quality compare.  Per-episode
+        # ``size_bytes`` proxies for quality (1080p AMZN WEB-DL > 720p
+        # WEB cap, etc.).  On collision the larger-size info wins;
+        # equal-size collisions keep first-seen (best's release) so
+        # folder/blocklist tracking points at the survivor's release.
+        # Episodes lacking a 'file' key (legacy list-of-tuples shape
+        # from _normalize_episodes_for_merge produces empty info dicts)
+        # are skipped — _build_season_data would crash on them.
+        merged_eps = {}
+        for item in group:
+            for ep_key, ep_info in (item.get('_episodes') or {}).items():
+                if not isinstance(ep_info, dict) or 'file' not in ep_info:
+                    continue
+                existing = merged_eps.get(ep_key)
+                if existing is None or _episode_size(ep_info) > _episode_size(existing):
+                    merged_eps[ep_key] = ep_info
+        merged['_episodes'] = merged_eps
+        merged['seasons'] = len({ek[0] for ek in merged_eps})
+        merged['episodes'] = len(merged_eps)
+
+        # Rebuild season_data from the unioned episode dict — downstream
+        # consumers (composition card sizes, prefs enforcer, gap-fill,
+        # search loops) all iterate ``season_data`` not ``_episodes``.
+        merged['season_data'] = _build_season_data(merged_eps, episode_default_source)
+
+        # Recompute size_bytes from the merged per-episode sizes.  Summing
+        # show.size_bytes across siblings would double-count overlapping
+        # releases.  Fall back to the max sibling show-level size when
+        # all merged episodes lack per-ep sizes (legacy scanner path)
+        # so the composition card doesn't silently zero-out.
+        per_episode_total = sum(_episode_size(info) for info in merged_eps.values())
+        if per_episode_total > 0:
+            merged['size_bytes'] = per_episode_total
+        else:
+            fallback_max = max((s.get('size_bytes') or 0 for s in group), default=0)
+            merged['size_bytes'] = fallback_max
+
+        # Preserve the survivor's Sonarr-aware missing_episodes /
+        # monitored_episodes.  Because ``_rank`` now puts Sonarr-filtered
+        # entries first, the survivor either HAS monitored math
+        # (correct) or NONE of the siblings did (so survivor's TMDB-all
+        # math is the best available).  Don't recompute against
+        # total_episodes — would revert to TMDB-all math and re-inflate
+        # missing on shows with unmonitored seasons.
+
+        merged['source'] = merged_source
+
+        # Use the earliest date_added (skip zero = stat failure) — most
+        # honest "when did this enter the user's library" timestamp.
+        dates = [s.get('date_added', 0) for s in group if s.get('date_added', 0) > 0]
+        if dates:
+            merged['date_added'] = min(dates)
+
+        logger.debug(
+            "[library] external-id dedup: collapsed %d entries for imdb=%s "
+            "(%r) — kept %r, dropped %d", len(group), imdb_id,
+            merged.get('title'), best.get('path', ''), len(group) - 1
+        )
+
+        result.append(merged)
+
+    shows[:] = result + no_id
 
 
 def _strip_ghost_duplicates(movies):
@@ -1010,7 +1922,7 @@ def _strip_ghost_duplicates(movies):
     ]
 
 
-def _apply_radarr_wanted_movies(movies, pending=None):
+def _apply_radarr_wanted_movies(movies, pending=None, degraded=None):
     """Inject Radarr-monitored movies with no file into the movie list as
     "ghost" entries so they surface in the Wanted view.
 
@@ -1050,6 +1962,10 @@ def _apply_radarr_wanted_movies(movies, pending=None):
     real movies it discovered.
 
     Returns the count of ghost entries injected (for caller logging).
+
+    ``degraded`` mirrors the Sonarr helpers: a failed movie-list fetch
+    from a configured Radarr adds ``'radarr_movies'`` (ghost movies never
+    get injected, deflating the wanted denominator).
     """
     pending = pending or {}
     try:
@@ -1062,6 +1978,10 @@ def _apply_radarr_wanted_movies(movies, pending=None):
         return 0
 
     radarr_movies = _get_radarr_movies_list(client)
+    if radarr_movies is None:
+        if degraded is not None:
+            degraded.add('radarr_movies')
+        return 0
     if not radarr_movies:
         return 0
 
@@ -1114,10 +2034,20 @@ def _apply_radarr_wanted_movies(movies, pending=None):
         ghost = {
             'title': title,
             'year': year,
+            # ``type`` is load-bearing for the /api/library/metadata UI
+            # call — without it, the JS sends ``type=undefined`` and the
+            # server defaults to 'show', poisoning the TMDB cache with
+            # show-shaped data under movie-style keys.
+            'type': 'movie',
             'source': 'wanted',
             'size_bytes': 0,
             'path': '',
             'missing': True,
+            # Radarr's computed "has reached minimum availability" flag.
+            # Stamped so the recovery metric can exclude announced/unreleased
+            # titles from its denominator; the Wanted UI view ignores it and
+            # still shows every monitored-but-missing movie.
+            'is_available': bool(rm.get('isAvailable')),
             '_radarr_id': rm.get('id'),
             '_radarr_tmdb_id': tmdb_id,
         }
@@ -1137,6 +2067,18 @@ def _normalize_title(title):
     t = re.sub(r'\s*\(\d{4}\)\s*$', '', t)
     t = t.strip()
     return t
+
+
+def _show_norm(item):
+    """Grouping/index key for a show item.
+
+    Reboot families (same normalized title, different-year siblings with
+    distinct TMDB IDs — e.g. iCarly 2007 vs iCarly 2021) carry a
+    year-qualified ``_norm_key`` stamped at scan time so the merge
+    pipeline and path indexes never aggregate the siblings; every other
+    item keys by plain ``_normalize_title``.
+    """
+    return item.get('_norm_key') or _normalize_title(item.get('title') or '')
 
 
 def _norm_for_matching(title):
@@ -1162,6 +2104,65 @@ def _norm_for_matching(title):
 
 
 _BARE_YEAR_RE = re.compile(r'\s*\(\d{4}\)\s*$')
+
+
+_ANY_YEAR_RE = re.compile(r'(?<!\d)(?:19|20)\d{2}(?!\d)')
+
+_LEADING_ARTICLES = ('the', 'a', 'an')
+
+
+def _release_matches_title(release_title, media_title, media_year=None):
+    """True when a torrent release name plausibly belongs to *media_title*.
+
+    Torrentio stream lists are keyed by IMDb id but polluted with
+    mislabeled uploads (e.g. a "Fight Club" release inside The Fountain's
+    list), so auto-add paths must sanity-check the release name before
+    adding.  Accepts an exact normalized match or the media title as a
+    token-aligned prefix of the parsed release name ("F1" → "F1 The
+    Movie") — never the reverse, so a short junk name can't claim a
+    longer title.  A leading article is stripped on both sides (scene
+    names routinely drop the "The" the arr keeps).  When *media_year*
+    is known (or embedded as "(YYYY)" in the media title), a release
+    whose years ALL sit >1 away is rejected — this catches sequels
+    riding the prefix rule ("Dune Part Two 2024" claiming "Dune" 2021)
+    and same-name remakes.
+    """
+    from utils.blackhole import parse_release_name
+    raw_release = str(release_title or '')
+    parsed, _season, _is_tv = parse_release_name(raw_release)
+    media_raw = str(media_title or '')
+    media = _BARE_YEAR_RE.sub('', media_raw)
+    rel_norm = _norm_for_matching(parsed)
+    media_norm = _norm_for_matching(media)
+    if not rel_norm or not media_norm:
+        return False
+    rel_tokens = rel_norm.split()
+    media_tokens = media_norm.split()
+    if rel_tokens and rel_tokens[0] in _LEADING_ARTICLES:
+        rel_tokens = rel_tokens[1:]
+    if media_tokens and media_tokens[0] in _LEADING_ARTICLES:
+        media_tokens = media_tokens[1:]
+    if not rel_tokens or not media_tokens:
+        return False
+    if rel_tokens[:len(media_tokens)] != media_tokens:
+        return False
+    if media_year is None:
+        m = _BARE_YEAR_RE.search(media_raw)
+        if m:
+            media_year = int(re.search(r'\d{4}', m.group(0)).group(0))
+    if media_year:
+        try:
+            year = int(media_year)
+        except (TypeError, ValueError):
+            return True
+        # Years that are part of the title itself (e.g. "1917") don't
+        # count as release-year evidence; ±1 tolerance for release-date
+        # vs production-year tagging.
+        years = [int(y) for y in _ANY_YEAR_RE.findall(raw_release)
+                 if y not in media_tokens]
+        if years and all(abs(y - year) > 1 for y in years):
+            return False
+    return True
 
 
 def _extract_tmdb_entry_year(entry):
@@ -1265,10 +2266,81 @@ def _find_canonical_tmdb_via_prefix(parsed_title, parsed_year, is_tv,
     return best
 
 
+def _match_arr_entry(title, year, parsed_title, arr_map, arr_map_norm,
+                     arr_by_tmdb, cached_tmdb, is_tv, max_season=0,
+                     _tmdb_cache=None):
+    """Resolve a library title to an arr library entry (Sonarr/Radarr).
+
+    The single implementation of the title-match cascade documented in
+    CLAUDE.md — used by movie/show symlink dir selection and movie/show
+    post-symlink rescan triggers.  Order:
+
+    1. Year-qualified exact match — disambiguates same-title
+       different-year entries (e.g. "The Bridge" 2011 vs 2013).
+    2. Bare exact match, then fuzzy ``_norm_for_matching`` match.
+    3. TMDB-cache key lookup.  The cache is keyed by the parsed-folder
+       norm — callers pass ``parsed_title`` (preserved when the display
+       title was upgraded to canonical) so renamed items still resolve.
+       For TV, a season-aware sub-step uses the item's max season to
+       disambiguate reboots/revivals sharing a title.
+    4. Token-aligned prefix match against the TMDB cache — recovers
+       parsed titles with appended actor/genre tokens (e.g. "Gattaca
+       Ethan Hawke Sci Fi" → "Gattaca").
+
+    Args:
+        title: display title of the library item.
+        year: item year int, or None.
+        parsed_title: parsed-from-folder title (falls back to ``title``
+            when falsy).
+        arr_map: {lowercase title: arr info} exact-match map.
+        arr_map_norm: {_norm_for_matching key: arr info} fuzzy map.
+        arr_by_tmdb: {tmdb_id: arr info} map.
+        cached_tmdb: {normalized title: tmdb_id} section from
+            ``get_cached_tmdb_ids()`` (movies or shows).
+        is_tv: True for shows, False for movies.
+        max_season: (TV only) max season number for the season-aware
+            fallback; 0/None skips that sub-step.
+        _tmdb_cache: pre-loaded full TMDB cache for the prefix-match
+            step (avoids per-call disk reads).
+
+    Returns the arr info dict, or None if nothing matched.
+    """
+    if year:
+        arr_info = arr_map.get(f"{title} ({year})".lower())
+        if arr_info:
+            return arr_info
+    arr_info = arr_map.get(title.lower()) or arr_map_norm.get(_norm_for_matching(title))
+    if arr_info:
+        return arr_info
+
+    parsed = parsed_title or title
+    norm = _normalize_title(parsed)
+    tmdb_id = (cached_tmdb.get(f"{norm} ({year})") if year else None) or cached_tmdb.get(norm)
+    if tmdb_id:
+        arr_info = arr_by_tmdb.get(tmdb_id)
+        if arr_info:
+            return arr_info
+    if is_tv and max_season:
+        from utils.tmdb import find_show_tmdb_id_by_season
+        alt_id = find_show_tmdb_id_by_season(norm, max_season, year)
+        if alt_id and alt_id != tmdb_id:
+            arr_info = arr_by_tmdb.get(alt_id)
+            if arr_info:
+                return arr_info
+
+    canonical = _find_canonical_tmdb_via_prefix(
+        parsed, year, is_tv=is_tv, _tmdb_cache=_tmdb_cache,
+    )
+    if canonical:
+        return arr_by_tmdb.get(canonical['tmdb_id'])
+    return None
+
+
 # Public aliases for cross-module reuse (e.g., debrid_client title matching)
 parse_folder_name = _parse_folder_name
 normalize_title = _normalize_title
 norm_for_matching = _norm_for_matching
+release_matches_title = _release_matches_title
 
 
 def _build_tmdb_aliases():
@@ -1310,6 +2382,57 @@ def _build_tmdb_aliases():
     )
 
 
+def _season_merge_conflict(norm_key, max_season, year=None):
+    """True when season-aware TMDB resolution redirects *norm_key* to a
+    different show than its direct cache entry.
+
+    Guards the pre-enrichment alias merges: the TMDB cache maps each
+    parsed title to exactly one show, so a bare reboot-family title
+    (cache key "daredevil" → "Daredevil: Born Again") drags releases of
+    the sibling show ("Marvel's Daredevil" S03) into the wrong entry.
+    Once merged, the enrichment-time season guard can't recover — its
+    word-subset search on the merged title never matches the sibling.
+    Kept unmerged, the pipeline self-heals: enrichment renames the item
+    via ``find_show_by_season`` and ``_dedup_shows_by_external_id``
+    folds it into the right show.
+
+    Fail-open: returns False when there is no season data, no direct
+    cache entry, or no covering sibling — so a cache that merely lags
+    the newest season keeps merging exactly as before.
+    """
+    if not max_season:
+        return False
+    try:
+        from utils.tmdb import get_cached_tmdb_ids, find_show_tmdb_id_by_season
+        show_ids = get_cached_tmdb_ids().get('shows', {})
+        direct_id = ((show_ids.get(f"{norm_key} ({year})") if year else None)
+                     or show_ids.get(norm_key))
+        if not direct_id:
+            return False
+        alt_id = find_show_tmdb_id_by_season(norm_key, max_season, year)
+    except Exception as e:
+        logger.debug("[library] season merge-veto check failed for %r: %s",
+                     norm_key, e)
+        return False
+    return bool(alt_id and alt_id != direct_id)
+
+
+def _max_episode_season(item):
+    """Highest season number present in an item's ``_episodes`` keys.
+
+    Falls back to the ``seasons`` count when episode filenames didn't
+    parse (``_count_show_content`` fallback path) so the season-aware
+    merge veto isn't silently disabled for those shows.  The count is
+    always ≤ the true max season number, so the proxy can only err in
+    the fail-open direction.  Movies carry neither key → 0.
+    """
+    eps = item.get('_episodes') or {}
+    if eps:
+        return max((sn for sn, _en in eps), default=0)
+    seasons = item.get('seasons')
+    return seasons if isinstance(seasons, int) and seasons > 0 else 0
+
+
 class _WebDAVUnsupportedError(RuntimeError):
     """Zurg does not honor recursive PROPFIND.
 
@@ -1334,6 +2457,13 @@ _WEBDAV_CAPABILITY_MAX_BYTES = 4096
 # indexes).  Bump on incompatible field renames so an upgrade
 # automatically discards stale on-disk caches instead of mis-loading
 # them; in-memory state is unaffected.
+#
+# IMPORTANT: this is now the SOLE format gate.  The old zurgarr_version
+# equality check was removed when get_data() dropped its synchronous
+# fallback — version is stored for diagnostics only, never validated
+# (see _serialize_cache_state).  Consequence: a semantic change to a
+# persisted field — even a same-type meaning change — MUST bump this
+# constant, or upgraded containers will silently load stale-shaped data.
 _LIBRARY_CACHE_SCHEMA = 1
 
 # Hard upper bound on the persisted library cache file size.  At ~1840
@@ -1375,7 +2505,7 @@ def _serialize_cache_state(cache, path_index, local_path_index, alias_norms):
     return {
         'schema': _LIBRARY_CACHE_SCHEMA,
         'ts': time.time(),
-        'zurgarr_version': _VERSION,
+        'zurgarr_version': _VERSION,  # diagnostic only — never validated on load
         'cache': cache,
         'path_index': [
             [norm, sn, en, p] for (norm, sn, en), p in path_index.items()
@@ -1395,8 +2525,6 @@ def _deserialize_cache_state(envelope):
     field of the wrong shape — including the ``bool``-as-``int`` trap —
     rejects the whole envelope.
     """
-    from version import VERSION as _VERSION
-
     if not isinstance(envelope, dict):
         return None
     # ``schema`` must be a strict int (rejects ``bool`` as well — see
@@ -1408,8 +2536,6 @@ def _deserialize_cache_state(envelope):
     if not _strict_number(ts):
         return None
     if ts > time.time() + _LIBRARY_CACHE_FUTURE_TS_TOLERANCE_S:
-        return None
-    if envelope.get('zurgarr_version') != _VERSION:
         return None
 
     cache = envelope.get('cache')
@@ -1430,6 +2556,10 @@ def _deserialize_cache_state(envelope):
         return None
     if not _strict_int(cache.get('scan_duration_ms')):
         return None
+    # ``arr_degraded`` is a per-scan runtime signal for the recovery
+    # snapshot writer — a warm-started payload must never replay a
+    # previous run's degradation flag.
+    cache.pop('arr_degraded', None)
 
     raw_pi = envelope.get('path_index')
     raw_lpi = envelope.get('local_path_index')
@@ -1470,7 +2600,32 @@ def _deserialize_cache_state(envelope):
     return cache, path_index, local_path_index, alias_norms
 
 
+def _empty_scan_payload():
+    """Pre-first-scan placeholder served by ``get_data``.
+
+    Key set MUST mirror ``_scan_read``'s return payload — the UI and
+    ``/api/library`` consumers destructure these fields unconditionally.
+    """
+    return {
+        'movies': [],
+        'shows': [],
+        'preferences': {},
+        'last_scan': None,
+        'scan_duration_ms': 0,
+        'arr_degraded': [],
+    }
+
+
 class LibraryScanner:
+    # Guards the three Wanted-recovery memo dicts (_wanted_tb_cooldown,
+    # _wanted_rd_miss, _wanted_no_results).  The scan-effects thread owns all
+    # writes during a pass; HTTP threads read snapshots (/api/stuck) and clear
+    # keys (retry action).  Bare membership checks on the effects thread stay
+    # lock-free (GIL-atomic, no iteration); anything that iterates, copies,
+    # rebinds, or mutates must hold this.  Class-level so test instances built
+    # via __new__ (bypassing __init__) still have it.
+    _wanted_memo_lock = threading.Lock()
+
     def __init__(self):
         self._mount_path = _discover_mount()
         self._local_movies_path = os.environ.get('BLACKHOLE_LOCAL_LIBRARY_MOVIES', '').strip() or None
@@ -1478,18 +2633,56 @@ class LibraryScanner:
         self._cache = None
         self._cache_time = 0
         self._ttl = 600
+        # Set by _scan_mount when a walk is truncated (deadline hit or the
+        # listing raised — e.g. a TorBox 429). _scan_read reads it right after
+        # the (synchronous) TB scan to decide whether to fall back to the
+        # last-known-good TB set instead of overwriting with partial data.
+        self._last_scan_mount_truncated = False
+        # Last COMPLETE TorBox scan results, kept in memory so an incomplete
+        # scan doesn't drop TB titles to "Wanted". In-memory only — lost on
+        # restart, repopulated by the first complete scan.
+        self._last_tb_movies = None
+        self._last_tb_shows = None
         self._lock = threading.Lock()
         self._scanning = False
         self._effects_running = False
         self._path_index = {}
         self._local_path_index = {}
         self._path_lock = threading.Lock()
-        self._search_cooldown = {}  # {(norm, sn): timestamp} — suppress re-search for 1 hour
+        # {(norm, sn): timestamp} — suppress re-search for 1 hour.  No lock:
+        # only touched from _search_for_missing_episodes, whose sole caller
+        # (_scan_effects) is serialized by _effects_running under self._lock.
+        self._search_cooldown = {}
+        # {imdb_or_imdb:s:e: monotonic ts} — suppress re-probing a Wanted ghost
+        # against Torrentio/TorBox for _WANTED_TB_RECOVERY_COOLDOWN after a miss
+        # or a grab, so a deep backlog isn't re-walked every scan.
+        self._wanted_tb_cooldown = {}
+        # {imdb_or_imdb:s:e: monotonic ts} — titles whose RD probe-add came
+        # back uncached (or filter-blocked).  Longer-lived than the TB
+        # cooldown (_WANTED_RD_MISS_TTL) so the same title isn't add/delete
+        # churned against RD every few hours; a miss usually means RD lacks
+        # the content family, not just that one release.
+        self._wanted_rd_miss = {}
+        # {imdb_or_imdb:s:e: monotonic ts} — Torrentio returned no usable
+        # results for the title.  Leg-independent (nothing for either leg to
+        # add), so it gates the pass before the per-leg memos; expires on the
+        # short TB cooldown TTL so newly-released content isn't held back.
+        self._wanted_no_results = {}
+        # Rehydrate the three memo dicts from the last persisted snapshot so
+        # a container restart doesn't re-probe the whole Wanted backlog
+        # through Torrentio + TB checkcached (observed live: a restart mid-
+        # drain re-ground all ~135 titles, burning the very TB create budget
+        # the memos exist to protect).
+        self._load_wanted_memos()
         self._alias_norms = {}     # {norm_title: set of alias norm_titles}
         try:
             self._debrid_unavailable_days = int(os.environ.get('DEBRID_UNAVAILABLE_THRESHOLD_DAYS', '3'))
         except (ValueError, TypeError):
             self._debrid_unavailable_days = 3
+        try:
+            self._force_grab_max_attempts = int(os.environ.get('FORCE_GRAB_MAX_ATTEMPTS', '12'))
+        except (ValueError, TypeError):
+            self._force_grab_max_attempts = 12
         try:
             self._pending_warning_hours = int(os.environ.get('PENDING_WARNING_HOURS', '24'))
         except (ValueError, TypeError):
@@ -1610,13 +2803,22 @@ class LibraryScanner:
             return None
 
     def _get_pref(self, norm, preferences):
-        """Look up a preference by normalized title, checking aliases if needed."""
+        """Look up a preference by normalized title, checking aliases if needed.
+
+        Year-qualified reboot-family norms (``icarly (2007)``) fall back to
+        the bare base — the UI saves prefs under the bare title, and a
+        title-level preference reasonably applies to every sibling.
+        """
         pref = preferences.get(norm)
         if not pref:
             for alias in self._alias_norms.get(norm, ()):
                 pref = preferences.get(alias)
                 if pref:
                     break
+        if not pref:
+            m = re.match(r'^(.+)\s+\(\d{4}\)$', norm)
+            if m:
+                pref = preferences.get(m.group(1))
         return pref
 
     def _route_for(self, norm, preferences):
@@ -1674,6 +2876,163 @@ class LibraryScanner:
         return missing
 
     @staticmethod
+    def _discover_torbox_mount():
+        """Return the TorBox rclone-mount path inside the container, or
+        ``None`` when TB isn't configured / hasn't come up yet.
+
+        Plan 39 phase 4 — defers to ``utils.debrid_routing.mount_for_debrid``
+        for the path computation so the per-debrid mount contract lives in
+        one place (also used by blackhole.py and debrid_health.py).  The
+        ``isdir`` check protects against the partial-config case where
+        ``TORBOX_API_KEY`` is set but ``TORBOX_WEBDAV_USER/PASS`` is not
+        — the mount doesn't come up, so scanning would just walk an empty
+        bind-only dir.  Returning None there avoids logging confusing
+        "no items on TB mount" messages.
+        """
+        if not os.environ.get('TORBOX_API_KEY'):
+            return None
+        try:
+            from utils.debrid_routing import mount_for_debrid, TORBOX
+        except Exception:
+            return None
+        path = mount_for_debrid(TORBOX)
+        # Must be both a directory AND have at least one entry to be a
+        # real mount (an empty bind dir would have no entries; a live
+        # FUSE mount surfaces TB's category folders even when the
+        # account has zero torrents — they appear as empty dirs).
+        if not path or not os.path.isdir(path):
+            return None
+        try:
+            # Accept the mount if listdir succeeds (even if empty).  We
+            # don't require content — an empty TB account is a valid
+            # state, just yields zero library items.
+            os.listdir(path)
+        except OSError:
+            return None
+        return path
+
+    @staticmethod
+    def _normalize_episodes_for_merge(eps):
+        """Coerce an ``_episodes`` value into the dict-of-info-dicts shape.
+
+        ``_scan_mount`` emits the dict shape (see library.py:4543).  The
+        WebDAV path omits the field, and a few legacy tests still feed a
+        list of ``(season, ep)`` tuples — both must merge cleanly into
+        the dict-form output that downstream consumers expect.
+        """
+        if isinstance(eps, dict):
+            return dict(eps)
+        if not eps:
+            return {}
+        out = {}
+        for e in eps:
+            key = tuple(e) if isinstance(e, list) else e
+            if isinstance(key, tuple) and len(key) == 2:
+                out[key] = {}
+        return out
+
+    @staticmethod
+    def _union_tb_items(last_good, partial):
+        """Union two TorBox item lists, keyed by normalized title.
+
+        Used to recover from an incomplete TB scan: ``last_good`` is the most
+        recent COMPLETE scan, ``partial`` is the truncated current scan.
+        Partial entries win on collision (fresh data), and titles present
+        only in ``last_good`` are carried over so a rate-limited walk doesn't
+        drop them to "Wanted". Movies and shows are unioned separately by the
+        caller, so there's no cross-type key collision.
+
+        Keyed by ``_show_norm`` to match the keying ``_scan_mount`` and
+        ``_merge_alt_debrid_items`` already use — reboot-family shows carry
+        a year-qualified ``_norm_key`` so siblings stay separate; same-title
+        movies (e.g. ``Dune (1984)`` vs ``Dune (2021)``) still collapse to
+        one entry inside a single scan, so the union introduces no new
+        title-loss beyond that pre-existing pipeline limitation.
+        """
+        by_key = {}
+        for it in (last_good or []):
+            by_key[_show_norm(it)] = it
+        for it in (partial or []):
+            by_key[_show_norm(it)] = it
+        return list(by_key.values())
+
+    @staticmethod
+    def _merge_alt_debrid_items(primary_movies, primary_shows,
+                                alt_movies, alt_shows):
+        """Merge alt-debrid items into the primary lists.
+
+        Plan 39 phase 4 — items unique to the alt debrid are appended.
+        Items present on BOTH debrids (matched by normalized title) keep
+        the primary entry but gain ``has_alt_source=True`` and
+        ``alt_source_debrid=<alt name>`` so the UI can render a
+        "RD + TB" pair-badge instead of two cards.
+
+        Match is by ``_show_norm`` — the same key the rest of the merge
+        pipeline uses.  Reboot-family shows carry a year-qualified
+        ``_norm_key`` so siblings stay separate; movies still key by bare
+        normalized title, so same-title-different-year films (e.g.
+        ``Dune (1984)`` vs ``Dune (2021)``) collapse into one card if
+        both mounts have both.  That's a known limitation; in practice
+        the cache rarely holds two films of the same title.
+        """
+        if not (alt_movies or alt_shows):
+            return primary_movies, primary_shows
+
+        def _key(item):
+            return _show_norm(item)
+
+        primary_movie_keys = {_key(m): m for m in primary_movies}
+        primary_show_keys = {_key(s): s for s in primary_shows}
+
+        for it in alt_movies:
+            k = _key(it)
+            if k and k in primary_movie_keys:
+                primary_movie_keys[k]['has_alt_source'] = True
+                primary_movie_keys[k]['alt_source_debrid'] = it.get('source_debrid')
+            else:
+                primary_movies.append(it)
+                if k:
+                    primary_movie_keys[k] = it
+
+        for it in alt_shows:
+            k = _key(it)
+            if k and k in primary_show_keys:
+                primary_show_keys[k]['has_alt_source'] = True
+                primary_show_keys[k]['alt_source_debrid'] = it.get('source_debrid')
+                # Merge episode sets so the season/episode counts reflect
+                # the union — TB might have episodes RD doesn't.
+                #
+                # ``_scan_mount`` (library.py:4543) produces ``_episodes``
+                # as a dict keyed by ``(season, ep)`` with episode-info
+                # dict values; the WebDAV scan path leaves the field
+                # absent.  We also defensively handle the legacy
+                # list-of-tuples shape that earlier tests pinned, so a
+                # mixed-shape merge (one side dict, one side list) still
+                # works — but always emit the dict shape, since the rest
+                # of the pipeline (e.g. ``_dedup_by_tmdb``,
+                # episode-level cross-ref) expects dict keys + info
+                # values.  Primary wins on dupes so the canonical path /
+                # source-debrid badge stays consistent.
+                p_eps = primary_show_keys[k].get('_episodes')
+                a_eps = it.get('_episodes')
+
+                merged_eps = LibraryScanner._normalize_episodes_for_merge(p_eps)
+                a_norm = LibraryScanner._normalize_episodes_for_merge(a_eps)
+                if a_norm:
+                    for ek, ev in a_norm.items():
+                        merged_eps.setdefault(ek, ev)
+                    primary_show_keys[k]['_episodes'] = merged_eps
+                    unique_seasons = {s for s, _e in merged_eps} if merged_eps else set()
+                    primary_show_keys[k]['seasons'] = len(unique_seasons)
+                    primary_show_keys[k]['episodes'] = len(merged_eps)
+            else:
+                primary_shows.append(it)
+                if k:
+                    primary_show_keys[k] = it
+
+        return primary_movies, primary_shows
+
+    @staticmethod
     def _dedup_by_tmdb(items, aliases):
         """Merge items that share a TMDB ID but have different normalized titles.
 
@@ -1687,15 +3046,72 @@ class LibraryScanner:
             logger.debug("[library] TMDB alias map empty, skipping debrid dedup")
             return items
 
+        # Season-aware merge veto (shows only): the alias map trusts the
+        # cache's one-show-per-title mapping, but a bare reboot-family
+        # title can point at the wrong sibling for the seasons an item
+        # actually holds (see _season_merge_conflict).  Precompute each
+        # key's max season/year across its items so either side of a
+        # candidate pairing can be checked.  Upstream (_scan_mount /
+        # _merge_alt_debrid_items) already collapses same-normalized-key
+        # items, so the max() aggregation below is defensive — if
+        # duplicate keys ever leak in, over-approximating max_season
+        # only errs toward keeping items separate.
+        key_max_season = {}
+        key_year = {}
+        for item in items:
+            k = _show_norm(item)
+            if not aliases.get(k):
+                continue
+            mx = _max_episode_season(item)
+            if mx > key_max_season.get(k, 0):
+                key_max_season[k] = mx
+            if k not in key_year and item.get('year'):
+                key_year[k] = item['year']
+
+        veto_memo = {}
+
+        def _vetoed(k):
+            if k not in veto_memo:
+                conflict = _season_merge_conflict(
+                    k, key_max_season.get(k, 0), key_year.get(k))
+                if conflict:
+                    logger.info(
+                        "[library] season-aware dedup veto: %r S%02d resolves "
+                        "to a different TMDB show than its cache entry — "
+                        "kept as a separate item for enrichment to re-resolve",
+                        k, key_max_season.get(k, 0))
+                veto_memo[k] = conflict
+            return veto_memo[k]
+
+        # Keys held by identity-unknown reboot-family items.  Guarded in
+        # BOTH directions: an ambiguous item must not hop into a sibling,
+        # and an attributed sibling must not hop into the ambiguous item's
+        # bare key (the bare cache entry shares a tmdb_id with one sibling,
+        # making them aliases of each other).
+        ambiguous_keys = {
+            _show_norm(i) for i in items if i.get('_ambiguous_reboot')
+        }
+
         # Map each norm key to its canonical (first-seen) key via aliases
         canon = {}  # norm_key -> canonical norm_key
         for item in items:
-            key = _normalize_title(item['title'])
+            key = _show_norm(item)
             if key in canon:
+                continue
+            # Identity-unknown reboot-family items must not alias-hop into
+            # a year-qualified sibling — that would attribute their episodes
+            # to a show that episode-shape resolution already declined to
+            # pick.  They stay on their own (bare) key.
+            if item.get('_ambiguous_reboot') or key in ambiguous_keys:
+                canon[key] = key
                 continue
             # Check if any existing canonical key is an alias of this key
             for alias in sorted(aliases.get(key, ())):
                 if alias in canon:
+                    if _vetoed(key) or _vetoed(alias):
+                        continue
+                    if alias in ambiguous_keys or canon[alias] in ambiguous_keys:
+                        continue
                     canon[key] = canon[alias]
                     break
             if key not in canon:
@@ -1704,7 +3120,7 @@ class LibraryScanner:
         # Group items by canonical key
         groups = {}  # canonical_key -> list of items
         for item in items:
-            key = _normalize_title(item['title'])
+            key = _show_norm(item)
             ckey = canon[key]
             groups.setdefault(ckey, []).append(item)
 
@@ -1746,9 +3162,9 @@ class LibraryScanner:
                 merged['seasons'] = len({ek[0] for ek in merged_eps})
                 merged['episodes'] = len(merged_eps)
 
-            merged_key = _normalize_title(merged['title'])
+            merged_key = _show_norm(merged)
             for item in group:
-                item_key = _normalize_title(item['title'])
+                item_key = _show_norm(item)
                 if item_key != merged_key:
                     logger.debug(
                         f"[library] TMDB dedup (debrid): '{item_key}' merged into '{merged_key}'"
@@ -1781,6 +3197,16 @@ class LibraryScanner:
             # Try WebDAV PROPFIND directly to Zurg (bypasses FUSE/rclone)
             try:
                 debrid_movies, debrid_shows = self._webdav_scan_mount(deadline)
+                # Source-tag every item so the UI badge logic below can
+                # distinguish RD/AD content from TB content.  WebDAV scan
+                # paths don't go through _scan_mount, so the tagging
+                # needs to happen here too.  Resolve the primary debrid
+                # for the badge rather than hard-coding 'realdebrid' —
+                # AD-only or TB-only setups need the correct provider tag.
+                from utils.debrid_routing import resolve_primary
+                primary_badge = resolve_primary() or 'realdebrid'
+                for it in debrid_movies + debrid_shows:
+                    it.setdefault('source_debrid', primary_badge)
                 logger.debug("[library] WebDAV scan succeeded")
             except Exception as e:
                 # Quiet down the recurring "using FUSE" log once the
@@ -1796,10 +3222,79 @@ class LibraryScanner:
                         self._webdav_unsupported_logged = True
                 try:
                     from utils.rclone_rc import refresh_dir
-                    refresh_dir('', recursive=True)
-                except Exception:
-                    pass
+                    from base import TORBOX_MOUNT_NAME
+                    # Skip the TorBox mount: it's enumerated below via the
+                    # mylist API, so a recursive PROPFIND walk over it here is
+                    # pure collateral and trips WebDAV listing rate-limits.
+                    refresh_dir('', recursive=True,
+                                exclude_mounts={TORBOX_MOUNT_NAME})
+                except Exception as e:
+                    logger.debug(f"[library] RC refresh before FUSE scan failed: {e}")
                 debrid_movies, debrid_shows = self._scan_mount(self._mount_path, deadline)
+
+        # Plan 39 phase 4 — second-pass scan against the TorBox mount.
+        # Adds items that live on TB only AND flags items present on
+        # both mounts with ``has_alt_source=True`` so the UI can render
+        # "available on RD + TB" without duplicating the card.
+        tb_mount = self._discover_torbox_mount()
+        if tb_mount:
+            # TB enumeration goes through the mylist API, not a FUSE walk.
+            # The old per-folder scandir/stat walk over the 5-tps rclone
+            # mount (~450 folders) generated 429 storms that contended with
+            # real content downloads — occasionally abandoning an in-flight
+            # download.  One mylist call returns the whole account with zero
+            # FUSE ops.  The mount is still discovered above because it's
+            # needed for symlink TARGETS (real file access), and the
+            # synthesized item paths must match its layout.
+            try:
+                tb_movies, tb_shows = self._scan_torbox_via_api(tb_mount)
+                tb_incomplete = self._last_scan_mount_truncated
+            except Exception as e:
+                logger.warning(f"[library] TB API scan failed: {e}")
+                tb_movies, tb_shows, tb_incomplete = [], [], True
+
+            # An incomplete TB walk (TorBox 429 / deadline) must not be
+            # treated as the authoritative TB set — otherwise every truncated
+            # scan drops the missing titles to "Wanted". Fall back to the last
+            # COMPLETE scan, unioning the partial over it so newly-grabbed
+            # content still appears. Only a complete scan becomes the new
+            # baseline. Tradeoff: a title genuinely deleted from TB during a
+            # run of truncated scans lingers as "available" until the next
+            # complete scan re-promotes a fresh baseline — cheap next to
+            # flipping the whole TB library to "Wanted" hourly.
+            if tb_incomplete:
+                if self._last_tb_movies is not None or self._last_tb_shows is not None:
+                    tb_movies = self._union_tb_items(self._last_tb_movies or [], tb_movies)
+                    tb_shows = self._union_tb_items(self._last_tb_shows or [], tb_shows)
+                    logger.warning(
+                        "[library] TB scan incomplete (rate-limited/timeout) — "
+                        "merged partial over last-good TB set (%d movies, %d shows) "
+                        "to avoid dropping titles to 'Wanted'",
+                        len(tb_movies), len(tb_shows),
+                    )
+                else:
+                    logger.warning(
+                        "[library] TB scan incomplete and no prior good TB scan "
+                        "to fall back on; using partial result (%d movies, %d shows)",
+                        len(tb_movies), len(tb_shows),
+                    )
+            else:
+                # Deep-copy: the same dicts flow into _merge_alt_debrid_items
+                # (sets has_alt_source/alt_source_debrid in place) and the
+                # downstream dedup/enrichment stages, all of which mutate
+                # items. A shallow list() copy would let those stages silently
+                # corrupt the baseline, so a later truncated scan would carry
+                # over polluted entries. Snapshot independent copies instead.
+                self._last_tb_movies = copy.deepcopy(tb_movies)
+                self._last_tb_shows = copy.deepcopy(tb_shows)
+
+            debrid_movies, debrid_shows = self._merge_alt_debrid_items(
+                debrid_movies, debrid_shows, tb_movies, tb_shows,
+            )
+            logger.debug(
+                f"[library] TB scan: {len(tb_movies)} movies, "
+                f"{len(tb_shows)} shows from {tb_mount}"
+            )
 
         # TMDB-based alias maps: when different sources (or different
         # torrents) use different names for the same title (e.g. "Star
@@ -1831,7 +3326,7 @@ class LibraryScanner:
 
         # Build normalized title index for cross-referencing
         debrid_movie_keys = {_normalize_title(m['title']): m for m in debrid_movies}
-        debrid_show_keys = {_normalize_title(s['title']): s for s in debrid_shows}
+        debrid_show_keys = {_show_norm(s): s for s in debrid_shows}
 
         local_movie_keys = {_normalize_title(lm['title']) for lm in local_movies}
         local_movie_map = {_normalize_title(lm['title']): lm for lm in local_movies}
@@ -1928,26 +3423,69 @@ class LibraryScanner:
             _pending_snapshot = _gap() or {}
         except Exception:
             _pending_snapshot = {}
-        ghosts_added = _apply_radarr_wanted_movies(movies, pending=_pending_snapshot)
+        # Tokens accumulated when a configured arr's bulk-list fetch fails
+        # mid-scan (DNS blip, restart race).  The recovery snapshot writer
+        # skips degraded scans so a transient failure can't poison the
+        # daily wanted/on-disk time series.
+        arr_degraded = set()
+        ghosts_added = _apply_radarr_wanted_movies(
+            movies, pending=_pending_snapshot, degraded=arr_degraded)
         if ghosts_added:
             logger.debug(f"[library] Injected {ghosts_added} Radarr wanted movie(s) as ghost entries")
 
         # Merge debrid + local shows with episode-level cross-referencing
-        local_show_map = {_normalize_title(ls['title']): ls for ls in local_shows}
+        local_show_map = {_show_norm(ls): ls for ls in local_shows}
 
         shows = []
         merged_local_show_keys = set()
+        # Memoized season-aware veto for the alias hops below — same
+        # rationale as the _dedup_by_tmdb veto (a bare reboot-family
+        # title must not drag its S-mismatched releases into the local
+        # sibling entry).  Exact-key matches are never vetoed: identical
+        # normalized titles are re-resolved together by enrichment.
+        _local_veto_memo = {}
+
+        def _local_merge_vetoed(nk, mx, yr):
+            # Keyed by the full argument tuple: the same norm key can be
+            # probed with different season contexts (alias hop uses the
+            # local candidate's seasons, prefix hop uses the debrid
+            # item's), and a first-wins memo would pin the wrong answer.
+            memo_key = (nk, mx, yr)
+            if memo_key not in _local_veto_memo:
+                _local_veto_memo[memo_key] = _season_merge_conflict(nk, mx, yr)
+            return _local_veto_memo[memo_key]
+
         for item in debrid_shows:
-            key = _normalize_title(item['title'])
+            key = _show_norm(item)
             local_key = None
+            # Identity-unknown reboot-family items never alias/prefix hop
+            # into a local sibling; only an exact bare-key match (another
+            # identity-unknown item) may merge.
+            _ambiguous = bool(item.get('_ambiguous_reboot'))
             if key in local_show_map:
                 local_key = key
-            else:
+            elif not _ambiguous:
                 for alias in sorted(show_aliases.get(key, ())):
-                    if alias in local_show_map:
-                        local_key = alias
-                        break
-            if local_key is None:
+                    if alias not in local_show_map:
+                        continue
+                    local_candidate = local_show_map[alias]
+                    # Symmetric guard: an attributed sibling must not hop
+                    # into an identity-unknown local item's bare key.
+                    if local_candidate.get('_ambiguous_reboot'):
+                        continue
+                    if (_local_merge_vetoed(
+                            key, _max_episode_season(item), item.get('year'))
+                        or _local_merge_vetoed(
+                            alias, _max_episode_season(local_candidate),
+                            local_candidate.get('year'))):
+                        logger.info(
+                            "[library] season-aware merge veto: debrid %r "
+                            "not merged into local %r — seasons resolve to "
+                            "a different TMDB show", key, alias)
+                        continue
+                    local_key = alias
+                    break
+            if local_key is None and not _ambiguous:
                 # Final fallback: token-aligned prefix lookup against the
                 # TMDB cache — symmetric with the movies merge cascade.
                 parsed_t = item.get('_parsed_title') or item.get('title') or ''
@@ -1958,8 +3496,24 @@ class LibraryScanner:
                 if canonical:
                     canon_key = _normalize_title(canonical['title'])
                     # Self-loop guard — see movies branch comment.
+                    # Season-aware veto mirrors the alias hop above.
+                    # Both sides are checked with the ITEM's seasons:
+                    # the key side asks "does my own cache entry redirect
+                    # me elsewhere?", the canon_key side asks "does the
+                    # entry I'd merge into actually cover the seasons I
+                    # carry?" — the latter matters when the parsed key
+                    # has no direct cache entry (long junk titles), which
+                    # would otherwise fail the key-side check open.
+                    item_mx = _max_episode_season(item)
                     if (canon_key and canon_key != key
-                            and canon_key in local_show_map):
+                            and canon_key in local_show_map
+                            # Symmetric guard — as in the alias hop above.
+                            and not local_show_map[canon_key].get(
+                                '_ambiguous_reboot')
+                            and not _local_merge_vetoed(
+                                key, item_mx, item.get('year'))
+                            and not _local_merge_vetoed(
+                                canon_key, item_mx, item.get('year'))):
                         local_key = canon_key
                         logger.debug(
                             f"[library] TMDB prefix match (show): debrid '{key}' "
@@ -2010,7 +3564,7 @@ class LibraryScanner:
             shows.append(item)
 
         for ls in local_shows:
-            key = _normalize_title(ls['title'])
+            key = _show_norm(ls)
             if key not in debrid_show_keys and key not in merged_local_show_keys:
                 shows.append(ls)
 
@@ -2046,7 +3600,22 @@ class LibraryScanner:
         # unmonitored) don't report 100s of "missing" episodes the user
         # never asked to track.  Also surfaces unmonitored season numbers
         # to the UI and to gap-fill so neither invents phantom work.
-        _apply_sonarr_monitored_filter(shows)
+        matched_series_ids = _apply_sonarr_monitored_filter(
+            shows, degraded=arr_degraded)
+
+        # Inject ghost entries for Sonarr-monitored series with no episode
+        # on disk yet — the TV mirror of the Radarr wanted-movie injection
+        # above.  Skips series already matched to a real library show
+        # (``matched_series_ids``) so we never double-count.  Reuses the
+        # same pending snapshot as the movie path so in-flight downloads
+        # don't double-count against the pending bucket.  Silently no-ops
+        # when Sonarr is unavailable.
+        show_ghosts = _apply_sonarr_wanted_shows(
+            shows, matched_series_ids, pending=_pending_snapshot,
+            degraded=arr_degraded,
+        )
+        if show_ghosts:
+            logger.debug(f"[library] Injected {show_ghosts} Sonarr wanted show(s) as ghost entries")
 
         # Strip ghost movies that now duplicate a real entry. Enrichment
         # may have renamed a real movie to a canonical TMDB title that
@@ -2054,6 +3623,15 @@ class LibraryScanner:
         # "F1 The Movie" → canonical "F1" collides with a Radarr ghost
         # titled "F1"). Pre-enrichment dedup couldn't see this collision.
         _strip_ghost_duplicates(movies)
+
+        # Collapse show entries that share an IMDb ID post-enrichment.
+        # The alias-map dedup in ``_dedup_by_tmdb`` runs pre-enrichment
+        # off normalized parsed-folder titles, so three debrid folders
+        # whose parsed names are "your friends and neighbors" /
+        # "your friends neighbors" / "your friends and neighbours"
+        # survive as three groups even though enrichment stamps the
+        # same canonical title + imdb_id on all three.
+        _dedup_shows_by_external_id(shows)
 
         # Build path indexes keyed by post-rename normalized titles.  When
         # two items collide on the same (norm, season, episode) — possible
@@ -2064,7 +3642,7 @@ class LibraryScanner:
         local_path_index = {}
         for show in shows:
             eps = show.get('_episodes', {})
-            norm = _normalize_title(show['title'])
+            norm = _show_norm(show)
             show_source = show.get('source', 'debrid')
             for (sn, en), info in eps.items():
                 src = info.get('source', show_source)
@@ -2108,6 +3686,12 @@ class LibraryScanner:
         for show in shows:
             show.pop('_episodes', None)
 
+        if arr_degraded:
+            logger.warning(
+                f"[library] Scan completed with degraded arr enrichment: "
+                f"{', '.join(sorted(arr_degraded))} — wanted counts are "
+                f"unreliable this scan")
+
         elapsed_ms = int((time.monotonic() - start) * 1000)
         return {
             'movies': movies,
@@ -2115,6 +3699,7 @@ class LibraryScanner:
             'preferences': preferences,
             'last_scan': datetime.now(timezone.utc).isoformat(timespec='seconds'),
             'scan_duration_ms': elapsed_ms,
+            'arr_degraded': sorted(arr_degraded),
         }
 
     def _scan_effects(self, data, force_enforce=False):
@@ -2135,6 +3720,7 @@ class LibraryScanner:
         changed = self._enforce_preferences(shows, movies, preferences, path_index,
                                               local_path_index, force=force_enforce)
         self._search_for_missing_episodes(shows, movies, preferences)
+        self._recover_wanted_via_debrid(shows, movies, preferences)
         self._recover_local_fallback_routing(shows, movies)
         self._clear_resolved_pending(shows, movies)
         self._escalate_stuck_pending()
@@ -2161,28 +3747,38 @@ class LibraryScanner:
                 self._effects_running = False
         return data
 
+    def peek_data(self):
+        """Return the cached scan payload without ever triggering a scan.
+
+        Monitoring readers (/api/stuck) must not pay — or race — a
+        synchronous library scan; stale-or-None is acceptable there.
+        """
+        with self._lock:
+            return self._cache
+
     def get_data(self):
+        """Return the library snapshot without ever blocking on a scan.
+
+        Serves the in-memory cache at any age; a TTL-expired (or absent)
+        cache triggers a background ``refresh()`` so the same HTTP
+        response reports ``scanning`` and the UI's poll loop picks up
+        fresh data when the scan lands.  ``refresh()`` is called outside
+        ``self._lock`` — it acquires the same non-reentrant lock.
+        """
+        needs_refresh = False
         with self._lock:
             now = time.monotonic()
             ttl = self._ttl if self._mount_path else 10
-            if self._cache is not None and (now - self._cache_time) < ttl:
-                return self._cache
-            # Background scan already running — return stale cache instead
-            # of triggering a duplicate synchronous scan
-            if self._scanning and self._cache is not None:
-                return self._cache
-
-        # Cache expired or empty — scan synchronously so caller always gets data
-        data = self.scan()
-        # Capture a coherent index snapshot before any concurrent scan can
-        # rebind the live ones — pairs this ``data`` with these indexes on
-        # disk so the warm-start state is internally consistent.
-        idx = self._snapshot_indexes_for_persist()
-        with self._lock:
-            self._cache = data
-            self._cache_time = time.monotonic()
-        self._persist_cache(data, *idx)
-        return data
+            cache = self._cache
+            if cache is not None and (now - self._cache_time) < ttl:
+                return cache
+            if not self._scanning:
+                needs_refresh = True
+        if needs_refresh:
+            self.refresh()
+        if cache is not None:
+            return cache
+        return _empty_scan_payload()
 
     def refresh(self, _rescan_depth=0):
         with self._lock:
@@ -2249,7 +3845,15 @@ class LibraryScanner:
                 self.refresh(_rescan_depth=_rescan_depth + 1)
 
         t = threading.Thread(target=_run, daemon=True)
-        t.start()
+        try:
+            t.start()
+        except Exception:
+            # A failed thread start must not wedge _scanning=True forever —
+            # get_data() has no synchronous fallback anymore, so a stuck
+            # flag would silently freeze the library at its last snapshot.
+            with self._lock:
+                self._scanning = False
+            raise
 
     def aliases_for(self, normalized_title):
         """Return the alias set for *normalized_title* (excluding itself).
@@ -2448,7 +4052,7 @@ class LibraryScanner:
         # Enforce prefer-debrid: replace local files with symlinks for source=both episodes
         if rclone_mount and symlink_base and self._local_tv_path:
             for show in shows:
-                norm = _normalize_title(show['title'])
+                norm = _show_norm(show)
                 pref = self._get_pref(norm, preferences)
                 if pref != 'prefer-debrid':
                     continue
@@ -2627,7 +4231,7 @@ class LibraryScanner:
         # This prevents deleting seasons/episodes that have no local backup.
         prefer_local_safe = {}
         for show in shows:
-            norm = _normalize_title(show['title'])
+            norm = _show_norm(show)
             if self._get_pref(norm, preferences) != 'prefer-local':
                 continue
             has_debrid_only = False
@@ -2697,6 +4301,123 @@ class LibraryScanner:
 
     _SEARCH_BUDGET_SECONDS = 30
     _SEARCH_RETRY_HOURS = 6
+    # Wanted→TorBox recovery: cap Torrentio fan-out per title probed against
+    # TB's cache, and how long a probed-and-missed (or just-grabbed) title is
+    # skipped before being re-probed.  6h matches the arr-search retry window.
+    _WANTED_TB_MAX_PROBES = 12
+    _WANTED_TB_RECOVERY_COOLDOWN = 6 * 3600
+    # RD leg of the Wanted recovery pass.  The ready timeout is short on
+    # purpose: cached content reaches ``downloaded`` within seconds of
+    # selectFiles; anything still converting/downloading after 20s is an
+    # uncached miss and the probe add is deleted.  The miss TTL is long
+    # (7 days vs the 6h TB cooldown) because a miss usually means RD
+    # doesn't have the content family cached at all — re-probing a
+    # different release of the same title every 6h would just churn
+    # add/delete cycles against RD's API.
+    _WANTED_RD_READY_TIMEOUT = 20
+    _WANTED_RD_POLL_INTERVAL = 2
+    _WANTED_RD_MISS_TTL = 7 * 24 * 3600
+    # RD's addMagnet hash-dedups: adding a hash already on the account
+    # returns the PRE-EXISTING torrent's id.  Before any probe-cleanup
+    # delete, the torrent's ``added`` timestamp is compared against the
+    # probe start; anything older than this grace (clock-skew headroom
+    # between RD's server and ours) was NOT created by the probe and
+    # must never be deleted.  Kept small: too wide a window lets a torrent
+    # the user added seconds before our probe read as "ours" and be
+    # deleted — the exact data-loss we're guarding against.
+    _WANTED_RD_PREEXISTING_GRACE = 30
+    # Time budget for the whole Wanted recovery pass.  Wider than
+    # _SEARCH_BUDGET_SECONDS (30s) because each uncached RD probe-add can
+    # legitimately burn _WANTED_RD_READY_TIMEOUT seconds of polling — a
+    # 30s ceiling would cap the pass at ~1 RD attempt per scan.
+    _WANTED_RECOVERY_BUDGET_SECONDS = 120
+
+    def _check_pending_freshness(self, norm, pending, direction):
+        """Resolve a title's pending entry and decide retry-vs-wait.
+
+        Shared by the shows and movies paths of
+        ``_search_for_missing_episodes`` (previously two copy-pasted blocks
+        that had already drifted).
+
+        Returns ``(pending_norm, verdict, pending_keys)``:
+          * ``pending_norm`` — the key the entry actually lives under (the
+            title's norm, or an alias norm).
+          * ``verdict`` — one of:
+              - ``'give-up'``: escalated to ``debrid-unavailable``; caller
+                must skip the title entirely.
+              - ``'retry'``: a same-direction entry exists but its last
+                search is older than ``_SEARCH_RETRY_HOURS``; caller may
+                re-search.
+              - ``'wait'``: a fresh same-direction entry exists; a
+                "Waiting for retry" status (with ``next_retry_at``) has
+                already been recorded on it.  The shows caller filters
+                ``pending_keys`` out of its candidates and falls through;
+                the movies caller skips the title.
+              - ``'none'``: no same-direction entry — either the title was
+                never pending, or a stale-direction entry was just cleared
+                (so ``touch_pending_searched``/``update_pending_error``
+                can't mutate a wrong-direction entry that would zombify
+                when the search loop errors out).
+          * ``pending_keys`` — the entry's ``(season, episode)`` set; only
+            populated for ``'wait'``.
+        """
+        from utils.library_prefs import clear_pending, update_pending_error
+
+        pending_entry = pending.get(norm)
+        pending_norm = norm  # key under which the entry lives
+        if not pending_entry:
+            for _pa in self._alias_norms.get(norm, ()):
+                pending_entry = pending.get(_pa)
+                if pending_entry:
+                    pending_norm = _pa
+                    break
+        pending_entry = pending_entry or {}
+        pe_dir = pending_entry.get('direction', '')
+        if pe_dir == 'debrid-unavailable':
+            return pending_norm, 'give-up', set()
+        if pe_dir and pe_dir != direction:
+            # Direction changed (e.g., user flipped from prefer-debrid to
+            # unset).  Clear the stale-direction entry.
+            clear_pending(pending_norm)
+            return pending_norm, 'none', set()
+        if pe_dir != direction:
+            return pending_norm, 'none', set()  # no entry for this direction
+
+        # Same-direction entry: retry only if the last search is stale.
+        last_ts = pending_entry.get('last_searched') or pending_entry.get('created')
+        stale = True
+        ls_dt = None
+        age_hours = 0.0
+        if last_ts:
+            try:
+                ls_dt = datetime.fromisoformat(last_ts)
+                if ls_dt.tzinfo is None:
+                    ls_dt = ls_dt.replace(tzinfo=timezone.utc)
+                age_hours = (datetime.now(timezone.utc) - ls_dt).total_seconds() / 3600
+                if age_hours < self._SEARCH_RETRY_HOURS:
+                    stale = False
+            except (ValueError, TypeError):
+                pass
+        if stale:
+            return pending_norm, 'retry', set()
+
+        # Fresh entry — record "waiting" status with next retry time.
+        remaining_h = self._SEARCH_RETRY_HOURS - age_hours
+        retry_dt = ls_dt + timedelta(hours=self._SEARCH_RETRY_HOURS)
+        update_pending_error(
+            pending_norm,
+            f"Waiting for retry ({remaining_h:.1f}h remaining)",
+            next_retry_at=retry_dt.isoformat(timespec='seconds'),
+            increment_retry=False,
+        )
+        # Tolerate malformed persisted entries (legacy schema / hand edits):
+        # a missing season/episode key must not abort the whole search loop.
+        pending_keys = {
+            (e['season'], e['episode'])
+            for e in pending_entry.get('episodes', [])
+            if isinstance(e, dict) and e.get('season') is not None and e.get('episode') is not None
+        }
+        return pending_norm, 'wait', pending_keys
 
     def _search_for_missing_episodes(self, shows, movies, preferences):
         """Unconditional episode-completeness reconcile.
@@ -2728,8 +4449,9 @@ class LibraryScanner:
         """
         gap_fill_on = gap_fill_enabled()
 
-        from utils.library_prefs import get_all_pending, set_pending, touch_pending_searched, update_pending_error
+        from utils.library_prefs import get_all_pending, set_pending, touch_pending_searched, update_pending_error, mark_debrid_unavailable
         from utils.tmdb import search_show as tmdb_search_show, search_movie as tmdb_search_movie
+        from utils import attempt_ledger
 
         # pending is a snapshot; set_pending calls below write new entries
         # that won't be visible in this snapshot — acceptable since each
@@ -2757,66 +4479,50 @@ class LibraryScanner:
                 if time.monotonic() > deadline:
                     logger.info("[library] Search budget exhausted, deferring remaining to next scan")
                     break
-                norm = _normalize_title(show['title'])
+                # Ghost entries (source='wanted') are Sonarr's own
+                # monitored-no-file series — Sonarr is ALREADY searching
+                # for them. Their season_data is empty but
+                # _compute_missing_episodes derives candidates from the
+                # TMDB episode cache, so without this guard a fully-absent
+                # ghost would (a) fire redundant Sonarr search commands and
+                # (b) write a set_pending entry that suppresses the ghost on
+                # the next scan — the same self-erase regression the movie
+                # path guards against below.  This gate is also one half of
+                # the inverse-gate invariant with _recover_wanted_via_debrid
+                # (see the comment there) that prevents dual acquisition of
+                # GHOSTS.  Partial-show seasons are a deliberate exception:
+                # that pass's season targets probe TB packs for the same
+                # missing episodes this pass searches the arr for — a
+                # dual-path overlap that self-corrects at import time.
+                if show.get('source') == 'wanted':
+                    continue
+                # Identity-unknown reboot-family items: missing-episode math
+                # runs against whichever sibling's TMDB entry the bare cache
+                # key resolved to, so derived searches would target an
+                # arbitrary sibling in Sonarr.  Skip until attribution works.
+                if show.get('_ambiguous_reboot'):
+                    continue
+                norm = _show_norm(show)
                 route = self._route_for(norm, preferences)
                 direction = {True: 'to-debrid', False: 'to-local', None: 'to-any'}[route]
 
+                # Pending state is keyed by the BARE title norm, not the
+                # year-qualified reboot-family key: the UI writes pending
+                # under the bare norm, and pre-collision behavior was one
+                # shared row per title.  Keying by _show_norm would split
+                # the row and orphan UI-written entries.
+                pending_key = _normalize_title(show.get('title') or '')
+
                 # Check pending state — skip debrid-unavailable, allow retries
-                # for stale entries whose direction matches the current route
-                pending_entry = pending.get(norm)
-                pending_norm = norm  # key under which the entry lives
-                if not pending_entry:
-                    for _pa in self._alias_norms.get(norm, ()):
-                        pending_entry = pending.get(_pa)
-                        if pending_entry:
-                            pending_norm = _pa
-                            break
-                pending_entry = pending_entry or {}
-                pe_dir = pending_entry.get('direction', '')
-                if pe_dir == 'debrid-unavailable':
+                # for stale entries whose direction matches the current route.
+                # 'wait' deliberately falls through: candidates are filtered
+                # by pending_keys below, so non-pending episodes of the same
+                # show can still be searched.
+                pending_norm, verdict, pending_keys = \
+                    self._check_pending_freshness(pending_key, pending, direction)
+                if verdict == 'give-up':
                     continue  # escalated — stop retrying
-                pending_keys = set()
-                is_retry = False
-                if pe_dir and pe_dir != direction:
-                    # Direction changed (e.g., user flipped from prefer-debrid
-                    # to unset).  Clear the stale-direction entry so
-                    # touch_pending_searched / update_pending_error below don't
-                    # mutate a wrong-direction entry that would then zombify
-                    # when the whole season loop errors out.
-                    from utils.library_prefs import clear_pending
-                    clear_pending(pending_norm)
-                    pending_entry = {}
-                    pe_dir = ''
-                if pe_dir == direction:
-                    # Check if the last search attempt is recent enough to skip
-                    last_ts = pending_entry.get('last_searched') or pending_entry.get('created')
-                    stale = True
-                    if last_ts:
-                        try:
-                            ls_dt = datetime.fromisoformat(last_ts)
-                            if ls_dt.tzinfo is None:
-                                ls_dt = ls_dt.replace(tzinfo=timezone.utc)
-                            age_hours = (datetime.now(timezone.utc) - ls_dt).total_seconds() / 3600
-                            if age_hours < self._SEARCH_RETRY_HOURS:
-                                stale = False
-                        except (ValueError, TypeError):
-                            pass
-                    if stale:
-                        is_retry = True  # allow retry — pending_keys stays empty
-                    else:
-                        pending_keys = {
-                            (e['season'], e['episode'])
-                            for e in pending_entry.get('episodes', [])
-                        }
-                        # Record "waiting" status with next retry time
-                        remaining_h = self._SEARCH_RETRY_HOURS - age_hours
-                        retry_dt = ls_dt + timedelta(hours=self._SEARCH_RETRY_HOURS)
-                        update_pending_error(
-                            pending_norm,
-                            f"Waiting for retry ({remaining_h:.1f}h remaining)",
-                            next_retry_at=retry_dt.isoformat(timespec='seconds'),
-                            increment_retry=False,
-                        )
+                is_retry = verdict == 'retry'
 
                 # Build the candidate set:
                 #   - Missing-anywhere (aired TMDB episodes absent from all sources).
@@ -2872,7 +4578,22 @@ class LibraryScanner:
 
                 respect_mon = True  # all routes honor Sonarr's monitored flag
                 new_pending = []
+                capped_count = 0
                 for sn, ep_nums in by_season.items():
+                    # Force-grab give-up gate: the prefer_debrid=True path
+                    # re-grabs an already-present file to push it to debrid,
+                    # which re-arms TorBox's abuse cooldown.  After
+                    # FORCE_GRAB_MAX_ATTEMPTS futile grabs on a stuck title,
+                    # stop poking debrid for this season.
+                    fg_key = f"fg:{norm}:s{sn}"
+                    if route is True and attempt_ledger.get(fg_key) >= self._force_grab_max_attempts:
+                        logger.info(
+                            f"[library] Force-grab give-up for {show['title']} S{sn:02d}: "
+                            f"{self._force_grab_max_attempts} attempts exhausted, "
+                            f"stopping debrid re-grab"
+                        )
+                        capped_count += 1
+                        continue
                     try:
                         result = show_client.ensure_and_search(
                             show['title'], show_tmdb_id, sn, ep_nums,
@@ -2882,6 +4603,21 @@ class LibraryScanner:
                         if status in ('sent', 'pending'):
                             for en in ep_nums:
                                 new_pending.append({'season': sn, 'episode': en})
+                            if route is True and result.get('grabbed'):
+                                fg_count = attempt_ledger.bump(fg_key)
+                                # The >= cap gate above freezes the count at
+                                # exactly the cap, so == fires once.
+                                if fg_count == self._force_grab_max_attempts:
+                                    try:
+                                        from utils.notifications import notify
+                                        notify('retry_giveup',
+                                               f"Gave Up: {show['title']} S{sn:02d}",
+                                               f'Force-grab retries exhausted ({fg_count} '
+                                               f'attempts) — debrid never picked this up. '
+                                               f'Use Retry on the Stuck tab to reset.',
+                                               level='warning')
+                                    except Exception:
+                                        pass
                         elif status == 'skipped':
                             # User-unmonitored episodes — respect intent, don't
                             # cooldown or error-log (would churn retry_count).
@@ -2907,6 +4643,14 @@ class LibraryScanner:
 
                 if new_pending:
                     set_pending(pending_norm, new_pending, direction)
+                elif capped_count and capped_count == len(by_season):
+                    # EVERY actionable season hit the force-grab cap (none were
+                    # sent and none errored transiently) — escalate the title to
+                    # debrid-unavailable so the UI reflects give-up and the loop
+                    # stops re-poking debrid.  A transient error on an un-capped
+                    # season leaves capped_count < len(by_season), so the title
+                    # keeps its to-debrid direction and retries next scan.
+                    mark_debrid_unavailable(pending_norm)
 
         # --- Movies via Radarr ---
         try:
@@ -2926,7 +4670,9 @@ class LibraryScanner:
                 # redundant /command/MoviesSearch calls, (b) write a
                 # set_pending entry which would suppress the ghost on
                 # the next scan (the bug surfaced in the 071ba5d review:
-                # Wanted view self-erases after one scan cycle).
+                # Wanted view self-erases after one scan cycle).  Also one
+                # half of the inverse-gate invariant with
+                # _recover_wanted_via_debrid (see the comment there).
                 if movie.get('source') == 'wanted':
                     continue
                 norm = _normalize_title(movie['title'])
@@ -2946,54 +4692,31 @@ class LibraryScanner:
                     if src in ('debrid', 'local', 'both'):
                         continue  # already available somewhere
 
-                pending_entry = pending.get(norm)
-                pending_norm = norm
-                if not pending_entry:
-                    for _pa in self._alias_norms.get(norm, ()):
-                        pending_entry = pending.get(_pa)
-                        if pending_entry:
-                            pending_norm = _pa
-                            break
-                pending_entry = pending_entry or {}
-                pe_dir = pending_entry.get('direction', '')
-                if pe_dir == 'debrid-unavailable':
+                # A movie has no per-episode granularity, so a fresh pending
+                # entry ('wait') skips the whole title — unlike the shows
+                # path, which falls through and filters by pending_keys.
+                pending_norm, verdict, _ = \
+                    self._check_pending_freshness(norm, pending, direction)
+                if verdict == 'give-up':
                     continue  # escalated — stop retrying
-                movie_is_retry = False
-                if pe_dir and pe_dir != direction:
-                    # Direction changed (preference flipped) — clear stale-direction
-                    # entry so touch / update_pending_error below don't zombify it.
-                    from utils.library_prefs import clear_pending
-                    clear_pending(pending_norm)
-                    pending_entry = {}
-                    pe_dir = ''
-                if pe_dir == direction:
-                    # Allow retry if last search is stale
-                    last_ts = pending_entry.get('last_searched') or pending_entry.get('created')
-                    stale = True
-                    if last_ts:
-                        try:
-                            ls_dt = datetime.fromisoformat(last_ts)
-                            if ls_dt.tzinfo is None:
-                                ls_dt = ls_dt.replace(tzinfo=timezone.utc)
-                            age_hours = (datetime.now(timezone.utc) - ls_dt).total_seconds() / 3600
-                            if age_hours < self._SEARCH_RETRY_HOURS:
-                                stale = False
-                        except (ValueError, TypeError):
-                            pass
-                    if not stale:
-                        # Record "waiting" status with next retry time
-                        remaining_h = self._SEARCH_RETRY_HOURS - age_hours
-                        retry_dt = ls_dt + timedelta(hours=self._SEARCH_RETRY_HOURS)
-                        update_pending_error(
-                            pending_norm,
-                            f"Waiting for retry ({remaining_h:.1f}h remaining)",
-                            next_retry_at=retry_dt.isoformat(timespec='seconds'),
-                            increment_retry=False,
-                        )
-                        continue  # recent search — skip
-                    movie_is_retry = True
+                if verdict == 'wait':
+                    continue  # recent search — skip
+                movie_is_retry = verdict == 'retry'
                 if (norm, 0) in self._search_cooldown:
                     continue  # recently attempted
+
+                # Force-grab give-up gate (mirrors the shows path): after
+                # FORCE_GRAB_MAX_ATTEMPTS futile debrid re-grabs on a stuck
+                # movie, escalate to debrid-unavailable and stop poking debrid.
+                fg_key = f"fg:{norm}"
+                if route is True and attempt_ledger.get(fg_key) >= self._force_grab_max_attempts:
+                    logger.info(
+                        f"[library] Force-grab give-up for movie {movie['title']}: "
+                        f"{self._force_grab_max_attempts} attempts exhausted, "
+                        f"stopping debrid re-grab"
+                    )
+                    mark_debrid_unavailable(pending_norm)
+                    continue
 
                 retry_tag = ' (retry)' if movie_is_retry else ''
                 route_tag = {True: 'debrid', False: 'local', None: 'any'}[route]
@@ -3021,6 +4744,21 @@ class LibraryScanner:
                     status = result.get('status', '')
                     if status in ('sent', 'pending'):
                         set_pending(pending_norm, [{'season': 0, 'episode': 0}], direction)
+                        if route is True and result.get('grabbed'):
+                            fg_count = attempt_ledger.bump(fg_key)
+                            # The >= cap gate above freezes the count at
+                            # exactly the cap, so == fires once.
+                            if fg_count == self._force_grab_max_attempts:
+                                try:
+                                    from utils.notifications import notify
+                                    notify('retry_giveup',
+                                           f"Gave Up: {movie['title']}",
+                                           f'Force-grab retries exhausted ({fg_count} '
+                                           f'attempts) — debrid never picked this up. '
+                                           f'Use Retry on the Stuck tab to reset.',
+                                           level='warning')
+                                except Exception:
+                                    pass
                     elif status == 'skipped':
                         # Respect_monitored short-circuit — user intentionally
                         # unmonitored; don't touch pending or retry_count.
@@ -3044,6 +4782,956 @@ class LibraryScanner:
                     self._search_cooldown[(norm, 0)] = now
                     update_pending_error(pending_norm, f"Radarr: {e}")
 
+    def _recover_wanted_via_debrid(self, shows, movies, preferences):
+        """Proactively grab debrid-cached copies of "Wanted" media.
+
+        The arr searches its own indexer pool (Prowlarr/Torznab); zurgarr
+        queries the Torrentio feed directly.  These are different populations,
+        so a title can be cached on a debrid yet sit in "Wanted" forever
+        because the arr's search never surfaces a grabbable release.
+        Empirically ~93% of the live Wanted backlog is already cached on
+        TorBox at full resolution — the gap to 100% recovery is this
+        acquisition path, not supply.  This pass closes it, in two legs per
+        Wanted ghost (movie or first missing episode of a show), both fed by
+        a single Torrentio search per title:
+
+        * **TB leg** (``WANTED_TB_RECOVERY_ENABLED``): probe candidates
+          against TorBox's still-working cache endpoint and add the best
+          cached release.  Runs FIRST and claims every TB-cached title
+          exclusively — the RD leg never fires on one.  Bounded per scan
+          (``WANTED_TB_RECOVERY_MAX_PER_SCAN``, default 2 — a trickle,
+          because create-volume bursts arm TB Essential's ~24h abuse
+          cooldown).  Enforcement backoff (an add failing while the
+          account cooldown flag is set) disables only this leg — the RD
+          leg keeps draining.
+        * **RD leg** (``WANTED_RD_RECOVERY_ENABLED``): fallback for titles
+          TorBox does NOT have cached (or can't answer for this pass) —
+          measured live at ~8% hit rate vs TB's 93-97% cache coverage, so
+          spending its add/delete churn on TB-cached titles is pure waste.
+          RD's cache probe is dead, so the add IS the probe — add the top
+          release, keep it if it goes instantly ready (cached), delete it
+          otherwise.  RD has no create-volume cooldown, so this leg caps
+          only on attempts per scan
+          (``WANTED_RD_RECOVERY_MAX_PER_SCAN``).  Every attempt doubles as
+          an RD cache-hit measurement (``wanted_rd_recovered`` vs
+          ``wanted_rd_uncached`` history causes).
+
+        Beyond whole-title ghosts, the pass also builds **season targets**
+        (``WANTED_SEASON_RECOVERY_ENABLED``) for partially-present shows:
+        each season with missing aired episodes is probed for a season
+        pack covering it (single-episode releases for the first missing
+        episode are the fallback).  Season targets are TB-only, share the
+        TB budget with ghosts (ghosts first), and one cached pack add
+        fills every gap in the season — the symlink phase skips episodes
+        already on disk.
+
+        The scanner's own symlink phase links recovered content on a
+        subsequent scan, and Radarr/Sonarr import it from the mount.
+        Per-title cooldowns keep a deep backlog from being re-probed every
+        scan (6h for the TB leg, 7 days for RD misses — see
+        ``_wanted_rd_miss``).
+        """
+        if not os.environ.get('TORRENTIO_URL'):
+            return  # no Torrentio feed to search against
+
+        from base import load_secret_or_env
+        from utils import search as _search
+        from utils import attempt_ledger as _ledger
+
+        # --- TB leg availability -------------------------------------
+        tb_key = load_secret_or_env('torbox_api_key')
+        tb_ok = bool(tb_key) and wanted_tb_recovery_enabled()
+        if tb_ok:
+            # ``cooldown_until`` on /user/me is ADVISORY, not an enforcement
+            # signal: on Pro plans organic creates succeed while the flag is
+            # set, and organic traffic keeps re-arming it — gating the leg
+            # on the flag self-starves recovery indefinitely (observed live:
+            # "skipped — cooldown for 83693s" on every scan while 181
+            # blackhole creates/week succeeded).  So the leg always attempts
+            # its first add; ENFORCEMENT is detected from the add actually
+            # failing while the cooldown flag is set, which disables the
+            # leg for the rest of the pass (see the add-failure handler
+            # below).  The pre-check remains purely informational.
+            try:
+                from utils.blackhole import _check_torbox_cooldown
+                tb_cooldown = _check_torbox_cooldown(tb_key)
+            except Exception:
+                tb_cooldown = 0
+            if tb_cooldown > 0:
+                logger.info(
+                    f"[library] Wanted→TB leg: TorBox cooldown flag set "
+                    f"({int(tb_cooldown)}s) — proceeding anyway; an add "
+                    f"failure will confirm enforcement and back off")
+
+        # --- RD leg availability -------------------------------------
+        rd_key = load_secret_or_env('rd_api_key')
+        rd_ok = bool(rd_key) and wanted_rd_recovery_enabled()
+        rd_client = None
+        if rd_ok:
+            try:
+                from utils.debrid_client import get_debrid_client
+                rd_client, _svc = get_debrid_client(
+                    service='realdebrid', api_key=rd_key)
+            except Exception as e:
+                logger.warning(f"[library] Wanted→RD leg disabled — client "
+                               f"init failed: {type(e).__name__}")
+                rd_client = None
+            if rd_client is None or not getattr(rd_client, 'configured', False):
+                rd_ok = False
+
+        if not tb_ok and not rd_ok:
+            return
+
+        now = time.monotonic()
+        # Expire per-title cooldown/miss entries.
+        with self._wanted_memo_lock:
+            self._wanted_tb_cooldown = {
+                k: t for k, t in self._wanted_tb_cooldown.items()
+                if now - t < self._WANTED_TB_RECOVERY_COOLDOWN
+            }
+            self._wanted_rd_miss = {
+                k: t for k, t in self._wanted_rd_miss.items()
+                if now - t < self._WANTED_RD_MISS_TTL
+            }
+            self._wanted_no_results = {
+                k: t for k, t in self._wanted_no_results.items()
+                if now - t < self._WANTED_TB_RECOVERY_COOLDOWN
+            }
+
+        tb_budget = wanted_tb_recovery_max_per_scan()
+        rd_budget = wanted_rd_recovery_max_per_scan()
+        deadline = now + self._WANTED_RECOVERY_BUDGET_SECONDS
+        tb_added = 0
+        rd_added = 0
+        rd_attempts = 0
+
+        # Build the target list: released movie ghosts + show ghosts (probing
+        # the first still-missing episode, defaulting to S01E01) + season
+        # targets for partially-present shows (probing a season pack that
+        # covers the season's missing episodes).
+        #
+        # INVARIANT (movies + ghost shows): this pass and
+        # _search_for_missing_episodes have inverse source gates — that pass
+        # skips source == 'wanted' items, this one's ghost targets are ONLY
+        # them.  The complementary gates prevent the two acquisition paths
+        # (arr search vs. direct TB add) from double-acquiring the same
+        # title in one scan; if either gate changes, re-check the other.
+        #
+        # DELIBERATE EXCEPTION (season targets): partial-show seasons are
+        # dual-path — gap-fill keeps firing arr searches for the same
+        # missing episodes while this pass probes TB for a season pack.
+        # The mechanisms differ (indexer grab → blackhole vs. direct
+        # debrid add → symlink) and the overlap self-corrects: if both
+        # succeed, the arr import simply replaces the symlinked file.
+        # Season targets exist precisely because gap-fill's indexer pool
+        # has been failing on these seasons.
+        targets = []  # (media_type, item, season, episode)
+        for m in movies:
+            if m.get('source') != 'wanted':
+                continue
+            if not m.get('is_available', True):
+                continue  # unreleased — Torrentio won't have a real release
+            if not m.get('imdb_id'):
+                continue
+            targets.append(('movie', m, None, None))
+        for s in shows:
+            if s.get('source') != 'wanted':
+                continue
+            if not s.get('imdb_id'):
+                continue
+            # A "wanted" show ghost is a Sonarr-monitored series with ZERO
+            # on-disk episodes (_apply_sonarr_wanted_shows only injects
+            # fully-absent series), so every episode is genuinely missing and
+            # S01E01 is always a legitimate entry point.  We still prefer the
+            # exact first missing episode when TMDB has the episode list —
+            # _compute_missing_episodes returns [] both for "all present"
+            # (impossible here — the ghost has nothing) and for "TMDB cache
+            # miss / don't know", and in either case the S01E01 fallback is
+            # correct for a fully-absent ghost rather than a blind guess.
+            season, episode = 1, 1
+            try:
+                miss = self._compute_missing_episodes(s)
+            except Exception:
+                miss = []
+            if miss:
+                season, episode = miss[0]
+            targets.append(('series', s, season, episode))
+
+        # Season targets: partially-present shows whose seasons still have
+        # missing aired episodes.  One cached pack add fills every gap in
+        # the season via the symlink phase (which skips episodes already on
+        # disk), so these drain scattered per-episode holes the arr's
+        # indexers never close.  TB-only — probing a whole pack through
+        # RD's add-poll-delete cycle is expensive at a measured ~8% hit
+        # rate — and appended AFTER the ghost targets so whole-title
+        # recovery keeps first claim on the shared TB budget.  Sorted by
+        # missing-count descending so the biggest gaps drain first.
+        if tb_ok and wanted_season_recovery_enabled():
+            season_targets = []
+            for s in shows:
+                if s.get('source') == 'wanted':
+                    continue  # ghosts are handled above
+                if s.get('_ambiguous_reboot'):
+                    continue  # imdb_id is a sibling guess — never probe on it
+                if not s.get('imdb_id'):
+                    continue
+                me = s.get('missing_episodes')
+                if not (isinstance(me, int) and me > 0):
+                    continue
+                try:
+                    miss = self._compute_missing_episodes(s)
+                except Exception:
+                    miss = []
+                if not miss:
+                    continue  # [] = "don't know" — never probe blind
+                by_season = {}
+                for sn, en in miss:
+                    by_season.setdefault(sn, []).append(en)
+                for sn, eps in by_season.items():
+                    season_targets.append(
+                        (len(eps), ('season', s, sn, min(eps))))
+            season_targets.sort(key=lambda t: t[0], reverse=True)
+            targets.extend(t for _, t in season_targets)
+
+        try:
+            from utils.blocklist import is_blocked as _is_blocked
+        except ImportError:
+            _is_blocked = None
+
+        for media_type, item, season, episode in targets:
+            tb_active = tb_ok and tb_added < tb_budget
+            rd_active = rd_ok and rd_attempts < rd_budget
+            if not tb_active and not rd_active:
+                break
+            now_loop = time.monotonic()
+            if now_loop > deadline:
+                logger.info("[library] Wanted recovery time budget exhausted, "
+                            "deferring remainder to next scan")
+                break
+            imdb = item['imdb_id']
+            if media_type == 'movie':
+                key = imdb
+            elif media_type == 'season':
+                # Distinct namespace from the per-episode ghost keys so a
+                # pack probe and an episode probe of the same season never
+                # share memo/ledger state.
+                key = f"{imdb}:{season}:pack"
+            else:
+                key = f"{imdb}:{season}:{episode}"
+            # Terminal give-up: this title's top releases are confirmed
+            # doomed on BOTH providers (RD filter-blocked + TB uncached)
+            # across WANTED_FILTER_GIVEUP_STRIKES passes.  Stop probing —
+            # re-probing a filter-blocked release never changes.  The strike
+            # is keyed per-probe (``key`` is the imdb for movies but
+            # ``imdb:season:episode`` for shows), so one blocked episode
+            # never abandons the whole series and per-episode strikes climb
+            # independently — one bump per pass, not one per episode.  An
+            # operator Retry (clear_retry_state) or the ledger prune sweep
+            # clears the strike and gives the title a fresh chance.
+            if imdb and _ledger.get(f'wantedblock:{key}') >= WANTED_FILTER_GIVEUP_STRIKES:
+                continue
+            if key in self._wanted_no_results:
+                continue
+            # Per-leg gates — a TB cooldown must never suppress the RD leg
+            # (or vice versa); each leg answers only to its own memo.
+            # Season targets are TB-only (see the target-build comment).
+            rd_try = (rd_active and media_type != 'season'
+                      and key not in self._wanted_rd_miss)
+            tb_try = tb_active and key not in self._wanted_tb_cooldown
+            if not rd_try and not tb_try:
+                continue
+
+            media_title = item.get('title')
+            try:
+                results = _search.search_torrentio(
+                    imdb,
+                    media_type='series' if media_type == 'season'
+                    else media_type,
+                    season=season, episode=episode)
+            except Exception:
+                results = []
+            # Blocklisted hashes were rejected for a reason (bad release,
+            # prior filter block, ...) — never re-add them via this pass.
+            if results and _is_blocked is not None:
+                try:
+                    results = [r for r in results
+                               if not _is_blocked(r.get('info_hash', ''))]
+                except Exception:
+                    logger.warning("[library] Wanted recovery blocklist "
+                                   "filter failed — using unfiltered results")
+            # Torrentio stream lists are imdb-keyed but polluted with
+            # mislabeled uploads; without this check a 2160p "Fight Club"
+            # junk entry outranks the real 1080p release and gets added
+            # in the wrong title's slot.
+            if results:
+                if not media_title:
+                    logger.warning(
+                        f"[library] Wanted recovery: no title on ghost "
+                        f"{key} — skipping title-match filter")
+                else:
+                    try:
+                        kept = [r for r in results
+                                if _release_matches_title(
+                                    r.get('title') or '', media_title,
+                                    media_year=item.get('year'))]
+                        dropped = len(results) - len(kept)
+                        if dropped:
+                            logger.info(
+                                f"[library] Wanted recovery dropped {dropped}"
+                                f"/{len(results)} title-mismatched result(s) "
+                                f"for '{media_title}'")
+                        results = kept
+                    except Exception:
+                        logger.warning(
+                            "[library] Wanted recovery title-match filter "
+                            "failed — using unfiltered results")
+            # Season targets: keep only releases that actually cover the
+            # target — a pack marking this season (or a range spanning it)
+            # or an exact-episode release for the first missing episode.
+            # Everything else (wrong season, wrong episode, no TV marker)
+            # is junk from Torrentio's imdb-keyed result list.
+            season_cls = {}
+            if media_type == 'season' and results:
+                kept = []
+                for r in results:
+                    ih = r.get('info_hash') or ''
+                    cls = _release_covers_season(
+                        r.get('title') or '', season, episode)
+                    if ih and cls:
+                        season_cls[ih] = cls
+                        kept.append(r)
+                if len(kept) < len(results):
+                    logger.debug(
+                        f"[library] Wanted season recovery dropped "
+                        f"{len(results) - len(kept)}/{len(results)} "
+                        f"non-covering result(s) for '{media_title}' "
+                        f"S{season:02d}")
+                results = kept
+            if not results:
+                self._memo_wanted(self._wanted_no_results, key)
+                continue
+
+            # Rank by quality score then seeds; cap the TB cache fan-out.
+            results.sort(
+                key=lambda r: ((r.get('quality') or {}).get('score', 0),
+                               r.get('seeds', 0)),
+                reverse=True,
+            )
+            if media_type == 'season':
+                # Stable re-sort: packs before single-episode releases (one
+                # pack add covers the whole season's gaps); the quality
+                # order above is preserved within each class.
+                results.sort(
+                    key=lambda r: season_cls.get(
+                        r.get('info_hash') or '') != 'pack')
+
+            ep_str = (f"S{season:02d}E{episode:02d}"
+                      if media_type in ('series', 'season') else None)
+
+            # ---- TB leg first: cache probe + add ---------------------
+            # TB gets first claim: ~93-97% of the live Wanted backlog is
+            # TB-cached vs a measured ~8% RD probe hit rate, so the RD leg
+            # is demoted to a fallback that only fires on titles TB does
+            # NOT have cached (or whose cache state it can't answer for
+            # this pass).
+            tb_uncached = False  # TB probe ran cleanly and found nothing
+            if tb_try:
+                probe = results[:self._WANTED_TB_MAX_PROBES]
+                hashes = [r['info_hash'] for r in probe]
+                tb_probe_ok = True
+                try:
+                    cmap = _search.check_debrid_cache(
+                        hashes, service='torbox', api_key=tb_key)
+                except Exception:
+                    cmap = {}
+                    tb_probe_ok = False
+                cached = next(
+                    (r for r in probe if cmap.get(r['info_hash'])), None)
+                if cached:
+                    # season_cls is empty for non-season targets, so this
+                    # collapses to ep_str everywhere else.
+                    add_ep = (f"S{season:02d}"
+                              if season_cls.get(cached['info_hash']) == 'pack'
+                              else ep_str)
+                    try:
+                        result = _search.add_to_debrid(
+                            cached['info_hash'],
+                            title=cached.get('title') or media_title or '',
+                            media_title=media_title,
+                            episode=add_ep,
+                            service='torbox',
+                            api_key=tb_key,
+                            cause='wanted_tb_recovered',
+                            source='library',
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"[library] Wanted→TB recovery add failed for "
+                            f"{media_title!r}: {type(e).__name__}")
+                        result = {}
+                    # Cool the title down regardless of outcome: a success
+                    # is added (no need to re-add), a duplicate is already
+                    # present, and a transient failure shouldn't be retried
+                    # until the window elapses.
+                    self._memo_wanted(self._wanted_tb_cooldown, key)
+                    if result.get('success'):
+                        tb_added += 1
+                    elif result.get('duplicate'):
+                        # The account already holds a release covering this
+                        # target, yet the target is still "wanted" — the
+                        # content exists but never materialized into the
+                        # library. Usually a layout-parsing gap (e.g. a
+                        # season-subdir naming the collector doesn't
+                        # recognize), not a supply problem: surface it
+                        # instead of silently re-cooling forever.
+                        logger.warning(
+                            f"[library] Wanted recovery target {media_title!r}"
+                            f" {add_ep} is covered by a release already in the"
+                            f" TB account ({(cached.get('title') or '')[:80]!r})"
+                            f" but its files never reached the library —"
+                            f" likely an unparsed folder layout")
+                    else:
+                        # Enforcement check: an add failure WHILE the account
+                        # cooldown flag is set means TB is actually rejecting
+                        # creates (HTTP 400 DOWNLOAD_SERVER_ERROR surfaces as
+                        # a generic failure here) — stop burning the remaining
+                        # TB budget this pass.  A failure with no cooldown
+                        # flag is a transient error; keep going.
+                        try:
+                            from utils.blackhole import _check_torbox_cooldown
+                            # force_refresh: the advisory pre-check may have
+                            # cached 0 seconds ago; a cooldown armed by THIS
+                            # add's rejection would be masked by that cache,
+                            # so re-query /user/me.
+                            tb_cooldown = _check_torbox_cooldown(
+                                tb_key, force_refresh=True)
+                        except Exception:
+                            # Can't distinguish enforcement from a transient
+                            # add failure — keep the leg alive (blast radius
+                            # is the small remaining per-scan budget) but
+                            # leave a trace for the operator.
+                            logger.warning(
+                                "[library] Wanted→TB leg: cooldown re-probe "
+                                "failed after an add failure — cannot "
+                                "confirm enforcement, leg stays active")
+                            tb_cooldown = 0
+                        if tb_cooldown > 0:
+                            logger.info(
+                                f"[library] Wanted→TB leg backing off — add "
+                                f"failed with account cooldown active "
+                                f"({int(tb_cooldown)}s); enforcement "
+                                f"confirmed")
+                            tb_ok = False
+                    # TB-cached: the RD leg never fires on this title — even
+                    # after a transient add failure the cached TB copy is the
+                    # cheaper retry once the cooldown memo expires.
+                    continue
+                tb_uncached = tb_probe_ok
+
+            # ---- RD leg: fallback for TB-uncached titles --------------
+            # The probe needs a full poll window of headroom left in the
+            # pass budget — starting with a clamped-short window would
+            # misclassify cached titles as 7-day misses.  Checked HERE (not
+            # at loop top) because the TB leg just consumed some of it.
+            if rd_try and (deadline - time.monotonic()
+                           < self._WANTED_RD_READY_TIMEOUT):
+                rd_try = False
+            rd_outcome = None
+            if rd_try:
+                top_hash = (results[0].get('info_hash') or '').lower()
+                if top_hash and _ledger.get(f'rdblock:{top_hash}') > 0:
+                    # RD's keyword filter already rejected this exact hash on
+                    # a previous pass — the verdict is deterministic and
+                    # persisted, so treat it as a confirmed filter block
+                    # WITHOUT re-adding (the in-memory miss memo dies on
+                    # restart, which was re-adding known-blocked hashes 6-7
+                    # times per title across deploys).  Costs no API call and
+                    # no budget; still pairs with the TB probe above so the
+                    # ``wantedblock:`` give-up strike keeps accruing.
+                    logger.debug(f"[library] Wanted→RD probe skipped for "
+                                 f"{media_title!r} — hash {top_hash[:8]}… has "
+                                 f"a persisted filter-block verdict")
+                    rd_outcome = 'filter_blocked'
+                else:
+                    rd_outcome = self._wanted_rd_probe_add(
+                        rd_client, rd_key, results[0],
+                        media_title, ep_str, key)
+                    if rd_outcome != 'skipped':
+                        # Only real add attempts count against the budget —
+                        # local skips (dedup hit, listing unavailable) cost
+                        # no RD API adds.
+                        rd_attempts += 1
+                if rd_outcome == 'recovered':
+                    rd_added += 1
+                    self._memo_wanted(self._wanted_tb_cooldown, key)
+                    continue
+
+            # ---- combine the legs' verdicts ---------------------------
+            if not tb_try:
+                # The TB leg couldn't run this pass (disabled / budget spent
+                # / per-title cooldown): the "uncached" half of the give-up
+                # signature can't be confirmed, so don't accrue a strike.
+                # Fall back to the 7-day RD-miss memo so a blocked release
+                # isn't re-probed against RD every scan while TB is
+                # unavailable.
+                if rd_outcome == 'filter_blocked':
+                    self._memo_wanted(self._wanted_rd_miss, key)
+                continue
+            if rd_outcome == 'filter_blocked' and imdb and tb_uncached:
+                # Both providers confirmed failing THIS pass — accrue a
+                # terminal give-up strike.  Deliberately DON'T cool the
+                # title down: leaving both memos clear lets each leg
+                # re-confirm on the next scan so the strike count can
+                # climb to WANTED_FILTER_GIVEUP_STRIKES (a few passes),
+                # after which the top-of-loop guard skips it for good.
+                self._record_wanted_filter_giveup(
+                    key, imdb, media_title, ep_str)
+            elif rd_outcome == 'filter_blocked' and imdb:
+                # TB probe errored — can't confirm uncached, so no strike;
+                # cool down + memo RD-miss to avoid re-probing the blocked
+                # release every scan while TB's cache state is unknown.
+                self._memo_wanted(self._wanted_tb_cooldown, key)
+                self._memo_wanted(self._wanted_rd_miss, key)
+            else:
+                # Plain TB miss (RD didn't filter-block) — cool down so we
+                # don't re-walk it before the window elapses.
+                self._memo_wanted(self._wanted_tb_cooldown, key)
+
+        if rd_added or tb_added:
+            logger.info(f"[library] Wanted recovery added {rd_added} release(s) "
+                        f"to RealDebrid and {tb_added} to TorBox")
+        # Persist the memo state so a restart resumes the drain where it
+        # left off instead of re-probing the whole backlog.
+        self._persist_wanted_memos()
+
+    def _record_wanted_filter_giveup(self, key, imdb, media_title, ep_str):
+        """Bump the persistent both-providers give-up strike for a Wanted
+        ghost, logging the terminal event exactly once when the count first
+        reaches ``WANTED_FILTER_GIVEUP_STRIKES`` (after which the loop's top
+        guard skips the probe, so no further strikes accrue).
+
+        ``key`` is the per-probe key (imdb for movies, ``imdb:season:episode``
+        for shows) so a series accrues strikes per-episode and one blocked
+        episode never terminates the whole show."""
+        from utils import attempt_ledger as _ledger
+        try:
+            strikes = _ledger.bump(f'wantedblock:{key}')
+        except Exception:
+            return
+        if strikes != WANTED_FILTER_GIVEUP_STRIKES:
+            # Below threshold: still accruing.  Once it equals the threshold
+            # the top-of-loop guard skips the probe on every later pass, so the
+            # count freezes here and this event fires exactly once — until the
+            # prune sweep expires the key, after which it re-climbs from 1 and
+            # re-crosses at ``==`` again (never ``>``).
+            return
+        logger.info(f"[library] Wanted recovery gave up on {media_title!r} "
+                    f"({imdb}) — filter-blocked on RD and uncached on TorBox "
+                    f"across {strikes} passes")
+        try:
+            from utils import history as _hist
+            _hist.log_event(
+                'debrid_add_failed', media_title or imdb,
+                episode=ep_str,
+                detail='Recovery gave up — filter-blocked on RealDebrid and '
+                       'uncached on TorBox',
+                source='library',
+                media_title=media_title,
+                meta={'cause': _hist.CAUSE_WANTED_FILTER_GIVEUP,
+                      'imdb_id': imdb,
+                      'strikes': strikes},
+            )
+        except Exception:
+            pass
+        try:
+            from utils.notifications import notify
+            label = media_title or imdb
+            if ep_str:
+                label = f'{label} {ep_str}'
+            notify('retry_giveup', f'Gave Up: {label}',
+                   f'Filter-blocked on RealDebrid and uncached on TorBox '
+                   f'across {strikes} passes. Retry from the Stuck tab on '
+                   f'the Activity page.',
+                   level='warning')
+        except Exception:
+            pass
+
+    def _wanted_rd_probe_add(self, rd_client, rd_key, release,
+                             media_title, ep_str, key):
+        """RD leg of the Wanted recovery pass — the add IS the cache probe.
+
+        Adds ``release`` to RD and polls briefly for ``downloaded``
+        (instantly ready = cached).  On a hit the torrent is kept, verified
+        against the May-2026 keyword filter via ``probe_file``, and a
+        ``wanted_rd_recovered`` history event is logged.  On a genuine cache
+        miss the probe add is deleted (by ``attempt_add_rescue``), the title
+        is memoized in ``_wanted_rd_miss``, and a ``wanted_rd_uncached``
+        event records the measurement.
+
+        Returns a state string — the caller uses it for flow, budget
+        accounting, and terminal give-up strike counting:
+
+        * ``'recovered'`` — kept, filter-clean recovery; skip the TB leg.
+        * ``'filter_blocked'`` — RD's keyword filter rejected this release
+          (add-time 403/451, or an instant-ready add whose file 451s).
+          Deterministic and permanent for this release, so — unlike a plain
+          cache miss — it is NOT memoized here; the caller pairs it with the
+          TB leg's result to bump the ``wantedblock:<imdb>`` give-up strike.
+          Counts against the per-scan budget; falls through to the TB leg.
+        * ``'attempted'`` — an RD add fired but didn't stick for a
+          retry-worthy reason (genuine cache miss, add error).  Memoized in
+          ``_wanted_rd_miss`` when it's a miss.  Counts against the budget;
+          falls through to the TB leg.
+        * ``'skipped'`` — no RD API add happened (no hash, dedup hit,
+          account listing unavailable).  Free — doesn't burn budget.
+
+        Never raises.
+        """
+        from utils import search as _search
+        from utils.debrid_routing import attempt_add_rescue, make_preexisting_check
+        from utils.debrid_client import RD_READY_STATES, RD_FAIL_STATES
+
+        info_hash = (release.get('info_hash') or '').lower()
+        title = release.get('title') or media_title or ''
+        if not info_hash:
+            return 'skipped'
+
+        # Dedup against the RD account listing.  Two distinct outcomes:
+        #
+        # * Listing unavailable (API blip): bail without adding.  RD hands
+        #   back the PRE-EXISTING torrent's id when the hash is already on
+        #   the account, so an add we can't dedup risks polling a torrent
+        #   we didn't create — and then deleting a user's in-flight
+        #   download on "miss".  Transient, no memo.
+        # * Hash already on the account (parked blocked entry, or content
+        #   the mount has under a mismatched name): skip and memoize —
+        #   re-adding won't change anything within the miss window.
+        #
+        # force_refresh bypasses the 30s dedup-cache TTL.  The staleness
+        # window is CORRELATED, not random: the user manually adding a
+        # popular release is exactly when the probe grabs the same hash —
+        # a stale "not on account" answer here hands the probe the user's
+        # own torrent id (RD hash-dedup) and the miss-cleanup delete
+        # would destroy their in-flight download.
+        try:
+            existing = _search._existing_hashes('realdebrid', rd_key,
+                                                force_refresh=True)
+        except Exception:
+            existing = None
+        if existing is None:
+            logger.info(f"[library] Wanted→RD probe skipped for "
+                        f"{media_title!r} — RD account listing unavailable")
+            return 'skipped'
+        if info_hash in existing:
+            logger.info(f"[library] Wanted→RD probe skipped for "
+                        f"{media_title!r} — hash already on RD account")
+            self._memo_wanted(self._wanted_rd_miss, key)
+            return 'skipped'
+
+        # Re-issue selectFiles (once) if the add's own selection fired
+        # during magnet conversion and didn't stick — otherwise a cached
+        # torrent can park in waiting_files_selection until the timeout.
+        reselected = []
+
+        def _status_fn(client, tid):
+            st = (client.torrent_status(tid) or '').strip().lower()
+            if st == 'waiting_files_selection' and not reselected:
+                reselected.append(True)
+                client.select_files(tid)
+            return st
+
+        # Last line of defense behind the force-refreshed dedup listing
+        # above: the listing can still miss (RD truncates /torrents at
+        # 2500 entries, dropping the OLDEST; or the user adds between
+        # our listing and our add).  RD's addMagnet hash-dedup then
+        # hands back the user's own torrent id, and every cleanup
+        # delete on that id destroys THEIR torrent.  Anything whose
+        # ``added`` timestamp predates the probe wasn't created by us.
+        # Unknown (info fetch failed, timestamp missing/unparseable) →
+        # treat as pre-existing: an orphaned probe entry beats
+        # destroying user data.
+        probe_start = time.time()
+        # Narrowed to RD's field only: this leg always holds an RD client
+        # (``created_at`` is TB's field, never present here).  The factory
+        # default checks both — don't rely on it in case a future third
+        # field would change precedence.
+        _preexisting = make_preexisting_check(
+            probe_start, grace=self._WANTED_RD_PREEXISTING_GRACE,
+            timestamp_fields=('added',))
+
+        core = attempt_add_rescue(
+            info_hash, 'torbox',
+            alt_debrid='realdebrid',
+            # RD's cache endpoint is dead — bypass the probe; the add
+            # itself (instant-ready or not) is the cache check.
+            cache_probe=lambda *_: True,
+            alt_client=rd_client,
+            status_fn=_status_fn,
+            ready_states=RD_READY_STATES,
+            fail_states=RD_FAIL_STATES,
+            ready_timeout=self._WANTED_RD_READY_TIMEOUT,
+            poll_interval=self._WANTED_RD_POLL_INTERVAL,
+            preexisting_check=_preexisting,
+            logger_prefix='library.wanted_rd',
+        )
+
+        if not core.get('rescued'):
+            reason = core.get('reason', 'error')
+            if reason in ('never_ready', 'failed_state'):
+                # Genuine cache miss — memoize + log the measurement.
+                self._memo_wanted(self._wanted_rd_miss, key)
+                self._log_wanted_rd_miss(
+                    title, media_title, ep_str, info_hash,
+                    reason=core.get('state') or reason)
+            elif core.get('http_status') in (403, 451):
+                # RD's keyword filter rejected at addMagnet time (HTTP
+                # 451/403) — deterministic and permanent for this release.
+                # Report it as a filter block (not a plain miss) so the
+                # caller can pair it with the TB leg and bump the terminal
+                # give-up strike; the 7-day _wanted_rd_miss memo is wrong
+                # here (re-probing a filter-blocked release never changes).
+                self._log_wanted_rd_miss(
+                    title, media_title, ep_str, info_hash,
+                    reason='infringing_add')
+                self._persist_rd_filter_block(info_hash)
+                return 'filter_blocked'
+            # Other add_error/add_failed are transient RD-side failures —
+            # no memo, the title gets another shot on a later scan.
+            return 'attempted'
+
+        tid = core.get('alt_torrent_id', '')
+
+        # Add-time filter-block check: RD accepts and instantly "readies"
+        # filter-gated content, then 451s the actual file.  Catch it now so
+        # a blocked add is never counted as a recovery (and the TB leg gets
+        # its chance immediately instead of after the next health sweep).
+        try:
+            probe = rd_client.probe_file(tid)
+        except Exception:
+            probe = {'status': 'unknown'}
+        if probe.get('status') == 'blocked':
+            # Same pre-existing guard as the miss-cleanup deletes: if
+            # RD's hash-dedup handed us the user's own (blocked) torrent,
+            # leave it in place — the filter verdict still stands.
+            try:
+                skip_delete = _preexisting(rd_client, tid)
+            except Exception:
+                skip_delete = True
+            if skip_delete:
+                logger.warning(
+                    f"[library] Wanted→RD probe: torrent {tid} predates "
+                    f"this probe (RD hash-dedup) — leaving the blocked "
+                    f"entry in place"
+                )
+            else:
+                try:
+                    rd_client.delete_torrent(tid)
+                except Exception:
+                    pass
+            # Same permanent-filter class as the add-time 403/451 branch —
+            # report as a filter block (no _wanted_rd_miss memo) so the
+            # caller can accrue the terminal give-up strike.
+            probe_reason = probe.get('reason', 'blocked')
+            self._log_wanted_rd_miss(
+                title, media_title, ep_str, info_hash,
+                reason=probe_reason)
+            # Only persist a restart-surviving verdict for a genuine keyword
+            # filter block (``infringing_file``).  ``probe_file`` also returns
+            # status='blocked' for a bare HTTP 404 (``not_found`` — the file
+            # is transiently unresolvable, e.g. RD hoster indexing lag on a
+            # just-added torrent); persisting THAT would lock a possibly-cached
+            # hash out of the RD leg for 30 idle days on a transient error.
+            if probe_reason == 'infringing_file':
+                self._persist_rd_filter_block(info_hash)
+            return 'filter_blocked'
+        # 'unknown' (network blip, 5xx) → keep the torrent; the health
+        # sweep re-probes it on its own cycle.
+
+        try:
+            _search.remember_added_hash('realdebrid', info_hash)
+        except Exception:
+            pass
+        try:
+            from utils import history as _hist
+            _hist.log_event(
+                'debrid_add', title,
+                episode=ep_str,
+                detail='Recovered Wanted — instantly ready on realdebrid',
+                source='library',
+                media_title=media_title,
+                meta={'cause': _hist.CAUSE_WANTED_RD_RECOVERED,
+                      'info_hash': info_hash,
+                      'service': 'realdebrid',
+                      'torrent_id': tid},
+            )
+        except Exception:
+            pass
+        logger.info(f"[library] Wanted→RD recovery: {media_title!r} "
+                    f"instantly ready on RealDebrid ({info_hash[:8]}…)")
+        return 'recovered'
+
+    @staticmethod
+    def _persist_rd_filter_block(info_hash):
+        """Persist RD's keyword-filter verdict for *info_hash*.
+
+        The verdict is deterministic per hash (RD 451s the same release
+        forever), but the in-memory ``_wanted_rd_miss`` memo dies on
+        restart — observed live as 6-7 redundant probe adds of the same
+        blocked hash per title across a multi-deploy weekend.  The
+        ``rdblock:`` ledger key survives restarts; the recovery loop reads
+        it to treat the hash as filter-blocked without re-adding.  Cleared
+        by the ledger's idle-decay prune, which doubles as the safety
+        valve in case RD ever unblocks a hash."""
+        try:
+            from utils import attempt_ledger as _ledger
+            _ledger.bump(f'rdblock:{(info_hash or "").lower()}')
+        except Exception:
+            pass
+
+    def _log_wanted_rd_miss(self, title, media_title, ep_str, info_hash,
+                            reason):
+        try:
+            from utils import history as _hist
+            _hist.log_event(
+                'debrid_add_failed', title,
+                episode=ep_str,
+                detail=f'Wanted recovery probe — {reason}',
+                source='library',
+                media_title=media_title,
+                meta={'cause': _hist.CAUSE_WANTED_RD_UNCACHED,
+                      'info_hash': info_hash,
+                      'service': 'realdebrid',
+                      'reason': reason},
+            )
+        except Exception:
+            pass
+
+    def _memo_wanted(self, memo, key):
+        """Stamp ``memo[key] = now`` under the memo lock (writer side)."""
+        with self._wanted_memo_lock:
+            memo[key] = time.monotonic()
+
+    def wanted_recovery_snapshot(self):
+        """Point-in-time copy of the Wanted-recovery memos for cross-thread
+        readers (the /api/stuck collector).
+
+        Keys are ``imdb`` (movies) or ``imdb:season:episode`` (shows).
+        Values are converted from monotonic stamps to age-in-seconds so
+        callers never have to compare against this process's monotonic
+        clock themselves.
+        """
+        now = time.monotonic()
+        with self._wanted_memo_lock:
+            return {
+                'no_results': {k: now - t for k, t in self._wanted_no_results.items()},
+                'rd_miss': {k: now - t for k, t in self._wanted_rd_miss.items()},
+                'tb_cooldown': {k: now - t for k, t in self._wanted_tb_cooldown.items()},
+            }
+
+    def clear_wanted_memos(self, imdb_id):
+        """Drop every recovery memo for ``imdb_id`` (movie key or any
+        ``imdb:s:e`` episode key) so the next scan's recovery pass retries
+        the title immediately.  Returns the number of keys removed."""
+        if not imdb_id:
+            return 0
+        prefix = f"{imdb_id}:"
+        removed = 0
+        with self._wanted_memo_lock:
+            for d in (self._wanted_no_results, self._wanted_rd_miss,
+                      self._wanted_tb_cooldown):
+                for k in [k for k in d if k == imdb_id or k.startswith(prefix)]:
+                    del d[k]
+                    removed += 1
+        if removed:
+            # Rewrite the snapshot so a restart can't resurrect a memo the
+            # operator just cleared via the Stuck-tab Retry action.
+            self._persist_wanted_memos()
+        return removed
+
+    def reload_wanted_memos(self):
+        """Merge the on-disk memo snapshot into the live dicts (used by
+        backup restore).  ``_load_wanted_memos`` is additive and
+        TTL-aware, so calling it on a running scanner is safe."""
+        self._load_wanted_memos()
+
+    @staticmethod
+    def _wanted_memos_file():
+        return os.path.join(
+            os.environ.get('CONFIG_DIR', '/config'), 'wanted_memos.json')
+
+    def _persist_wanted_memos(self):
+        """Snapshot the three Wanted-recovery memo dicts to disk.
+
+        One atomic write per recovery pass (plus one per operator Retry).
+        Ages are stored in seconds (monotonic stamps are meaningless across
+        restarts) together with a wall-clock ``saved_at`` so the loader can
+        account for the downtime between save and reload.  Best-effort: a
+        read-only or full ``/config`` must never break a scan.
+        """
+        payload = {
+            'version': 1,
+            'saved_at': time.time(),
+            'memos': self.wanted_recovery_snapshot(),
+        }
+        try:
+            import json as _json
+            from utils.file_utils import atomic_write
+            with atomic_write(self._wanted_memos_file()) as fh:
+                _json.dump(payload, fh, separators=(',', ':'))
+        except (OSError, ValueError, TypeError) as e:
+            logger.debug(f"[library] Could not persist wanted memos: {e}")
+
+    def _load_wanted_memos(self):
+        """Rehydrate the memo dicts from the persisted snapshot (init-time).
+
+        Each stored age is grown by the wall-clock downtime since
+        ``saved_at``; entries already past their TTL are dropped rather than
+        loaded.  Clock skew makes the ages approximate, which is fine — the
+        memos are API-pressure hints, not correctness state (worst case a
+        title is re-probed a little early or late).  Missing/corrupt file
+        loads nothing.
+        """
+        import json as _json
+        path = self._wanted_memos_file()
+        try:
+            with open(path, encoding='utf-8') as fh:
+                payload = _json.load(fh)
+        except (OSError, ValueError):
+            return
+        if not isinstance(payload, dict):
+            return
+        memos = payload.get('memos')
+        saved_at = payload.get('saved_at')
+        if not isinstance(memos, dict) or not isinstance(saved_at, (int, float)):
+            return
+        downtime = max(0.0, time.time() - saved_at)
+        now = time.monotonic()
+        ttls = {
+            'no_results': self._WANTED_TB_RECOVERY_COOLDOWN,
+            'rd_miss': self._WANTED_RD_MISS_TTL,
+            'tb_cooldown': self._WANTED_TB_RECOVERY_COOLDOWN,
+        }
+        loaded = 0
+        with self._wanted_memo_lock:
+            for name, target in (('no_results', self._wanted_no_results),
+                                 ('rd_miss', self._wanted_rd_miss),
+                                 ('tb_cooldown', self._wanted_tb_cooldown)):
+                stored = memos.get(name)
+                if not isinstance(stored, dict):
+                    continue
+                ttl = ttls[name]
+                for key, age in stored.items():
+                    if not isinstance(key, str) or not isinstance(age, (int, float)):
+                        continue
+                    current_age = age + downtime
+                    if current_age < 0 or current_age >= ttl:
+                        continue
+                    target[key] = now - current_age
+                    loaded += 1
+        if loaded:
+            logger.info(f"[library] Restored {loaded} Wanted-recovery memo(s) "
+                        f"from {path}")
+
     def _clear_resolved_pending(self, shows, movies):
         """Clear pending entries that are resolved or stale.
 
@@ -3058,6 +5746,11 @@ class LibraryScanner:
         Runs unconditionally on every scan.
         """
         from utils.library_prefs import get_all_pending, clear_pending
+        from utils import attempt_ledger
+
+        # Time-decay the give-up ledger once per scan: a title abandoned 30+
+        # days ago gets a fresh budget if it ever flows back through a loop.
+        attempt_ledger.prune(30 * 24 * 3600)
 
         pending = get_all_pending()
         if not pending:
@@ -3067,24 +5760,62 @@ class LibraryScanner:
         # Also register alias keys so pending entries stored under either
         # the debrid or local title can be resolved.
         source_map = {}
+        # {norm_title: imdb_id} so resolution can also reset the imdb-keyed
+        # tbalt: give-up counters (blackhole TB-alt recovery), not just fg:.
+        imdb_map = {}
+
+        def _reg_imdb(key, imdb):
+            # Collision-safe registration: reboot-family siblings share the
+            # bare norm but have distinct IMDb IDs — guessing would reset the
+            # WRONG sibling's tbalt: strikes. On conflict, mark the key
+            # ambiguous (None) so resolution skips the reset entirely.
+            if key in imdb_map:
+                if imdb_map[key] != imdb:
+                    imdb_map[key] = None
+            else:
+                imdb_map[key] = imdb
+
         for show in shows:
-            norm = _normalize_title(show['title'])
+            norm = _show_norm(show)
             ep_sources = {}
             for sd in show.get('season_data', []):
                 for ep in sd.get('episodes', []):
                     ep_sources[(sd['number'], ep['number'])] = ep.get('source', '')
-            source_map[norm] = ep_sources
+            # Merge (never overwrite): an ambiguous reboot-family item's
+            # _show_norm IS the bare norm, so plain assignment would clobber
+            # the bare-key dict an attributed sibling already registered
+            # below — losing its episodes and leaving pending rows uncleared.
+            merged_sources = source_map.setdefault(norm, {})
+            merged_sources.update(ep_sources)
+            show_imdb = show.get('imdb_id')
+            if show_imdb:
+                _reg_imdb(norm, show_imdb)
+            # Reboot-family items carry a year-qualified norm, but pending
+            # entries are keyed by the bare title norm — register it too,
+            # merging siblings (matches pre-collision aggregated semantics).
+            bare = _normalize_title(show.get('title') or '')
+            if bare != norm:
+                source_map.setdefault(bare, {}).update(ep_sources)
+                if show_imdb:
+                    _reg_imdb(bare, show_imdb)
             for alias in self._alias_norms.get(norm, ()):
                 if alias not in source_map:
-                    source_map[alias] = ep_sources
+                    source_map[alias] = merged_sources
+                if show_imdb:
+                    _reg_imdb(alias, show_imdb)
 
         for movie in movies:
             norm = _normalize_title(movie['title'])
             movie_sources = {(0, 0): movie.get('source', '')}
             source_map[norm] = movie_sources
+            movie_imdb = movie.get('imdb_id')
+            if movie_imdb:
+                _reg_imdb(norm, movie_imdb)
             for alias in self._alias_norms.get(norm, ()):
                 if alias not in source_map:
                     source_map[alias] = movie_sources
+                if movie_imdb:
+                    _reg_imdb(alias, movie_imdb)
 
         # Snapshot pending; clear_pending re-reads under lock so concurrent writes are safe
         for norm_title, entry in list(pending.items()):
@@ -3112,6 +5843,24 @@ class LibraryScanner:
                 logger.debug(f"[library] Clearing {len(resolved)} pending episode(s) for "
                              f"{norm_title!r} (direction={direction!r})")
                 clear_pending(norm_title, resolved)
+                # Content landed on debrid — drop the force-grab give-up counter
+                # so a future re-acquisition gets a fresh attempt budget. Reset
+                # both key forms (movie `fg:{norm}` and per-season `fg:{norm}:sN`);
+                # a missing key is a safe no-op. Same for the imdb-keyed
+                # `tbalt:` give-up counters (blackhole TB-alt recovery) —
+                # blackhole keys movies as `sNone` (parse_release_name returns
+                # season=None for movies), so season-0 resolutions clear that
+                # form too.
+                if direction in ('to-debrid', 'debrid-unavailable'):
+                    attempt_ledger.reset(f"fg:{norm_title}")
+                    imdb = imdb_map.get(norm_title)
+                    for ep in resolved:
+                        sn = ep.get('season', 0)
+                        attempt_ledger.reset(f"fg:{norm_title}:s{sn}")
+                        if imdb:
+                            attempt_ledger.reset(f"tbalt:{imdb}:s{sn}")
+                            if not sn:
+                                attempt_ledger.reset(f"tbalt:{imdb}:sNone")
 
     def _escalate_stuck_pending(self):
         """Mark to-debrid entries as debrid-unavailable after threshold days.
@@ -3260,15 +6009,26 @@ class LibraryScanner:
         # Build source map
         source_map = {}
         for show in shows:
-            norm = _normalize_title(show['title'])
+            norm = _show_norm(show)
             ep_sources = {}
             for sd in show.get('season_data', []):
                 for ep in sd.get('episodes', []):
                     ep_sources[(sd['number'], ep['number'])] = ep.get('source', '')
-            source_map[norm] = ep_sources
+            # Merge (never overwrite): an ambiguous reboot-family item's
+            # _show_norm IS the bare norm, so plain assignment would clobber
+            # the bare-key dict an attributed sibling already registered
+            # below — losing its episodes and leaving pending rows uncleared.
+            merged_sources = source_map.setdefault(norm, {})
+            merged_sources.update(ep_sources)
+            # Reboot-family items carry a year-qualified norm, but pending
+            # entries are keyed by the bare title norm — register it too,
+            # merging siblings (matches pre-collision aggregated semantics).
+            bare = _normalize_title(show.get('title') or '')
+            if bare != norm:
+                source_map.setdefault(bare, {}).update(ep_sources)
             for alias in self._alias_norms.get(norm, ()):
                 if alias not in source_map:
-                    source_map[alias] = ep_sources
+                    source_map[alias] = merged_sources
 
         for movie in movies:
             norm = _normalize_title(movie['title'])
@@ -3319,7 +6079,12 @@ class LibraryScanner:
         except Exception:
             movie_client, movie_svc = None, None
 
-        show_norms = {_normalize_title(s['title']): s for s in shows}
+        show_norms = {_show_norm(s): s for s in shows}
+        # Pending entries are bare-keyed; register bare norms for
+        # reboot-family items too (first sibling wins, matching the
+        # pre-collision single-row semantics).
+        for s in shows:
+            show_norms.setdefault(_normalize_title(s.get('title') or ''), s)
         movie_norms = {_normalize_title(m['title']): m for m in movies}
 
         def _resolve_via_aliases(norm, mapping):
@@ -3375,8 +6140,10 @@ class LibraryScanner:
         broken links and removes them so the next symlink-creation pass can
         lay down fresh links for replacement content.
 
-        Only touches symlinks whose targets start with BLACKHOLE_SYMLINK_TARGET_BASE.
-        Real files and non-debrid symlinks are never modified.
+        Walks all configured (debrid-target-prefix, rclone-mount) pairs so
+        TorBox-routed symlinks under ``<RD_base>_torbox`` get cleanup too —
+        otherwise broken TB symlinks accumulate on disk forever (plan 39
+        dual-debrid gap).  Real files and non-debrid symlinks are never modified.
 
         Must run BEFORE ``_create_debrid_symlinks`` in the effects pipeline.
         """
@@ -3388,31 +6155,40 @@ class LibraryScanner:
             return
 
         rclone_real = os.path.realpath(rclone_mount)
-        base_prefix = symlink_base.rstrip(os.sep) + os.sep
-
-        # Guard: verify the rclone mount exists, is responsive, and has content.
-        # A missing or stalled FUSE mount makes os.path.exists() return False
-        # for everything, which would cause mass deletion of valid symlinks.
-        # Zurg category stubs (movies/, shows/) can persist even when all
-        # content is gone, so check that at least one known category dir
-        # is non-empty.  Mirrors the guard in scheduled_tasks.verify_symlinks.
+        # Build (target-prefix, rclone-mount-real-path) pairs for every
+        # configured debrid so the check-path translation step finds the
+        # right mount per symlink.  RD is the primary pair; TB is appended
+        # when its mount discovers cleanly.  Same pattern as
+        # ``_create_debrid_symlinks::_mount_target_pairs``.
+        debrid_pair_list = [(os.path.normpath(symlink_base).rstrip(os.sep) + os.sep, rclone_real)]
+        tb_real = None
         try:
-            if not os.path.isdir(rclone_real) or not os.listdir(rclone_real):
-                logger.debug("[library] Rclone mount empty or missing at %s — "
-                             "skipping broken symlink cleanup", rclone_real)
-                return
-            _mount_cats = ('movies', 'shows', 'anime')
-            if not any(
-                os.path.isdir(os.path.join(rclone_real, c))
-                and os.listdir(os.path.join(rclone_real, c))
-                for c in _mount_cats
-            ):
-                logger.debug("[library] Rclone mount categories empty at %s — "
-                             "skipping broken symlink cleanup", rclone_real)
-                return
-        except OSError:
-            logger.debug("[library] Rclone mount not responsive at %s — "
-                         "skipping broken symlink cleanup", rclone_real)
+            from utils.debrid_routing import TORBOX, symlink_target_base_for_debrid
+            tb_base = (symlink_target_base_for_debrid(TORBOX) or '').strip()
+            tb_mount = self._discover_torbox_mount() if tb_base else None
+            if tb_base and tb_mount:
+                tb_real = os.path.realpath(tb_mount)
+                tb_prefix = os.path.normpath(tb_base).rstrip(os.sep) + os.sep
+                if (tb_prefix, tb_real) not in debrid_pair_list:
+                    debrid_pair_list.append((tb_prefix, tb_real))
+        except Exception as exc:
+            logger.debug("[library] TB cleanup-pair resolution failed: %s", exc)
+        debrid_prefixes_only = tuple(p for p, _m in debrid_pair_list)
+
+        # Per-mount health guard.  A missing or stalled/throttled FUSE mount
+        # makes os.path.exists() return False for everything under it, which
+        # would mass-delete valid symlinks.  Compute health PER MOUNT — RD and
+        # TB fail independently (e.g. TB under a 429 read-throttle while RD is
+        # fine), so a global "any mount up" check is not enough: the per-symlink
+        # deletion below must skip symlinks routed to an unhealthy mount.  The
+        # TB mount is flat (no category dirs); RD/Zurg is categorized.
+        mount_health = {
+            _m: _mount_has_content(_m, flat=(_m == tb_real))
+            for _p, _m in debrid_pair_list
+        }
+        if not any(mount_health.values()):
+            logger.debug("[library] No debrid mount has content — "
+                         "skipping broken symlink cleanup")
             return
 
         removed = 0
@@ -3454,14 +6230,32 @@ class LibraryScanner:
                                     target = os.path.normpath(
                                         os.path.join(os.path.dirname(fpath), target)
                                     )
-                                if not target.startswith(base_prefix):
+                                # Match the symlink target to one of the configured
+                                # debrid (prefix, mount) pairs so RD and TB symlinks
+                                # both get cleanup against the right mount.
+                                matched_prefix = None
+                                matched_mount = None
+                                for _p, _m in debrid_pair_list:
+                                    if target.startswith(_p):
+                                        matched_prefix = _p
+                                        matched_mount = _m
+                                        break
+                                if matched_prefix is None:
                                     continue
-                                # Translate arr-namespace target to rclone mount for existence check
+                                # Translate arr-namespace target to the per-debrid
+                                # rclone mount for existence check.
                                 check_path = os.path.normpath(
-                                    rclone_real + os.sep + target[len(base_prefix):]
+                                    matched_mount + os.sep + target[len(matched_prefix):]
                                 )
                                 # Ensure translated path stays within the mount
-                                if not check_path.startswith(rclone_real + os.sep):
+                                if not check_path.startswith(matched_mount + os.sep):
+                                    continue
+                                # Skip deletion when this symlink's mount is not
+                                # confirmed healthy — os.path.exists() returns
+                                # False for everything on a throttled/stalled
+                                # mount, so deleting here would tear down valid
+                                # symlinks (the TB-throttle symlink-thrash bug).
+                                if not mount_health.get(matched_mount, False):
                                     continue
                                 if not os.path.exists(check_path):
                                     # Re-verify still a symlink to narrow TOCTOU window
@@ -3484,7 +6278,7 @@ class LibraryScanner:
                                     if _extract_release_info is not None:
                                         try:
                                             release_name, _, _ = _extract_release_info(
-                                                target, [base_prefix]
+                                                target, debrid_prefixes_only
                                             )
                                         except Exception as exc:
                                             logger.warning(
@@ -3589,7 +6383,44 @@ class LibraryScanner:
         self._local_drop_alerted = False
 
         real_mount = os.path.realpath(rclone_mount)
+
+        # Per-debrid (rclone-mount, symlink-target-base) pairs.  RD/AD's
+        # pair is always first (the primary).  When TorBox is configured
+        # AND its mount is reachable, its pair is appended so episodes
+        # that landed on the TB mount get symlinks pointing at the TB
+        # target base — keeping the RD/TB split that Plex libraries
+        # depend on.  Without this, the prefix-check below silently
+        # skips every TB-source episode and only RD content ever gets
+        # symlinked into the local arr library — the load-bearing
+        # final step of plan 39 phase 4 that wasn't wired up.
+        _mount_target_pairs = [(real_mount, symlink_base)]
+        try:
+            from utils.debrid_routing import TORBOX, symlink_target_base_for_debrid as _tb_base_for
+            _tb_mount = self._discover_torbox_mount()
+            if _tb_mount:
+                _tb_real = os.path.realpath(_tb_mount)
+                _tb_symlink_base = _tb_base_for(TORBOX)
+                if _tb_symlink_base:
+                    _mount_target_pairs.append((_tb_real, _tb_symlink_base))
+        except Exception as e:
+            logger.debug(f"[library] TB symlink pair resolution failed: {e}")
+
+        def _resolve_symlink_target(real_debrid_path):
+            """Return host-side symlink target for *real_debrid_path*.
+
+            Searches per-debrid (mount, target_base) pairs in order and
+            returns ``<base> + <suffix-under-that-mount>`` for the first
+            match.  Returns ``None`` when the path is under no known
+            debrid mount — caller should skip (don't create symlinks
+            pointing at unmapped filesystems).
+            """
+            for _m, _b in _mount_target_pairs:
+                if real_debrid_path.startswith(_m + os.sep) or real_debrid_path == _m:
+                    return _b + real_debrid_path[len(_m):]
+            return None
+
         created = 0
+        phantom_sources = 0
         symlinked_shows = set()   # titles that got new symlinks
         symlinked_movies = set()  # titles that got new symlinks
         # Per-title details for the activity event: set of new basenames
@@ -3607,6 +6438,10 @@ class LibraryScanner:
         # event ids can never leak into this cycle's rescan calls — even
         # when this scan creates zero symlinks.
         self._pending_rescan_prior_ids = {}
+        # NOTE: keyed by DISPLAY title, not _show_norm — if two reboot-family
+        # siblings share a display title AND both symlink in the same scan,
+        # the later one's year wins.  Rare and self-correcting (the rescan
+        # match falls back to the TMDB-ID cascade level), so not re-keyed.
         _symlink_years = {}       # title -> parsed year (for year-aware rescan matching)
         # canonical title -> parsed-folder title (when display was upgraded
         # via TMDB rename).  Lets the rescan-trigger TMDB cache fallback use
@@ -3698,7 +6533,7 @@ class LibraryScanner:
             if tid:
                 sonarr_by_tmdb[tid] = info
         # Load cached TMDB IDs so we can translate Zurgarr titles → TMDB IDs
-        from utils.tmdb import get_cached_tmdb_ids, find_show_tmdb_id_by_season
+        from utils.tmdb import get_cached_tmdb_ids
         cached_tmdb_ids = get_cached_tmdb_ids()
         cached_tmdb_movies = cached_tmdb_ids.get('movies', {})
         cached_tmdb_shows = cached_tmdb_ids.get('shows', {})
@@ -3718,6 +6553,9 @@ class LibraryScanner:
             logger.debug("[library] full TMDB cache load for prefix-match failed: %s", e)
             _tmdb_full_cache = {}
 
+        # Lazy import (module-level would re-form the library ↔ blackhole cycle)
+        from utils.blackhole import is_obfuscated_name as _is_obfuscated_name
+
         # --- Movies ---
         if self._local_movies_path:
             real_movies_root = os.path.realpath(self._local_movies_path)
@@ -3731,6 +6569,13 @@ class LibraryScanner:
                 title = movie['title']
                 year = movie.get('year')
 
+                # Anti-DMCA obfuscated payloads (hex name + tracker tag, e.g.
+                # EZTV) parse into junk hex "movies" — never import them.
+                # The blackhole monitor handles their real identity via the
+                # .magnet-derived display name.
+                if _is_obfuscated_name(title) or _is_obfuscated_name(os.path.basename(mount_dir)):
+                    continue
+
                 # Skip blocklisted items by mount folder name (full release name).
                 # Only match on the release folder — not the parsed title — so
                 # that blocking one quality/release doesn't block replacements
@@ -3740,37 +6585,12 @@ class LibraryScanner:
                     if _blocklist.is_blocked_title(mount_folder):
                         continue
 
-                # Year-qualified exact match first to disambiguate same-title
-                # different-year entries (e.g. "The Bridge" 2011 vs 2013)
-                arr_info = None
-                if year:
-                    arr_info = radarr_map.get(f"{title} ({year})".lower())
-                if not arr_info:
-                    arr_info = radarr_map.get(title.lower()) or radarr_map_norm.get(_norm_for_matching(title))
-                # Fallback: match via TMDB ID when title differs.  The TMDB
-                # cache is keyed by the parsed-folder norm — use _parsed_title
-                # (preserved when the display title was upgraded to canonical)
-                # so renamed items still resolve via cache.
-                if not arr_info:
-                    _norm = _normalize_title(movie.get('_parsed_title') or title)
-                    tmdb_id = (cached_tmdb_movies.get(f"{_norm} ({year})") if year else None) or cached_tmdb_movies.get(_norm)
-                    if tmdb_id:
-                        arr_info = radarr_by_tmdb.get(tmdb_id)
-                # Final TMDB fallback: token-aligned prefix match.  Recovers
-                # parsed titles where extra tokens (actor name, genre tag)
-                # were appended before the year — e.g. "Gattaca Ethan
-                # Hawke Sci Fi" → cache entry "Gattaca" → Radarr id.
-                # Without this, the cascade falls through to a parsed-title
-                # folder name and creates an orphan symlink dir alongside
-                # the canonical one.
-                if not arr_info:
-                    parsed_t = movie.get('_parsed_title') or title
-                    canonical = _find_canonical_tmdb_via_prefix(
-                        parsed_t, year, is_tv=False,
-                        _tmdb_cache=_tmdb_full_cache,
-                    )
-                    if canonical:
-                        arr_info = radarr_by_tmdb.get(canonical['tmdb_id'])
+                arr_info = _match_arr_entry(
+                    title, year, movie.get('_parsed_title'),
+                    radarr_map, radarr_map_norm, radarr_by_tmdb,
+                    cached_tmdb_movies, is_tv=False,
+                    _tmdb_cache=_tmdb_full_cache,
+                )
                 if arr_info and arr_info['folder']:
                     movie_dir = arr_info['folder']
                 else:
@@ -3785,25 +6605,17 @@ class LibraryScanner:
                     if os.path.isdir(target_dir) and self._has_media_files(target_dir):
                         continue
 
-                # Find the largest media file in the torrent folder
-                media_file = None
-                media_size = -1
-                try:
-                    for fname in os.listdir(mount_dir):
-                        ext = os.path.splitext(fname)[1].lower()
-                        if ext in MEDIA_EXTENSIONS:
-                            fpath = os.path.join(mount_dir, fname)
-                            try:
-                                sz = os.path.getsize(fpath)
-                            except OSError:
-                                sz = 0
-                            if sz > media_size:
-                                media_size = sz
-                                media_file = fname
-                except OSError:
+                # Find the largest media file in the torrent folder.  Searches
+                # one level deep so nested-folder torrents (video tucked inside
+                # a release-named subdir) still get symlinked — without this
+                # they're detected as on-debrid but never linkable, showing
+                # "available" in zurgarr yet "missing" in Radarr.
+                media_rel, media_size = _find_largest_movie_video(mount_dir)
+                if not media_rel:
                     continue
-                if not media_file:
-                    continue
+                # Local library uses a flat filename (the basename); the arr
+                # re-imports by content, so the nesting need not be preserved.
+                media_file = os.path.basename(media_rel)
 
                 local_path = os.path.join(
                     self._local_movies_path, movie_dir, media_file
@@ -3819,10 +6631,10 @@ class LibraryScanner:
                 if os.path.islink(local_path) or os.path.exists(local_path):
                     continue
 
-                real_debrid = os.path.realpath(os.path.join(mount_dir, media_file))
-                if not real_debrid.startswith(real_mount + os.sep) and real_debrid != real_mount:
+                real_debrid = os.path.realpath(os.path.join(mount_dir, media_rel))
+                symlink_target = _resolve_symlink_target(real_debrid)
+                if symlink_target is None:
                     continue
-                symlink_target = symlink_base + real_debrid[len(real_mount):]
 
                 try:
                     os.makedirs(os.path.dirname(local_path), exist_ok=True)
@@ -3869,42 +6681,29 @@ class LibraryScanner:
             real_tv_root = os.path.realpath(self._local_tv_path)
 
             for show in shows:
-                norm = _normalize_title(show['title'])
+                norm = _show_norm(show)
                 title = show['title']
                 year = show.get('year')
-                # Year-qualified exact match first to disambiguate same-title
-                # different-year entries (e.g. "The Bridge" 2011 vs 2013)
-                arr_info = None
-                if year:
-                    arr_info = sonarr_map.get(f"{title} ({year})".lower())
-                if not arr_info:
-                    arr_info = sonarr_map.get(title.lower()) or sonarr_map_norm.get(_norm_for_matching(title))
-                if not arr_info:
-                    # Season-aware TMDB fallback: use the show's max season
-                    # to disambiguate reboots/revivals with the same title.
-                    # The TMDB cache is keyed by parsed-folder norm — use
-                    # _parsed_title so renamed items still resolve via cache.
-                    show_max_sn = _show_max_season.get(title)
-                    parsed_norm = _normalize_title(show.get('_parsed_title') or title)
-                    tmdb_id = (cached_tmdb_shows.get(f"{parsed_norm} ({year})") if year else None) or cached_tmdb_shows.get(parsed_norm)
-                    if tmdb_id:
-                        arr_info = sonarr_by_tmdb.get(tmdb_id)
-                    if not arr_info and show_max_sn:
-                        alt_id = find_show_tmdb_id_by_season(parsed_norm, show_max_sn, year)
-                        if alt_id and alt_id != tmdb_id:
-                            arr_info = sonarr_by_tmdb.get(alt_id)
-                # Final TMDB fallback: token-aligned prefix match.
-                # Symmetric with the movies cascade — recovers parsed
-                # titles with appended actor/genre/role tokens that
-                # prevent direct cache key match.
-                if not arr_info:
-                    parsed_t = show.get('_parsed_title') or title
-                    canonical = _find_canonical_tmdb_via_prefix(
-                        parsed_t, year, is_tv=True,
-                        _tmdb_cache=_tmdb_full_cache,
-                    )
-                    if canonical:
-                        arr_info = sonarr_by_tmdb.get(canonical['tmdb_id'])
+                # Same obfuscated-payload guard as the movie loop above
+                # (title AND mount folder, for Sonarr/Radarr parity).
+                if _is_obfuscated_name(title) or _is_obfuscated_name(os.path.basename(show.get('path', ''))):
+                    continue
+                # Identity-unknown reboot-family item (same-title siblings
+                # with distinct TMDB IDs, episode-shape attribution failed):
+                # linking it could put content inside the wrong show's folder.
+                if show.get('_ambiguous_reboot'):
+                    logger.info(
+                        "[library] Skipping symlinks for %r — reboot-family "
+                        "identity is ambiguous (add a year to the release or "
+                        "wait for episode-shape attribution)", title)
+                    continue
+                arr_info = _match_arr_entry(
+                    title, year, show.get('_parsed_title'),
+                    sonarr_map, sonarr_map_norm, sonarr_by_tmdb,
+                    cached_tmdb_shows, is_tv=True,
+                    max_season=_show_max_season.get(title, 0),
+                    _tmdb_cache=_tmdb_full_cache,
+                )
                 if arr_info and arr_info['folder']:
                     show_dir = arr_info['folder']
                 else:
@@ -3924,15 +6723,35 @@ class LibraryScanner:
                         # Skip blocklisted items by release folder name.
                         # Only match on the release folder — not the parsed title — so
                         # that blocking one release doesn't block replacements.
-                        # debrid_path may be .../release/Season N/ep.mkv or .../release/ep.mkv;
-                        # climb past Season dirs to reach the actual release folder.
+                        # The release folder is the FIRST path component under the
+                        # debrid mount — derived from the mount prefix, not by
+                        # climbing past Season-dir names (a flat torrent literally
+                        # named "Season 3 (BluRay)" at mount root would make the
+                        # climb overshoot to the mount root and silently no-op
+                        # the block).  Climb heuristic kept only as fallback for
+                        # paths under no known mount.
                         if _blocklist:
-                            parent = os.path.dirname(debrid_path)
-                            parent_name = os.path.basename(parent)
-                            if _SEASON_DIR_PATTERN.match(parent_name):
-                                release_folder = os.path.basename(os.path.dirname(parent))
-                            else:
-                                release_folder = parent_name
+                            release_folder = None
+                            for _m, _b in _mount_target_pairs:
+                                if debrid_path.startswith(_m + os.sep):
+                                    release_folder = debrid_path[len(_m) + 1:].split(os.sep, 1)[0]
+                                    break
+                            if release_folder is None:
+                                parent = os.path.dirname(debrid_path)
+                                parent_name = os.path.basename(parent)
+                                if _match_season_dir(parent_name):
+                                    grandparent_name = os.path.basename(
+                                        os.path.dirname(parent))
+                                    # Abort the climb when the grandparent
+                                    # is empty or itself season-shaped —
+                                    # the parent is then likely a flat
+                                    # release, not a season subdir.
+                                    if grandparent_name and not _match_season_dir(grandparent_name):
+                                        release_folder = grandparent_name
+                                    else:
+                                        release_folder = parent_name
+                                else:
+                                    release_folder = parent_name
                             if _blocklist.is_blocked_title(release_folder):
                                 continue
 
@@ -3952,11 +6771,31 @@ class LibraryScanner:
                         if os.path.islink(local_path) or os.path.exists(local_path):
                             continue
 
+                        # Enumeration (TB mylist API / Zurg WebDAV) can report
+                        # folder names the FUSE layer renames (e.g. TorBox
+                        # strips '&' from on-disk folders), so path_index may
+                        # carry paths that don't exist on the mount. A symlink
+                        # to such a path is born broken and churns
+                        # create→cleanup every scan. The mount is ground
+                        # truth: skip sources that don't resolve. (exists()
+                        # also returns False on a dead/ENOTCONN mount —
+                        # skipping there is benign: nothing is created or
+                        # deleted, and the next healthy scan links normally.)
+                        if not os.path.exists(debrid_path):
+                            phantom_sources += 1
+                            if phantom_sources <= 5:
+                                logger.warning(
+                                    "[library] Skipping symlink for %r S%02dE%02d: "
+                                    "source does not exist on mount: %r",
+                                    title, snum, enum, debrid_path,
+                                )
+                            continue
+
                         # Translate mount path to Sonarr/arr namespace
                         real_debrid = os.path.realpath(debrid_path)
-                        if not real_debrid.startswith(real_mount + os.sep) and real_debrid != real_mount:
+                        symlink_target = _resolve_symlink_target(real_debrid)
+                        if symlink_target is None:
                             continue
-                        symlink_target = symlink_base + real_debrid[len(real_mount):]
 
                         try:
                             os.makedirs(os.path.dirname(local_path), exist_ok=True)
@@ -3995,6 +6834,12 @@ class LibraryScanner:
                                 title, snum, enum, e
                             )
 
+        if phantom_sources > 5:
+            logger.warning(
+                "[library] Skipped %d symlink(s) total whose enumerated "
+                "source path does not exist on the mount",
+                phantom_sources,
+            )
         if created:
             logger.info(f"[library] Created {created} debrid symlink(s) in local library")
             # Cause picker: first-scan-after-restart bypasses upgrade heuristic
@@ -4103,6 +6948,40 @@ class LibraryScanner:
                 pass
 
         if created:
+            # Plan 41 phase B.2 — NFS attribute-cache race mitigation.
+            # When Sonarr/Radarr lives on a different host from the symlink
+            # target and reaches it via an NFS share, the arr's view of the
+            # share is cached by the kernel (default 30-60s attribute TTL).
+            # A rescan fired immediately after symlink creation walks the
+            # directory before the cache refreshes, sees nothing new, and
+            # completes without imports — the file only lands on the next
+            # 1h library_scan cycle (which then re-triggers the rescan and
+            # this time succeeds).  Sleeping briefly here lets NFS see the
+            # new symlinks before the arr stat()s them.
+            nfs_delay = _resolve_nfs_rescan_delay()
+            # Only sleep when at least one arr is configured AND has matching
+            # symlinks — otherwise the sleep stalls the scan loop with no
+            # corresponding rescan fire (e.g. Radarr-only user just got show
+            # symlinks and SONARR_URL is unset; the rescan loop would warn
+            # and skip).  Reviewer feedback (code-reviewer Phase B LOW #2).
+            will_rescan_shows = bool(symlinked_shows and os.environ.get('SONARR_URL'))
+            will_rescan_movies = bool(symlinked_movies and os.environ.get('RADARR_URL'))
+            if nfs_delay > 0 and (will_rescan_shows or will_rescan_movies):
+                logger.info(
+                    f"[library] Sleeping {nfs_delay}s before arr rescans to let "
+                    f"NFS attribute cache invalidate (LIBRARY_RESCAN_NFS_DELAY)"
+                )
+                # NOTE: this sleep is NOT interruptible by SIGTERM — the
+                # scanner runs in a daemon thread, so the worst case on
+                # shutdown is the rescan trigger never fires for the
+                # symlinks just created.  Next container startup's
+                # library_scan cycle re-discovers them and triggers the
+                # rescan properly; no data loss.  Adding cooperative
+                # shutdown (via a ``_stop_event`` on ``LibraryScanner``)
+                # is deferred to plan 40 since it requires broader
+                # restructuring of the scanner threading model.
+                time.sleep(nfs_delay)
+
             # Trigger arr rescans so Sonarr/Radarr discover the new files.
             # Exception safety: the stash was reset to {} at the top of this
             # method, so even if the rescan loop raises the next scan won't
@@ -4125,36 +7004,13 @@ class LibraryScanner:
                         "Set SONARR_URL and SONARR_API_KEY for automatic rescans."
                     )
             for title in symlinked_shows:
-                # Year-qualified exact match first (symmetric with show dir selection)
-                info = None
-                _yr = _symlink_years.get(title)
-                if _yr:
-                    info = sonarr_map.get(f"{title} ({_yr})".lower())
-                if not info:
-                    info = sonarr_map.get(title.lower()) or sonarr_map_norm.get(_norm_for_matching(title))
-                if not info:
-                    # TMDB cache is keyed by parsed-folder norm — use the
-                    # stashed parsed title so renamed items still resolve.
-                    norm_t = _normalize_title(_symlink_parsed.get(title) or title)
-                    tmdb_id = (cached_tmdb_shows.get(f"{norm_t} ({_yr})") if _yr else None) or cached_tmdb_shows.get(norm_t)
-                    if tmdb_id:
-                        info = sonarr_by_tmdb.get(tmdb_id)
-                    if not info:
-                        max_sn = _show_max_season.get(title, 0)
-                        if max_sn:
-                            alt_id = find_show_tmdb_id_by_season(norm_t, max_sn, _yr)
-                            if alt_id and alt_id != tmdb_id:
-                                info = sonarr_by_tmdb.get(alt_id)
-                if not info:
-                    # Final TMDB fallback: token-aligned prefix match —
-                    # symmetric with the show dir-selection cascade.
-                    parsed_t = _symlink_parsed.get(title) or title
-                    canonical = _find_canonical_tmdb_via_prefix(
-                        parsed_t, _yr, is_tv=True,
-                        _tmdb_cache=_tmdb_full_cache,
-                    )
-                    if canonical:
-                        info = sonarr_by_tmdb.get(canonical['tmdb_id'])
+                info = _match_arr_entry(
+                    title, _symlink_years.get(title), _symlink_parsed.get(title),
+                    sonarr_map, sonarr_map_norm, sonarr_by_tmdb,
+                    cached_tmdb_shows, is_tv=True,
+                    max_season=_show_max_season.get(title, 0),
+                    _tmdb_cache=_tmdb_full_cache,
+                )
                 if info and info.get('id') and info.get('client'):
                     try:
                         prior = (getattr(self, '_pending_rescan_prior_ids', {}) or {}).get(title)
@@ -4167,8 +7023,8 @@ class LibraryScanner:
                         try:
                             from utils import retry_counter as _rc
                             _rc.reset('sonarr', info['id'])
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"[library] retry_counter reset failed for sonarr:{info['id']}: {e}")
                         logger.info(f"[library] Triggered Sonarr rescan for {title}")
                     except Exception as e:
                         logger.warning(f"[library] Sonarr rescan failed for {title}: {e}")
@@ -4192,32 +7048,12 @@ class LibraryScanner:
                         "Set RADARR_URL and RADARR_API_KEY for automatic rescans."
                     )
             for title in symlinked_movies:
-                # Year-qualified exact match first (symmetric with movie dir selection)
-                info = None
-                _yr = _symlink_years.get(title)
-                if _yr:
-                    info = radarr_map.get(f"{title} ({_yr})".lower())
-                if not info:
-                    info = radarr_map.get(title.lower()) or radarr_map_norm.get(_norm_for_matching(title))
-                if not info:
-                    # TMDB cache is keyed by parsed-folder norm — use the
-                    # stashed parsed title so renamed items still resolve.
-                    _norm_t = _normalize_title(_symlink_parsed.get(title) or title)
-                    tmdb_id = (cached_tmdb_movies.get(f"{_norm_t} ({_yr})") if _yr else None) or cached_tmdb_movies.get(_norm_t)
-                    if tmdb_id:
-                        info = radarr_by_tmdb.get(tmdb_id)
-                if not info:
-                    # Final TMDB fallback: token-aligned prefix match —
-                    # symmetric with the movie dir-selection cascade.
-                    # (no season-aware sub-step for movies —
-                    # find_show_tmdb_id_by_season is TV-only.)
-                    parsed_t = _symlink_parsed.get(title) or title
-                    canonical = _find_canonical_tmdb_via_prefix(
-                        parsed_t, _yr, is_tv=False,
-                        _tmdb_cache=_tmdb_full_cache,
-                    )
-                    if canonical:
-                        info = radarr_by_tmdb.get(canonical['tmdb_id'])
+                info = _match_arr_entry(
+                    title, _symlink_years.get(title), _symlink_parsed.get(title),
+                    radarr_map, radarr_map_norm, radarr_by_tmdb,
+                    cached_tmdb_movies, is_tv=False,
+                    _tmdb_cache=_tmdb_full_cache,
+                )
                 if info and info.get('id') and info.get('client'):
                     try:
                         prior = (getattr(self, '_pending_rescan_prior_ids', {}) or {}).get(title)
@@ -4227,8 +7063,8 @@ class LibraryScanner:
                         try:
                             from utils import retry_counter as _rc
                             _rc.reset('radarr', info['id'])
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"[library] retry_counter reset failed for radarr:{info['id']}: {e}")
                         logger.info(f"[library] Triggered Radarr rescan for {title}")
                     except Exception as e:
                         logger.warning(f"[library] Radarr rescan failed for {title}: {e}")
@@ -4240,58 +7076,128 @@ class LibraryScanner:
     # Internal Zurg directories to always skip
     _SKIP_CATEGORIES = {'__all__', '__unplayable__'}
 
-    def _scan_mount(self, mount_path, deadline=None):
+    def _scan_mount(self, mount_path, deadline=None, source_debrid=None, flat_layout=False):
         """Scan all category directories on the mount and aggregate by title.
 
         Debrid mounts have one folder per torrent, so the same show appears
         many times (one per grabbed episode/season pack). This method collects
         episode IDs from every folder, then groups by normalized title so each
-        show becomes a single entry with correct season/episode counts.
+        show becomes a single entry with correct source_debrid badge.
         Movies are also deduplicated by title.
+
+        ``source_debrid`` (plan 39 phase 4) tags every returned item with
+        the provider name so the UI can distinguish RD from TB content.
+        Defaults to the resolved primary debrid (AD-only and TB-only setups
+        get the correct badge; pre-fix this was hard-coded to ``realdebrid``
+        which mislabelled non-RD primaries).  The second pass over the alt
+        mount explicitly passes ``source_debrid='torbox'``.
+
+        ``flat_layout=True`` (plan 39 phase 4 follow-up) treats *mount_path*
+        as a single category root — releases live directly under it with
+        no ``shows/movies/anime/__all__`` subdivision.  This matches TorBox's
+        WebDAV layout; Zurg-backed mounts (RD/AD) keep the categorized
+        default.  Pre-fix this method assumed 2-level structure unconditionally,
+        so TB scans iterated each release folder AS A CATEGORY and looked
+        for sub-folders inside (finding only media files) — every TB show
+        and movie except the few with internal subdirs was silently dropped.
         """
-        try:
-            categories = []
-            with os.scandir(mount_path) as it:
-                for entry in it:
-                    if entry.is_dir(follow_symlinks=False):
-                        categories.append(entry.name)
-        except (PermissionError, OSError) as e:
-            logger.warning(f"[library] Cannot list mount {mount_path}: {e}")
-            return [], []
+        if source_debrid is None:
+            from utils.debrid_routing import resolve_primary
+            source_debrid = resolve_primary() or 'realdebrid'
+        from utils.blackhole import is_obfuscated_name as _is_obfuscated_name
 
-        non_special = [c for c in categories if c not in self._SKIP_CATEGORIES]
-        scan_dirs = non_special if non_special else [c for c in categories if c == '__all__']
+        # Reset the per-scan truncation flag; set True below if the walk is
+        # cut short (deadline or a listing error). The caller checks this to
+        # avoid letting a partial scan drop titles.
+        self._last_scan_mount_truncated = False
 
-        if not scan_dirs:
-            logger.warning("[library] No directories found on mount")
-            return [], []
+        if flat_layout:
+            # Sentinel '' so the join below evaluates to ``mount_path`` itself.
+            scan_dirs = ['']
+            logger.debug(f"[library] Scanning flat mount root: {mount_path}")
+        else:
+            try:
+                categories = []
+                with os.scandir(mount_path) as it:
+                    for entry in it:
+                        if entry.is_dir(follow_symlinks=False):
+                            categories.append(entry.name)
+            except (PermissionError, OSError) as e:
+                logger.warning(f"[library] Cannot list mount {mount_path}: {e}")
+                self._last_scan_mount_truncated = True
+                return [], []
 
-        logger.debug(f"[library] Scanning mount categories: {scan_dirs}")
+            non_special = [c for c in categories if c not in self._SKIP_CATEGORIES]
+            scan_dirs = non_special if non_special else [c for c in categories if c == '__all__']
+
+            if not scan_dirs:
+                logger.warning("[library] No directories found on mount")
+                return [], []
+
+            logger.debug(f"[library] Scanning mount categories: {scan_dirs}")
 
         # Collect raw per-folder data
-        show_groups = {}   # normalized_title -> {title, year, episodes, path}
+        show_groups = {}   # group key (normalized title, year-qualified for reboot families) -> {title, year, episodes, path}
+        collision_bases = _show_collision_bases()
         movie_groups = {}  # normalized_title -> {title, year, path}
         timed_out = False
 
         for category in scan_dirs:
-            cat_path = os.path.join(mount_path, category)
-            category_is_shows = category.lower() in self._SHOW_CATEGORIES
+            cat_path = mount_path if flat_layout else os.path.join(mount_path, category)
+            # Flat layout has no category hint; rely on per-folder episode
+            # detection.  Categorized: 'shows'/'tv'/'anime' etc. pre-classify.
+            category_is_shows = (not flat_layout) and category.lower() in self._SHOW_CATEGORIES
             try:
                 with os.scandir(cat_path) as it:
                     for entry in it:
                         if deadline is not None and time.monotonic() > deadline:
                             logger.warning("[library] Timeout during mount scan")
                             timed_out = True
+                            self._last_scan_mount_truncated = True
                             break
                         if not entry.is_dir(follow_symlinks=False):
                             continue
                         if entry.name.lower() in _SKIP_FOLDERS:
+                            continue
+                        if _is_obfuscated_name(entry.name):
+                            logger.debug(
+                                f"[library] Skipping obfuscated mount folder: {entry.name}"
+                            )
                             continue
                         title, year = _parse_folder_name(entry.name)
                         if not title:
                             continue
                         episodes = _collect_episodes(entry.path)
                         is_show = len(episodes) > 0
+
+                        # Plan 41 phase B.1 — folder-name TV-marker
+                        # fallback.  On TB's flat layout the folder name
+                        # often carries Sxx / Sxx-Syy / Season N markers
+                        # without per-episode tags, and the files inside
+                        # may not be cached yet (or got sanitised by the
+                        # indexer to drop SxxExx).  ``_collect_episodes``
+                        # returns empty in that case; without this
+                        # fallback the entry buckets as a movie and
+                        # cascades into wasted Radarr API calls + gap-
+                        # fill searches that loop indefinitely.
+                        #
+                        # We flip ``is_show=True`` WITHOUT injecting
+                        # synthetic episode entries — those would
+                        # surface as "Episode 0" placeholders in the
+                        # library UI's per-episode breakdown.  The
+                        # show-entry bucket downstream gets a 0-episode
+                        # show that the next scan cycle (after TB
+                        # finishes caching) fills in with real
+                        # ``SxxExx`` files; until then the Sonarr
+                        # rescan trigger still fires correctly because
+                        # it's keyed on title, not episode count.
+                        if not is_show and _detect_tv_marker(entry.name):
+                            is_show = True
+                            logger.debug(
+                                f"[library] Classifying {entry.name!r} as TV via "
+                                f"folder-name marker (no SxxExx files found inside)"
+                            )
+
                         if not is_show and category_is_shows:
                             # Zurg says show but no S##E## episodes found.
                             # Check top level AND immediate subdirs for
@@ -4342,27 +7248,9 @@ class LibraryScanner:
                             for ep_key in episodes:
                                 episodes[ep_key]['_folder_ep_count'] = season_counts[ep_key[0]]
 
-                            key = _normalize_title(title)
-                            if key not in show_groups:
-                                show_groups[key] = {
-                                    'title': title,
-                                    'year': year,
-                                    'episodes': dict(episodes),
-                                    'path': entry.path,
-                                }
-                            else:
-                                existing = show_groups[key]['episodes']
-                                for ep_key, ep_info in episodes.items():
-                                    if ep_key not in existing:
-                                        existing[ep_key] = ep_info
-                                    elif ep_info.get('_folder_ep_count', 1) > existing[ep_key].get('_folder_ep_count', 1):
-                                        existing[ep_key] = ep_info
-                                # Prefer title with year or better capitalization
-                                if year and not show_groups[key]['year']:
-                                    show_groups[key]['year'] = year
-                                    show_groups[key]['title'] = title
-                                elif title[0:1].isupper() and not show_groups[key]['title'][0:1].isupper():
-                                    show_groups[key]['title'] = title
+                            key, year = _show_group_key(
+                                title, year, collision_bases, episodes)
+                            _merge_show_group(show_groups, key, title, year, episodes, entry.path)
                         else:
                             key = _normalize_title(title)
                             if key not in movie_groups:
@@ -4375,7 +7263,19 @@ class LibraryScanner:
                                 movie_groups[key]['year'] = year
                                 movie_groups[key]['title'] = title
             except (PermissionError, OSError) as e:
+                # A listing error mid-walk (e.g. a TorBox 429 surfacing as
+                # 'couldn't list files') means the result is incomplete —
+                # flag it so the caller doesn't treat partial data as the
+                # full TB set and drop titles to "Wanted".
+                #
+                # Unlike the deadline branch this does NOT break: a categorized
+                # (RD) mount may have several categories and a transient error
+                # in one shouldn't abandon the others (best-effort scan). For
+                # flat-layout (TB) there's a single category so continue vs.
+                # break is moot, but the truncation flag still routes the TB
+                # caller to the last-good fallback.
                 logger.warning(f"[library] Cannot scan {cat_path}: {e}")
+                self._last_scan_mount_truncated = True
             if timed_out:
                 break
 
@@ -4387,6 +7287,7 @@ class LibraryScanner:
                 'title': g['title'],
                 'year': g['year'],
                 'source': 'debrid',
+                'source_debrid': source_debrid,
                 'type': 'movie',
                 'seasons': 0,
                 'episodes': 0,
@@ -4397,20 +7298,23 @@ class LibraryScanner:
             })
 
         shows = []
-        for g in show_groups.values():
+        for key, g in show_groups.items():
             eps = g['episodes']
             unique_seasons = {s for s, _e in eps} if eps else set()
-            shows.append({
+            item = {
                 'title': g['title'],
                 'year': g['year'],
                 'source': 'debrid',
+                'source_debrid': source_debrid,
                 'type': 'show',
                 'seasons': len(unique_seasons),
                 'episodes': len(eps),
                 '_episodes': eps,
                 'path': g['path'],
                 'date_added': _get_folder_mtime(g['path']),
-            })
+            }
+            _stamp_reboot_identity(item, key, collision_bases)
+            shows.append(item)
 
         return movies, shows
 
@@ -4643,6 +7547,7 @@ class LibraryScanner:
             )
 
         from utils.webdav import propfind
+        from utils.blackhole import is_obfuscated_name as _is_obfuscated_name
 
         zurg_url = _discover_zurg_url(self._mount_path)
         if not zurg_url:
@@ -4672,6 +7577,7 @@ class LibraryScanner:
         # Step 2: PROPFIND each category with depth infinity
         show_groups = {}
         movie_groups = {}
+        collision_bases = _show_collision_bases()
 
         # Aggregate detection state — only conclude that Zurg lacks recursive
         # PROPFIND if EVERY category that returned folders returned zero
@@ -4725,6 +7631,8 @@ class LibraryScanner:
                 parts = rel.split('/')
                 folder_name = parts[0]
                 if folder_name.lower() in _SKIP_FOLDERS:
+                    continue
+                if _is_obfuscated_name(folder_name):
                     continue
 
                 if folder_name not in folders:
@@ -4794,26 +7702,12 @@ class LibraryScanner:
                     for ep_key in episodes:
                         episodes[ep_key]['_folder_ep_count'] = season_counts[ep_key[0]]
 
-                    key = _normalize_title(title)
-                    if key not in show_groups:
-                        show_groups[key] = {
-                            'title': title,
-                            'year': year,
-                            'episodes': dict(episodes),
-                            'path': os.path.join(self._mount_path, category, folder_name),
-                        }
-                    else:
-                        existing = show_groups[key]['episodes']
-                        for ep_key, ep_info in episodes.items():
-                            if ep_key not in existing:
-                                existing[ep_key] = ep_info
-                            elif ep_info.get('_folder_ep_count', 1) > existing[ep_key].get('_folder_ep_count', 1):
-                                existing[ep_key] = ep_info
-                        if year and not show_groups[key]['year']:
-                            show_groups[key]['year'] = year
-                            show_groups[key]['title'] = title
-                        elif title[0:1].isupper() and not show_groups[key]['title'][0:1].isupper():
-                            show_groups[key]['title'] = title
+                    key, year = _show_group_key(
+                        title, year, collision_bases, episodes)
+                    _merge_show_group(
+                        show_groups, key, title, year, episodes,
+                        os.path.join(self._mount_path, category, folder_name),
+                    )
                 else:
                     key = _normalize_title(title)
                     if key not in movie_groups:
@@ -4875,10 +7769,10 @@ class LibraryScanner:
             })
 
         shows = []
-        for g in show_groups.values():
+        for key, g in show_groups.items():
             eps = g['episodes']
             unique_seasons = {s for s, _e in eps} if eps else set()
-            shows.append({
+            item = {
                 'title': g['title'],
                 'year': g['year'],
                 'source': 'debrid',
@@ -4888,7 +7782,9 @@ class LibraryScanner:
                 '_episodes': eps,
                 'path': g['path'],
                 'date_added': 0,
-            })
+            }
+            _stamp_reboot_identity(item, key, collision_bases)
+            shows.append(item)
 
         return movies, shows
 
@@ -4914,7 +7810,7 @@ class LibraryScanner:
 
         # Check season subdirectories
         for season_dir, files in contents.get('season_files', {}).items():
-            season_match = _SEASON_DIR_PATTERN.match(season_dir)
+            season_match = _match_season_dir(season_dir)
             if not season_match:
                 continue
             season_num = int(season_match.group(1))
@@ -4940,6 +7836,213 @@ class LibraryScanner:
 
         return episodes
 
+    def _scan_torbox_via_api(self, tb_mount):
+        """Enumerate TorBox library content via the mylist API.
+
+        Replaces the throttled per-folder FUSE walk (``_scan_mount(
+        flat_layout=True)``): that walk issued thousands of scandir/stat
+        calls over a 5-tps rclone mount and contended with real content
+        downloads, producing 429 storms that occasionally abandoned an
+        in-flight download.  ``mylist`` returns the whole account (folder
+        names + per-file paths/sizes) in ONE HTTP call, so enumeration
+        costs zero FUSE ops.  The FUSE mount is still required for symlink
+        TARGETS (real file access) — only enumeration moves to the API.
+
+        Returns ``(movies, shows)`` in ``_scan_mount`` output shape.  Sets
+        ``self._last_scan_mount_truncated`` True (so the caller falls back
+        to its last-good TB baseline instead of dropping titles to
+        "Wanted") only when the API call FAILS — i.e. ``list_torbox_torrents``
+        returns ``None``.  An empty account (``[]``) is a complete,
+        authoritative zero-item scan and is NOT treated as incomplete.
+        """
+        self._last_scan_mount_truncated = False
+
+        from base import load_secret_or_env
+        from utils import search
+        from utils.blackhole import is_obfuscated_name as _is_obfuscated_name
+
+        api_key = load_secret_or_env('torbox_api_key')
+        if not api_key:
+            self._last_scan_mount_truncated = True
+            return [], []
+
+        # TORBOX_SCAN_TIMEOUT was the old FUSE-walk deadline; it now caps the
+        # single mylist HTTP call instead (read live from os.environ so a
+        # SIGHUP-less UI change applies next scan).  Floor at 10s — a healthy
+        # mylist responds in seconds, but a large account over a slow link
+        # shouldn't spuriously fail and drop TB to the last-good fallback.
+        try:
+            tb_timeout = max(int(os.environ.get('TORBOX_SCAN_TIMEOUT', '180')), 10)
+        except (ValueError, TypeError):
+            tb_timeout = 180
+        torrents = search.list_torbox_torrents(api_key, timeout=tb_timeout)
+        if torrents is None:
+            logger.warning("[library] TB mylist API call failed; treating "
+                           "TB scan as incomplete (will fall back to last-good)")
+            self._last_scan_mount_truncated = True
+            return [], []
+
+        # Build the per-folder structure _collect_episodes_from_webdav
+        # expects: folder name -> {'files': [(fname, size, path)],
+        # 'season_files': {subdir: [(fname, size, path)]}}.
+        #
+        # CRITICAL: the on-disk folder is the FIRST path component of each
+        # file's mylist ``name`` — NOT the torrent-level ``name``.  rclone
+        # lays files out at <mount>/<files[].name>, where files[].name is the
+        # ORIGINAL torrent path (e.g. "Tulsa.King.S02.../ep.mkv").  The
+        # entry-level ``name`` is a SANITIZED display string (spaces for dots,
+        # truncated, & -> and) that matches the on-disk folder for only ~20%
+        # of torrents (live: 102/490).  Keying paths off it would synthesize
+        # non-existent targets for ~80% of TB content.  Deriving the folder
+        # from the file path matches the live mount for 485/490 entries
+        # (1717/1749 files); the handful of stragglers are unicode/special-
+        # char folders rclone renames, which a FUSE walk wouldn't serve either.
+        folders = {}
+        folder_created = {}
+        for t in torrents:
+            # list_torbox_torrents normalizes its output, but guard defensively
+            # so one malformed entry degrades to a skip rather than raising and
+            # aborting the whole scan (which would lose all genuinely-new TB
+            # content for the cycle by tripping the last-good fallback).
+            if not isinstance(t, dict):
+                continue
+            created = _parse_tb_timestamp(t.get('created_at'))
+            files = t.get('files')
+            if not isinstance(files, list):
+                continue
+            for f in files:
+                if not isinstance(f, dict):
+                    continue
+                frel = f.get('name')
+                if not isinstance(frel, str) or not frel:
+                    continue
+                # Split into clean path components: drop empties (so a "//"
+                # can't reintroduce an absolute component that os.path.join
+                # would treat as a new root and escape the mount) and reject
+                # any ".." traversal. The synthesized path is rebuilt from the
+                # cleaned components, so it always stays under <tb_mount> and
+                # _resolve_symlink_target can map it back to the TB symlink
+                # base; nothing can point outside the TB mount.
+                parts = [p for p in frel.split('/') if p]
+                if '..' in parts:
+                    continue
+                # A bare file at the mount root (no torrent folder) can't be
+                # classified into a title dir; the old FUSE walk only
+                # enumerated top-level DIRS, so skip to match its behavior.
+                if len(parts) < 2:
+                    continue
+                folder_name = parts[0]
+                if _is_obfuscated_name(folder_name):
+                    logger.debug(
+                        f"[library] Skipping obfuscated TB folder: {folder_name}"
+                    )
+                    continue
+                subparts = parts[1:]
+                size = f.get('size', 0)
+                if not isinstance(size, int) or size < 0:
+                    size = 0
+                synth_path = os.path.join(tb_mount, *parts)
+                bucket = folders.setdefault(
+                    folder_name, {'files': [], 'season_files': {}})
+                folder_created[folder_name] = max(
+                    folder_created.get(folder_name, 0), created)
+                if len(subparts) == 1:
+                    bucket['files'].append((subparts[0], size, synth_path))
+                elif len(subparts) == 2:
+                    bucket['season_files'].setdefault(subparts[0], []).append(
+                        (subparts[1], size, synth_path)
+                    )
+                # Deeper nesting is ignored — mirrors _webdav_scan_mount,
+                # which only buckets 2- and 3-level paths.
+
+        show_groups = {}
+        movie_groups = {}
+        collision_bases = _show_collision_bases()
+        for folder_name, contents in folders.items():
+            title, year = _parse_folder_name(folder_name)
+            if not title:
+                continue
+            episodes = self._collect_episodes_from_webdav(contents, folder_name)
+            is_show = len(episodes) > 0
+            # Flat-layout TV-marker fallback (mirrors _scan_mount): a season
+            # pack still caching on TB carries the marker in its folder name
+            # but has no SxxExx files yet.  Flip to show WITHOUT injecting
+            # synthetic episodes; the next scan fills in real files.
+            if not is_show and _detect_tv_marker(folder_name):
+                is_show = True
+            created = folder_created.get(folder_name, 0)
+            if is_show:
+                season_counts = {}
+                for ep_key in episodes:
+                    season_counts[ep_key[0]] = season_counts.get(ep_key[0], 0) + 1
+                for ep_key in episodes:
+                    episodes[ep_key]['_folder_ep_count'] = season_counts[ep_key[0]]
+                key, year = _show_group_key(
+                    title, year, collision_bases, episodes)
+                _merge_show_group(show_groups, key, title, year, episodes,
+                                  os.path.join(tb_mount, folder_name))
+                g = show_groups[key]
+                if created > g.get('date_added', 0):
+                    g['date_added'] = created
+            else:
+                key = _normalize_title(title)
+                if key not in movie_groups:
+                    movie_groups[key] = {
+                        'title': title,
+                        'year': year,
+                        'path': os.path.join(tb_mount, folder_name),
+                        'date_added': created,
+                        '_contents': contents,
+                    }
+                else:
+                    if year and not movie_groups[key]['year']:
+                        movie_groups[key]['year'] = year
+                        movie_groups[key]['title'] = title
+                    if created > movie_groups[key].get('date_added', 0):
+                        movie_groups[key]['date_added'] = created
+
+        movies = []
+        for g in movie_groups.values():
+            mq, msz = _get_movie_quality_from_webdav(g.get('_contents', {}))
+            movies.append({
+                'title': g['title'],
+                'year': g['year'],
+                'source': 'debrid',
+                'source_debrid': 'torbox',
+                'type': 'movie',
+                'seasons': 0,
+                'episodes': 0,
+                'path': g['path'],
+                'quality': mq,
+                'size_bytes': msz,
+                'date_added': g.get('date_added', 0),
+            })
+
+        shows = []
+        for key, g in show_groups.items():
+            eps = g['episodes']
+            unique_seasons = {s for s, _e in eps} if eps else set()
+            item = {
+                'title': g['title'],
+                'year': g['year'],
+                'source': 'debrid',
+                'source_debrid': 'torbox',
+                'type': 'show',
+                'seasons': len(unique_seasons),
+                'episodes': len(eps),
+                '_episodes': eps,
+                'path': g['path'],
+                'date_added': g.get('date_added', 0),
+            }
+            _stamp_reboot_identity(item, key, collision_bases)
+            shows.append(item)
+
+        logger.debug(
+            f"[library] TB API scan: {len(torrents)} torrents → "
+            f"{len(movies)} movies, {len(shows)} shows"
+        )
+        return movies, shows
+
     def _scan_local_movies(self):
         items = []
         if not self._local_movies_path:
@@ -4947,7 +8050,8 @@ class LibraryScanner:
         if not os.path.isdir(self._local_movies_path):
             logger.warning(f"[library] Local movies path not found: {self._local_movies_path}")
             return items
-        symlink_base = os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', '').strip()
+        symlink_prefixes = _all_debrid_symlink_prefixes()
+        from utils.blackhole import is_obfuscated_name as _is_obfuscated_name
         try:
             with os.scandir(self._local_movies_path) as it:
                 for entry in it:
@@ -4956,8 +8060,10 @@ class LibraryScanner:
                     # Skip known non-media folders before any I/O
                     if entry.name.lower() in _SKIP_FOLDERS:
                         continue
+                    if _is_obfuscated_name(entry.name):
+                        continue
                     # Skip folders that only contain debrid symlinks
-                    if symlink_base and self._is_debrid_symlink_dir(entry.path, symlink_base):
+                    if symlink_prefixes and self._is_debrid_symlink_dir(entry.path, symlink_prefixes):
                         continue
                     # Skip folders with no media files — these are either empty
                     # Radarr placeholders or dirs whose symlinks were deleted.
@@ -4985,14 +8091,22 @@ class LibraryScanner:
         return items
 
     @staticmethod
-    def _is_debrid_symlink_dir(path, symlink_base):
+    def _is_debrid_symlink_dir(path, symlink_prefixes):
         """Check if a directory contains only debrid symlinks (no real media files).
+
+        ``symlink_prefixes`` is a tuple of trailing-``os.sep``-terminated
+        prefixes — one per configured debrid target base.  A symlink whose
+        target starts with ANY of them counts as a debrid symlink; a symlink
+        targeting an unknown path counts as non-debrid and disqualifies the
+        whole dir.  Plan 39: dual-debrid setups have a separate prefix for
+        each provider; checking only one would misclassify the other.
 
         Only considers media-extension files. Non-media files (.nfo, .srt, .jpg)
         are ignored so Radarr metadata doesn't cause false local classification.
         Returns False for empty directories.
         """
-        prefix = symlink_base.rstrip(os.sep) + os.sep
+        if not symlink_prefixes:
+            return False
         has_debrid_symlink = False
         try:
             with os.scandir(path) as it:
@@ -5002,7 +8116,7 @@ class LibraryScanner:
                         continue
                     if f.is_symlink():
                         target = os.readlink(f.path)
-                        if not target.startswith(prefix):
+                        if not any(target.startswith(p) for p in symlink_prefixes):
                             return False  # symlink to non-debrid location
                         has_debrid_symlink = True
                     elif f.is_file(follow_symlinks=False):
@@ -5013,29 +8127,47 @@ class LibraryScanner:
 
     @staticmethod
     def _has_media_files(path):
-        """Check if a directory contains at least one media file (real or symlink).
+        """Check if a directory contains at least one *resolving* media file.
 
         Used to avoid classifying metadata-only directories (leftover .nfo/.jpg
         from Radarr after symlinks were deleted) as genuine local content.
+
+        A symlink counts only if it RESOLVES: a dangling video symlink (target
+        gone, or pointing outside every configured debrid base after a target-
+        base rename) is morally identical to a deleted symlink — counting it as
+        local would inflate the recovery metric and hide the title from
+        "Wanted", blocking symlink recreation. Real files short-circuit before
+        any deref so a live mount isn't stat'd unnecessarily.
         """
         try:
             with os.scandir(path) as it:
                 for f in it:
                     ext = os.path.splitext(f.name)[1].lower()
-                    if ext in MEDIA_EXTENSIONS and (f.is_file() or f.is_symlink()):
+                    if ext not in MEDIA_EXTENSIONS:
+                        continue
+                    if f.is_file(follow_symlinks=False):
+                        return True
+                    if f.is_symlink() and os.path.exists(f.path):
                         return True
         except OSError:
             pass
         return False
 
     @staticmethod
-    def _is_debrid_symlink_only(path, symlink_base):
+    def _is_debrid_symlink_only(path, symlink_prefixes):
         """Check if a show directory tree contains only debrid symlinks (no real media files).
+
+        ``symlink_prefixes`` is a tuple of debrid-target prefixes (one per
+        configured debrid).  See ``_is_debrid_symlink_dir`` for the dual-debrid
+        rationale — the same single-prefix bug applied here, mis-bucketing
+        TB-routed show folders as local TV (and, when the show name collided
+        with a movie folder, surfacing as a movie card in the library UI).
 
         Walks into Season subdirectories to check episode files. Non-media files
         are ignored. Returns False for empty directories.
         """
-        prefix = symlink_base.rstrip(os.sep) + os.sep
+        if not symlink_prefixes:
+            return False
         has_any_media = False
         try:
             with os.scandir(path) as it:
@@ -5050,7 +8182,8 @@ class LibraryScanner:
                                         continue
                                     has_any_media = True
                                     if f.is_symlink():
-                                        if not os.readlink(f.path).startswith(prefix):
+                                        target = os.readlink(f.path)
+                                        if not any(target.startswith(p) for p in symlink_prefixes):
                                             return False
                                     elif f.is_file(follow_symlinks=False):
                                         return False  # real file
@@ -5060,7 +8193,8 @@ class LibraryScanner:
                         ext = os.path.splitext(entry.name)[1].lower()
                         if ext in MEDIA_EXTENSIONS:
                             has_any_media = True
-                            if not os.readlink(entry.path).startswith(prefix):
+                            target = os.readlink(entry.path)
+                            if not any(target.startswith(p) for p in symlink_prefixes):
                                 return False
                     elif entry.is_file(follow_symlinks=False):
                         ext = os.path.splitext(entry.name)[1].lower()
@@ -5077,7 +8211,9 @@ class LibraryScanner:
         if not os.path.isdir(self._local_tv_path):
             logger.warning(f"[library] Local TV path not found: {self._local_tv_path}")
             return items
-        symlink_base = os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', '').strip()
+        symlink_prefixes = _all_debrid_symlink_prefixes()
+        from utils.blackhole import is_obfuscated_name as _is_obfuscated_name
+        collision_bases = _show_collision_bases()
         try:
             with os.scandir(self._local_tv_path) as it:
                 for entry in it:
@@ -5086,16 +8222,20 @@ class LibraryScanner:
                     # Skip known non-media folders before any I/O
                     if entry.name.lower() in _SKIP_FOLDERS:
                         continue
+                    if _is_obfuscated_name(entry.name):
+                        continue
                     # Skip show folders that are entirely debrid symlinks
-                    if symlink_base and self._is_debrid_symlink_only(entry.path, symlink_base):
+                    if symlink_prefixes and self._is_debrid_symlink_only(entry.path, symlink_prefixes):
                         continue
                     title, year = _parse_folder_name(entry.name)
                     if not title:
                         continue
                     eps = _collect_episodes(entry.path)
                     if eps:
+                        key, year = _show_group_key(
+                            title, year, collision_bases, eps)
                         unique_seasons = {s for s, _e in eps}
-                        items.append({
+                        item = {
                             'title': title,
                             'year': year,
                             'source': 'local',
@@ -5105,7 +8245,9 @@ class LibraryScanner:
                             '_episodes': eps,
                             'path': entry.path,
                             'date_added': _get_folder_mtime(entry.path),
-                        })
+                        }
+                        _stamp_reboot_identity(item, key, collision_bases)
+                        items.append(item)
                     else:
                         # Fallback for shows without parseable episode patterns
                         seasons, ep_count = _count_show_content(entry.path)
@@ -5113,7 +8255,9 @@ class LibraryScanner:
                         # or dirs whose symlinks were deleted
                         if ep_count == 0:
                             continue
-                        items.append({
+                        key, year = _show_group_key(
+                            title, year, collision_bases, {})
+                        item = {
                             'title': title,
                             'year': year,
                             'source': 'local',
@@ -5123,7 +8267,9 @@ class LibraryScanner:
                             '_episodes': {},
                             'path': entry.path,
                             'date_added': _get_folder_mtime(entry.path),
-                        })
+                        }
+                        _stamp_reboot_identity(item, key, collision_bases)
+                        items.append(item)
         except (PermissionError, OSError) as e:
             logger.warning(f"[library] Cannot scan local TV: {e}")
         return items
@@ -5274,6 +8420,13 @@ def compute_library_stats(data):
 
     for show in data.get('shows', []) or []:
         show_src = show.get('source') or 'debrid'
+        # Ghost shows from _apply_sonarr_wanted_shows (source='wanted') are
+        # Sonarr-monitored-but-not-downloaded series. Like ghost movies,
+        # they aren't on-disk library and MUST NOT count toward the
+        # local/debrid/both buckets — otherwise the Composition card
+        # inflates with content that doesn't exist yet.
+        if show_src == 'wanted':
+            continue
         if show_src not in shows_by_src:
             show_src = 'debrid'
         shows_by_src[show_src] += 1

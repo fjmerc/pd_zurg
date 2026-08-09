@@ -56,6 +56,11 @@ def zurg_setup():
                 else:
                     file.write(line)
 
+    def _yaml_quote(value):
+        # Single-quoted YAML scalar: immune to :, #, %, !, leading/trailing
+        # spaces etc. Only escape needed is doubling embedded single quotes.
+        return "'" + str(value).replace("'", "''") + "'"
+
     def update_creds(file_path, zurguser, zurgpass):
         logger.debug(f"Updating username and password in config file: {file_path}")
         with open(file_path, 'r') as file:
@@ -64,9 +69,9 @@ def zurg_setup():
             for line in lines:
                 if zurguser and zurgpass:
                     if line.strip().startswith("username:") or line.strip().startswith("# username:"):
-                        file.write(f"username: {zurguser}\n")
+                        file.write(f"username: {_yaml_quote(zurguser)}\n")
                     elif line.strip().startswith("password:") or line.strip().startswith("# password:"):
-                        file.write(f"password: {zurgpass}\n")
+                        file.write(f"password: {_yaml_quote(zurgpass)}\n")
                     else:
                         file.write(line)
                 else:

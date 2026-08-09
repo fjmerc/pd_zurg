@@ -146,6 +146,20 @@ def test_library_symlink_cleanup_with_counts():
     assert 'Library symlink cleanup' in s
 
 
+def test_mount_selfheal_restarted():
+    ev = _ev('mount_selfheal', mount='/data', restarted=True)
+    s = format_event(ev)['short']
+    assert 'Self-healed dead mount /data' in s
+    assert 'rclone remounted' in s
+
+
+def test_mount_selfheal_restart_failed():
+    ev = _ev('mount_selfheal', mount='/mnt/torbox', restarted=False)
+    s = format_event(ev)['short']
+    assert 'Dead mount /mnt/torbox' in s
+    assert 'operator attention needed' in s
+
+
 def test_blackhole_new_import_with_count():
     ev = _ev('blackhole_new_import', count=5, release='Big.Pack.2024')
     assert 'Blackhole import: 5 files from Big.Pack.2024' in format_event(ev)['short']
@@ -156,9 +170,138 @@ def test_blackhole_cache_hit_lists_provider():
     assert 'realdebrid' in format_event(ev)['short']
 
 
+def test_blackhole_mount_handoff_lists_provider():
+    ev = _ev('blackhole_mount_handoff', provider='torbox')
+    s = format_event(ev)['short']
+    assert 'torbox' in s
+    assert 'library scanner' in s
+
+
+def test_tb_cached_alt_grabbed_names_rejected_provider_and_tier():
+    ev = _ev('tb_cached_alt_grabbed', rejected_provider='realdebrid', tier='1080p')
+    s = format_event(ev)['short']
+    assert 'realdebrid' in s
+    assert '1080p' in s
+    assert 'TorBox' in s
+
+
+def test_tb_cached_alt_grabbed_without_tier_still_renders():
+    ev = _ev('tb_cached_alt_grabbed', rejected_provider='realdebrid')
+    s = format_event(ev)['short']
+    assert 'realdebrid' in s
+    assert 'TorBox' in s
+
+
+def test_wanted_tb_recovered_names_service():
+    ev = _ev('wanted_tb_recovered', service='torbox')
+    s = format_event(ev)['short']
+    assert 'Recovered Wanted' in s
+    assert 'torbox' in s
+
+
+def test_wanted_tb_recovered_defaults_service_to_torbox():
+    ev = _ev('wanted_tb_recovered')
+    s = format_event(ev)['short']
+    assert 'TorBox' in s
+
+
+def test_wanted_rd_recovered_names_service():
+    ev = _ev('wanted_rd_recovered', service='realdebrid')
+    s = format_event(ev)['short']
+    assert 'Recovered Wanted' in s
+    assert 'realdebrid' in s
+
+
+def test_wanted_rd_recovered_defaults_service_display_case():
+    # Default matches the TB formatter's display-cased 'TorBox'.
+    ev = _ev('wanted_rd_recovered')
+    assert 'RealDebrid' in format_event(ev)['short']
+
+
+def test_wanted_rd_uncached_plain_miss():
+    ev = _ev('wanted_rd_uncached', reason='never_ready')
+    s = format_event(ev)['short']
+    assert 'not cached on RealDebrid' in s
+
+
+def test_wanted_rd_uncached_filter_block():
+    ev = _ev('wanted_rd_uncached', reason='infringing_file')
+    s = format_event(ev)['short']
+    assert 'filter-blocked' in s
+    assert 'RealDebrid' in s
+
+
+def test_wanted_rd_uncached_add_time_filter_block():
+    ev = _ev('wanted_rd_uncached', reason='infringing_add')
+    s = format_event(ev)['short']
+    assert 'filter-blocked' in s
+    assert 'RealDebrid' in s
+
+
+def test_wanted_filter_giveup():
+    ev = _ev('wanted_filter_giveup', imdb_id='tt9999999', strikes=3)
+    s = format_event(ev)['short']
+    assert 'gave up' in s
+    assert 'RealDebrid' in s
+    assert 'TorBox' in s
+
+
+def test_arr_feedback_blocklisted_names_arr_and_strikes():
+    ev = _ev('arr_feedback_blocklisted', arr_service='sonarr',
+             info_hash='ABC123', provider='torbox', strikes=2, max_strikes=8)
+    s = format_event(ev)['short']
+    assert 'Sonarr' in s
+    assert 'blocklisted' in s
+    assert 'strike 2/8' in s
+
+
+def test_arr_feedback_blocklisted_radarr_without_strikes():
+    ev = _ev('arr_feedback_blocklisted', arr_service='radarr')
+    s = format_event(ev)['short']
+    assert 'Radarr' in s
+    assert 'strike' not in s
+
+
 def test_terminal_error_shows_status():
     ev = _ev('terminal_error', provider='realdebrid', status='magnet_error')
     assert 'Failed on realdebrid: magnet_error' == format_event(ev)['short']
+
+
+def test_debrid_filtered_detection_only():
+    """AUTO_REMEDIATE off — no action flags, render as 'detection only'."""
+    ev = _ev('debrid_filtered', reason='infringing_file', http=451)
+    s = format_event(ev)['short']
+    assert 'Filter-blocked on debrid (infringing_file, HTTP 451)' in s
+    assert 'detection only' in s
+
+
+def test_debrid_filtered_with_all_actions():
+    """AUTO_REMEDIATE on, everything succeeded — action tail lists each."""
+    ev = _ev('debrid_filtered', reason='infringing_file', http=451,
+             deleted=True, blocklisted=True, researched=True)
+    s = format_event(ev)['short']
+    assert 'removed from debrid' in s
+    assert 'hash blocklisted' in s
+    assert 'arr re-search triggered' in s
+
+
+def test_debrid_filtered_partial_action():
+    """Delete succeeded but arr re-search didn't — only true flags appear."""
+    ev = _ev('debrid_filtered', reason='infringing_file', http=451,
+             deleted=True, blocklisted=True, researched=False)
+    s = format_event(ev)['short']
+    assert 'removed from debrid' in s
+    assert 'hash blocklisted' in s
+    assert 'arr re-search triggered' not in s
+
+
+def test_debrid_filtered_without_http_still_renders():
+    """Defensive: a malformed event missing http still renders cleanly."""
+    ev = _ev('debrid_filtered', reason='infringing_file', deleted=True)
+    s = format_event(ev)['short']
+    assert 'Filter-blocked on debrid (infringing_file)' in s
+    assert 'HTTP' not in s
+    assert 'removed from debrid' in s
 
 
 def test_uncached_timeout_deleted_vs_not():
@@ -166,6 +309,20 @@ def test_uncached_timeout_deleted_vs_not():
     removed = format_event(_ev('uncached_timeout', deleted=True))['short']
     assert 'debrid cleanup skipped' in kept
     assert 'removed from debrid' in removed
+
+
+def test_uncached_rejected_renders_cross_confirmation_when_present():
+    """The cross-probe path attaches meta['cross_confirmed_via']='torbox' so
+    audit-trail readers can distinguish single-probe rejections (chosen
+    debrid said no) from cross-confirmed ones (chosen debrid said unknown,
+    TB said no).  The formatter must surface that distinction."""
+    plain = format_event(_ev('uncached_rejected', provider='realdebrid'))['short']
+    crossed = format_event(_ev('uncached_rejected', provider='realdebrid',
+                                cross_confirmed_via='torbox'))['short']
+    assert 'Rejected — not cached on realdebrid' in plain
+    assert '(cross-confirmed' not in plain
+    assert 'Rejected — not cached on realdebrid' in crossed
+    assert '(cross-confirmed via torbox)' in crossed
 
 
 def test_unknown_cause_falls_back_to_detail():

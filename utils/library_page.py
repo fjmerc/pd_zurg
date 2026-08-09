@@ -160,6 +160,21 @@ __NAV_HTML__
 [data-theme="light"] .badge-local{background:#1a7f371a;border-color:#1a7f3740}
 [data-theme="light"] .badge-debrid{background:#7c3aed1a;border-color:#7c3aed40;color:#7c3aed}
 
+/* Plan 39 phase 4: per-debrid provider badges (RD / TB / AD). */
+.badge-provider{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;vertical-align:middle;margin-left:4px}
+.badge-provider .badge-full{display:inline}
+.badge-provider .badge-mini{display:none}
+.badge-provider-rd{background:#3fb9500f;color:#3fb950;border:1px solid #3fb95033}
+.badge-provider-tb{background:#58a6ff0f;color:var(--blue);border:1px solid #58a6ff33}
+.badge-provider-ad{background:#db6d280f;color:var(--orange);border:1px solid #db6d2833}
+[data-theme="light"] .badge-provider-rd{background:#1a7f371a;border-color:#1a7f3740}
+[data-theme="light"] .badge-provider-tb{background:#0969da1a;border-color:#0969da40;color:#0969da}
+[data-theme="light"] .badge-provider-ad{background:#bc4c001a;border-color:#bc4c0040;color:#bc4c00}
+@media(max-width:640px){
+  .badge-provider .badge-full{display:none}
+  .badge-provider .badge-mini{display:inline}
+}
+
 .btn-ghost.btn-switch:hover:not(:disabled):not(.confirming){border-color:#2dd4bf;color:#2dd4bf}
 
 /* Quality badges */
@@ -459,6 +474,11 @@ body.has-bulk-bar{padding-bottom:60px}
 .btn-add-debrid:hover:not(:disabled){background:#3fb95018;border-color:var(--green)}
 .btn-add-debrid:disabled{opacity:.5;cursor:not-allowed}
 .btn-add-debrid.added{border-color:var(--green);color:var(--green);cursor:default}
+.btn-add-debrid+.btn-add-debrid{margin-left:4px}
+.badge-cached{font-size:.78em;white-space:nowrap}
+.badge-cached.yes{color:var(--green);font-weight:600}
+.badge-cached.no{color:var(--text3)}
+.badge-cached.unknown{color:var(--text3)}
 .search-empty{text-align:center;color:var(--text3);padding:24px 0;font-size:.88em}
 .search-count{font-size:.75em;color:var(--text3);margin-left:auto}
 </style>
@@ -1035,17 +1055,49 @@ function switchTab(name) {
 // ---------------------------------------------------------------------------
 // Filtering & rendering
 // ---------------------------------------------------------------------------
-function buildBadges(source) {
+function buildBadges(source, item) {
+  // Base location badge (Local / Debrid / Both / Wanted)
+  var html;
   if (source === 'both') {
-    return '<span class="badge-local"><span class="badge-full">Local</span><span class="badge-mini">L</span></span><span class="badge-debrid"><span class="badge-full">Debrid</span><span class="badge-mini">D</span></span>';
+    html = '<span class="badge-local"><span class="badge-full">Local</span><span class="badge-mini">L</span></span><span class="badge-debrid"><span class="badge-full">Debrid</span><span class="badge-mini">D</span></span>';
+  } else if (source === 'local') {
+    html = '<span class="badge-local"><span class="badge-full">Local</span><span class="badge-mini">L</span></span>';
+  } else if (source === 'debrid') {
+    html = '<span class="badge-debrid"><span class="badge-full">Debrid</span><span class="badge-mini">D</span></span>';
+  } else if (source === 'wanted') {
+    // Ghost entries from Radarr (monitored but no file). Reuse the red
+    // .badge-missing styling that episode-level missing entries use.
+    html = '<span class="badge-missing"><span class="badge-full">Wanted</span><span class="badge-mini">W</span></span>';
+  } else {
+    html = '<span class="badge-debrid"><span class="badge-full">' + esc(source) + '</span><span class="badge-mini">?</span></span>';
   }
-  if (source === 'local') return '<span class="badge-local"><span class="badge-full">Local</span><span class="badge-mini">L</span></span>';
-  if (source === 'debrid') return '<span class="badge-debrid"><span class="badge-full">Debrid</span><span class="badge-mini">D</span></span>';
-  // source='wanted': ghost entries from Radarr (monitored but no file).
-  // Reuse the red .badge-missing styling that episode-level missing
-  // entries already use.
-  if (source === 'wanted') return '<span class="badge-missing"><span class="badge-full">Wanted</span><span class="badge-mini">W</span></span>';
-  return '<span class="badge-debrid"><span class="badge-full">' + esc(source) + '</span><span class="badge-mini">?</span></span>';
+
+  // Plan 39 phase 4: per-debrid provider badge (RD / TB) — only relevant
+  // for debrid-sourced items (source='debrid' or 'both').  Single-debrid
+  // users see no extra badge because source_debrid will always be the
+  // same provider; the rendering keeps the badge in that case too as a
+  // small visual cue but it's the same color across all items.
+  if (item && (source === 'debrid' || source === 'both')) {
+    var sd = item.source_debrid;
+    var alt = item.alt_source_debrid;
+    if (sd === 'realdebrid') {
+      html += '<span class="badge-provider badge-provider-rd" title="On Real-Debrid"><span class="badge-full">RD</span><span class="badge-mini">RD</span></span>';
+    } else if (sd === 'torbox') {
+      html += '<span class="badge-provider badge-provider-tb" title="On TorBox"><span class="badge-full">TB</span><span class="badge-mini">TB</span></span>';
+    } else if (sd === 'alldebrid') {
+      html += '<span class="badge-provider badge-provider-ad" title="On AllDebrid"><span class="badge-full">AD</span><span class="badge-mini">AD</span></span>';
+    }
+    if (item.has_alt_source) {
+      if (alt === 'torbox') {
+        html += '<span class="badge-provider badge-provider-tb" title="Also on TorBox"><span class="badge-full">+TB</span><span class="badge-mini">+TB</span></span>';
+      } else if (alt === 'realdebrid') {
+        html += '<span class="badge-provider badge-provider-rd" title="Also on Real-Debrid"><span class="badge-full">+RD</span><span class="badge-mini">+RD</span></span>';
+      } else if (alt === 'alldebrid') {
+        html += '<span class="badge-provider badge-provider-ad" title="Also on AllDebrid"><span class="badge-full">+AD</span><span class="badge-mini">+AD</span></span>';
+      }
+    }
+  }
+  return html;
 }
 
 function _qualityBadge(quality) {
@@ -1217,7 +1269,7 @@ function buildCard(item, index) {
     pendingBadge = pendingBadge.replace('class="badge-pending"',
       'class="badge-pending has-error" title="' + escAttr(errTooltip) + '"');
   }
-  var sourceBadges = buildBadges(item.source);
+  var sourceBadges = buildBadges(item.source, item);
   var statusLine = '';
   if (pendingBadge || metaLine) {
     statusLine = '<div class="card-status">' + pendingBadge + metaLine + '</div>';
@@ -1480,7 +1532,10 @@ function _observeUncachedCards() {
         var title = card.getAttribute('data-title');
         var type = card.getAttribute('data-type');
         var year = card.getAttribute('data-year') || '';
-        if (!title) return;
+        // Same guard as showDetail() — when data-type is empty or
+        // "undefined" (escAttr serialises a JS undefined that way),
+        // skip the fetch rather than send a malformed request.
+        if (!title || !type || type === 'undefined') return;
         var nk = normTitle(title);
         if (_metaCache[nk]) { _applyMeta(card, _metaCache[nk]); return; }
         var url = '/api/library/metadata?title=' + encodeURIComponent(title) + '&type=' + encodeURIComponent(type);
@@ -2290,18 +2345,23 @@ function showDetail(index) {
   var backBtn = document.querySelector('.detail-back');
   if (backBtn) backBtn.focus();
 
-  // Fetch TMDB metadata
-  var params = 'title=' + encodeURIComponent(item.title) + '&type=' + encodeURIComponent(item.type);
-  if (item.year) params += '&year=' + item.year;
-  fetch('/api/library/metadata?' + params)
-    .then(function(r) { return r.ok ? r.json() : null; })
-    .then(function(meta) {
-      if (meta && _inDetailView && _detailItem === item) {
-        _detailMeta = meta;
-        _renderDetail();
-      }
-    })
-    .catch(function() {});
+  // Fetch TMDB metadata.  Guard against item.type being undefined —
+  // encodeURIComponent(undefined) returns the literal "undefined" which
+  // the server then rejected as not in {show,movie}.  Skip the fetch
+  // entirely when we can't tell the caller what kind of entry it is.
+  if (item.type) {
+    var params = 'title=' + encodeURIComponent(item.title) + '&type=' + encodeURIComponent(item.type);
+    if (item.year) params += '&year=' + item.year;
+    fetch('/api/library/metadata?' + params)
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(meta) {
+        if (meta && _inDetailView && _detailItem === item) {
+          _detailMeta = meta;
+          _renderDetail();
+        }
+      })
+      .catch(function() {});
+  }
 }
 
 function _renderDetail() {
@@ -2415,7 +2475,7 @@ function _renderMovieDetail(movie, meta) {
   var moviePe = _pending[moviePnk];
   var moviePeDir = moviePe ? (moviePe.direction || '') : '';
   html += '<div class="card-badges">';
-  html += buildBadges(movie.source);
+  html += buildBadges(movie.source, movie);
   if (moviePeDir === 'debrid-unavailable') {
     html += ' <span class="badge-unavailable">Debrid N/A</span>';
   } else if (moviePeDir === 'to-local-fallback') {
@@ -2656,7 +2716,7 @@ function _renderSeasonEpisodes(season, si) {
       html += '<span class="badge-fallback"><span class="badge-full">Local Fallback</span><span class="badge-mini">\u21B3</span></span>';
     } else if (isMigrating) {
       // Episode is available — show source badge + subtle upgrade indicator
-      html += buildBadges(ep.source);
+      html += buildBadges(ep.source, ep);
       html += '<span class="badge-migrating"><span class="badge-full">Migrating</span><span class="badge-mini">\u2197</span></span>';
     } else if (isPending) {
       // Episode is missing — actively searching
@@ -2677,7 +2737,7 @@ function _renderSeasonEpisodes(season, si) {
         }
       }
     } else {
-      html += buildBadges(ep.source);
+      html += buildBadges(ep.source, ep);
     }
     html += '</td>';
     html += '<td class="ep-quality">';
@@ -2810,7 +2870,7 @@ function _renderShowDetail(show, meta) {
   if (show.year) html += ' <span class="card-year">(' + esc(String(show.year)) + ')</span>';
   if (meta && meta.status) html += '<span class="detail-status">' + esc(meta.status) + '</span>';
   html += '</h2>';
-  html += '<div class="card-badges">' + buildBadges(show.source) + ' <span id="compromise-badge-slot"></span></div>';
+  html += '<div class="card-badges">' + buildBadges(show.source, show) + ' <span id="compromise-badge-slot"></span></div>';
   var showPe = _pending[nk];
   var showPeDir = showPe ? (showPe.direction || '') : '';
   var showErrText = (showPeDir === 'to-debrid' || showPeDir === 'to-local') ? formatPendingDetail(showPe) : '';
@@ -4146,11 +4206,13 @@ function startTsRefresh() {
 // Debrid Search Modal (F9)
 // ---------------------------------------------------------------------------
 var _searchResults = [];
+var _searchProviders = [];
 var _searchSortCol = 'quality';
 var _searchSortAsc = false;
 var _searchQualityFilter = 0;
 var _searchMediaTitle = '';
 var _searchEpisodeTag = '';
+var _SVC_ABBR = {realdebrid: 'RD', alldebrid: 'AD', torbox: 'TB'};
 
 function openSearchFromBtn(btn) {
   var imdbId = btn.getAttribute('data-imdb');
@@ -4214,6 +4276,7 @@ function openSearchModal(imdbId, mediaType, season, episode, displayTitle, media
   .then(function(r) { return r.json(); })
   .then(function(data) {
     _searchResults = data.results || [];
+    _searchProviders = data.providers || [];
     _renderSearchResults();
   })
   .catch(function(err) {
@@ -4248,6 +4311,7 @@ function _renderSearchResults() {
     if (_searchSortCol === 'quality') { va = a.quality.score; vb = b.quality.score; }
     else if (_searchSortCol === 'size') { va = a.size_bytes; vb = b.size_bytes; }
     else if (_searchSortCol === 'seeds') { va = a.seeds; vb = b.seeds; }
+    else if (_searchSortCol === 'cached') { va = a.cached === true ? 1 : 0; vb = b.cached === true ? 1 : 0; }
     else { va = a.quality.score; vb = b.quality.score; }
     if (va === vb) {
       if (_searchSortCol !== 'quality' && a.quality.score !== b.quality.score) return b.quality.score - a.quality.score;
@@ -4280,6 +4344,7 @@ function _renderSearchResults() {
     {key: 'quality', label: 'Quality'},
     {key: 'size', label: 'Size'},
     {key: 'seeds', label: 'Seeds'},
+    {key: 'cached', label: 'Cached'},
     {key: 'action', label: ''},
   ];
   for (var ci = 0; ci < cols.length; ci++) {
@@ -4303,9 +4368,25 @@ function _renderSearchResults() {
     html += '<td><span class="badge-quality ' + qCls + '">' + esc(r.quality.label) + '</span></td>';
     html += '<td>' + _formatBytes(r.size_bytes) + '</td>';
     html += '<td>' + (r.seeds || 0) + '</td>';
+    if (r.cached === true) {
+      var svcAbbr = _SVC_ABBR[r.cached_service] || (r.cached_service || '').toUpperCase();
+      html += '<td><span class="badge-cached yes" title="Cached on ' + escAttr(r.cached_service || '') + '">' + esc(svcAbbr) + ' &#10003;</span></td>';
+    } else if (r.cached === false) {
+      html += '<td><span class="badge-cached no" title="Not cached">&#10007;</span></td>';
+    } else {
+      html += '<td><span class="badge-cached unknown" title="Cache status unknown">&ndash;</span></td>';
+    }
     html += '<td>';
     if (r._added) {
       html += '<span style="color:var(--green);font-size:.82em">&#10003; Added</span>';
+    } else if (_searchProviders.length > 0) {
+      // One labelled button per configured provider — even for a single
+      // provider, so the user always sees WHERE the torrent will land.
+      for (var pi = 0; pi < _searchProviders.length; pi++) {
+        var svc = _searchProviders[pi];
+        var lbl = _SVC_ABBR[svc] || svc.toUpperCase();
+        html += '<button class="btn-add-debrid" data-hash="' + escAttr(r.info_hash) + '" data-service="' + escAttr(svc) + '" title="Add to ' + escAttr(svc) + '" onclick="addSearchResult(this)">+ ' + esc(lbl) + '</button>';
+      }
     } else {
       html += '<button class="btn-add-debrid" data-hash="' + escAttr(r.info_hash) + '" onclick="addSearchResult(this)">Add</button>';
     }
@@ -4335,10 +4416,13 @@ function addSearchResult(btn) {
   }
   if (!r) return;
 
+  var service = btn.getAttribute('data-service') || '';
+  var origLabel = btn.textContent;
   btn.disabled = true;
   btn.textContent = '\u2026';
 
   var addBody = {info_hash: r.info_hash, title: r.title};
+  if (service) addBody.service = service;
   if (_searchMediaTitle) addBody.media_title = _searchMediaTitle;
   if (_searchEpisodeTag) addBody.episode = _searchEpisodeTag;
   fetch('/api/search/add', {
@@ -4362,13 +4446,13 @@ function addSearchResult(btn) {
       _showSearchMsg(msg, 'success');
     } else {
       btn.disabled = false;
-      btn.textContent = 'Add';
+      btn.textContent = origLabel;
       _showSearchMsg('Failed: ' + (data.error || 'Unknown error'), 'error');
     }
   })
   .catch(function(err) {
     btn.disabled = false;
-    btn.textContent = 'Add';
+    btn.textContent = origLabel;
     _showSearchMsg('Error: ' + String(err), 'error');
   });
 }

@@ -5,7 +5,9 @@ optional 'message', and optional 'items' count for result tracking.
 """
 
 import os
+import re
 import shutil
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from utils.logger import get_logger
@@ -34,6 +36,11 @@ _DEFAULTS = {
     'HOUSEKEEPING_INTERVAL': 24 * 3600,        # 24 hours
     'CONFIG_BACKUP_INTERVAL': 24 * 3600,       # 24 hours
     'MOUNT_LIVENESS_INTERVAL': 60,             # 1 minute
+    # Debrid health reconciler (plan 38). 12h matches a healthy 5000-torrent
+    # library producing ~5000 probes per sweep at the module's 60/min limit
+    # (≈85 min) — well clear of 12h, leaving headroom for other RD traffic.
+    # Power-user override via env var; not surfaced in the Settings UI.
+    'DEBRID_HEALTH_INTERVAL': 12 * 3600,       # 12 hours
 }
 
 
@@ -46,6 +53,13 @@ def _get_interval(env_var):
         except ValueError:
             logger.warning(f"[scheduler] Invalid {env_var}={val}, using default")
     return _DEFAULTS.get(env_var, 3600)
+
+
+# Zurg writes one logs/zurg-YYYY-MM-DD.log per day with no retention of its
+# own; housekeeping prunes them.  Paths mirror the per-service config dirs
+# in zurg/setup.py.
+_ZURG_LOG_DIRS = ('/zurg/RD/logs', '/zurg/AD/logs')
+_ZURG_LOG_RETENTION_DAYS = 14
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +151,14 @@ def library_scan():
                                  'movies': movies, 'shows': shows,
                                  'duration_ms': duration_ms})
 
+    # Record a daily recovery snapshot (upsert-by-day) for the TB-viability
+    # time series. Best-effort: snapshotting must never break the scan.
+    try:
+        from utils import recovery as _recovery
+        _recovery.record_snapshot(data)
+    except Exception as e:
+        logger.debug(f"[scheduler] Recovery snapshot failed: {e}")
+
     return {
         'status': 'success',
         'message': f'{movies} movies, {shows} shows ({dur_str})',
@@ -151,18 +173,34 @@ def library_scan():
 MEDIA_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m4v', '.webm'}
 
 # Track recently re-triggered arr search IDs to prevent search storms.
-# Shared by verify_symlinks (repair) and detect_stale_grabs.
+# Shared by verify_symlinks (repair), detect_stale_grabs, library
+# symlink cleanup, and debrid_health remediation — each of those runs in
+# its own daemon thread off the task scheduler, so every read/write of
+# _retrigger_history must hold _retrigger_history_lock. The lock is held
+# only for the in-memory ops (membership check + insert + delete); arr
+# API calls happen OUTSIDE the lock to avoid serialising network I/O
+# across unrelated tasks.
 # Key: ('sonarr', ep_id) or ('radarr', movie_id), Value: epoch time of last trigger.
 _retrigger_history = {}
+_retrigger_history_lock = threading.Lock()
 _RETRIGGER_COOLDOWN = 7200  # 2 hours — don't re-trigger the same item within this window
+
+# Single-episode release pattern (S##E## with NO trailing E/digit/-, so
+# multi-ep releases like S01E04E05 or S01E04-05 don't match and fall
+# back to season-wide search). Used by force_episodes path to restrict
+# the search to the exact ep that was filter-blocked, instead of
+# triggering an N-episode search storm for a 200-ep anime season when
+# only one ep was actually affected.
+_SINGLE_EP_RE = re.compile(r'[.\s]S\d{1,2}E(\d{1,4})(?![E\d-])', re.IGNORECASE)
 
 
 def _prune_retrigger_history():
     """Remove expired entries from the retrigger cooldown dict."""
     now = time.time()
-    stale = [k for k, v in _retrigger_history.items() if now - v > _RETRIGGER_COOLDOWN]
-    for k in stale:
-        del _retrigger_history[k]
+    with _retrigger_history_lock:
+        stale = [k for k, v in _retrigger_history.items() if now - v > _RETRIGGER_COOLDOWN]
+        for k in stale:
+            del _retrigger_history[k]
 
 # Local library mount health tracking
 _local_library_baselines = {}   # {label: True} — had real files on previous check
@@ -198,8 +236,12 @@ def _cleanup_empty_parents(deleted_path, stop_at):
 def _extract_release_info(target, debrid_prefixes):
     """Extract release name, relative file path, and category from a symlink target.
 
-    Given a target like ``/data/movies/Release.Name/sub/file.mkv``, returns
-    ``('Release.Name', 'sub/file.mkv', 'movies')``.
+    Two layouts are recognised:
+    - Zurg (RD/AD): ``<base>/<category>/<release>/<rel_file>`` →
+      returns ``('<release>', '<rel_file>', '<category>')``.
+    - TorBox flat: ``<base>/<release>/<rel_file>`` →
+      returns ``('<release>', '<rel_file>', '')`` (empty category).
+
     Returns ``(None, None, None)`` if the target can't be parsed.
     """
     remainder = None
@@ -211,24 +253,31 @@ def _extract_release_info(target, debrid_prefixes):
         return None, None, None
 
     parts = remainder.split('/')
-    if len(parts) < 3:
+    # Path traversal rejected up-front so neither layout branch has to
+    # repeat the check.  An empty path component (``//`` in the target,
+    # rare but possible) collapses into the wrong release slot too —
+    # reject those.
+    if any(seg in ('..', '') for seg in parts):
         return None, None, None
 
-    category = parts[0]
-    release_name = parts[1]
-    rel_file = '/'.join(parts[2:])
-
-    # Reject path traversal in any component
-    if '..' in category or '..' in release_name or any(seg == '..' for seg in parts[2:]):
-        return None, None, None
-
-    return release_name, rel_file, category
+    if len(parts) >= 3:
+        # Zurg layout: <category>/<release>/<rel_file>
+        return parts[1], '/'.join(parts[2:]), parts[0]
+    if len(parts) == 2:
+        # TorBox flat layout: <release>/<rel_file>
+        return parts[0], parts[1], ''
+    return None, None, None
 
 
 def _find_release_on_mount(release_name, rclone_mount):
-    """Search mount categories for a release folder.
+    """Search the rclone mount for a release folder.
 
     Returns ``(full_path, category)`` or ``(None, None)``.
+
+    Probes categorized Zurg dirs first (``shows/movies/anime`` then
+    ``__all__`` fallback) and lastly the bare mount root — the latter
+    serves TorBox's flat WebDAV mount layout, where releases live
+    directly under the mount root with no category subdivision.
     """
     from utils.blackhole import MOUNT_CATEGORIES
 
@@ -239,15 +288,33 @@ def _find_release_on_mount(release_name, rclone_mount):
     path = os.path.join(rclone_mount, '__all__', release_name)
     if os.path.isdir(path):
         return path, '__all__'
+    # Flat-layout fallback (TorBox).
+    path = os.path.join(rclone_mount, release_name)
+    if os.path.isdir(path):
+        return path, ''
     return None, None
 
 
-def _attempt_arr_research(release_name):
+def _attempt_arr_research(release_name, force_episodes=False):
     """Trigger Sonarr/Radarr search for a lost release.
 
     Uses ``parse_release_name`` to identify the content, then looks it up in
     the arr library and triggers a search.  Respects the shared retrigger
     cooldown to prevent search storms.
+
+    ``force_episodes`` skips the ``hasFile`` gate on the TV branch so the
+    caller can queue a search even when Sonarr's last scan still believes
+    the episode is present.  Used by ``debrid_health._remediate`` because
+    the just-issued ``delete_torrent`` won't drop out of Zurg's WebDAV
+    listing for ~15-30 s — Sonarr's view lags the truth, and we'd
+    otherwise skip every episode in the affected release.  When the
+    release name carries a single-ep pattern (``S##E##``), the search is
+    further narrowed to that one episode so a single blocked ep on a
+    200-ep anime season doesn't fan out to 200 search jobs; multi-ep
+    and season-pack releases fall through to the season-wide scope.
+
+    On API failure the cooldown reservation is rolled back so the next
+    sweep can retry instead of being silently muzzled for 2 h.
 
     Returns True if a search was actually triggered.
     """
@@ -274,28 +341,49 @@ def _attempt_arr_research(release_name):
         if not episodes:
             return False
 
-        target_eps = []
-        for ep in episodes:
-            if season is not None and ep.get('seasonNumber') != season:
-                continue
-            if not ep.get('hasFile'):
-                ep_id = ep.get('id')
-                if ep_id:
-                    item_key = ('sonarr', ep_id)
-                    if item_key not in _retrigger_history:
-                        target_eps.append(ep_id)
-                        _retrigger_history[item_key] = now_epoch
+        target_episode = None
+        if force_episodes:
+            ep_match = _SINGLE_EP_RE.search(release_name)
+            if ep_match:
+                target_episode = int(ep_match.group(1))
 
-        if target_eps:
+        target_eps = []
+        with _retrigger_history_lock:
+            for ep in episodes:
+                if season is not None and ep.get('seasonNumber') != season:
+                    continue
+                if target_episode is not None and ep.get('episodeNumber') != target_episode:
+                    continue
+                if not force_episodes and ep.get('hasFile'):
+                    continue
+                ep_id = ep.get('id')
+                if not ep_id:
+                    continue
+                item_key = ('sonarr', ep_id)
+                if item_key in _retrigger_history:
+                    continue
+                target_eps.append(ep_id)
+                _retrigger_history[item_key] = now_epoch
+
+        if not target_eps:
+            return False
+
+        try:
             client.search_episodes(target_eps, media_title=name,
                                    cause='symlink_repair_research')
-            s_label = f'S{season:02d}' if season is not None else 'all'
-            logger.info(
-                f"[scheduler] Repair: triggered Sonarr search for '{name}' "
-                f"{s_label} ({len(target_eps)} episodes)"
-            )
-            return True
-        return False
+        except Exception:
+            with _retrigger_history_lock:
+                for eid in target_eps:
+                    _retrigger_history.pop(('sonarr', eid), None)
+            raise
+
+        s_label = f'S{season:02d}' if season is not None else 'all'
+        ep_label = f'E{target_episode:02d}' if target_episode is not None else ''
+        logger.info(
+            f"[scheduler] Repair: triggered Sonarr search for '{name}' "
+            f"{s_label}{ep_label} ({len(target_eps)} episodes)"
+        )
+        return True
     else:
         client = RadarrClient()
         if not client.configured:
@@ -306,12 +394,19 @@ def _attempt_arr_research(release_name):
             return False
 
         item_key = ('radarr', movie['id'])
-        if item_key in _retrigger_history:
-            return False
+        with _retrigger_history_lock:
+            if item_key in _retrigger_history:
+                return False
+            _retrigger_history[item_key] = now_epoch
 
-        _retrigger_history[item_key] = now_epoch
-        client.search_movie(movie['id'], media_title=name,
-                            cause='symlink_repair_research')
+        try:
+            client.search_movie(movie['id'], media_title=name,
+                                cause='symlink_repair_research')
+        except Exception:
+            with _retrigger_history_lock:
+                _retrigger_history.pop(item_key, None)
+            raise
+
         logger.info(f"[scheduler] Repair: triggered Radarr search for '{name}'")
         return True
 
@@ -323,12 +418,46 @@ def verify_symlinks():
     local_movies = os.environ.get('BLACKHOLE_LOCAL_LIBRARY_MOVIES', '').strip()
     rclone_mount = os.path.realpath(os.environ.get('BLACKHOLE_RCLONE_MOUNT', '/data'))
     symlink_target = os.environ.get('BLACKHOLE_SYMLINK_TARGET_BASE', '').strip()
-    # Check symlinks pointing to either the rclone mount or the symlink target base
+
+    # Per-debrid (symlink_target_base, rclone_mount) pairs so that a broken
+    # symlink can be translated back to the right mount for existence-checks
+    # and repair.  RD/AD symlinks point at BLACKHOLE_SYMLINK_TARGET_BASE and
+    # resolve to BLACKHOLE_RCLONE_MOUNT; TB symlinks point at
+    # BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX (or the derived ``<RD base>_torbox``
+    # fallback) and resolve to the TB rclone mount.  Without this, every TB
+    # symlink looks like an unrecognised target prefix → skipped from
+    # verification entirely (latent before plan 39, now load-bearing).
+    from utils.blackhole import MOUNT_CATEGORIES
+    from utils.debrid_routing import (
+        TORBOX, mount_for_debrid, symlink_target_base_for_debrid,
+    )
+
+    target_mount_pairs = []  # list of (symlink_target_real, mount_real)
     debrid_prefixes = [rclone_mount + '/']
-    symlink_target_real = ''
     if symlink_target:
-        symlink_target_real = os.path.realpath(symlink_target) + '/'
-        debrid_prefixes.append(symlink_target_real)
+        rd_target_real = os.path.realpath(symlink_target) + '/'
+        debrid_prefixes.append(rd_target_real)
+        target_mount_pairs.append((rd_target_real, rclone_mount))
+
+    # TorBox pair.  ``mount_for_debrid`` needs the parent of the per-debrid
+    # mount-name suffix — same convention used by BlackholeWatcher._mount_for.
+    tb_target = symlink_target_base_for_debrid(TORBOX)
+    tb_mount_real = ''
+    if tb_target:
+        tb_target_real = os.path.realpath(tb_target) + '/'
+        # Resolve TB mount path from RCLONE_MOUNT_NAME parent + TORBOX_MOUNT_NAME.
+        rclonemn = os.environ.get('RCLONE_MOUNT_NAME') or ''
+        base = rclone_mount.rstrip('/')
+        if rclonemn and os.path.basename(base) == rclonemn:
+            parent = os.path.dirname(base)
+            if parent:
+                base = parent
+        tb_mount = mount_for_debrid(TORBOX, rclone_mount_base=base) or ''
+        if tb_mount and os.path.isdir(tb_mount):
+            tb_mount_real = os.path.realpath(tb_mount)
+            debrid_prefixes.append(tb_target_real)
+            debrid_prefixes.append(tb_mount_real + '/')
+            target_mount_pairs.append((tb_target_real, tb_mount_real))
 
     scan_dirs = []
     if os.path.isdir(completed_dir):
@@ -341,34 +470,45 @@ def verify_symlinks():
     if not scan_dirs:
         return {'status': 'success', 'message': 'No directories to check'}
 
-    # Guard: verify the rclone mount exists, is responsive, and has content.
-    # A missing or stalled FUSE mount makes os.path.exists return False for
-    # everything, which would cause mass deletion of all symlinks.  Zurg
-    # category stubs (movies/, shows/) can exist even when all content is
-    # gone, so check that at least one known category dir is non-empty.
-    # The entire guard is inside try/except OSError because os.path.isdir
-    # itself can raise on a stalled FUSE mount (ENOTCONN, EIO).
-    from utils.blackhole import MOUNT_CATEGORIES
+    # Guard: verify at least one configured rclone mount exists, is responsive,
+    # and has content.  A missing or stalled FUSE mount makes os.path.exists
+    # return False for everything, which would cause mass deletion of all
+    # symlinks.  Zurg category stubs (movies/, shows/) can exist even when
+    # all content is gone, so check that at least one category dir is
+    # non-empty; the TB mount is flat (no categories) so we check that its
+    # top-level listing is non-empty instead.  Either being healthy is
+    # enough to proceed — the prefix→mount-pair routing below ensures we
+    # only act on symlinks for mounts we can actually see.
     try:
-        if not os.path.isdir(rclone_mount):
-            logger.warning(f"[scheduler] Mount {rclone_mount} does not exist — aborting symlink verify")
-            return {'status': 'error', 'message': 'Mount not found, aborted'}
-        if not os.listdir(rclone_mount):
-            logger.warning(f"[scheduler] Mount {rclone_mount} is empty — aborting symlink verify")
-            return {'status': 'error', 'message': 'Mount empty, aborted'}
-        # Deeper check: at least one known Zurg category dir has content.
-        # Empty category stubs persist even when debrid has no torrents.
-        has_content = any(
-            os.path.isdir(os.path.join(rclone_mount, cat))
-            and os.listdir(os.path.join(rclone_mount, cat))
-            for cat in MOUNT_CATEGORIES
-        )
-        if not has_content:
-            logger.warning(f"[scheduler] Mount categories at {rclone_mount} are empty — aborting symlink verify")
-            return {'status': 'error', 'message': 'Mount categories empty, aborted'}
+        zurg_has_content = False
+        if os.path.isdir(rclone_mount) and os.listdir(rclone_mount):
+            zurg_has_content = any(
+                os.path.isdir(os.path.join(rclone_mount, cat))
+                and os.listdir(os.path.join(rclone_mount, cat))
+                for cat in MOUNT_CATEGORIES
+            )
+        tb_has_content = False
+        if tb_mount_real and os.path.isdir(tb_mount_real):
+            tb_has_content = bool(os.listdir(tb_mount_real))
+        if not (zurg_has_content or tb_has_content):
+            logger.warning(
+                f"[scheduler] No mount has content (zurg={rclone_mount!r}, "
+                f"tb={tb_mount_real!r}) — aborting symlink verify to prevent mass deletion"
+            )
+            return {'status': 'error', 'message': 'Mounts empty, aborted'}
     except OSError as e:
-        logger.error(f"[scheduler] Mount {rclone_mount} unresponsive — aborting symlink verify to prevent mass deletion: {e}")
+        logger.error(f"[scheduler] Mount unresponsive — aborting symlink verify to prevent mass deletion: {e}")
         return {'status': 'error', 'message': f'Mount unresponsive, aborted: {e}'}
+
+    # Per-mount health map.  The global guard above only confirms SOME mount is
+    # alive; deletion must be gated per mount because RD and TB fail
+    # independently (e.g. TB under a 429 read-throttle while RD is fine).
+    # Without this, a healthy RD lets the guard pass and every TB symlink —
+    # whose target the throttled TB mount can't serve — gets queued for
+    # deletion, then re-created next scan (the symlink-thrash bug).
+    mount_health = {rclone_mount: zurg_has_content}
+    if tb_mount_real:
+        mount_health[tb_mount_real] = tb_has_content
 
     # Phase 1: Identify broken symlinks (don't delete yet)
     to_delete = []
@@ -391,16 +531,28 @@ def verify_symlinks():
                     continue
 
                 checked += 1
-                # When BLACKHOLE_SYMLINK_TARGET_BASE differs from the rclone
-                # mount, symlinks intentionally point to a path that only
-                # exists inside Radarr/Sonarr's container (e.g. /mnt/debrid).
-                # Translate the target to the local rclone mount path before
-                # checking existence.
-                check_target = target
-                if symlink_target_real and target.startswith(symlink_target_real):
-                    check_target = rclone_mount + '/' + target[len(symlink_target_real):]
+                # Translate the symlink target back to a local mount path
+                # before checking existence.  Each (target_base, mount)
+                # pair maps a host-visible Plex/arr path to the local
+                # rclone-mount equivalent.  TB symlinks point at the TB
+                # base and resolve to the TB mount; RD/AD symlinks point
+                # at the RD base and resolve to the RD mount.  Without
+                # the per-pair routing, a TB symlink translated against
+                # the RD pair lands at /<RD-mount>/<TB-release> which
+                # never exists → mass deletion.
+                check_target, matched_mount = target, rclone_mount
+                for tgt_real, mnt_real in target_mount_pairs:
+                    if target.startswith(tgt_real):
+                        check_target = mnt_real + '/' + target[len(tgt_real):]
+                        matched_mount = mnt_real
+                        break
+                # Skip symlinks routed to a mount that isn't confirmed healthy:
+                # a throttled/stalled mount fails os.path.exists() for every
+                # target, so queuing them here would mass-delete valid links.
+                if not mount_health.get(matched_mount, False):
+                    continue
                 if not os.path.exists(check_target):
-                    to_delete.append((fpath, target, scan_dir))
+                    to_delete.append((fpath, target, scan_dir, matched_mount))
 
     # Phase 2: Attempt repair, then delete confirmed broken symlinks.
     # Auto-search on deletion is enabled by either the legacy opt-in flag
@@ -415,17 +567,23 @@ def verify_symlinks():
     searched = 0
     deleted = 0
 
-    for fpath, target, scan_dir in to_delete:
-        # Step 1: Try to re-find the release on the mount
+    for fpath, target, scan_dir, matched_mount in to_delete:
+        # Step 1: Try to re-find the release on the mount it came from.
         release_name, rel_file, old_cat = _extract_release_info(target, debrid_prefixes)
         if release_name and rel_file:
-            new_path, new_cat = _find_release_on_mount(release_name, rclone_mount)
+            new_path, new_cat = _find_release_on_mount(release_name, matched_mount)
             if new_path and os.path.exists(os.path.join(new_path, rel_file)):
-                # Rebuild the symlink target using the canonical base
-                if symlink_target:
-                    new_target = os.path.join(symlink_target, new_cat, release_name, rel_file)
-                else:
-                    new_target = os.path.join(rclone_mount, new_cat, release_name, rel_file)
+                # Rebuild the symlink target on the same target base it
+                # came from — preserves the RD-vs-TB split that Plex
+                # libraries depend on.
+                rebuild_base = None
+                for tgt_real, mnt_real in target_mount_pairs:
+                    if mnt_real == matched_mount:
+                        rebuild_base = tgt_real.rstrip('/')
+                        break
+                if rebuild_base is None:
+                    rebuild_base = matched_mount
+                new_target = os.path.join(rebuild_base, new_cat, release_name, rel_file)
                 try:
                     tmp_link = fpath + '.repair_tmp'
                     os.symlink(new_target, tmp_link)
@@ -433,7 +591,7 @@ def verify_symlinks():
                     repaired += 1
                     logger.info(
                         f"[scheduler] Repaired symlink: {fpath} "
-                        f"({old_cat} -> {new_cat})"
+                        f"({old_cat!r} -> {new_cat!r})"
                     )
                     continue
                 except OSError as e:
@@ -632,6 +790,32 @@ def housekeeping():
     except Exception as e:
         logger.error(f"[scheduler] Error rotating history: {e}")
 
+    # 4b. Prune old Zurg daily logs.  Zurg rotates by date but never deletes,
+    # and a single noisy day can produce a multi-GB file that then sits on
+    # disk forever (2026-07-14 disk audit: one 8 GB file plus 200+ files
+    # going back years).  mtime-based, so the file zurg is still writing is
+    # never touched; non-log files in the dir are ignored.
+    for logs_dir in _ZURG_LOG_DIRS:
+        try:
+            if not os.path.isdir(logs_dir):
+                continue
+            for fname in os.listdir(logs_dir):
+                if not (fname.startswith('zurg-') and fname.endswith('.log')):
+                    continue
+                fpath = os.path.join(logs_dir, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                try:
+                    age_days = (now - os.path.getmtime(fpath)) / 86400
+                    if age_days > _ZURG_LOG_RETENTION_DAYS:
+                        os.remove(fpath)
+                        cleaned += 1
+                        logger.info(f"[scheduler] Removed old zurg log: {fpath}")
+                except OSError:
+                    pass
+        except Exception as e:
+            logger.error(f"[scheduler] Error pruning zurg logs in {logs_dir}: {e}")
+
     # 5. Expire old auto-added blocklist entries
     try:
         from utils import blocklist as _blocklist_mod
@@ -727,9 +911,12 @@ def detect_stale_grabs():
             source_title = record.get('sourceTitle', '?')[:60]
             stale_found += 1
 
-            # Dedup: skip if already re-triggered recently
-            if item_key in _retrigger_history:
-                continue
+            # Dedup: skip if already re-triggered recently. Lock held
+            # only for the membership check; the API call below releases
+            # before re-acquiring on the set side.
+            with _retrigger_history_lock:
+                if item_key in _retrigger_history:
+                    continue
 
             # Re-trigger search
             if name == 'sonarr':
@@ -749,7 +936,8 @@ def detect_stale_grabs():
                 client.search_movie(movie_id, media_title=source_title,
                                     cause='stale_grab_retry')
 
-            _retrigger_history[item_key] = now_epoch
+            with _retrigger_history_lock:
+                _retrigger_history[item_key] = now_epoch
             searches_triggered += 1
 
     msg = f'Found {stale_found} stale grabs'
@@ -888,37 +1076,286 @@ def _check_local_library_health():
             _local_library_alerted[label] = False
 
 
+# Mount-probe thresholds.  Surfaced as module constants so the test
+# suite can monkeypatch them and so a future operator can tune via
+# code review rather than spelunking through magic numbers.
+_SLOW_MOUNT_THRESHOLD_SEC = 5      # listdir slower than this → log WARN
+_LISTDIR_TIMEOUT_SEC = 15          # hard cap on listdir before we give up
+                                    # (a wedged FUSE that responds-but-slow
+                                    # would otherwise hang the scheduler
+                                    # thread forever; this is the only
+                                    # tier of defense)
+
+
+def _listdir_with_timeout(path, timeout):
+    """``os.listdir(path)`` with a wall-clock timeout.
+
+    A wedged FUSE driver (rclone busy with vfs-refresh, blocked on a
+    debrid 5xx, or genuinely stuck) doesn't raise — it just never
+    returns.  ``signal.alarm`` only works from the main thread, and the
+    scheduler runs in a worker, so we use a daemon thread with a
+    bounded join.  On timeout the worker is *leaked* (no portable way
+    to cancel a blocking syscall in another thread) but the caller is
+    no longer wedged, and the daemon flag keeps the leak from
+    preventing interpreter shutdown.
+
+    Returns the listing on success.  Raises ``TimeoutError`` on
+    timeout — the caller maps that to ``'error'``.  Raises the
+    underlying ``OSError`` if the worker raised.
+    """
+    import threading
+    result = {}
+
+    def _run():
+        try:
+            result['entries'] = os.listdir(path)
+        except BaseException as exc:  # noqa: BLE001 - propagate to caller
+            result['exc'] = exc
+
+    t = threading.Thread(target=_run, name=f'mount-probe-{os.path.basename(path)}', daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise TimeoutError(f'listdir({path!r}) did not return within {timeout}s')
+    if 'exc' in result:
+        raise result['exc']
+    return result['entries']
+
+
+def _probe_mount(mount_path, tolerate_timeout=False):
+    """Probe a single FUSE mount.
+
+    Returns ``(status, message, items)`` where status is one of
+    ``'success'`` / ``'error'`` / ``'absent'``.  ``'absent'`` signals
+    the path is not a mount at all (caller decides whether that's a
+    real error or just "this mount isn't configured").  Distinguishing
+    error vs absent matters for the dual-mount summary: a missing TB
+    mount on a single-debrid install shouldn't degrade RD-only health.
+
+    A wedged-but-not-erroring FUSE (rclone hung mid-operation) is
+    bounded to ``_LISTDIR_TIMEOUT_SEC`` so one stuck mount can't block
+    the entire scheduler thread (which also runs verify_symlinks,
+    library_scan, debrid_health sweeps, etc).
+
+    ``tolerate_timeout`` softens *only* the timeout case to a slow-but-
+    alive ``'success'`` (used for TorBox, whose tight rate limit makes a
+    full FUSE walk routinely 429-throttle past the deadline — a slow
+    walk there is expected, not a dead mount).  A genuinely dead mount
+    still raises ENOTCONN, which is handled as ``'error'`` regardless.
+    """
+    if not os.path.isdir(mount_path):
+        return 'absent', f'Mount path does not exist: {mount_path}', 0
+    if not os.path.ismount(mount_path):
+        return 'absent', f'Not a mount point: {mount_path}', 0
+    try:
+        start = time.time()
+        entries = _listdir_with_timeout(mount_path, _LISTDIR_TIMEOUT_SEC)
+        elapsed = time.time() - start
+        if elapsed > _SLOW_MOUNT_THRESHOLD_SEC:
+            logger.warning(f"[scheduler] Mount {mount_path} is slow: listdir took {elapsed:.1f}s")
+            return 'success', f'Mount responsive but slow ({elapsed:.1f}s)', len(entries)
+        return 'success', f'{len(entries)} entries, {elapsed:.2f}s', len(entries)
+    except TimeoutError as e:
+        if tolerate_timeout:
+            # A rate-limited mount (TorBox 429-throttling the FUSE walk)
+            # is alive, just slow — reporting 'error' would flap the
+            # System page red on every TB walk.  Only the *timeout* case
+            # is softened; a dead mount raises ENOTCONN (handled below).
+            logger.warning(f"[scheduler] Mount {mount_path} slow/rate-limited "
+                           f"(no listing within {_LISTDIR_TIMEOUT_SEC}s): {e}")
+            return 'success', f'Mount responsive but rate-limited ({e})', 0
+        logger.error(f"[scheduler] Mount {mount_path} hung past {_LISTDIR_TIMEOUT_SEC}s: {e}")
+        return 'error', f'Mount hung: {e}', 0
+    except Exception as e:  # noqa: BLE001 — FUSE bindings raise non-OSError too
+        # Half-stuck FUSE (mount table entry persists, rclone process
+        # died) returns ENOTCONN here — the canonical failure mode this
+        # probe needs to surface to operators.  Widened beyond OSError
+        # because libfuse bindings can surface decode/parse errors on
+        # corrupted dentry blocks too.
+        logger.error(f"[scheduler] Mount {mount_path} is unresponsive: {e}")
+        return 'error', f'Mount unresponsive: {e}', 0
+
+
+# Consecutive-unresponsive counts and last-heal stamps per mount path.
+# Module-level (not task-local) because each probe run is a fresh call —
+# the streak has to survive between scheduler ticks.
+_MOUNT_SELFHEAL_FAILS = 2        # consecutive unresponsive probes before healing
+_MOUNT_SELFHEAL_COOLDOWN = 600   # min seconds between heal attempts per mount
+_mount_unresponsive_counts = {}
+_mount_last_selfheal = {}
+
+
+def _selfheal_enabled():
+    return str(os.environ.get('MOUNT_SELFHEAL_ENABLED', 'true')).lower() == 'true'
+
+
+def _maybe_selfheal_mount(mount_path, status, message):
+    """Auto-recover a dead FUSE mount (the ENOTCONN corpse).
+
+    The canonical failure: rclone was SIGKILLed (container recreate) and
+    left a stale mount-table entry; the supervisor's rclone restarts then
+    crashloop on "directory already mounted" until an operator manually
+    lazy-unmounts.  Detection has existed in this probe for a while — this
+    closes the detection→remediation gap: after ``_MOUNT_SELFHEAL_FAILS``
+    consecutive unresponsive probes, lazy-unmount the corpse (reusing the
+    startup ladder in ``rclone.rclone._force_clear_stale_mount``) and
+    restart the owning rclone process.
+
+    Deliberately narrow: heals ONLY the 'Mount unresponsive' signature
+    (dead FUSE daemon).  'Mount hung' (alive-but-slow rclone) and 'absent'
+    are left alone — killing a live rclone mid-operation risks worse.
+    Never unmounts unless the matching rclone process is registered, so
+    there is always something to remount with.
+
+    Returns True when a heal was attempted and the rclone restart
+    succeeded.
+    """
+    if status != 'error' or 'unresponsive' not in (message or ''):
+        _mount_unresponsive_counts.pop(mount_path, None)
+        return False
+    count = _mount_unresponsive_counts.get(mount_path, 0) + 1
+    _mount_unresponsive_counts[mount_path] = count
+    if not _selfheal_enabled() or count < _MOUNT_SELFHEAL_FAILS:
+        return False
+    now = time.monotonic()
+    last = _mount_last_selfheal.get(mount_path)
+    if last is not None and now - last < _MOUNT_SELFHEAL_COOLDOWN:
+        return False
+
+    from utils.processes import restart_service, service_registered
+    mn = os.path.basename(mount_path.rstrip('/'))
+    if not service_registered('rclone', key_type=mn):
+        # Deliberately NOT latching the cooldown: nothing was attempted, so
+        # the moment an rclone registers (startup ordering) the very next
+        # probe may heal.  Throttle the log via the streak count instead.
+        if count == _MOUNT_SELFHEAL_FAILS or count % 10 == 0:
+            logger.error(
+                f"[scheduler] Mount {mount_path} is dead but no rclone "
+                f"process is registered for '{mn}' — cannot self-heal, "
+                f"operator attention needed")
+        return False
+
+    _mount_last_selfheal[mount_path] = now
+    logger.warning(
+        f"[scheduler] Mount {mount_path} unresponsive for {count} "
+        f"consecutive probes — self-healing: lazy-unmount + rclone "
+        f"restart ({mn})")
+    try:
+        from rclone.rclone import _force_clear_stale_mount
+        _force_clear_stale_mount(mount_path, logger)
+    except Exception as e:
+        logger.error(f"[scheduler] Self-heal unmount of {mount_path} "
+                     f"failed: {e}")
+    restarted = False
+    try:
+        restarted = restart_service('rclone', key_type=mn)
+    except Exception as e:
+        logger.error(f"[scheduler] Self-heal rclone restart for '{mn}' "
+                     f"failed: {e}")
+    if restarted:
+        logger.info(f"[scheduler] Self-heal complete — rclone ({mn}) "
+                    f"restarted for {mount_path}")
+        _mount_unresponsive_counts.pop(mount_path, None)
+    else:
+        logger.error(f"[scheduler] Self-heal could not restart rclone "
+                     f"({mn}) — mount {mount_path} remains dead")
+    if _history:
+        try:
+            _history.log_event(
+                'repair' if restarted else 'failed',
+                f'Mount {mount_path}',
+                source='scheduler',
+                meta={'cause': _history.CAUSE_MOUNT_SELFHEAL,
+                      'mount': mount_path,
+                      'restarted': restarted})
+        except Exception:
+            pass
+    return restarted
+
+
 def mount_liveness_probe():
-    """Verify rclone FUSE mount and local library mounts are healthy."""
+    """Verify rclone FUSE mounts (RD/AD + TB) and local library mounts are healthy.
+
+    Probes the primary mount (``BLACKHOLE_RCLONE_MOUNT``) and the TB
+    mount when configured.  Either being dead degrades the overall
+    status — neither mount being silently dead is the failure mode this
+    probe was added to catch.  Plan 39 dual-debrid: pre-fix this only
+    probed the RD mount, so a dead TB mount left the System page green
+    while every TB grab silently timed out at 300s.
+    """
     rclone_mount = os.environ.get('BLACKHOLE_RCLONE_MOUNT', '/data')
 
-    # Check rclone FUSE mount first — this is the primary health signal
-    # and must not be blocked by a stale NFS mount on the local library.
-    if not os.path.isdir(rclone_mount):
-        result = {'status': 'error', 'message': f'Mount path does not exist: {rclone_mount}'}
-    elif not os.path.ismount(rclone_mount):
-        result = {'status': 'error', 'message': f'Not a mount point: {rclone_mount}'}
-    else:
+    # Primary (RD/AD) — always checked.  This is the load-bearing mount;
+    # an absent or unresponsive primary is always an error.
+    primary_status, primary_msg, primary_items = _probe_mount(rclone_mount)
+    if primary_status == 'absent':
+        # Primary missing is a real error (existing behavior).
+        primary_status = 'error'
+    _maybe_selfheal_mount(rclone_mount, primary_status, primary_msg)
+
+    # Optional TB mount.  Gated on the same three env vars
+    # ``rclone/rclone.py::_torbox_mount_configured`` checks, so we don't
+    # waste a probe on TB-unconfigured installs.  ``mount_for_debrid(TORBOX)``
+    # always synthesises a path even without credentials (it falls back
+    # to ``/data/torbox``), so a pure-discovery probe would falsely
+    # report 'absent' on every RD-only install — which would be a
+    # constant 'not a mount point' / 'path does not exist' message in
+    # the System UI for users who never enabled TB.  Worse, if a future
+    # change made ``BLACKHOLE_RCLONE_MOUNT`` point to ``/data/torbox``
+    # (an unusual but valid config), the bare-discovery code would
+    # probe the same mount twice.  Env-gate keeps the probe scoped.
+    tb_configured = bool(
+        os.environ.get('TORBOX_API_KEY')
+        and os.environ.get('TORBOX_WEBDAV_USER')
+        and os.environ.get('TORBOX_WEBDAV_PASS')
+    )
+    tb_mount_path = None
+    tb_status, tb_msg, tb_items = None, None, 0
+    if tb_configured:
         try:
-            start = time.time()
-            entries = os.listdir(rclone_mount)
-            elapsed = time.time() - start
-            if elapsed > 5:
-                logger.warning(f"[scheduler] Mount {rclone_mount} is slow: listdir took {elapsed:.1f}s")
-                result = {
-                    'status': 'success',
-                    'message': f'Mount responsive but slow ({elapsed:.1f}s)',
-                    'items': len(entries),
-                }
-            else:
-                result = {
-                    'status': 'success',
-                    'message': f'{len(entries)} entries, {elapsed:.2f}s',
-                    'items': len(entries),
-                }
-        except OSError as e:
-            logger.error(f"[scheduler] Mount {rclone_mount} is unresponsive: {e}")
-            result = {'status': 'error', 'message': f'Mount unresponsive: {e}'}
+            from utils.debrid_routing import TORBOX, mount_for_debrid
+            # ``mount_for_debrid`` needs the parent of the per-debrid mount-name
+            # suffix — same convention as BlackholeWatcher._mount_for and
+            # verify_symlinks.
+            rclonemn = os.environ.get('RCLONE_MOUNT_NAME') or ''
+            base = rclone_mount.rstrip('/')
+            if rclonemn and os.path.basename(base) == rclonemn:
+                parent = os.path.dirname(base)
+                if parent:
+                    base = parent
+            tb_mount_path = mount_for_debrid(TORBOX, rclone_mount_base=base)
+        except Exception as e:
+            logger.debug(f"[scheduler] TB mount discovery failed: {e}")
+
+    if tb_mount_path:
+        tb_status, tb_msg, tb_items = _probe_mount(tb_mount_path, tolerate_timeout=True)
+        _maybe_selfheal_mount(tb_mount_path, tb_status, tb_msg)
+
+    # Combine.  TB 'absent' means TB not configured — don't degrade.
+    # TB 'error' means TB configured but dead — degrade to error.
+    if primary_status == 'error':
+        overall = 'error'
+        message = f'RD: {primary_msg}'
+        if tb_status:
+            message += f' | TB ({tb_mount_path}): {tb_msg}'
+    elif tb_status == 'error':
+        overall = 'error'
+        message = f'TB ({tb_mount_path}): {tb_msg} | RD: {primary_msg}'
+    else:
+        overall = 'success'
+        message = primary_msg
+        if tb_status == 'success':
+            message += f' | TB: {tb_msg}'
+
+    result = {
+        'status': overall,
+        'message': message,
+        'items': primary_items,
+    }
+    if tb_status is not None:
+        result['tb_items'] = tb_items
+        result['tb_mount'] = tb_mount_path
+        result['tb_status'] = tb_status
 
     # Check local library paths for real files (detects NFS/SMB mount drops).
     # Runs after the rclone check so a stale NFS mount doesn't block
@@ -1118,6 +1555,23 @@ def register_all():
             interval_seconds=_get_interval('MOUNT_LIVENESS_INTERVAL'),
             description='Verify rclone FUSE mount is responsive',
             initial_delay=60,
+        )
+
+    # Debrid Health Reconciler (plan 38) — register whenever any RD
+    # credential is present in the environment, so the task surfaces
+    # in the scheduler UI even when DEBRID_HEALTH_ENABLED is OFF.
+    # The sweep itself is a no-op when disabled; this preserves the
+    # user's ability to manually trigger from the System page without
+    # restarting the container after toggling the env var ON.
+    rd_configured = bool(os.environ.get('RD_API_KEY') or os.path.isfile('/run/secrets/rd_api_key'))
+    if rd_configured:
+        from utils.debrid_health import run_sweep as _debrid_health_run
+        scheduler.register(
+            'debrid_health_reconcile',
+            _debrid_health_run,
+            interval_seconds=_get_interval('DEBRID_HEALTH_INTERVAL'),
+            description='Probe RD torrents for May 2026 keyword-filter blocks (infringing_file / error 35)',
+            initial_delay=900,  # 15 min after startup
         )
 
     # Notification Digest — daily summary if enabled

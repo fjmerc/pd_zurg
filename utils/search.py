@@ -13,6 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 from base import load_secret_or_env
 from utils.logger import get_logger
@@ -48,6 +49,13 @@ def _get_torrentio_url():
     return (os.environ.get('TORRENTIO_URL') or '').rstrip('/')
 
 
+_SERVICE_KEY_NAMES = {
+    'realdebrid': 'rd_api_key',
+    'alldebrid': 'ad_api_key',
+    'torbox': 'torbox_api_key',
+}
+
+
 def _get_debrid_service():
     """Detect configured debrid service. Returns (service, api_key) or (None, None)."""
     rd = load_secret_or_env('rd_api_key')
@@ -60,6 +68,41 @@ def _get_debrid_service():
     if tb:
         return 'torbox', tb
     return None, None
+
+
+def _resolve_service_key(service):
+    """Resolve the API key for an explicitly-named debrid service, or None."""
+    key_name = _SERVICE_KEY_NAMES.get(service)
+    if not key_name:
+        return None
+    return load_secret_or_env(key_name)
+
+
+def list_configured_services():
+    """Return the ids of all configured debrid services, in the stable
+    RD → AD → TB priority order used by ``_get_debrid_service``."""
+    return [s for s in ('realdebrid', 'alldebrid', 'torbox')
+            if load_secret_or_env(_SERVICE_KEY_NAMES[s])]
+
+
+def is_service_configured(service):
+    """True when ``service`` is a known debrid id with a configured key."""
+    return bool(_resolve_service_key(service))
+
+
+def _cache_probe_service():
+    """Pick the service to use for cache-annotation probes.
+
+    TorBox is the only provider whose pre-add cache endpoint still works
+    (RD deprecated instantAvailability in Nov 2024, AD discontinued
+    /v4/magnet/instant in May 2026), so prefer TB whenever a key is
+    configured — otherwise fall back to the RD-first auto-detect, whose
+    stub probes return all-None.
+    """
+    tb = load_secret_or_env('torbox_api_key')
+    if tb:
+        return 'torbox', tb
+    return _get_debrid_service()
 
 
 def _safe_log_url(url):
@@ -256,6 +299,12 @@ def search_torrentio(imdb_id, media_type='movie', season=None, episode=None):
 # spuriously return "unknown".
 _CACHE_PROBE_TIMEOUT = 10
 
+# mylist returns the FULL account (hundreds of torrents, each with its file
+# list) in one response — a much bigger payload than a cache probe, so it
+# gets a longer ceiling.  This is the library-enumeration path; it must not
+# share the snappy cache-probe budget.
+_MYLIST_TIMEOUT = 30
+
 # Cap TorBox per-hash fan-out so a large Torrentio result set cannot
 # produce a ``N * _CACHE_PROBE_TIMEOUT`` wall-clock stall holding the
 # status-server worker thread.  Callers that want more coverage should
@@ -266,6 +315,7 @@ _TORBOX_MAX_PROBES = 25
 # with RD + QUALITY_COMPROMISE_ONLY_CACHED=true understand why compromise
 # never fires.  A module-level flag avoids log-spam across many searches.
 _rd_cache_warning_emitted = False
+_ad_cache_warning_emitted = False
 
 
 def check_debrid_cache(info_hashes, service=None, api_key=None):
@@ -291,11 +341,19 @@ def check_debrid_cache(info_hashes, service=None, api_key=None):
         ``None`` as "not cached" (safe) and under aggressive mode treat
         it as "assume cached".
 
-    Real-Debrid note: RD deprecated ``/torrents/instantAvailability`` in
-    Nov 2024 and the endpoint now returns an empty object.  We return
-    ``{hash: None}`` for RD — there is no way to pre-check cache status
-    anymore.  AllDebrid (`/v4/magnet/instant`) and TorBox
-    (`/api/torrents/checkcached`) still expose working probes.
+    Provider notes:
+      - **Real-Debrid** deprecated ``/torrents/instantAvailability`` in
+        Nov 2024.  Stub returns ``{hash: None}``; no network call.
+      - **AllDebrid** discontinued ``/v4/magnet/instant`` (404 ``DISCONTINUED``
+        as of May 2026, verified against the live API + the public
+        docs at https://docs.alldebrid.com).  No replacement endpoint
+        exists — cache state is only knowable post-upload via the
+        ``ready`` flag on ``/v4.1/magnet/upload``, which is a
+        state-changing operation and therefore unsuitable for a
+        read-only pre-add probe.  Stub returns ``{hash: None}``;
+        no network call.
+      - **TorBox** ``/api/torrents/checkcached`` is the only provider
+        endpoint still exposing a working pre-add cache probe.
 
     URL redaction: every HTTP URL logged by this function is passed
     through ``_safe_log_url`` so API keys in query strings never leak
@@ -357,100 +415,110 @@ def _check_cache_rd(hashes, api_key):
     return {h: None for h in hashes}
 
 
-def _coerce_instant(value):
-    """Normalise AD's ``instant`` field to True/False/None.
-
-    The API returns a bool today; defensive coercion for ``"true"`` /
-    ``"false"`` strings guards against a silent server-side change
-    that would otherwise drop confirmed-uncached into None.
-    """
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        v = value.strip().lower()
-        if v == 'true':
-            return True
-        if v == 'false':
-            return False
-    return None
-
-
 def _check_cache_ad(hashes, api_key):
-    """AllDebrid batch cache probe via ``/v4/magnet/instant``.
+    """AllDebrid cache probe stub.
 
-    AD accepts the full hash batch in a single POST and returns a
-    parallel array; we map by the hash the API echoes back so index
-    drift (e.g. AD dropping a hash from the response) cannot mis-tag
-    another hash.  Body uses repeated ``magnets[]`` fields via
-    ``_urllib_post(doseq=True)``.
+    ``/v4/magnet/instant`` was discontinued by AD some time before
+    May 2026 (verified live: every call to v4 and v4.1 returns
+    ``{"status":"error","error":{"code":"DISCONTINUED",...}}``).  No
+    replacement endpoint exists — AD's only remaining cache signal is
+    the ``ready`` boolean on a successful ``/v4.1/magnet/upload``
+    response, which is a state-changing operation and therefore
+    unsuitable for a read-only pre-add probe.  We return
+    ``{hash: None}`` uniformly without hitting the network and emit a
+    single process-lifetime warning so users with AD +
+    ``QUALITY_COMPROMISE_ONLY_CACHED=true`` understand why compromise
+    never fires.
     """
-    magnets = [_hash_to_magnet(h) for h in hashes]
-    qs = urllib.parse.urlencode({'agent': 'zurgarr', 'apikey': api_key})
-    url = f'https://api.alldebrid.com/v4/magnet/instant?{qs}'
-    data = _urllib_post(url, data=[('magnets[]', m) for m in magnets],
-                        timeout=_CACHE_PROBE_TIMEOUT, doseq=True)
-    result = {h: None for h in hashes}
-    if not data or data.get('status') != 'success':
-        return result
-    magnets_data = (data.get('data') or {}).get('magnets') or []
-    if not isinstance(magnets_data, list):
-        return result
+    global _ad_cache_warning_emitted
+    if not _ad_cache_warning_emitted:
+        logger.warning(
+            "[search] AllDebrid cache probes are a no-op — AD discontinued "
+            "/v4/magnet/instant (no replacement endpoint).  Cache-gated "
+            "features (QUALITY_COMPROMISE_ONLY_CACHED, cached_first sort) "
+            "will treat all AD releases as 'unknown' and refuse escalation; "
+            "set QUALITY_COMPROMISE_ONLY_CACHED=false to opt into aggressive "
+            "escalation without cache verification"
+        )
+        _ad_cache_warning_emitted = True
+    return {h: None for h in hashes}
 
-    hash_set = set(hashes)
-    for entry in magnets_data:
-        if not isinstance(entry, dict):
-            continue
-        entry_hash = (entry.get('hash') or '').strip().lower()
-        if entry_hash not in hash_set:
-            continue
-        coerced = _coerce_instant(entry.get('instant'))
-        if coerced is not None:
-            result[entry_hash] = coerced
-    return result
+
+def _probe_tb_hash(info_hash, headers):
+    """Probe one hash against TorBox checkcached.  Returns True/False/None.
+
+    TorBox returns {"success": true, "data": {<hash>: {...}} } when
+    cached, and {"success": true, "data": {}} / [] when not.  An
+    unexpected type (None, string, etc.) is "unknown" per I4 — we must
+    not conflate API error with a confirmed-uncached.
+    """
+    url = f'https://api.torbox.app/v1/api/torrents/checkcached?hash={info_hash}'
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=_CACHE_PROBE_TIMEOUT) as resp:
+            raw = resp.read(1 * 1024 * 1024)
+            if not raw:
+                return None
+            data = json.loads(raw.decode('utf-8'))
+    except (urllib.error.URLError, urllib.error.HTTPError,
+            json.JSONDecodeError, OSError, ValueError) as e:
+        logger.warning(
+            f"[search] TB cache probe {_safe_log_url(url)} "
+            f"(hash={info_hash[:8]}…): {type(e).__name__}"
+        )
+        return None
+    if not data.get('success'):
+        return None
+    payload = data.get('data')
+    if not isinstance(payload, dict):
+        return None
+    return info_hash in payload
+
+
+# Concurrency for the TB per-hash probe fan-out.  8 keeps a 25-probe batch
+# at ~3 sequential rounds (worst case ~30 s instead of ~4 min when TB is
+# timing out) without hammering the API.  The pool is a shared module-level
+# singleton so concurrent callers (status-server request threads, the
+# compromise engine, the Wanted→TB recovery pass) share ONE budget of 8
+# in-flight probes — per-call pools would multiply thread count and TB API
+# pressure by the number of stacked searches.
+_TORBOX_PROBE_WORKERS = 8
+_tb_probe_pool = None
+_tb_probe_pool_lock = threading.Lock()
+
+
+def _get_tb_probe_pool():
+    global _tb_probe_pool
+    with _tb_probe_pool_lock:
+        if _tb_probe_pool is None:
+            _tb_probe_pool = ThreadPoolExecutor(
+                max_workers=_TORBOX_PROBE_WORKERS,
+                thread_name_prefix='tb-probe')
+        return _tb_probe_pool
 
 
 def _check_cache_tb(hashes, api_key):
     """TorBox per-hash cache probe via ``/api/torrents/checkcached``.
 
     TB's endpoint is per-hash; the batch is capped at
-    ``_TORBOX_MAX_PROBES`` so a large Torrentio result set cannot
-    blow out the ``_CACHE_PROBE_TIMEOUT`` budget linearly (25 × 10 s
-    = ~4 min worst case instead of unbounded).  Hashes beyond the cap
-    stay as ``None`` (unknown) — the compromise engine already ranks
-    candidates so the top few always get probed.
+    ``_TORBOX_MAX_PROBES`` and fanned out across the shared probe pool so
+    a large Torrentio result set cannot blow out the
+    ``_CACHE_PROBE_TIMEOUT`` budget linearly.  Hashes beyond the cap
+    stay as ``None`` (unknown) — callers rank candidates before probing
+    so the top few always get probed.
     """
     headers = {
         'Authorization': f'Bearer {api_key}',
         'User-Agent': 'zurgarr/1.0',
     }
-    base_url = 'https://api.torbox.app/v1/api/torrents/checkcached'
     result = {h: None for h in hashes}
-    for h in hashes[:_TORBOX_MAX_PROBES]:
-        url = f'{base_url}?hash={h}'
-        req = urllib.request.Request(url, headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=_CACHE_PROBE_TIMEOUT) as resp:
-                raw = resp.read(1 * 1024 * 1024)
-                if not raw:
-                    continue
-                data = json.loads(raw.decode('utf-8'))
-        except (urllib.error.URLError, urllib.error.HTTPError,
-                json.JSONDecodeError, OSError, ValueError) as e:
-            logger.warning(
-                f"[search] TB cache probe {_safe_log_url(url)} "
-                f"(hash={h[:8]}…): {type(e).__name__}"
-            )
-            continue
-        # TorBox returns {"success": true, "data": {<hash>: {...}} } when
-        # cached, and {"success": true, "data": {}} / [] when not.
-        # An unexpected type (None, string, etc.) is "unknown" per I4 —
-        # we must not conflate API error with a confirmed-uncached.
-        if not data.get('success'):
-            continue
-        payload = data.get('data')
-        if not isinstance(payload, dict):
-            continue
-        result[h] = h in payload
+    batch = hashes[:_TORBOX_MAX_PROBES]
+    if not batch:
+        return result
+    pool = _get_tb_probe_pool()
+    for h, verdict in zip(batch, pool.map(
+            lambda x: _probe_tb_hash(x, headers), batch)):
+        result[h] = verdict
     return result
 
 
@@ -636,12 +704,72 @@ def _existing_hashes_tb(api_key):
     return out
 
 
+def list_torbox_torrents(api_key, timeout=_MYLIST_TIMEOUT):
+    """TB: GET /v1/api/torrents/mylist → full per-torrent listing.
+
+    Returns the entire account in ONE call so the library scanner can
+    enumerate TorBox content without walking the throttled FUSE mount
+    (the source of the rclone 429 storms).  Each returned dict carries the
+    release-folder ``name`` (matches the rclone mount folder) and a ``files``
+    list whose ``name`` is the full relative path *including* that folder.
+
+    Returns a ``list[dict]`` on success or ``None`` on any API failure, so
+    the caller can distinguish "TB has zero torrents" (``[]``) from "couldn't
+    reach TB" (``None``) and fall back to its last-good baseline.
+    """
+    headers = {'Authorization': f'Bearer {api_key}'}
+    # bypass_cache=true: TorBox caches mylist server-side, so without this a
+    # scan can promote a STALE page as the authoritative TB baseline and drop
+    # since-added titles to "Wanted".  Mirrors debrid_client.list_torrents.
+    data = _urllib_get(
+        'https://api.torbox.app/v1/api/torrents/mylist?bypass_cache=true',
+        headers=headers, timeout=timeout,
+    )
+    if not isinstance(data, dict) or not data.get('success'):
+        return None
+    payload = data.get('data') if isinstance(data.get('data'), list) else []
+    out = []
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get('name')
+        if not isinstance(name, str) or not name:
+            continue
+        files = []
+        raw_files = entry.get('files')
+        if isinstance(raw_files, list):
+            for f in raw_files:
+                if not isinstance(f, dict):
+                    continue
+                fname = f.get('name')
+                if not isinstance(fname, str) or not fname:
+                    continue
+                size = f.get('size')
+                if not isinstance(size, int) or size < 0:
+                    size = 0
+                short = f.get('short_name')
+                files.append({
+                    'name': fname,
+                    'short_name': short if isinstance(short, str) else os.path.basename(fname),
+                    'size': size,
+                })
+        out.append({
+            'name': name,
+            'hash': _coerce_hash(entry.get('hash')),
+            'id': entry.get('id'),
+            'files': files,
+            'created_at': entry.get('created_at'),
+        })
+    return out
+
+
 # ---------------------------------------------------------------------------
 # F9.3 — Search + filter
 # ---------------------------------------------------------------------------
 
 def search_torrents(imdb_id, media_type='movie', season=None, episode=None,
-                    annotate_cache=False, sort_mode='quality'):
+                    annotate_cache=False, sort_mode='quality',
+                    cache_service=None):
     """Search Torrentio for torrents, sorted by quality then seeds.
 
     Args:
@@ -649,23 +777,33 @@ def search_torrents(imdb_id, media_type='movie', season=None, episode=None,
             ``search_torrentio`` (see that function for details).
         annotate_cache: When True, every result carries ``cached``
             (``True``/``False``/``None``) and ``cached_service`` fields
-            populated by ``check_debrid_cache`` for the auto-detected
-            provider.  Default False — the manual-search UI preserves
-            its existing behaviour unless the caller opts in.
+            populated by ``check_debrid_cache``.  Default False — the
+            manual-search UI preserves its existing behaviour unless the
+            caller opts in.
         sort_mode: ``'quality'`` (default) sorts by quality score then
             seeders.  ``'cached_first'`` sorts by
             (cached desc, quality desc, seeders desc) so a cached 1080p
             outranks an uncached 2160p — useful when the caller wants
             to grab something that will actually stream immediately.
             Implies ``annotate_cache=True``.
+        cache_service: Which provider to probe for cache annotation.
+            ``None`` (default) uses the RD-first auto-detected service —
+            this MUST stay the default because the quality-compromise
+            engine's grabs land on the primary provider, and a TB
+            "cached" verdict says nothing about RD cache state.
+            ``'auto_probe'`` prefers TorBox when a TB key is configured
+            (the only provider with a working pre-add probe) — used by
+            the manual-search UI, where ``cached_service`` labels the
+            badge and the user picks the add target themselves.
 
     Returns list of dicts sorted per the chosen ``sort_mode``.
     Blocklisted hashes are filtered out.
 
     Provider note: Real-Debrid's cache-query endpoint was deprecated in
-    Nov 2024, so RD annotations are always ``None`` and ``'cached_first'``
-    sort degrades to quality order for RD users.  AllDebrid and TorBox
-    return meaningful True/False.
+    Nov 2024 and AllDebrid discontinued ``/v4/magnet/instant`` in May 2026,
+    so RD and AD annotations are always ``None`` and ``'cached_first'`` sort
+    degrades to quality order for those users.  Only TorBox
+    (``/api/torrents/checkcached``) still returns meaningful True/False.
     """
     results = search_torrentio(imdb_id, media_type, season, episode)
     if not results:
@@ -678,6 +816,14 @@ def search_torrents(imdb_id, media_type='movie', season=None, episode=None,
     except ImportError:
         pass
 
+    # Rank by quality BEFORE probing — TB caps the probe batch at
+    # _TORBOX_MAX_PROBES, so the hash list must lead with the releases
+    # the caller actually cares about, not raw Torrentio order.
+    results.sort(key=lambda r: (
+        r['quality']['score'],
+        r['seeds'],
+    ), reverse=True)
+
     # Cache annotation — requested explicitly, or implied by cached_first
     # sort.  A single batched probe per search keeps the UI snappy.  We
     # resolve the service once and pass it into ``check_debrid_cache``
@@ -686,7 +832,10 @@ def search_torrents(imdb_id, media_type='movie', season=None, episode=None,
     # read, no chance of a mid-call key rotation causing divergence.
     want_cache = annotate_cache or sort_mode == 'cached_first'
     if want_cache:
-        service, api_key = _get_debrid_service()
+        if cache_service == 'auto_probe':
+            service, api_key = _cache_probe_service()
+        else:
+            service, api_key = _get_debrid_service()
         cache_map = check_debrid_cache(
             [r['info_hash'] for r in results],
             service=service, api_key=api_key,
@@ -704,11 +853,6 @@ def search_torrents(imdb_id, media_type='movie', season=None, episode=None,
             r['quality']['score'],
             r['seeds'],
         ), reverse=True)
-    else:
-        results.sort(key=lambda r: (
-            r['quality']['score'],
-            r['seeds'],
-        ), reverse=True)
 
     return results
 
@@ -717,8 +861,9 @@ def search_torrents(imdb_id, media_type='movie', season=None, episode=None,
 # F9.3 — Add to debrid
 # ---------------------------------------------------------------------------
 
-def add_to_debrid(info_hash, title='', media_title=None, episode=None):
-    """Add a torrent to the configured debrid provider via magnet.
+def add_to_debrid(info_hash, title='', media_title=None, episode=None,
+                  *, service=None, api_key=None, cause=None, source='search'):
+    """Add a torrent to a debrid provider via magnet.
 
     Args:
         info_hash: 40-char hex info hash
@@ -727,6 +872,15 @@ def add_to_debrid(info_hash, title='', media_title=None, episode=None):
             event surfaces in that show/movie's detail-page Activity panel,
             which exact-matches on title or media_title.
         episode: Optional "SxxEyy" string for episode-scoped adds.
+        service: Explicit debrid service ('realdebrid'/'alldebrid'/'torbox').
+            When omitted, the RD-first auto-detected service is used. Callers
+            that must target a specific provider (e.g. the Wanted→TorBox
+            recovery pass) pass this to bypass the RD-first default.
+        api_key: Explicit API key for ``service``. When omitted but ``service``
+            is given, the key is resolved from env/secrets for that service.
+        cause: Override the success-event ``meta['cause']`` slug. Defaults to
+            ``'debrid_add_via_search'`` for the interactive-search path.
+        source: History event ``source`` field (default ``'search'``).
 
     Returns:
         {'success': bool, 'torrent_id': str, 'service': str, 'error': str,
@@ -735,9 +889,13 @@ def add_to_debrid(info_hash, title='', media_title=None, episode=None):
     if not info_hash or not _HASH_RE.match(info_hash):
         return {'success': False, 'torrent_id': '', 'service': '', 'error': 'Invalid info hash'}
 
-    service, api_key = _get_debrid_service()
-    if not service:
-        return {'success': False, 'torrent_id': '', 'service': '', 'error': 'No debrid service configured'}
+    if service:
+        if not api_key:
+            api_key = _resolve_service_key(service)
+    else:
+        service, api_key = _get_debrid_service()
+    if not service or not api_key:
+        return {'success': False, 'torrent_id': '', 'service': service or '', 'error': 'No debrid service configured'}
 
     lowered = info_hash.lower()
 
@@ -799,11 +957,11 @@ def add_to_debrid(info_hash, title='', media_title=None, episode=None):
         with _existing_hashes_lock:
             _inflight_adds.discard(inflight_key)
 
-    # Emit history event.  Scrub well-known credential patterns from the
-    # provider error string before it lands in history.jsonl — debrid
-    # clients have been seen to echo the request URL (with apikey
-    # querystring) in failure messages, and history is a plain file that
-    # is often shared verbatim when troubleshooting.
+    # Scrub well-known credential patterns from the provider error string
+    # IN PLACE, so every downstream consumer gets the sanitized version:
+    # history.jsonl, the notification body, AND the HTTP response returned
+    # to the browser by /api/search/add — debrid clients have been seen to
+    # echo the request URL (with apikey querystring) in failure messages.
     import re as _re
 
     def _redact(s):
@@ -815,6 +973,8 @@ def add_to_debrid(info_hash, title='', media_title=None, episode=None):
                     flags=_re.IGNORECASE)
         return s
 
+    result['error'] = _redact(result.get('error', ''))
+
     try:
         from utils import history as _hist
         if result['success']:
@@ -822,22 +982,22 @@ def add_to_debrid(info_hash, title='', media_title=None, episode=None):
                 'debrid_add',
                 title or info_hash[:16],
                 episode=episode,
-                detail=f'Added to {service} via search',
-                source='search',
+                detail=f'Added to {service} via {source}',
+                source=source,
                 media_title=media_title,
-                meta={'cause': 'debrid_add_via_search',
+                meta={'cause': cause or 'debrid_add_via_search',
                       'info_hash': info_hash,
                       'service': service,
                       'torrent_id': result.get('torrent_id', '')},
             )
         else:
-            err = _redact(result.get('error', ''))
+            err = result.get('error', '')
             _hist.log_event(
                 'debrid_add_failed',
                 title or info_hash[:16],
                 episode=episode,
                 detail=f'Failed to add to {service}: {err}',
-                source='search',
+                source=source,
                 media_title=media_title,
                 meta={'cause': 'debrid_add_failed',
                       'info_hash': info_hash,
@@ -850,10 +1010,11 @@ def add_to_debrid(info_hash, title='', media_title=None, episode=None):
     # Emit notification
     try:
         from utils.notifications import notify
+        _via = 'interactive search' if source == 'search' else source
         if result['success']:
             notify('debrid_add_success',
                    f'Added to {service}',
-                   f'{title or info_hash[:16]} added via interactive search')
+                   f'{title or info_hash[:16]} added via {_via}')
         else:
             notify('debrid_add_failed',
                    f'Failed to add to {service}',

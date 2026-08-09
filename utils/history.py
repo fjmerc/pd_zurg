@@ -35,6 +35,7 @@ _retention_days = 30
 CAUSE_BLACKHOLE_NEW_IMPORT = 'blackhole_new_import'
 CAUSE_BLACKHOLE_CACHE_HIT = 'blackhole_cache_hit'
 CAUSE_BLACKHOLE_GRAB_SUBMITTED = 'blackhole_grab_submitted'
+CAUSE_BLACKHOLE_MOUNT_HANDOFF = 'blackhole_mount_handoff'
 CAUSE_LIBRARY_NEW_IMPORT = 'library_new_import'
 CAUSE_LIBRARY_UPGRADE_REPLACED = 'library_upgrade_replaced'
 CAUSE_LIBRARY_STATE_INIT = 'library_state_init'
@@ -51,8 +52,35 @@ CAUSE_INCOMPLETE_RELEASE = 'incomplete_release'
 CAUSE_ALTS_EXHAUSTED = 'alts_exhausted'
 CAUSE_DUPLICATE_SKIPPED = 'duplicate_skipped'
 CAUSE_BLOCKLISTED_HASH = 'blocklisted_hash'
+# Uncached-rejected grab reported back to the owning arr via the failed-
+# download API: the arr blocklists THAT release and immediately searches for
+# a different one.  Distinct from CAUSE_BLOCKLISTED_HASH (local pd_zurg
+# blocklist rejecting an incoming drop) — this is the outbound feedback that
+# breaks the silent delete → identical re-grab loop.
+CAUSE_ARR_FEEDBACK_BLOCKLISTED = 'arr_feedback_blocklisted'
 CAUSE_DEBRID_UNAVAILABLE_MARKED = 'debrid_unavailable_marked'
 CAUSE_DEBRID_ADD_VIA_SEARCH = 'debrid_add_via_search'
+# A "Wanted" library ghost (monitored, no file) that the arr never grabbed was
+# found cached on TorBox and added directly by the library recovery pass —
+# bypassing the arr→indexer search pool entirely.  Distinct from
+# CAUSE_DEBRID_ADD_VIA_SEARCH (user-driven interactive add) because this fires
+# automatically during the scan effects phase against the Wanted backlog.
+CAUSE_WANTED_TB_RECOVERED = 'wanted_tb_recovered'
+# RD leg of the same Wanted-recovery pass.  RD's cache probe is dead
+# (deprecated Nov 2024) so the add itself is the probe: add the magnet,
+# keep it if it goes instantly ready (cached), delete and fall back to
+# the TorBox trickle otherwise.  RECOVERED = kept; UNCACHED = probe add
+# deleted (never ready / dead state / filter-blocked at add time — see
+# meta['reason']).  Together the two causes are the RD cache-hit-rate
+# measurement on the Wanted backlog.
+CAUSE_WANTED_RD_RECOVERED = 'wanted_rd_recovered'
+CAUSE_WANTED_RD_UNCACHED = 'wanted_rd_uncached'
+# Terminal give-up for a Wanted ghost: its top releases were confirmed
+# filter-blocked on RealDebrid AND uncached on TorBox across
+# WANTED_FILTER_GIVEUP_STRIKES recovery passes, so the recovery legs stop
+# probing it (persisted as a ``wantedblock:<imdb>`` attempt-ledger strike).
+# Surfaced on the Stuck tab; cleared by an operator Retry or ledger prune.
+CAUSE_WANTED_FILTER_GIVEUP = 'wanted_filter_giveup'
 
 # Action
 CAUSE_POST_SYMLINK_RESCAN = 'post_symlink_rescan'
@@ -67,6 +95,17 @@ CAUSE_LOCAL_FALLBACK_GRAB = 'local_fallback_grab'
 
 # Management
 CAUSE_PREFERENCE_SOURCE_SWITCH = 'preference_source_switch'
+CAUSE_DEBRID_FILTERED = 'debrid_filtered'
+# Plan 39 phase 3: filter-blocked content was auto-rehosted on the alt
+# debrid (TB when source was RD).  Distinct from CAUSE_DEBRID_FILTERED
+# because the user-visible outcome is different (file still plays, no
+# arr re-search fired, no blocklist add).
+CAUSE_DEBRID_RESCUED = 'debrid_rescued'
+# A grab was rejected because its exact hash was uncached, but a DIFFERENT
+# release of the same title was found cached on TorBox and grabbed in its
+# place.  Distinct from CAUSE_DEBRID_RESCUED (same hash, different debrid) —
+# here the hash differs and recovery happens at uncached-reject time.
+CAUSE_TB_CACHED_ALT_GRABBED = 'tb_cached_alt_grabbed'
 CAUSE_ROUTING_REPAIRED = 'routing_repaired'
 CAUSE_ARR_DELETED_USER = 'arr_deleted_user'
 CAUSE_ARR_DELETED_CLEANUP = 'arr_deleted_cleanup'
@@ -79,6 +118,9 @@ CAUSE_TASK_STALE_GRAB_DETECTION = 'task_stale_grab_detection'
 CAUSE_TASK_ROUTING_AUDIT = 'task_routing_audit'
 CAUSE_TASK_VERIFY_SYMLINKS = 'task_verify_symlinks'
 CAUSE_LIBRARY_SYMLINK_CLEANUP = 'library_symlink_cleanup'
+# mount_liveness detected a dead FUSE mount (ENOTCONN corpse) and
+# automatically unmounted + restarted the owning rclone process.
+CAUSE_MOUNT_SELFHEAL = 'mount_selfheal'
 
 
 def init(config_dir='/config'):
@@ -91,6 +133,19 @@ def init(config_dir='/config'):
         _retention_days = 30
         logger.warning("[history] Invalid HISTORY_RETENTION_DAYS, using default 30")
     logger.info(f"[history] Initialized — {_file_path} (retention: {_retention_days} days)")
+
+
+def restore_bytes(data):
+    """Replace the on-disk event log atomically (backup restore).
+
+    Holding ``_lock`` across the write closes the lost-append race:
+    ``log_event`` appends under the same lock, so an append can't land
+    between restore's read-nothing and its rename.
+    """
+    path = _file_path or '/config/history.jsonl'
+    with _lock:
+        with atomic_write(path, mode='wb') as f:
+            f.write(data)
 
 
 def log_event(type, title, episode=None, detail='', source='', meta=None, media_title=None):
@@ -192,6 +247,60 @@ def query(type=None, title=None, start=None, end=None, page=1, limit=50):
     }
 
 
+def events_since(start):
+    """Return all events at or after ISO timestamp ``start``, oldest first.
+
+    Unpaginated — for aggregation readers (the /api/stuck collector) that
+    need the full retention window, not a UI page.  Bounded by the 30-day
+    ``rotate()`` retention.
+    """
+    if _file_path is None:
+        return []
+    events = _read_all_events()
+    if start:
+        events = [e for e in events if e.get('ts', '') >= start]
+    return events
+
+
+def count_by_cause(causes, start=None):
+    """Count events whose ``meta['cause']`` is one of ``causes``.
+
+    Args:
+        causes: iterable of cause slugs to count
+        start: ISO datetime string — only events at or after this time
+
+    Returns:
+        dict mapping each requested cause to its event count (0 when absent)
+    """
+    _, recent = count_by_cause_windows(causes, start=start or '')
+    return recent
+
+
+def count_by_cause_windows(causes, start=''):
+    """Count matching events over the full file and a recent window in one pass.
+
+    Args:
+        causes: iterable of cause slugs to count
+        start: ISO datetime string bounding the recent window ('' counts all)
+
+    Returns:
+        (total, recent) — two dicts mapping each cause to its count; ``total``
+        covers every event on file, ``recent`` only those with ts >= start
+    """
+    total = {c: 0 for c in causes}
+    recent = {c: 0 for c in causes}
+    if _file_path is None:
+        return total, recent
+    for e in _read_all_events():
+        cause = (e.get('meta') or {}).get('cause')
+        if cause not in total:
+            continue
+        total[cause] += 1
+        if e.get('ts', '') >= start:
+            recent[cause] += 1
+    return total, recent
+
+
 def query_by_show(title, limit=20):
     """Return last N events for a specific show title (case-insensitive exact match).
 
@@ -260,26 +369,42 @@ def rotate():
 
 
 def _read_all_events():
-    """Read all events from the JSONL file. Thread-safe."""
+    """Read all events from the JSONL file. Thread-safe.
+
+    Holds the lock only for the raw file read; JSON parsing (the expensive
+    part on large histories) happens outside it so log_event() writers
+    aren't stalled while the UI paginates.
+    """
     with _lock:
-        return _read_all_events_unlocked()
+        lines = _read_lines()
+    return _parse_lines(lines)
 
 
 def _read_all_events_unlocked():
     """Read all events from the JSONL file. Caller must hold _lock."""
-    events = []
+    return _parse_lines(_read_lines())
+
+
+def _read_lines():
     try:
-        with open(_file_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    events.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue  # skip corrupted lines
+        # errors='replace': a torn multibyte write must not poison every read
+        with open(_file_path, 'r', encoding='utf-8', errors='replace') as f:
+            return f.readlines()
     except FileNotFoundError:
-        pass
+        return []
     except OSError as e:
         logger.error(f"[history] Failed to read history: {e}")
+        return []
+
+
+def _parse_lines(lines):
+    events = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue  # skip corrupted lines
     return events

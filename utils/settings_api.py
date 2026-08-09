@@ -35,7 +35,7 @@ ENV_SCHEMA = [
             ('ZURG_ENABLED', 'Enable Zurg', 'boolean', True, 'Enable the Zurg WebDAV server'),
             ('RD_API_KEY', 'Real-Debrid API Key', 'secret', False, 'API key from real-debrid.com/apitoken'),
             ('AD_API_KEY', 'AllDebrid API Key', 'secret', False, 'API key from alldebrid.com'),
-            ('TORBOX_API_KEY', 'TorBox API Key', 'secret', False, 'API key from torbox.app'),
+            ('TORBOX_API_KEY', 'TorBox API Key', 'secret', False, 'API key from torbox.app. Powers cache probes, search-add, and the dual-debrid blackhole routing. For the WebDAV mount, also set TORBOX_WEBDAV_USER + TORBOX_WEBDAV_PASS (see the TorBox section).'),
             ('ZURG_VERSION', 'Zurg Version', 'string', False, 'Pin to specific version (e.g., v0.9.2-hotfix.4)'),
             ('ZURG_UPDATE', 'Auto-Update Zurg', 'boolean', False, 'Check for Zurg updates on startup'),
             ('ZURG_LOG_LEVEL', 'Zurg Log Level', 'select:DEBUG,INFO,WARNING,ERROR', False, 'Log level for Zurg process'),
@@ -61,6 +61,132 @@ ENV_SCHEMA = [
             ('RCLONE_VFS_CACHE_MAX_AGE', 'VFS Cache Max Age', 'string', False, 'Max age of VFS cache files (e.g., 1h, 24h)'),
             ('RCLONE_BUFFER_SIZE', 'Buffer Size', 'string', False, 'In-memory buffer per open file (e.g., 16M)'),
             ('RCLONE_TRANSFERS', 'Transfers', 'string', False, 'Number of parallel transfers'),
+        ],
+    },
+    {
+        'name': 'TorBox',
+        'description': 'TorBox co-debrid mount (plan 39). TORBOX_API_KEY alone enables cache probes and search-add against TorBox; the WebDAV mount additionally requires TORBOX_WEBDAV_USER + TORBOX_WEBDAV_PASS (configured in the TorBox dashboard under Settings → Integrations → WebDAV — the API key itself does NOT authenticate WebDAV).',
+        'fields': [
+            ('TORBOX_WEBDAV_USER', 'TorBox WebDAV User', 'string', False, 'TorBox account email used for WebDAV Basic auth. NOT the API key.'),
+            ('TORBOX_WEBDAV_PASS', 'TorBox WebDAV Password', 'secret', False, 'WebDAV-only password set in the TorBox dashboard (Settings → Integrations → WebDAV). Distinct from the account login password and from the API key.'),
+            ('TORBOX_MOUNT_NAME', 'TorBox Mount Name', 'string', False, 'Mount path under /data. Default "torbox" — must not collide with RCLONE_MOUNT_NAME.'),
+            ('TORBOX_RCLONE_TPSLIMIT', 'TorBox rclone tps limit', 'string', False, 'Max requests-per-second issued by the TB rclone mount. Default 5. TB rate-limits reads aggressively under concurrent Plex/Bazarr scans; capping tps avoids the "too many errors 11/10" 429 cascade. Set to 0 to omit the flag.'),
+            ('TORBOX_RCLONE_TPSLIMIT_BURST', 'TorBox rclone tps burst', 'string', False, 'Short-burst allowance on top of TORBOX_RCLONE_TPSLIMIT. Default 3 (lowered from 10 to avoid tripping TorBox WebDAV listing rate-limits). Lets quick peeks (ffprobe header reads) succeed without blocking. Set to 0 to omit the flag.'),
+            ('TORBOX_RCLONE_DIR_CACHE_TIME', 'TorBox dir-cache time', 'string', False, 'How long the TB rclone mount caches directory listings (rclone --dir-cache-time syntax, e.g. 2h). Default 2h. Must exceed the library scan interval; with a shorter value every cold scan re-lists all TB folders at the throttled tps limit and times out, dropping TB titles. The blackhole grab hook calls vfs/refresh so new content still appears between expiries.'),
+            ('TORBOX_SCAN_TIMEOUT', 'TorBox scan timeout (s)', 'string', False, 'Seconds the library scan may spend walking the TB FUSE mount. Default 180. The main 30s scan deadline cannot enumerate a large TB mount on a cold cache at the throttled tps limit (~450 folders ≈ 90s), so TB gets its own budget; raise it if a very large TB library still truncates.'),
+        ],
+    },
+    {
+        'name': 'Media Services',
+        'description': 'Sonarr/Radarr/Overseerr integration for downloads, rescans, and library symlinks',
+        'fields': [
+            ('SONARR_URL', 'Sonarr URL', 'url', False, 'Sonarr base URL (e.g. http://sonarr:8989). Used for downloads, rescans, and folder naming'),
+            ('SONARR_API_KEY', 'Sonarr API Key', 'secret', False, 'Sonarr API key (Settings > General in Sonarr)'),
+            ('RADARR_URL', 'Radarr URL', 'url', False, 'Radarr base URL (e.g. http://radarr:7878). Used for downloads, rescans, and folder naming'),
+            ('RADARR_API_KEY', 'Radarr API Key', 'secret', False, 'Radarr API key (Settings > General in Radarr)'),
+            ('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'Auto-Enforce Preferences', 'boolean', False, 'Automatically switch sources when content arrives matching a stored preference'),
+            ('ROUTING_AUTO_TAG_UNTAGGED', 'Auto-Tag Untagged Media', 'boolean', False, 'During the 6h routing audit, auto-apply the debrid tag to monitored Sonarr series / Radarr movies that have no routing tag. Self-heals Overseerr requests that arrive with empty tags and silently fail with "0 active indexers" (default: true)'),
+            ('PENDING_WARNING_HOURS', 'Pending Warning After (hours)', 'number:0-168', False, 'Hours before sending a warning notification for stuck pending items (default: 24, 0 to disable)'),
+        ],
+    },
+    {
+        'name': 'Blackhole',
+        'description': 'Torrent blackhole watcher for *arr integration',
+        'fields': [
+            ('BLACKHOLE_ENABLED', 'Enable Blackhole', 'boolean', False, 'Watch a directory for .torrent/.magnet files'),
+            ('BLACKHOLE_DIR', 'Watch Directory', 'string', False, 'Directory to watch for torrent files'),
+            ('BLACKHOLE_POLL_INTERVAL', 'Poll Interval (seconds)', 'number:1-3600', False, 'How often to check for new files'),
+            ('BLACKHOLE_DEBRID', 'Debrid Service', 'select:realdebrid,alldebrid,torbox', False, 'Which debrid service to use'),
+            ('BLACKHOLE_SYMLINK_ENABLED', 'Enable Symlinks', 'boolean', False, 'Create symlinks in completed dir after debrid download finishes'),
+            ('BLACKHOLE_COMPLETED_DIR', 'Completed Directory', 'string', False, 'Directory for completed symlinks (container path, default: /completed)'),
+            ('BLACKHOLE_RCLONE_MOUNT', 'rclone Mount Path', 'string', False, 'rclone mount path inside container (default: /data)'),
+            ('BLACKHOLE_SYMLINK_TARGET_BASE', 'Symlink Target Base', 'string', False, 'Mount path as seen on Sonarr/Radarr host (e.g., /mnt/debrid)'),
+            ('BLACKHOLE_MOUNT_POLL_TIMEOUT', 'Mount Poll Timeout (seconds)', 'number:30-3600', False, 'Max time to wait for content on mount (default: 300)'),
+            ('BLACKHOLE_MOUNT_POLL_INTERVAL', 'Mount Poll Interval (seconds)', 'number:5-120', False, 'How often to check for content on mount (default: 10)'),
+            ('BLACKHOLE_SYMLINK_MAX_AGE', 'Symlink Max Age (hours)', 'number:0-720', False, 'Remove symlink dirs older than this (0=disabled, default: 72)'),
+            ('SYMLINK_REPAIR_AUTO_SEARCH', 'Repair Auto-Search', 'boolean', False, 'When broken symlinks can\'t be repaired from mount, trigger arr re-search'),
+            ('BLOCKLIST_AUTO_ADD', 'Auto-Blocklist Failed Torrents', 'boolean', False, 'Automatically blocklist torrents that hit terminal debrid errors (default: true)'),
+            ('BLOCKLIST_EXPIRY_DAYS', 'Blocklist Expiry (days)', 'number:0-365', False, 'Auto-expire auto-added blocklist entries after N days (0=never, default: 0). Manual entries are kept forever.'),
+            ('BLACKHOLE_DEDUP_ENABLED', 'Enable Local Library Dedup', 'boolean', False, 'Skip torrents that match content already in your local library'),
+            ('BLACKHOLE_LOCAL_LIBRARY_TV', 'Local TV Library Path', 'string', False, 'Path to local TV library (for dedup and auto debrid symlinks)'),
+            ('BLACKHOLE_LOCAL_LIBRARY_MOVIES', 'Local Movie Library Path', 'string', False, 'Path to local movie library (for dedup and auto debrid symlinks)'),
+            ('BLACKHOLE_DEBRID_DEDUP_ENABLED', 'Skip If Already in Debrid Account', 'boolean', False, 'Before adding, query the debrid account and skip hashes already present. Prevents duplicate torrent entries when Sonarr/Radarr re-grabs the same release after a failed import (default: ON).'),
+            ('BLACKHOLE_REQUIRE_CACHED', 'Require Cached on Debrid', 'boolean', False, 'Refuse .torrent / .magnet drops whose hash is not confirmed cached on the debrid provider. Real-Debrid deprecated its cache probe in Nov 2024, so on RD this will block all adds — leave OFF for RD or switch to AllDebrid/TorBox to use this gate (default: OFF).'),
+            ('BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'Delete Uncached Torrents on Timeout', 'boolean', False, 'When the blackhole gives up waiting for debrid to cache a torrent (BLACKHOLE_MOUNT_POLL_TIMEOUT — default 5 min), actively delete it from the debrid account instead of leaving it as a 0%/0-seed entry. Recommended ON for Real-Debrid users where no pre-add cache probe is available — see TROUBLESHOOTING.md "Uncached torrents pile up on my debrid account from the blackhole" (default: OFF).'),
+            ('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'TorBox Cached-Alternative Recovery', 'boolean', False, 'When a grabbed release is uncached and would be rejected, search Torrentio for other releases of the same title that ARE cached on TorBox (at the same quality tier the arr approved) and grab one of those instead. Prevents abundantly-cached titles from silently falling back to "Wanted" just because the specific hash Sonarr/Radarr picked is uncached. Requires TorBox configured (default: ON).'),
+            ('BLACKHOLE_TB_ALT_MAX_ATTEMPTS', 'TB-Alt Give-Up After (attempts)', 'number:1-100', False, 'How many cached-alternative grabs the recovery path will make for one season before giving up and letting the title fall back to "Wanted". Each grab re-arms TorBox\'s abuse cooldown, so a never-completing title would otherwise be re-grabbed every time its .magnet re-drops. The counter persists across restarts and decays after 30 idle days (default: 12).'),
+            ('BLACKHOLE_ARR_FAILED_FEEDBACK_ENABLED', 'Arr Failed-Download Feedback', 'boolean', False, 'When an uncached grab is rejected (and no cached alternative was found), report the failure back to Sonarr/Radarr via the failed-download API so the arr blocklists that release and immediately searches for a different one. Without feedback the arr is never told anything went wrong and re-grabs the identical release on every RSS pass (default: ON).'),
+            ('BLACKHOLE_ARR_FEEDBACK_MAX_STRIKES', 'Arr Feedback Give-Up After (strikes)', 'number:1-100', False, 'How many failed-download reports to send for one title (per episode for TV) before stopping. Each report makes the arr blocklist a release and grab the NEXT candidate, so an entirely-uncached title would otherwise walk its whole release list. Past the cap, rejects fall back to silent deletion and the Wanted recovery pass owns the title. Persists across restarts; decays after 30 idle days (default: 8).'),
+        ],
+    },
+    {
+        'name': 'Multi-Debrid Routing',
+        'description': 'Per-grab debrid routing for dual-debrid setups (plan 39). Inert when only one debrid is configured. The cache-aware default probes each configured debrid before adding so cached releases land on the provider that already has them; the primary wins ties.',
+        'fields': [
+            ('BLACKHOLE_DEBRID_ROUTING', 'Routing Mode', 'select:cache_aware,primary_only', False, 'cache_aware (default with two debrids): probe each provider before adding, prefer cached. primary_only: always route to the primary.  Reserved-but-unimplemented modes (tag, round_robin) are accepted with a one-shot WARNING and fall through to the default.'),
+            ('BLACKHOLE_DEBRID_PRIMARY', 'Primary Debrid', 'select:realdebrid,alldebrid,torbox', False, 'Used as the tiebreak in cache_aware mode and as the sole target in primary_only mode. Defaults to the legacy BLACKHOLE_DEBRID value, then to the first configured debrid in (RD, AD, TB) order.'),
+            ('BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX', 'TorBox Symlink Target Base', 'string', False, 'Host-side mount path for TorBox symlinks (e.g. /mnt/debrid_torbox).  When unset, falls back to the RD base with a "_torbox" suffix.  Must be non-empty when symlinks + TorBox are both enabled.'),
+            ('DEBRID_HEALTH_CROSS_RESCUE', 'Cross-Debrid Rescue', 'select:auto,true,false', False, 'When the RD reconciler finds a filter-blocked torrent and TB has it cached, re-host on TB and retarget arr-library symlinks. Default (auto): ON when both RD + TB API keys are set, OFF otherwise. Set false to disable rescue even with both keys (debugging the remediation path); true forces an attempt (no-op when alt is not configured).'),
+        ],
+    },
+    {
+        'name': 'Debrid Search',
+        'description': 'Interactive torrent search and one-click add to debrid',
+        'fields': [
+            ('TORRENTIO_URL', 'Torrentio URL', 'url', False,
+             'Torrentio API base URL (e.g. https://torrentio.strem.fun). Enables interactive torrent search in the Library detail view'),
+            ('SEARCH_DEDUP_ENABLED', 'Skip If Already in Debrid Account', 'boolean', False,
+             'Before the one-click Add, query the debrid account and refuse hashes already present. Prevents a double-click from creating two entries for the same torrent (default: ON).'),
+            ('SEARCH_REQUIRE_CACHED', 'Require Cached on Debrid', 'boolean', False,
+             'Refuse the Add button when the hash is not confirmed cached on the debrid provider. Real-Debrid deprecated its cache probe in Nov 2024, so on RD this will block all adds — leave OFF for RD or switch to AllDebrid/TorBox to use this gate (default: OFF).'),
+        ],
+    },
+    {
+        'name': 'Recovery & Reconciliation',
+        'description': 'Wanted-backlog recovery passes, gap-fill reconciliation, and per-title give-up limits. These knobs govern how aggressively the library scanner tries to acquire or re-acquire content that is monitored but missing.',
+        'fields': [
+            ('WANTED_TB_RECOVERY_ENABLED', 'Wanted → TorBox Recovery', 'boolean', False, 'For every "Wanted" title (monitored, no file) that Sonarr/Radarr never grabbed, search Torrentio directly, probe candidates against TorBox\'s cache, and add the best cached release straight to TorBox — bypassing the arr\'s own indexer pool. Closes the acquisition gap where a title is cached on TorBox but the arr\'s Prowlarr/Torznab search never surfaces a grabbable release, leaving it stuck in Wanted. The next library scan symlinks it and the arr imports it. Requires TorBox + Torrentio configured (default: ON).'),
+            ('WANTED_TB_RECOVERY_MAX_PER_SCAN', 'Wanted Recovery Max Per Scan', 'number:1-100', False, 'Cap on how many Wanted titles the recovery pass adds to TorBox per library scan. Kept small (default 2) so creates trickle out across scans instead of bursting — TorBox Essential\'s abuse system arms a ~24h account cooldown on create-volume bursts, which starves recovery far more than a low per-scan cap does.'),
+            ('WANTED_RD_RECOVERY_ENABLED', 'Wanted → RealDebrid Recovery', 'boolean', False, 'RD leg of the Wanted recovery pass. RD\'s cache-query endpoint is dead (deprecated Nov 2024), so the add itself is the probe: the top Torrentio release is added to RealDebrid and kept only if it goes instantly ready (= cached); otherwise the probe add is deleted and the title falls back to the TorBox leg. RD has no create-volume cooldown, so this leg drains the Wanted backlog much faster whenever RD has the content. Filter-blocked releases are detected at add time and routed to TorBox instead. Requires RealDebrid + Torrentio configured (default: ON).'),
+            ('WANTED_RD_RECOVERY_MAX_PER_SCAN', 'Wanted RD Probes Per Scan', 'number:1-100', False, 'Cap on RealDebrid probe-adds per library scan — counts attempts, not successes (each attempt is addMagnet + selectFiles + status polls + a delete on miss). RD has no create-volume abuse cooldown, so this can sit higher than the TorBox cap; each uncached attempt burns up to ~20s of polling, so very high values just eat the pass\'s time budget (default 4).'),
+            ('WANTED_SEASON_RECOVERY_ENABLED', 'Wanted Season-Pack Recovery', 'boolean', False, 'Extends Wanted recovery beyond fully-absent titles: for partially-present shows, each season with missing aired episodes is probed for a TorBox-cached season pack (falling back to a single-episode release for the first missing episode). One cached pack add fills every gap in the season — the symlink phase skips episodes already on disk. TorBox-only; shares the Wanted Recovery Max Per Scan budget, with whole-title targets keeping first claim. Requires the Wanted → TorBox Recovery toggle (default: ON).'),
+            ('FORCE_GRAB_MAX_ATTEMPTS', 'Force-Grab Give-Up After (attempts)', 'number:1-100', False, 'How many times the library scanner will force-grab a debrid release for a stuck title before giving up and marking it debrid-unavailable. Each force-grab re-arms TorBox\'s abuse cooldown, so an uncached/never-completing title would otherwise be re-grabbed every scan forever, starving genuine recovery. The counter persists across restarts and resets when the title lands on debrid or after 30 idle days (default: 12).'),
+            ('DEBRID_UNAVAILABLE_THRESHOLD_DAYS', 'Debrid Unavailable After (days)', 'number:1-30', False, 'Days of failed searches before marking content as debrid-unavailable (default: 3)'),
+            ('GAP_FILL_ENABLED', 'Gap-Fill Missing Episodes', 'boolean', False, 'Reconcile every monitored show against TMDB and search Sonarr/Radarr for aired episodes missing from both debrid and local, regardless of source preference. Also auto-enables re-search for broken symlinks during verify_symlinks. Set OFF to opt out (default: true)'),
+            ('LIBRARY_RESCAN_NFS_DELAY', 'NFS Rescan Delay (seconds)', 'number:0-300', False,
+             'Sleep this many seconds between creating new debrid symlinks and firing Sonarr/Radarr rescans. Default 0 (no delay) — bump to 30 if Sonarr/Radarr reads the symlink directory over NFS and you see "hasFile=false" right after a scan that later imports cleanly on its own. The arr-side kernel attribute cache (default 30-60s TTL on most NFS mounts) hides freshly-created symlinks from the rescan walk; this delay lets the cache expire first. Clamped to [0, 300] (default: 0).'),
+        ],
+    },
+    {
+        'name': 'Quality Compromise',
+        'description': 'Cache-aware tier escalation + season-pack fallback for the blackhole pipeline (plan 33). Opt-in via the master toggle below — all other fields in this section are inert while it is OFF.',
+        'fields': [
+            ('QUALITY_COMPROMISE_ENABLED', 'Enable Quality Compromise', 'boolean', False, 'Master toggle. Turn ON to let the blackhole escalate to a lower tier (within the arr\'s profile) when the preferred tier has no cached option after a dwell window. All other QUALITY_COMPROMISE_* / SEASON_PACK_FALLBACK_* fields below are inert while this is OFF.'),
+            ('QUALITY_COMPROMISE_DWELL_DAYS', 'Dwell Days at Preferred Tier', 'number:1-30', False, 'Days of failed preferred-tier attempts before the first compromise may fire (default: 3). Invariant I3 — the dwell clock measures from the first preferred-tier attempt, not the most recent retry.'),
+            ('QUALITY_COMPROMISE_MIN_SEEDERS', 'Compromise Min Seeders', 'number:0-1000', False, 'Compromise candidates below this seeder floor are skipped (default: 3). Keeps poorly-seeded releases from landing in a compromise grab.'),
+            ('QUALITY_COMPROMISE_ONLY_CACHED', 'Only Cached Compromises', 'boolean', False, 'Require the compromise candidate to be CACHED on your debrid provider (default: ON). Invariant I4 — trading quality for an uncached release is worse than no compromise. Real-Debrid deprecated instant-availability Nov 2024, so RD users under strict mode will never compromise; flip OFF for aggressive escalation.'),
+            ('QUALITY_COMPROMISE_MAX_TIER_DROP', 'Max Tier Drop', 'number:1-10', False, 'Cap on how far below the preferred tier the engine may descend. 1 = one drop only (e.g. 2160p → 1080p). 2 = up to two drops (default). Set to a large value (e.g. 10) to effectively disable the cap — the arr\'s profile ceiling always remains authoritative.'),
+            ('QUALITY_COMPROMISE_NOTIFY', 'Notify on Compromise', 'boolean', False, 'Send an Apprise notification on each compromise grab (default: ON). Setting OFF silences Apprise only — the dashboard history event and pending_monitors annotation still fire (invariant I7 — observability is non-negotiable).'),
+            ('SEASON_PACK_FALLBACK_ENABLED', 'Enable Season-Pack Fallback', 'boolean', False, 'TV-only: probe a cached pack at the PREFERRED tier before dropping tier, so a show with many missing episodes gets filled in without a quality compromise. Still opt-in on top of the master toggle above.'),
+            ('SEASON_PACK_FALLBACK_MIN_MISSING', 'Pack Probe Min Missing Episodes', 'number:1-100', False, 'Minimum missing-episode count in the target season before a pack probe is attempted (absolute floor, default: 4).'),
+            ('SEASON_PACK_FALLBACK_MIN_RATIO', 'Pack Probe Min Missing Ratio', 'string', False, 'Minimum missing/total ratio for the target season (0.0–1.0, default: 0.4). Belt-and-suspenders with MIN_MISSING — prevents a 40-episode season with 4 holes (10%) from grabbing a 40-episode pack when only a few are missing. Set to 0.0 to disable the ratio gate and rely on MIN_MISSING alone.'),
+        ],
+    },
+    {
+        'name': 'Debrid Health',
+        'description': 'Background reconciler that detects Real-Debrid keyword-filter blocks (the May 2026 infringing_file / error 35 filter-gate) on the existing torrent set. Without this, Zurg keeps advertising blocked torrents as healthy — your library shows phantom content that won\'t play. Probes one sample file per torrent (default every 12h, rate-limited under RD\'s quota) and persists per-torrent block state to /config/debrid_health.json. Detection only in this phase; auto-remediation (delete from RD + arr re-search) and UI badges follow in later phases of plan 38.',
+        'fields': [
+            ('DEBRID_HEALTH_ENABLED', 'Enable Debrid Health Reconciler', 'boolean', False,
+             'Master kill switch for the periodic probe sweep. Default ON — turn OFF only if RD\'s API drifts and the prober starts misbehaving, or if you want to silence the background API calls entirely (default: ON).'),
+            ('DEBRID_HEALTH_AUTO_REMEDIATE', 'Auto-Remediate Blocked Torrents', 'boolean', False,
+             'When a probe confirms a torrent is filter-blocked: blocklist the hash, delete the torrent from your RD account, and trigger Sonarr/Radarr to re-search for a replacement. OFF by default because this mutates your debrid account state — review the detected blocks via /api/library or /config/debrid_health.json first, then flip ON. Hard-capped at 100 remediations per sweep so a first-run enable on a large library cannot mass-delete. The hash blocklist prevents re-grabs of the same release (default: OFF).'),
+        ],
+    },
+    {
+        'name': 'Library Metadata',
+        'description': 'TMDB integration for episode titles, posters, and missing episode detection',
+        'fields': [
+            ('TMDB_API_KEY', 'TMDB API Key', 'secret', False, 'API key from themoviedb.org (free, enables metadata in Library page)'),
         ],
     },
     {
@@ -111,52 +237,23 @@ ENV_SCHEMA = [
              'Comma-separated event types: startup, shutdown, download_complete, download_error, '
              'library_refresh, symlink_created, symlink_failed, debrid_unavailable, pending_warning, '
              'local_fallback_triggered, blocklist_added, arr_deleted, health_error, symlink_repaired, '
-             'daily_digest, debrid_add_success, debrid_add_failed, compromise_grabbed. '
-             'Leave empty for all events'),
+             'daily_digest, debrid_add_success, debrid_add_failed, compromise_grabbed, debrid_filtered, debrid_rescued, '
+             'retry_giveup. Leave empty for all events'),
             ('NOTIFICATION_LEVEL', 'Minimum Level', 'select:info,warning,error', False, 'Minimum severity to send notifications'),
             ('NOTIFICATION_DIGEST_ENABLED', 'Daily Digest', 'boolean', False, 'Send a daily summary notification'),
             ('NOTIFICATION_DIGEST_TIME', 'Digest Time (HH:MM)', 'string', False, 'When to send the daily digest (24h format, default: 08:00)'),
         ],
     },
     {
-        'name': 'Blackhole',
-        'description': 'Torrent blackhole watcher for *arr integration',
+        'name': 'Monitoring',
+        'description': 'ffprobe monitoring and auto-update',
         'fields': [
-            ('BLACKHOLE_ENABLED', 'Enable Blackhole', 'boolean', False, 'Watch a directory for .torrent/.magnet files'),
-            ('BLACKHOLE_DIR', 'Watch Directory', 'string', False, 'Directory to watch for torrent files'),
-            ('BLACKHOLE_POLL_INTERVAL', 'Poll Interval (seconds)', 'number:1-3600', False, 'How often to check for new files'),
-            ('BLACKHOLE_DEBRID', 'Debrid Service', 'select:realdebrid,alldebrid,torbox', False, 'Which debrid service to use'),
-            ('BLACKHOLE_SYMLINK_ENABLED', 'Enable Symlinks', 'boolean', False, 'Create symlinks in completed dir after debrid download finishes'),
-            ('BLACKHOLE_COMPLETED_DIR', 'Completed Directory', 'string', False, 'Directory for completed symlinks (container path, default: /completed)'),
-            ('BLACKHOLE_RCLONE_MOUNT', 'rclone Mount Path', 'string', False, 'rclone mount path inside container (default: /data)'),
-            ('BLACKHOLE_SYMLINK_TARGET_BASE', 'Symlink Target Base', 'string', False, 'Mount path as seen on Sonarr/Radarr host (e.g., /mnt/debrid)'),
-            ('BLACKHOLE_MOUNT_POLL_TIMEOUT', 'Mount Poll Timeout (seconds)', 'number:30-3600', False, 'Max time to wait for content on mount (default: 300)'),
-            ('BLACKHOLE_MOUNT_POLL_INTERVAL', 'Mount Poll Interval (seconds)', 'number:5-120', False, 'How often to check for content on mount (default: 10)'),
-            ('BLACKHOLE_SYMLINK_MAX_AGE', 'Symlink Max Age (hours)', 'number:0-720', False, 'Remove symlink dirs older than this (0=disabled, default: 72)'),
-            ('SYMLINK_REPAIR_AUTO_SEARCH', 'Repair Auto-Search', 'boolean', False, 'When broken symlinks can\'t be repaired from mount, trigger arr re-search'),
-            ('BLOCKLIST_AUTO_ADD', 'Auto-Blocklist Failed Torrents', 'boolean', False, 'Automatically blocklist torrents that hit terminal debrid errors (default: true)'),
-            ('BLOCKLIST_EXPIRY_DAYS', 'Blocklist Expiry (days)', 'number:0-365', False, 'Auto-expire auto-added blocklist entries after N days (0=never, default: 0). Manual entries are kept forever.'),
-            ('BLACKHOLE_DEDUP_ENABLED', 'Enable Local Library Dedup', 'boolean', False, 'Skip torrents that match content already in your local library'),
-            ('BLACKHOLE_LOCAL_LIBRARY_TV', 'Local TV Library Path', 'string', False, 'Path to local TV library (for dedup and auto debrid symlinks)'),
-            ('BLACKHOLE_LOCAL_LIBRARY_MOVIES', 'Local Movie Library Path', 'string', False, 'Path to local movie library (for dedup and auto debrid symlinks)'),
-            ('BLACKHOLE_DEBRID_DEDUP_ENABLED', 'Skip If Already in Debrid Account', 'boolean', False, 'Before adding, query the debrid account and skip hashes already present. Prevents duplicate torrent entries when Sonarr/Radarr re-grabs the same release after a failed import (default: ON).'),
-            ('BLACKHOLE_REQUIRE_CACHED', 'Require Cached on Debrid', 'boolean', False, 'Refuse .torrent / .magnet drops whose hash is not confirmed cached on the debrid provider. Real-Debrid deprecated its cache probe in Nov 2024, so on RD this will block all adds — leave OFF for RD or switch to AllDebrid/TorBox to use this gate (default: OFF).'),
-            ('BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT', 'Delete Uncached Torrents on Timeout', 'boolean', False, 'When the blackhole gives up waiting for debrid to cache a torrent (BLACKHOLE_MOUNT_POLL_TIMEOUT — default 5 min), actively delete it from the debrid account instead of leaving it as a 0%/0-seed entry. Recommended ON for Real-Debrid users where no pre-add cache probe is available — see TROUBLESHOOTING.md "Uncached torrents pile up on my debrid account from the blackhole" (default: OFF).'),
-        ],
-    },
-    {
-        'name': 'Quality Compromise',
-        'description': 'Cache-aware tier escalation + season-pack fallback for the blackhole pipeline (plan 33). Opt-in via the master toggle below — all other fields in this section are inert while it is OFF.',
-        'fields': [
-            ('QUALITY_COMPROMISE_ENABLED', 'Enable Quality Compromise', 'boolean', False, 'Master toggle. Turn ON to let the blackhole escalate to a lower tier (within the arr\'s profile) when the preferred tier has no cached option after a dwell window. All other QUALITY_COMPROMISE_* / SEASON_PACK_FALLBACK_* fields below are inert while this is OFF.'),
-            ('QUALITY_COMPROMISE_DWELL_DAYS', 'Dwell Days at Preferred Tier', 'number:1-30', False, 'Days of failed preferred-tier attempts before the first compromise may fire (default: 3). Invariant I3 — the dwell clock measures from the first preferred-tier attempt, not the most recent retry.'),
-            ('QUALITY_COMPROMISE_MIN_SEEDERS', 'Compromise Min Seeders', 'number:0-1000', False, 'Compromise candidates below this seeder floor are skipped (default: 3). Keeps poorly-seeded releases from landing in a compromise grab.'),
-            ('QUALITY_COMPROMISE_ONLY_CACHED', 'Only Cached Compromises', 'boolean', False, 'Require the compromise candidate to be CACHED on your debrid provider (default: ON). Invariant I4 — trading quality for an uncached release is worse than no compromise. Real-Debrid deprecated instant-availability Nov 2024, so RD users under strict mode will never compromise; flip OFF for aggressive escalation.'),
-            ('QUALITY_COMPROMISE_MAX_TIER_DROP', 'Max Tier Drop', 'number:1-10', False, 'Cap on how far below the preferred tier the engine may descend. 1 = one drop only (e.g. 2160p → 1080p). 2 = up to two drops (default). Set to a large value (e.g. 10) to effectively disable the cap — the arr\'s profile ceiling always remains authoritative.'),
-            ('QUALITY_COMPROMISE_NOTIFY', 'Notify on Compromise', 'boolean', False, 'Send an Apprise notification on each compromise grab (default: ON). Setting OFF silences Apprise only — the dashboard history event and pending_monitors annotation still fire (invariant I7 — observability is non-negotiable).'),
-            ('SEASON_PACK_FALLBACK_ENABLED', 'Enable Season-Pack Fallback', 'boolean', False, 'TV-only: probe a cached pack at the PREFERRED tier before dropping tier, so a show with many missing episodes gets filled in without a quality compromise. Still opt-in on top of the master toggle above.'),
-            ('SEASON_PACK_FALLBACK_MIN_MISSING', 'Pack Probe Min Missing Episodes', 'number:1-100', False, 'Minimum missing-episode count in the target season before a pack probe is attempted (absolute floor, default: 4).'),
-            ('SEASON_PACK_FALLBACK_MIN_RATIO', 'Pack Probe Min Missing Ratio', 'string', False, 'Minimum missing/total ratio for the target season (0.0–1.0, default: 0.4). Belt-and-suspenders with MIN_MISSING — prevents a 40-episode season with 4 holes (10%) from grabbing a 40-episode pack when only a few are missing. Set to 0.0 to disable the ratio gate and rely on MIN_MISSING alone.'),
+            ('MOUNT_SELFHEAL_ENABLED', 'Mount Self-Heal', 'boolean', False,
+             'When the mount-liveness probe finds a dead FUSE mount (stale mount-table entry after a container recreate — rclone crashloops on "directory already mounted" until someone manually lazy-unmounts), automatically unmount the corpse and restart the owning rclone process. Fires only after 2 consecutive dead probes, only for the dead-daemon signature (never a slow or rate-limited mount), and at most once per 10 minutes per mount (default: ON).'),
+            ('FFPROBE_MONITOR_ENABLED', 'Enable ffprobe Monitor', 'boolean', False, 'Monitor for stuck ffprobe processes'),
+            ('FFPROBE_STUCK_TIMEOUT', 'Stuck Timeout (seconds)', 'number:10-600', False, 'Seconds before an ffprobe process is considered stuck'),
+            ('FFPROBE_POLL_INTERVAL', 'Poll Interval (seconds)', 'number:5-300', False, 'How often to check for stuck processes'),
+            ('AUTO_UPDATE_INTERVAL', 'Auto-Update Interval (hours)', 'number:1-168', False, 'How often to check for Zurg/plex_debrid updates'),
         ],
     },
     {
@@ -171,50 +268,6 @@ ENV_SCHEMA = [
         ],
     },
     {
-        'name': 'Library Metadata',
-        'description': 'TMDB integration for episode titles, posters, and missing episode detection',
-        'fields': [
-            ('TMDB_API_KEY', 'TMDB API Key', 'secret', False, 'API key from themoviedb.org (free, enables metadata in Library page)'),
-        ],
-    },
-    {
-        'name': 'Media Services',
-        'description': 'Sonarr/Radarr/Overseerr integration for downloads, rescans, and library symlinks',
-        'fields': [
-            ('SONARR_URL', 'Sonarr URL', 'url', False, 'Sonarr base URL (e.g. http://sonarr:8989). Used for downloads, rescans, and folder naming'),
-            ('SONARR_API_KEY', 'Sonarr API Key', 'secret', False, 'Sonarr API key (Settings > General in Sonarr)'),
-            ('RADARR_URL', 'Radarr URL', 'url', False, 'Radarr base URL (e.g. http://radarr:7878). Used for downloads, rescans, and folder naming'),
-            ('RADARR_API_KEY', 'Radarr API Key', 'secret', False, 'Radarr API key (Settings > General in Radarr)'),
-            ('LIBRARY_PREFERENCE_AUTO_ENFORCE', 'Auto-Enforce Preferences', 'boolean', False, 'Automatically switch sources when content arrives matching a stored preference'),
-            ('ROUTING_AUTO_TAG_UNTAGGED', 'Auto-Tag Untagged Media', 'boolean', False, 'During the 6h routing audit, auto-apply the debrid tag to monitored Sonarr series / Radarr movies that have no routing tag. Self-heals Overseerr requests that arrive with empty tags and silently fail with "0 active indexers" (default: true)'),
-            ('DEBRID_UNAVAILABLE_THRESHOLD_DAYS', 'Debrid Unavailable After (days)', 'number:1-30', False, 'Days of failed searches before marking content as debrid-unavailable (default: 3)'),
-            ('PENDING_WARNING_HOURS', 'Pending Warning After (hours)', 'number:0-168', False, 'Hours before sending a warning notification for stuck pending items (default: 24, 0 to disable)'),
-            ('GAP_FILL_ENABLED', 'Gap-Fill Missing Episodes', 'boolean', False, 'Reconcile every monitored show against TMDB and search Sonarr/Radarr for aired episodes missing from both debrid and local, regardless of source preference. Also auto-enables re-search for broken symlinks during verify_symlinks. Set OFF to opt out (default: true)'),
-        ],
-    },
-    {
-        'name': 'Debrid Search',
-        'description': 'Interactive torrent search and one-click add to debrid',
-        'fields': [
-            ('TORRENTIO_URL', 'Torrentio URL', 'url', False,
-             'Torrentio API base URL (e.g. https://torrentio.strem.fun). Enables interactive torrent search in the Library detail view'),
-            ('SEARCH_DEDUP_ENABLED', 'Skip If Already in Debrid Account', 'boolean', False,
-             'Before the one-click Add, query the debrid account and refuse hashes already present. Prevents a double-click from creating two entries for the same torrent (default: ON).'),
-            ('SEARCH_REQUIRE_CACHED', 'Require Cached on Debrid', 'boolean', False,
-             'Refuse the Add button when the hash is not confirmed cached on the debrid provider. Real-Debrid deprecated its cache probe in Nov 2024, so on RD this will block all adds — leave OFF for RD or switch to AllDebrid/TorBox to use this gate (default: OFF).'),
-        ],
-    },
-    {
-        'name': 'Monitoring',
-        'description': 'ffprobe monitoring and auto-update',
-        'fields': [
-            ('FFPROBE_MONITOR_ENABLED', 'Enable ffprobe Monitor', 'boolean', False, 'Monitor for stuck ffprobe processes'),
-            ('FFPROBE_STUCK_TIMEOUT', 'Stuck Timeout (seconds)', 'number:10-600', False, 'Seconds before an ffprobe process is considered stuck'),
-            ('FFPROBE_POLL_INTERVAL', 'Poll Interval (seconds)', 'number:5-300', False, 'How often to check for stuck processes'),
-            ('AUTO_UPDATE_INTERVAL', 'Auto-Update Interval (hours)', 'number:1-168', False, 'How often to check for Zurg/plex_debrid updates'),
-        ],
-    },
-    {
         'name': 'Logging',
         'description': 'Application logging configuration',
         'fields': [
@@ -223,6 +276,14 @@ ENV_SCHEMA = [
             ('ZURGARR_LOG_SIZE', 'Max Log Size', 'string', False, 'Max size per log file (e.g., 10M).'),
             ('COLOR_LOG_ENABLED', 'Color Logs', 'boolean', False, 'Enable colored console log output'),
             ('PD_LOGFILE', 'plex_debrid Log File', 'string', False, 'Path for plex_debrid log output'),
+        ],
+    },
+    {
+        'name': 'Backups',
+        'description': 'Scheduled config backups (archive: .env, settings.json, library_prefs.json, blocklist.json)',
+        'fields': [
+            ('CONFIG_BACKUP_INTERVAL', 'Backup Interval (seconds)', 'number:0-604800', False, 'Seconds between scheduled config backups. 0 disables scheduled backups (manual backup/restore still work). Default 86400 (24h).'),
+            ('CONFIG_BACKUP_RETENTION', 'Retention Count', 'number:1-1000', False, 'Number of scheduled backups to keep. Older archives are pruned after each run. Default 7.'),
         ],
     },
     {
@@ -241,18 +302,16 @@ ENV_SCHEMA = [
             ('SKIP_VALIDATION', 'Skip Validation', 'boolean', False, 'Skip startup config validation checks'),
         ],
     },
-    {
-        'name': 'Backups',
-        'description': 'Scheduled config backups (archive: .env, settings.json, library_prefs.json, blocklist.json)',
-        'fields': [
-            ('CONFIG_BACKUP_INTERVAL', 'Backup Interval (seconds)', 'number:0-604800', False, 'Seconds between scheduled config backups. 0 disables scheduled backups (manual backup/restore still work). Default 86400 (24h).'),
-            ('CONFIG_BACKUP_RETENTION', 'Retention Count', 'number:1-1000', False, 'Number of scheduled backups to keep. Older archives are pruned after each run. Default 7.'),
-        ],
-    },
 ]
 
 # All known env var keys from the schema
 _ALL_KEYS = {field[0] for cat in ENV_SCHEMA for field in cat['fields']}
+
+# Keys the schema declares as secret-typed. Sourced by config viewers so a
+# future secret field whose name lacks a KEY/TOKEN/PASS/SECRET/AUTH token
+# still gets masked (all current secret keys happen to match by name).
+_SECRET_KEYS = {field[0] for cat in ENV_SCHEMA
+                for field in cat['fields'] if field[2] == 'secret'}
 
 # Env vars whose application default is non-empty (typically boolean toggles
 # that default to ON when unset). Used by read_env_values() and
@@ -267,6 +326,23 @@ _ENV_DEFAULTS = {
     # as ON when the var isn't set in .env, matching runtime behavior in
     # utils/library.py::gap_fill_enabled().
     'GAP_FILL_ENABLED': 'true',
+    # Wanted→TorBox recovery is on by default; matches
+    # utils/library.py::wanted_tb_recovery_enabled() and base/__init__.py Config.
+    'WANTED_TB_RECOVERY_ENABLED': 'true',
+    'WANTED_TB_RECOVERY_MAX_PER_SCAN': '2',
+    # RD leg — matches utils/library.py::wanted_rd_recovery_enabled()/_max_per_scan()
+    # and base/__init__.py Config.
+    'WANTED_RD_RECOVERY_ENABLED': 'true',
+    'WANTED_RD_RECOVERY_MAX_PER_SCAN': '4',
+    # Season-pack extension — matches
+    # utils/library.py::wanted_season_recovery_enabled() and base/__init__.py Config.
+    'WANTED_SEASON_RECOVERY_ENABLED': 'true',
+    # Debrid health detection is on by default; matches
+    # utils/debrid_health.py::_enabled() and base/__init__.py Config.
+    'DEBRID_HEALTH_ENABLED': 'true',
+    # Mount self-heal defaults ON — matches
+    # utils/scheduled_tasks.py::_selfheal_enabled() and base/__init__.py Config.
+    'MOUNT_SELFHEAL_ENABLED': 'true',
     # Quality compromise true-defaults — see Config.load() in base/__init__.py.
     # Listed so the Settings UI renders the matching toggles as ON out of
     # the box instead of misleading the user with an OFF toggle when the
@@ -278,11 +354,37 @@ _ENV_DEFAULTS = {
     # rely on the protection without ever setting the var.
     'SEARCH_DEDUP_ENABLED': 'true',
     'BLACKHOLE_DEBRID_DEDUP_ENABLED': 'true',
+    # TorBox cached-alternative recovery defaults ON — matches the runtime
+    # fallback in blackhole.py::_tb_alt_recovery_enabled().  Listed so the
+    # Settings UI toggle renders ON when the var is unset.
+    'BLACKHOLE_TB_ALT_RECOVERY_ENABLED': 'true',
+    # Arr failed-download feedback defaults ON — matches the runtime
+    # fallback in blackhole.py::_arr_failed_feedback_enabled().
+    'BLACKHOLE_ARR_FAILED_FEEDBACK_ENABLED': 'true',
+    # Give-up cap true-defaults — match the live-os.environ fallbacks in
+    # library.py (force-grab), blackhole.py (TB-alt, arr feedback strikes).
+    # Listed so the UI shows the resolved value instead of an empty field
+    # while the help text claims "default: 12"/"default: 8".
+    'FORCE_GRAB_MAX_ATTEMPTS': '12',
+    'BLACKHOLE_TB_ALT_MAX_ATTEMPTS': '12',
+    'BLACKHOLE_ARR_FEEDBACK_MAX_STRIKES': '8',
     # Config backup retention default matches base/__init__.py Config.load().
     # Interval is omitted here because the scheduler's own default (86400s)
     # applies when the env var is empty; surfacing a non-empty UI default
     # would pin the value into .env on first save.
     'CONFIG_BACKUP_RETENTION': '7',
+    # Plan 41 phase D: TB rclone tps defaults match the runtime fallback
+    # in rclone/rclone.py.  Listed here so the Settings UI shows the true
+    # default rather than an empty field that would suggest "no limit".
+    'TORBOX_RCLONE_TPSLIMIT': '5',
+    'TORBOX_RCLONE_TPSLIMIT_BURST': '3',
+    'TORBOX_RCLONE_DIR_CACHE_TIME': '2h',
+    'TORBOX_SCAN_TIMEOUT': '180',
+    # TorBox mount name default — matches base/__init__.py Config.load().
+    # Listed so the Settings UI shows 'torbox' as the resolved value when
+    # TORBOX_MOUNT_NAME isn't in .env, preventing an empty-looking field
+    # that would confuse the user about what mount path will be used.
+    'TORBOX_MOUNT_NAME': 'torbox',
     # Notification digest default matches Config.load() in base/__init__.py
     # (os.getenv('NOTIFICATION_DIGEST_TIME', '08:00')). Listed so the UI
     # doesn't render an empty field while help text claims "default: 08:00".
@@ -582,6 +684,17 @@ def validate_env_values(values):
         'BLACKHOLE_MOUNT_POLL_TIMEOUT': (30, 3600),
         'BLACKHOLE_MOUNT_POLL_INTERVAL': (5, 120),
         'BLACKHOLE_SYMLINK_MAX_AGE': (0, 720),
+        # Plan 41 phase B.2 — NFS attribute-cache delay before arr rescans.
+        # Runtime ``_resolve_nfs_rescan_delay`` clamps to [0, 300]; the
+        # validation here surfaces an out-of-range value to the user
+        # rather than silently clamping behind their back.
+        'LIBRARY_RESCAN_NFS_DELAY': (0, 300),
+        # Plan 41 phase D — TB rclone throttling.  0 = omit flag (no
+        # throttle); upper bound 100 is well above any real-world value
+        # for TB's tier ceiling but catches typos that would cripple
+        # the mount.
+        'TORBOX_RCLONE_TPSLIMIT': (0, 100),
+        'TORBOX_RCLONE_TPSLIMIT_BURST': (0, 200),
         # Quality compromise (plan 33) — integer fields
         'QUALITY_COMPROMISE_DWELL_DAYS': (1, 30),
         'QUALITY_COMPROMISE_MIN_SEEDERS': (0, 1000),

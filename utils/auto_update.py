@@ -29,7 +29,7 @@ class Update(ProcessHandler):
         if enable_update:
             self.logger.info(f"Automatic updates set to {format_time(self.auto_update_interval())} for {process_name}")
             initial_update = self.update_check(process_name)
-            self.schedule_thread = threading.Thread(target=self.update_schedule, args=(process_name,))
+            self.schedule_thread = threading.Thread(target=self.update_schedule, args=(process_name,), daemon=True)
             self.schedule_thread.start()
             if not initial_update:
                 self.start_process(process_name)

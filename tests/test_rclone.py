@@ -3,7 +3,7 @@
 import os
 import sys
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, mock_open
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -34,7 +34,12 @@ def rclone_env(monkeypatch):
 
 
 def _run_setup(monkeypatch, nfs=False):
-    """Run rclone.setup() with all externals mocked, return the rclone command."""
+    """Run rclone.setup() with all externals mocked, return the rclone command.
+
+    Returns the command from the LAST start_process call — only use with a
+    single mount (RDAPIKEY set, ADAPIKEY/TorBox unset), or earlier mounts'
+    commands are silently clobbered.
+    """
     captured = {}
 
     with patch('rclone.rclone.ProcessHandler') as mock_ph, \
@@ -171,3 +176,359 @@ class TestNfsCommandFlags:
         monkeypatch.setenv('RCLONE_VFS_CACHE_MAX_AGE', '1h')
         cmd = _run_setup(monkeypatch, nfs=True)
         assert _extract_flag(cmd, 'vfs-cache-max-age') == '1h'
+
+
+class TestIsMountPoint:
+    """Tests for the /proc/self/mountinfo-based mount-point check."""
+
+    def _mountinfo(self, *mount_points):
+        # Minimal mountinfo lines; field 5 (index 4) is the mount point.
+        lines = []
+        for i, mp in enumerate(mount_points):
+            lines.append(
+                f"{100 + i} 30 0:{i} / {mp} rw,relatime shared:1 - fuse.rclone x: rw\n")
+        return "".join(lines)
+
+    def test_present_path_is_mount_point(self):
+        import rclone.rclone as mod
+        data = self._mountinfo("/data/zurgarr", "/data/torbox")
+        with patch("builtins.open", mock_open(read_data=data)):
+            assert mod._is_mount_point("/data/torbox") is True
+
+    def test_absent_path_is_not_mount_point(self):
+        import rclone.rclone as mod
+        data = self._mountinfo("/data/zurgarr")
+        with patch("builtins.open", mock_open(read_data=data)):
+            assert mod._is_mount_point("/data/torbox") is False
+
+    def test_prefix_path_does_not_false_match(self):
+        """/data/torbox must not match a longer /data/torbox2 mount."""
+        import rclone.rclone as mod
+        data = self._mountinfo("/data/torbox2")
+        with patch("builtins.open", mock_open(read_data=data)):
+            assert mod._is_mount_point("/data/torbox") is False
+
+    def test_unreadable_mountinfo_returns_false(self):
+        import rclone.rclone as mod
+        with patch("builtins.open", side_effect=OSError("boom")):
+            assert mod._is_mount_point("/data/torbox") is False
+
+    def test_matches_octal_escaped_path(self):
+        """Kernel escapes spaces as \\040; the comparison must decode them."""
+        import rclone.rclone as mod
+        data = ("120 30 0:1 / /data/My\\040Mount rw,relatime "
+                "shared:1 - fuse.rclone x: rw\n")
+        with patch("builtins.open", mock_open(read_data=data)):
+            assert mod._is_mount_point("/data/My Mount") is True
+
+
+class TestForceClearStaleMount:
+    """Tests for the escalate-and-verify stale-mount clearing loop."""
+
+    def test_clears_on_first_attempt_when_unmount_succeeds(self):
+        import rclone.rclone as mod
+        logger = MagicMock()
+        with patch("rclone.rclone.subprocess.run") as run, \
+             patch("rclone.rclone._is_mount_point", return_value=False), \
+             patch("rclone.rclone.os.makedirs") as makedirs, \
+             patch("rclone.rclone.time.sleep") as sleep:
+            assert mod._force_clear_stale_mount("/data/torbox", logger) is True
+            # No retry sleep on a first-attempt success.
+            sleep.assert_not_called()
+            makedirs.assert_called_once()
+            assert run.called
+
+    def test_retries_then_succeeds_when_lazy_teardown_settles(self):
+        import rclone.rclone as mod
+        logger = MagicMock()
+        # Still mounted for two checks, then clears.
+        with patch("rclone.rclone.subprocess.run"), \
+             patch("rclone.rclone._is_mount_point",
+                   side_effect=[True, True, False]), \
+             patch("rclone.rclone.os.makedirs"), \
+             patch("rclone.rclone.time.sleep") as sleep:
+            assert mod._force_clear_stale_mount("/data/torbox", logger) is True
+            assert sleep.call_count == 2
+
+    def test_returns_false_and_warns_when_never_clears(self):
+        import rclone.rclone as mod
+        logger = MagicMock()
+        with patch("rclone.rclone.subprocess.run"), \
+             patch("rclone.rclone._is_mount_point", return_value=True), \
+             patch("rclone.rclone.os.makedirs"), \
+             patch("rclone.rclone.time.sleep"):
+            assert mod._force_clear_stale_mount(
+                "/data/torbox", logger, attempts=3) is False
+            logger.warning.assert_called_once()
+
+    def test_makedirs_failure_after_unmount_keeps_retrying(self):
+        """Detached from mount table but dir still a corpse (ENOTCONN)."""
+        import rclone.rclone as mod
+        logger = MagicMock()
+        with patch("rclone.rclone.subprocess.run"), \
+             patch("rclone.rclone._is_mount_point", return_value=False), \
+             patch("rclone.rclone.os.makedirs",
+                   side_effect=[OSError("ENOTCONN"), None]), \
+             patch("rclone.rclone.time.sleep") as sleep:
+            assert mod._force_clear_stale_mount("/data/torbox", logger) is True
+            assert sleep.call_count == 1
+
+    def test_tolerates_missing_fusermount_binary(self):
+        import rclone.rclone as mod
+        logger = MagicMock()
+        with patch("rclone.rclone.subprocess.run",
+                   side_effect=FileNotFoundError("no fusermount")), \
+             patch("rclone.rclone._is_mount_point", return_value=False), \
+             patch("rclone.rclone.os.makedirs"), \
+             patch("rclone.rclone.time.sleep"):
+            # FileNotFoundError on every ladder command must not propagate.
+            assert mod._force_clear_stale_mount("/data/torbox", logger) is True
+
+
+class TestDeadFuseMountAt:
+    """Tests for the fstype-aware dead-FUSE-corpse probe."""
+
+    FUSE_LINE = ("715 26 0:63 / /data/torbox rw,nosuid,nodev shared:105 "
+                 "- fuse.rclone torbox: rw\n")
+    BIND_LINE = ("716 26 8:1 /mnt/remote/torbox /data/torbox rw shared:1 "
+                 "- ext4 /dev/sda1 rw\n")
+
+    def test_dead_fuse_mount_detected(self):
+        import rclone.rclone as mod
+        with patch("builtins.open", mock_open(read_data=self.FUSE_LINE)), \
+             patch("rclone.rclone.os.listdir",
+                   side_effect=OSError(107, "Socket not connected")):
+            assert mod._dead_fuse_mount_at("/data/torbox") is True
+
+    def test_healthy_fuse_mount_left_alone(self):
+        import rclone.rclone as mod
+        with patch("builtins.open", mock_open(read_data=self.FUSE_LINE)), \
+             patch("rclone.rclone.os.listdir", return_value=[]):
+            assert mod._dead_fuse_mount_at("/data/torbox") is False
+
+    def test_plain_bind_mount_is_not_fuse(self):
+        """/data/<mn> can itself be a docker bind mount — never a corpse."""
+        import rclone.rclone as mod
+        with patch("builtins.open", mock_open(read_data=self.BIND_LINE)), \
+             patch("rclone.rclone.os.listdir",
+                   side_effect=OSError("boom")) as listdir:
+            assert mod._dead_fuse_mount_at("/data/torbox") is False
+            listdir.assert_not_called()
+
+    def test_fuse_stacked_over_bind_detected(self):
+        """A corpse re-imported over the bind mount at the same path."""
+        import rclone.rclone as mod
+        data = self.BIND_LINE + self.FUSE_LINE
+        with patch("builtins.open", mock_open(read_data=data)), \
+             patch("rclone.rclone.os.listdir",
+                   side_effect=OSError(107, "Socket not connected")):
+            assert mod._dead_fuse_mount_at("/data/torbox") is True
+
+    def test_no_mount_returns_false(self):
+        import rclone.rclone as mod
+        with patch("builtins.open", mock_open(read_data="")), \
+             patch("rclone.rclone.os.listdir") as listdir:
+            assert mod._dead_fuse_mount_at("/data/torbox") is False
+            listdir.assert_not_called()
+
+    def test_unreadable_mountinfo_returns_false(self):
+        import rclone.rclone as mod
+        with patch("builtins.open", side_effect=OSError("boom")):
+            assert mod._dead_fuse_mount_at("/data/torbox") is False
+
+    def test_matches_octal_escaped_path(self):
+        import rclone.rclone as mod
+        data = ("120 30 0:1 / /data/My\\040Mount rw,relatime shared:1 "
+                "- fuse.rclone x: rw\n")
+        with patch("builtins.open", mock_open(read_data=data)), \
+             patch("rclone.rclone.os.listdir",
+                   side_effect=OSError(107, "Socket not connected")):
+            assert mod._dead_fuse_mount_at("/data/My Mount") is True
+
+
+class TestClearLeftoverMounts:
+    """Layer-peeling loop: dead FUSE → ladder, anything else → plain umount."""
+
+    def test_bare_path_is_noop(self):
+        import rclone.rclone as mod
+        with patch("rclone.rclone._is_mount_point", return_value=False), \
+             patch("rclone.rclone.subprocess.run") as run, \
+             patch("rclone.rclone._force_clear_stale_mount") as clear:
+            assert mod._clear_leftover_mounts("/data/torbox") is True
+            run.assert_not_called()
+            clear.assert_not_called()
+
+    def test_dead_corpse_is_force_cleared(self):
+        import rclone.rclone as mod
+        with patch("rclone.rclone._is_mount_point",
+                   side_effect=[True, False]), \
+             patch("rclone.rclone._dead_fuse_mount_at", return_value=True), \
+             patch("rclone.rclone._force_clear_stale_mount",
+                   return_value=True) as clear:
+            assert mod._clear_leftover_mounts("/data/torbox") is True
+            clear.assert_called_once()
+            assert clear.call_args[0][0] == "/data/torbox"
+
+    def test_non_fuse_bind_is_plain_umounted(self):
+        """The 2026-07-14 ext4-bind variant: not FUSE, but still in mountinfo."""
+        import rclone.rclone as mod
+        with patch("rclone.rclone._is_mount_point",
+                   side_effect=[True, False]), \
+             patch("rclone.rclone._dead_fuse_mount_at", return_value=False), \
+             patch("rclone.rclone.subprocess.run",
+                   return_value=MagicMock(returncode=0)) as run:
+            assert mod._clear_leftover_mounts("/data/torbox") is True
+            run.assert_called_once()
+            assert run.call_args[0][0] == ["umount", "/data/torbox"]
+
+    def test_stacked_layers_all_peeled(self):
+        """Two stacked binds: one umount pops one layer, loop must continue."""
+        import rclone.rclone as mod
+        with patch("rclone.rclone._is_mount_point",
+                   side_effect=[True, True, False]), \
+             patch("rclone.rclone._dead_fuse_mount_at", return_value=False), \
+             patch("rclone.rclone.subprocess.run",
+                   return_value=MagicMock(returncode=0)) as run:
+            assert mod._clear_leftover_mounts("/data/torbox") is True
+            assert run.call_count == 2
+
+    def test_fuse_corpse_over_bind_both_cleared(self):
+        """FUSE corpse stacked on the override bind: ladder then plain umount."""
+        import rclone.rclone as mod
+        with patch("rclone.rclone._is_mount_point",
+                   side_effect=[True, True, False]), \
+             patch("rclone.rclone._dead_fuse_mount_at",
+                   side_effect=[True, False]), \
+             patch("rclone.rclone._force_clear_stale_mount",
+                   return_value=True) as ladder, \
+             patch("rclone.rclone.subprocess.run",
+                   return_value=MagicMock(returncode=0)) as run:
+            assert mod._clear_leftover_mounts("/data/torbox") is True
+            ladder.assert_called_once()
+            run.assert_called_once()
+
+    def test_busy_umount_stops_without_forcing(self):
+        import rclone.rclone as mod
+        logger = MagicMock()
+        with patch("rclone.rclone._is_mount_point", return_value=True), \
+             patch("rclone.rclone._dead_fuse_mount_at", return_value=False), \
+             patch("rclone.rclone.subprocess.run",
+                   return_value=MagicMock(returncode=32)) as run, \
+             patch("rclone.rclone.logger", logger):
+            assert mod._clear_leftover_mounts("/data/torbox") is False
+            run.assert_called_once()
+            logger.warning.assert_called_once()
+
+    def test_failed_ladder_stops_loop(self):
+        import rclone.rclone as mod
+        with patch("rclone.rclone._is_mount_point", return_value=True), \
+             patch("rclone.rclone._dead_fuse_mount_at", return_value=True), \
+             patch("rclone.rclone._force_clear_stale_mount",
+                   return_value=False) as clear:
+            assert mod._clear_leftover_mounts("/data/torbox") is False
+            clear.assert_called_once()
+
+    def test_bounded_by_max_layers(self):
+        import rclone.rclone as mod
+        logger = MagicMock()
+        with patch("rclone.rclone._is_mount_point", return_value=True), \
+             patch("rclone.rclone._dead_fuse_mount_at", return_value=False), \
+             patch("rclone.rclone.subprocess.run",
+                   return_value=MagicMock(returncode=0)) as run, \
+             patch("rclone.rclone.logger", logger):
+            assert mod._clear_leftover_mounts("/data/torbox",
+                                              max_layers=3) is False
+            assert run.call_count == 3
+            logger.warning.assert_called_once()
+
+    def test_setup_skips_mount_when_peel_fails(self, rclone_env, monkeypatch):
+        """A failed peel must skip the mount (error + notify), not launch
+        rclone into a guaranteed 'directory already mounted' crashloop."""
+        with patch('rclone.rclone.ProcessHandler') as mock_ph, \
+             patch('rclone.rclone.wait_for_url', return_value=True), \
+             patch('rclone.rclone.notify') as notify, \
+             patch('rclone.rclone.atomic_write', MagicMock()), \
+             patch('rclone.rclone.get_port_from_config', return_value='9999'), \
+             patch('rclone.rclone.refresh_globals'), \
+             patch('rclone.rclone._clear_leftover_mounts',
+                   return_value=False), \
+             patch('os.path.exists', return_value=False), \
+             patch('os.makedirs'), \
+             patch('subprocess.run'), \
+             patch('builtins.open', MagicMock()):
+
+            import rclone.rclone as mod
+            monkeypatch.setattr(mod, 'RCLONEMN', 'test_mount')
+            monkeypatch.setattr(mod, 'RDAPIKEY', 'rd_key')
+            monkeypatch.setattr(mod, 'ADAPIKEY', None)
+            monkeypatch.setattr(mod, 'NFSMOUNT', None)
+            monkeypatch.setattr(mod, 'PLEXDEBRID', None)
+            monkeypatch.setattr(mod, 'RCLONELOGLEVEL', 'NOTICE')
+            monkeypatch.setattr(mod, 'TORBOXAPIKEY', None)
+
+            mod.setup()
+
+            mock_ph.assert_not_called()
+            error_events = [c for c in notify.call_args_list
+                            if c.args and c.args[0] == 'health_error']
+            assert len(error_events) == 1
+            assert 'test_mount' in error_events[0].args[2]
+
+
+class TestPerMountProcessHandler:
+    """Each mount must register with its OWN ProcessHandler.
+
+    A shared handler leaves only the first mount in the registry while
+    the handler's internals track the last-started one — breaking
+    per-mount shutdown, restart_service(key_type=...), and the mount
+    self-heal's service_registered gate.
+    """
+
+    def test_two_mounts_get_distinct_handlers_and_hooks(self, rclone_env, monkeypatch):
+        handlers = []
+
+        def make_handler(logger):
+            h = MagicMock()
+            handlers.append(h)
+            return h
+
+        with patch('rclone.rclone.ProcessHandler', side_effect=make_handler), \
+             patch('rclone.rclone.wait_for_url', return_value=True), \
+             patch('rclone.rclone.notify'), \
+             patch('rclone.rclone.atomic_write', MagicMock()), \
+             patch('rclone.rclone.get_port_from_config', return_value='9999'), \
+             patch('rclone.rclone.refresh_globals'), \
+             patch('rclone.rclone.find_available_port', return_value=8080), \
+             patch('rclone.rclone._dead_fuse_mount_at', return_value=False), \
+             patch('os.path.exists', return_value=False), \
+             patch('os.makedirs'), \
+             patch('subprocess.run'), \
+             patch('builtins.open', MagicMock()):
+
+            import rclone.rclone as mod
+            monkeypatch.setattr(mod, 'RCLONEMN', 'test_mount')
+            monkeypatch.setattr(mod, 'RDAPIKEY', 'rd_key')
+            monkeypatch.setattr(mod, 'ADAPIKEY', 'ad_key')
+            monkeypatch.setattr(mod, 'NFSMOUNT', None)
+            monkeypatch.setattr(mod, 'NFSPORT', None)
+            monkeypatch.setattr(mod, 'PLEXDEBRID', None)
+            monkeypatch.setattr(mod, 'ZURGUSER', None)
+            monkeypatch.setattr(mod, 'ZURGPASS', None)
+            monkeypatch.setattr(mod, 'RCLONELOGLEVEL', 'NOTICE')
+            monkeypatch.setattr(mod, 'TORBOXAPIKEY', None)
+
+            mod.setup()
+
+        assert len(handlers) == 2
+        key_types = [h.start_process.call_args[0][3] for h in handlers]
+        assert key_types == ['test_mount_RD', 'test_mount_AD']
+
+        # Each pre_restart hook must clear ITS OWN mount path. Patching
+        # works because the hook lambda resolves _clear_leftover_mounts
+        # through the module's global namespace AT CALL TIME, not at
+        # closure creation — keep it a module-level name.
+        with patch('rclone.rclone._clear_leftover_mounts') as clear:
+            for h in handlers:
+                h.pre_restart()
+            cleared = [c.args[0] for c in clear.call_args_list]
+            assert cleared == ['/data/test_mount_RD', '/data/test_mount_AD']

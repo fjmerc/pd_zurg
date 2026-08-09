@@ -104,8 +104,10 @@ class TestBlackholeRequireCached:
         assert not os.path.exists(path)
 
     def test_unknown_blocked_when_gate_on(self, handler, magnet_file, monkeypatch):
-        """RD's cache probe returns None for every hash — strict mode must
-        treat that as 'not cached' so uncached RD grabs never sneak through."""
+        """Single-debrid RD, cache probe returns None: must NOT submit, AND must
+        NOT delete — file defers to the next watcher poll.  (The cross-probe
+        path is gated on TB being configured; with no TB key, the file falls
+        through to the existing defer behaviour.)"""
         path, h = magnet_file
         monkeypatch.setenv('BLACKHOLE_REQUIRE_CACHED', 'true')
         with patch('utils.search._existing_hashes', return_value=set()), \
@@ -113,6 +115,8 @@ class TestBlackholeRequireCached:
                    return_value={h: None}):
             handler._process_file(path)
         handler._add_to_realdebrid.assert_not_called()
+        assert os.path.exists(path), \
+            'single-debrid + unknown cache must defer, not delete — outage protection'
 
     def test_cached_allowed_when_gate_on(self, handler, magnet_file, monkeypatch):
         path, h = magnet_file
@@ -189,6 +193,160 @@ class TestBlackholeRequireCached:
         handler._add_to_realdebrid.assert_not_called()
         assert os.path.exists(path), \
             'file must NOT be deleted when API key is missing — leaves user a clear recovery path'
+
+
+class TestBlackholeRequireCachedCrossProbe:
+    """Guards for the cross-provider cache-confirmation path in strict mode.
+
+    When the chosen debrid (e.g. RD) returns ``cached=None`` because its
+    cache-probe endpoint is deprecated, the strict-mode gate would
+    otherwise defer every uncached file forever — never able to confirm
+    or refute its cache state.  The cross-probe re-queries TB (the one
+    provider with a working cache endpoint as of 2026-05) and, if TB
+    confirms the hash is uncached, treats the file as definitively
+    uncached and removes it.  When TB also returns unknown, defer is
+    preserved (transient-outage protection).
+    """
+
+    def test_uncached_via_tb_cross_probe_when_chosen_debrid_unknown(
+        self, handler, magnet_file, monkeypatch,
+    ):
+        """Happy path: chosen=RD probe is None, TB probe is False → skip
+        (delete + uncached_rejected event) instead of defer."""
+        path, h = magnet_file
+        handler.debrid_api_keys = {'realdebrid': 'rd-key', 'torbox': 'tb-key'}
+        monkeypatch.setenv('BLACKHOLE_REQUIRE_CACHED', 'true')
+
+        def _probe(hashes, service=None, api_key=None):
+            # Returns None for everything except an explicit TB query → False
+            return {h: False} if service == 'torbox' else {h: None}
+
+        with patch('utils.search._existing_hashes', return_value=set()), \
+             patch('utils.search.check_debrid_cache', side_effect=_probe):
+            handler._process_file(path)
+        handler._add_to_realdebrid.assert_not_called()
+        assert not os.path.exists(path), \
+            'file MUST be deleted when TB cross-confirms uncached + RD probe is broken'
+
+    def test_defers_when_tb_also_unknown(self, handler, magnet_file, monkeypatch):
+        """Transient-outage protection: when BOTH the chosen debrid AND TB
+        return None (TB rate-limited or down), preserve the existing defer
+        behaviour — must not delete in-flight files during a TB blip."""
+        path, h = magnet_file
+        handler.debrid_api_keys = {'realdebrid': 'rd-key', 'torbox': 'tb-key'}
+        monkeypatch.setenv('BLACKHOLE_REQUIRE_CACHED', 'true')
+
+        with patch('utils.search._existing_hashes', return_value=set()), \
+             patch('utils.search.check_debrid_cache', return_value={h: None}):
+            handler._process_file(path)
+        handler._add_to_realdebrid.assert_not_called()
+        assert os.path.exists(path), \
+            'file MUST remain when neither probe is conclusive — outage protection'
+
+    def test_defers_when_tb_not_configured(self, handler, magnet_file, monkeypatch):
+        """Regression guard for single-debrid RD users: with TB not
+        configured, the cross-probe must NOT fire (no spurious API call,
+        no AttributeError) and the existing defer path runs unchanged."""
+        path, h = magnet_file
+        # Single-debrid: no debrid_api_keys dict; _api_key_for('torbox') → None
+        monkeypatch.setenv('BLACKHOLE_REQUIRE_CACHED', 'true')
+
+        probe_calls = []
+
+        def _probe(hashes, service=None, api_key=None):
+            probe_calls.append(service)
+            return {h: None}
+
+        with patch('utils.search._existing_hashes', return_value=set()), \
+             patch('utils.search.check_debrid_cache', side_effect=_probe):
+            handler._process_file(path)
+        handler._add_to_realdebrid.assert_not_called()
+        assert os.path.exists(path), 'single-debrid setup must defer, not delete'
+        assert 'torbox' not in probe_calls, \
+            'TB cross-probe must NOT fire when TB is not configured'
+
+    def test_tb_chosen_uncached_uses_single_probe(self, handler, magnet_file,
+                                                  monkeypatch):
+        """When TB is itself the chosen debrid and returns cached=False,
+        the existing single-probe skip path handles it.  The cross-probe
+        block must not re-query TB (would be wasteful and surfaces as a
+        double-call in the probe-call ledger)."""
+        path, h = magnet_file
+        handler.debrid_service = 'torbox'
+        handler.debrid_api_key = 'tb-key'
+        handler.debrid_api_keys = {'torbox': 'tb-key'}
+        monkeypatch.setenv('BLACKHOLE_REQUIRE_CACHED', 'true')
+
+        probe_calls = []
+
+        def _probe(hashes, service=None, api_key=None):
+            probe_calls.append(service)
+            return {h: False}
+
+        with patch('utils.search._existing_hashes', return_value=set()), \
+             patch('utils.search.check_debrid_cache', side_effect=_probe):
+            handler._process_file(path)
+        handler._add_to_torbox.assert_not_called()
+        assert not os.path.exists(path), 'TB-confirmed uncached must delete via the standard path'
+        assert probe_calls.count('torbox') == 1, \
+            'TB must be probed exactly once when it is the chosen debrid'
+
+    def test_tb_chosen_case_insensitive_skips_cross_probe(self, handler,
+                                                          magnet_file,
+                                                          monkeypatch):
+        """Regression: the `debrid != 'torbox'` guard must be case-insensitive.
+        A debrid name of 'TorBox' or 'TORBOX' (possible if env-supplied
+        primary debrid uses mixed case) must NOT fire a self-cross-probe,
+        which would double-billing TB's rate limit on every uncached hit."""
+        path, h = magnet_file
+        handler.debrid_service = 'TorBox'
+        handler.debrid_api_key = 'tb-key'
+        handler.debrid_api_keys = {'torbox': 'tb-key', 'TorBox': 'tb-key'}
+        monkeypatch.setenv('BLACKHOLE_REQUIRE_CACHED', 'true')
+
+        probe_calls = []
+
+        def _probe(hashes, service=None, api_key=None):
+            probe_calls.append(service)
+            # First call from the standard probe — return None to push into
+            # the cross-probe branch.  If the case guard is wrong, we'll see
+            # a second call here.
+            return {h: None}
+
+        with patch('utils.search._existing_hashes', return_value=set()), \
+             patch('utils.search.check_debrid_cache', side_effect=_probe):
+            handler._process_file(path)
+        assert len(probe_calls) == 1, \
+            'mixed-case TB chosen debrid must NOT trigger a self-cross-probe'
+        assert os.path.exists(path), 'cross-probe skipped → file defers, not deleted'
+
+    def test_cross_probe_exception_falls_through_to_defer(self, handler,
+                                                          magnet_file,
+                                                          monkeypatch):
+        """When the TB cross-probe call itself raises (e.g. unexpected
+        schema change → KeyError, or a non-network ImportError), the file
+        must NOT be orphaned: fall through to the defer path so the next
+        poll retries."""
+        path, h = magnet_file
+        handler.debrid_api_keys = {'realdebrid': 'rd-key', 'torbox': 'tb-key'}
+        monkeypatch.setenv('BLACKHOLE_REQUIRE_CACHED', 'true')
+
+        call_count = [0]
+
+        def _probe(hashes, service=None, api_key=None):
+            call_count[0] += 1
+            if service == 'torbox':
+                raise KeyError('simulated TB schema change')
+            return {h: None}
+
+        with patch('utils.search._existing_hashes', return_value=set()), \
+             patch('utils.search.check_debrid_cache', side_effect=_probe):
+            handler._process_file(path)
+        handler._add_to_realdebrid.assert_not_called()
+        assert os.path.exists(path), \
+            'file MUST defer when TB cross-probe raises — must not orphan'
+        assert call_count[0] == 2, \
+            'cross-probe must be attempted exactly once (RD-probe + TB-probe)'
 
 
 class TestBlackholeTimeoutCleanup:
@@ -613,3 +771,72 @@ class TestPlexDebridCacheRuleEnforcer:
         assert rules[0] == ['cache status', 'requirement', 'cached', '']
         assert rules[1] == ['resolution', 'requirement', '<=', '1080']
         assert rules[2] == ['seeders', 'preference', 'highest', '']
+
+
+class TestArrFailedFeedbackWiring:
+    """Both reject sites must report the failed grab back to the arr BEFORE
+    deleting the drop — otherwise the arr re-grabs the identical release on
+    every RSS pass (the silent-delete loop).  The feedback result must not
+    change the delete outcome."""
+
+    def test_uncached_reject_pushes_feedback_then_deletes(
+        self, handler, magnet_file, monkeypatch,
+    ):
+        path, h = magnet_file
+        monkeypatch.setenv('BLACKHOLE_REQUIRE_CACHED', 'true')
+        handler._push_arr_failed_feedback = MagicMock(return_value=True)
+        with patch('utils.search._existing_hashes', return_value=set()), \
+             patch('utils.search.check_debrid_cache', return_value={h: False}):
+            handler._process_file(path)
+        handler._push_arr_failed_feedback.assert_called_once()
+        args, kwargs = handler._push_arr_failed_feedback.call_args
+        assert args[1].lower() == h, 'info hash must be forwarded to the arr'
+        assert args[2] == 'realdebrid'
+        assert not os.path.exists(path), 'feedback must not suppress the delete'
+        handler._add_to_realdebrid.assert_not_called()
+
+    def test_cross_confirmed_reject_pushes_feedback_then_deletes(
+        self, handler, magnet_file, monkeypatch,
+    ):
+        path, h = magnet_file
+        handler.debrid_api_keys = {'realdebrid': 'rd-key', 'torbox': 'tb-key'}
+        monkeypatch.setenv('BLACKHOLE_REQUIRE_CACHED', 'true')
+        handler._push_arr_failed_feedback = MagicMock(return_value=False)
+
+        def _probe(hashes, service=None, api_key=None):
+            return {h: False} if service == 'torbox' else {h: None}
+
+        with patch('utils.search._existing_hashes', return_value=set()), \
+             patch('utils.search.check_debrid_cache', side_effect=_probe):
+            handler._process_file(path)
+        handler._push_arr_failed_feedback.assert_called_once()
+        assert not os.path.exists(path), \
+            'feedback returning False must degrade to the status-quo delete'
+
+    def test_tb_alt_recovery_success_skips_feedback(
+        self, handler, magnet_file, monkeypatch,
+    ):
+        """A recovered grab is a SUCCESS — the arr must not be told it
+        failed, or it would blocklist a release we just fulfilled."""
+        path, h = magnet_file
+        monkeypatch.setenv('BLACKHOLE_REQUIRE_CACHED', 'true')
+        handler._try_torbox_cached_alternative = MagicMock(return_value=True)
+        handler._push_arr_failed_feedback = MagicMock()
+        with patch('utils.search._existing_hashes', return_value=set()), \
+             patch('utils.search.check_debrid_cache', return_value={h: False}):
+            handler._process_file(path)
+        handler._push_arr_failed_feedback.assert_not_called()
+
+    def test_deferred_unknown_cache_does_not_push_feedback(
+        self, handler, magnet_file, monkeypatch,
+    ):
+        """Defer is not a failure — the grab may still complete on the next
+        poll.  Feedback there would blocklist releases during API blips."""
+        path, h = magnet_file
+        monkeypatch.setenv('BLACKHOLE_REQUIRE_CACHED', 'true')
+        handler._push_arr_failed_feedback = MagicMock()
+        with patch('utils.search._existing_hashes', return_value=set()), \
+             patch('utils.search.check_debrid_cache', return_value={h: None}):
+            handler._process_file(path)
+        handler._push_arr_failed_feedback.assert_not_called()
+        assert os.path.exists(path)

@@ -29,6 +29,11 @@ logger = get_logger()
 # free text out of history.jsonl and the per-show Activity sidebar.
 _EPISODE_TAG_RE = re.compile(r'^S\d{1,4}E\d{1,4}$')
 
+# 40-char hex info hash — validated at the endpoint (rejected, NOT truncated:
+# slicing a longer hex-looking string to 40 chars could silently add a
+# different, valid torrent).
+_INFO_HASH_RE = re.compile(r'^[a-fA-F0-9]{40}$')
+
 
 # ---------------------------------------------------------------------------
 # Gzip compression cache (content hash → compressed bytes)
@@ -202,7 +207,14 @@ def read_log_lines(lines=100, level=None, log_dir='./log'):
         log_files = glob_mod.glob(os.path.join(log_dir, 'ZURGARR-*.log'))
         if not log_files:
             return []
-        log_file = max(log_files)  # Lexicographic sort — date-stamped names sort correctly
+        # Pick the file most recently written, NOT the lexicographically
+        # greatest name.  CustomRotatingFileHandler keeps the *active* file as
+        # ``ZURGARR-<date>.log`` and renames rolled-over content to
+        # ``ZURGARR-<date>_1.log`` (``_2``, ...).  Since ``_`` (0x5F) sorts
+        # after ``.`` (0x2E), a plain ``max()`` would return the frozen ``_1``
+        # backup and the Logs tab would show stale entries that stop at the
+        # last rollover.  mtime always identifies the file still being written.
+        log_file = max(log_files, key=os.path.getmtime)
 
         with open(log_file, 'rb') as f:
             f.seek(0, 2)
@@ -248,18 +260,36 @@ _CONFIG_PREFIXES = (
     'SYMLINK_VERIFY', 'PREFERENCE_ENFORCE', 'HOUSEKEEPING',
     'CONFIG_BACKUP', 'MOUNT_LIVENESS', 'HISTORY_',
 )
+# Keys whose value embeds a credential the name-pattern check can't catch
+# (e.g. Apprise URLs like discord://token@id). Always masked.
+_EMBEDDED_CREDENTIAL_KEYS = {'NOTIFICATION_URL'}
 
 
 def get_sanitized_config():
-    """Return current Zurgarr config with sensitive values masked."""
-    config = {}
-    for key in sorted(os.environ.keys()):
-        if not any(key.startswith(p) for p in _CONFIG_PREFIXES):
-            continue
+    """Return current Zurgarr config with sensitive values masked.
 
-        value = os.environ[key]
-        if any(s in key.upper() for s in _SENSITIVE_PATTERNS):
-            if value and len(value) > 8:
+    The key set is the union of the authoritative settings schema
+    (``settings_api._ALL_KEYS``) and any live env var matching a config
+    prefix, so schema keys are shown even when unset and non-schema knobs
+    (e.g. ZURG_INSTANCES_CONFIG) still appear.
+    """
+    from utils.settings_api import _ALL_KEYS, _SECRET_KEYS
+
+    keys = set(_ALL_KEYS)
+    for key in os.environ:
+        if any(key.startswith(p) for p in _CONFIG_PREFIXES):
+            keys.add(key)
+
+    config = {}
+    for key in sorted(keys):
+        value = os.environ.get(key, '')
+        sensitive = (
+            any(s in key.upper() for s in _SENSITIVE_PATTERNS)
+            or key in _SECRET_KEYS
+            or key in _EMBEDDED_CREDENTIAL_KEYS
+        )
+        if sensitive:
+            if value and len(value) > 12:
                 config[key] = value[:4] + '****' + value[-4:]
             elif value:
                 config[key] = '****'
@@ -347,6 +377,33 @@ def check_services():
             except (ValueError, KeyError):
                 pass
         svc['url'] = 'https://alldebrid.com'
+        services.append(svc)
+
+    # TorBox
+    tb_key = _get_secret_or_env('torbox_api_key', 'TORBOX_API_KEY')
+    if tb_key:
+        svc, resp = _check_service(
+            'TorBox', 'debrid',
+            'https://api.torbox.app/v1/api/user/me',
+            headers={'Authorization': f'Bearer {tb_key}'})
+        if resp:
+            try:
+                data = resp.json().get('data') or {}
+                svc['username'] = data.get('email', '')
+                plan = data.get('plan', 0)
+                svc['premium'] = plan > 0
+                exp_str = data.get('expiration_date', '')
+                if exp_str:
+                    svc['expiration'] = exp_str
+                    try:
+                        exp = datetime.fromisoformat(exp_str.replace('Z', '+00:00'))
+                        days = (exp - datetime.now(timezone.utc)).days
+                        svc['days_remaining'] = days
+                    except (ValueError, TypeError):
+                        pass
+            except (ValueError, KeyError):
+                pass
+        svc['url'] = 'https://torbox.app'
         services.append(svc)
 
     # Plex
@@ -1198,10 +1255,10 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .dot.green{background:var(--green)}.dot.red{background:var(--red);border-radius:2px}.dot.yellow{background:transparent;border:2px solid var(--yellow);width:8px;height:8px}
 .svc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
 .svc-item{display:flex;align-items:center;padding:10px 12px;background:var(--bg);border-radius:6px;border:1px solid var(--border2)}
-.svc-item .svc-info{flex:1;margin-left:8px}
-.svc-item .svc-name{font-size:.85em;font-weight:500;color:var(--text)}
+.svc-item .svc-info{flex:1;min-width:0;margin-left:8px}
+.svc-item .svc-name{font-size:.85em;font-weight:500;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .svc-name a{color:inherit;text-decoration:none}.svc-name a:hover{color:var(--blue)}
-.svc-item .svc-detail{font-size:.75em;color:var(--text2);margin-top:2px}
+.svc-item .svc-detail{font-size:.75em;color:var(--text2);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .svc-item .svc-badge{font-size:.7em;padding:2px 6px;border-radius:4px;font-weight:500;margin-left:8px}
 .svc-item .svc-badge.premium{background:#3fb9501a;color:var(--green)}
 .svc-item .svc-badge.warn{background:#d299221a;color:var(--yellow)}
@@ -1322,6 +1379,28 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
     status_data_ref = None
     auth_credentials = None
 
+    def handle_one_request(self):
+        """Wrap ``BaseHTTPRequestHandler.handle_one_request`` so client
+        disconnects (BrokenPipeError, ConnectionResetError) during the
+        response body write don't escape to socketserver's default
+        ``handle_error`` — which spams a multi-line Traceback per
+        disconnect into stderr/zurgarr's logs.
+
+        Common cause: polling clients (traefik health checks, watchtower,
+        a browser tab the user closed mid-fetch) close the socket before
+        the response finishes streaming.  Nothing wrong on the server
+        side; just noise.  Log at DEBUG so the cause is still
+        recoverable if an operator wants it.
+        """
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError) as e:
+            logger.debug(
+                f"[status] client {self.client_address} disconnected mid-response: {e}"
+            )
+        # Other exceptions propagate to the default handler — those are
+        # real bugs we want to see.
+
     def do_GET(self):
         # Prometheus metrics endpoint — served before auth check
         # (scrapers don't support basic auth easily)
@@ -1374,6 +1453,27 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             from utils.task_scheduler import scheduler
             data = json.dumps(scheduler.get_status())
             self._send_json_response(200, data)
+        elif self.path == '/api/debrid_health/summary':
+            try:
+                from utils.debrid_health import get_summary
+                self._send_json_response(200, json.dumps(get_summary()))
+            except Exception as e:
+                self._send_json_response(500, json.dumps({'error': str(e)}))
+        elif self.path.startswith('/api/recovery'):
+            try:
+                from utils import recovery
+                params = parse_qs(urlparse(self.path).query)
+                try:
+                    limit = int(params.get('limit', ['0'])[0])
+                except ValueError:
+                    limit = 0
+                snapshots = recovery.load_snapshots(limit=limit or None)
+                self._send_json_response(200, json.dumps({
+                    'latest': snapshots[-1] if snapshots else None,
+                    'snapshots': snapshots,
+                }))
+            except Exception as e:
+                self._send_json_response(500, json.dumps({'error': str(e)}))
         elif self.path == '/settings':
             # Settings editor — requires auth
             if not self.auth_credentials:
@@ -1527,9 +1627,19 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             qs = parse_qs(urlparse(self.path).query)
             title = qs.get('title', [''])[0]
             year = qs.get('year', [None])[0]
-            media_type = qs.get('type', ['show'])[0]
+            media_type = qs.get('type', [''])[0]
             if not title:
                 self._send_json_response(400, json.dumps({'error': 'title required'}))
+            elif media_type not in ('show', 'movie'):
+                # Reject missing / malformed type so the TMDB cache never
+                # gets poisoned with show data under movie-style keys (or
+                # vice versa).  The JS sometimes serialises an undefined
+                # ``item.type`` as the literal string ``"undefined"`` —
+                # don't paper over that by defaulting silently.
+                self._send_json_response(400, json.dumps({
+                    'error': 'type must be "show" or "movie"',
+                    'got': media_type or '(missing)',
+                }))
             else:
                 try:
                     year_int = int(year) if year else None
@@ -1624,7 +1734,19 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == '/api/blocklist':
             from utils import blocklist as blocklist_mod
             self._send_json_response(200, json.dumps(blocklist_mod.get_all()))
-        elif self.path == '/activity':
+        elif self.path == '/api/stuck' or self.path.startswith('/api/stuck?'):
+            # No cache-bypass param: on auth-less installs this GET is open
+            # (like /api/history) and a cold collect walks 30 days of
+            # history, so the 60s cache is the DoS guard.  The mutating
+            # endpoints invalidate the cache, so post-action reloads are
+            # still fresh.
+            try:
+                from utils import stuck
+                self._send_json_response(200, json.dumps(stuck.collect()))
+            except Exception as e:
+                logger.exception("[stuck] collect failed")
+                self._send_json_response(500, json.dumps({'error': str(e)}))
+        elif self.path == '/activity' or self.path.startswith('/activity?'):
             from utils.activity_page import get_activity_html
             self._send_html_response(get_activity_html().encode())
         elif self.path == '/system':
@@ -1678,6 +1800,15 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     return
                 from utils.library_prefs import set_preference
                 result = set_preference(title, preference)
+                if preference == 'none':
+                    # Clearing the preference revokes the transition driver —
+                    # cancel any in-flight pending so the scanner stops
+                    # searching for a move the user no longer wants.
+                    try:
+                        from utils.library_prefs import clear_pending_with_aliases
+                        result['pending_cleared'] = clear_pending_with_aliases(title)
+                    except Exception as e:
+                        logger.warning(f"[preference] Pending cleanup failed for '{title}': {e}")
                 self._send_json_response(200, json.dumps(result))
             except ValueError as e:
                 self._send_json_response(400, json.dumps({'error': str(e)}))
@@ -2105,14 +2236,40 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 to_switch = []
                 not_on_debrid = 0
                 with scanner._path_lock:
+                    # Reboot-family items are indexed under a year-qualified
+                    # norm ("icarly (2007)").  Derive it from a trailing
+                    # (YYYY) in the display title; failing that, fall back
+                    # to a UNIQUE qualified sibling in the indexes.  Two or
+                    # more siblings stay ambiguous → fail-safe no-match.
+                    lookup_norms = [norm]
+                    m = re.search(r'\((\d{4})\)\s*$', title)
+                    if m:
+                        lookup_norms.insert(0, f'{norm} ({m.group(1)})')
+                    else:
+                        qual_re = re.compile(
+                            re.escape(norm) + r' \(\d{4}\)$')
+                        quals = {
+                            k[0]
+                            for idx in (scanner._local_path_index,
+                                        scanner._path_index)
+                            for k in idx
+                            if qual_re.match(k[0])
+                        }
+                        if len(quals) == 1:
+                            lookup_norms.append(quals.pop())
                     for ep in season_eps:
                         try:
                             s = int(ep.get('season', 0))
                             e = int(ep.get('episode', 0))
                         except (ValueError, TypeError):
                             continue
-                        local_p = scanner._local_path_index.get((norm, s, e))
-                        debrid_p = scanner._path_index.get((norm, s, e))
+                        local_p = debrid_p = None
+                        for cn in lookup_norms:
+                            lp = scanner._local_path_index.get((cn, s, e))
+                            dp = scanner._path_index.get((cn, s, e))
+                            if lp or dp:
+                                local_p, debrid_p = lp, dp
+                                break
                         if local_p and debrid_p:
                             to_switch.append({
                                 'local_path': local_p,
@@ -2727,9 +2884,102 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             from utils import blocklist as blocklist_mod
             entry_id = blocklist_mod.add(info_hash, title, reason=reason, source='manual')
             if entry_id:
+                # A manual block changes the Stuck tab's annotations — drop
+                # its 60s cache so the follow-up reload reflects it.
+                try:
+                    from utils import stuck as _stuck
+                    _stuck.invalidate_cache()
+                except Exception:
+                    pass
                 self._send_json_response(200, json.dumps({'status': 'added', 'id': entry_id}))
             else:
                 self._send_json_response(500, json.dumps({'error': 'Failed to add entry'}))
+        elif self.path == '/api/stuck/retry':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 100_000:
+                    self._send_json_response(400, json.dumps({'error': 'Request body too large'}))
+                    return
+                body = self.rfile.read(content_length)
+                values = json.loads(body.decode('utf-8'))
+                if not isinstance(values, dict):
+                    self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
+                    return
+                key = (values.get('key') or '').strip()
+                title = (values.get('title') or '').strip()
+                imdb_id = (values.get('imdb_id') or '').strip()
+                if not key:
+                    self._send_json_response(400, json.dumps({'error': 'key required'}))
+                    return
+                if len(key) > 512 or len(title) > 512:
+                    self._send_json_response(400, json.dumps({'error': 'key/title too long'}))
+                    return
+                if imdb_id:
+                    import re as _re
+                    if not _re.match(r'^tt\d{7,8}$', imdb_id):
+                        self._send_json_response(400, json.dumps({'error': 'imdb_id must be tt followed by 7-8 digits'}))
+                        return
+                from utils import stuck
+                cleared = stuck.clear_retry_state(key, title=title or None,
+                                                  imdb_id=imdb_id or None)
+                self._send_json_response(200, json.dumps({'status': 'cleared', **cleared}))
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception:
+                logger.exception("[stuck] retry failed")
+                self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
+        elif self.path == '/api/stuck/dismiss':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 100_000:
+                    self._send_json_response(400, json.dumps({'error': 'Request body too large'}))
+                    return
+                body = self.rfile.read(content_length)
+                values = json.loads(body.decode('utf-8'))
+                if not isinstance(values, dict):
+                    self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
+                    return
+                key = (values.get('key') or '').strip()
+                if not key:
+                    self._send_json_response(400, json.dumps({'error': 'key required'}))
+                    return
+                if len(key) > 512:
+                    self._send_json_response(400, json.dumps({'error': 'key too long'}))
+                    return
+                from utils import stuck
+                stuck.dismiss(key)
+                self._send_json_response(200, json.dumps({'status': 'dismissed'}))
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception:
+                logger.exception("[stuck] dismiss failed")
+                self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
+        elif self.path == '/api/stuck/undismiss':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 100_000:
+                    self._send_json_response(400, json.dumps({'error': 'Request body too large'}))
+                    return
+                body = self.rfile.read(content_length)
+                values = json.loads(body.decode('utf-8'))
+                if not isinstance(values, dict):
+                    self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
+                    return
+                key = (values.get('key') or '').strip()
+                if not key:
+                    self._send_json_response(400, json.dumps({'error': 'key required'}))
+                    return
+                if len(key) > 512:
+                    self._send_json_response(400, json.dumps({'error': 'key too long'}))
+                    return
+                from utils import stuck
+                stuck.undismiss(key)
+                self._send_json_response(200, json.dumps({'status': 'undismissed'}))
+            except json.JSONDecodeError:
+                self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
+            except Exception:
+                logger.exception("[stuck] undismiss failed")
+                self._send_json_response(500, json.dumps({'error': 'Internal server error'}))
         elif self.path == '/api/search':
             try:
                 content_length = int(self.headers.get('Content-Length', 0))
@@ -2773,9 +3023,14 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     except (ValueError, TypeError):
                         self._send_json_response(400, json.dumps({'error': 'episode must be integer'}))
                         return
-                from utils.search import search_torrents
-                results = search_torrents(imdb_id, media_type, season, episode)
-                self._send_json_response(200, json.dumps({'results': results}))
+                from utils.search import search_torrents, list_configured_services
+                results = search_torrents(imdb_id, media_type, season, episode,
+                                          annotate_cache=True,
+                                          cache_service='auto_probe')
+                self._send_json_response(200, json.dumps({
+                    'results': results,
+                    'providers': list_configured_services(),
+                }))
             except json.JSONDecodeError:
                 self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
             except Exception:
@@ -2795,7 +3050,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 # Reject non-string fields explicitly so {"media_title": 123}
                 # returns a clean 400 instead of a 500 from .strip()
                 # AttributeError caught by the bare-Exception fallthrough.
-                for _f in ('info_hash', 'title', 'media_title', 'episode'):
+                for _f in ('info_hash', 'title', 'media_title', 'episode', 'service'):
                     if _f in values and values[_f] is not None and not isinstance(values[_f], str):
                         self._send_json_response(400, json.dumps({'error': f'{_f} must be a string'}))
                         return
@@ -2803,6 +3058,13 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 title = (values.get('title') or '').strip()[:500]
                 media_title = (values.get('media_title') or '').strip()[:500] or None
                 episode = (values.get('episode') or '').strip()[:16] or None
+                service = (values.get('service') or '').strip()[:64] or None
+                if service is not None:
+                    from utils.search import is_service_configured
+                    if not is_service_configured(service):
+                        self._send_json_response(400, json.dumps(
+                            {'error': f'service {service!r} is not configured'}))
+                        return
                 # Episode tag is server-trusted as 'SxxEyy' shape — clients
                 # may post any string; reject anything that isn't the shape
                 # we expect rather than letting garbage land in history.jsonl
@@ -2813,10 +3075,15 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 if not info_hash:
                     self._send_json_response(400, json.dumps({'error': 'info_hash required'}))
                     return
+                if not _INFO_HASH_RE.match(info_hash):
+                    self._send_json_response(400, json.dumps(
+                        {'error': 'info_hash must be a 40-character hex string'}))
+                    return
                 from utils.search import add_to_debrid
                 result = add_to_debrid(info_hash, title=title,
                                        media_title=media_title,
-                                       episode=episode)
+                                       episode=episode,
+                                       service=service)
                 status_code = 200 if result.get('success') else 400
                 self._send_json_response(status_code, json.dumps(result))
             except json.JSONDecodeError:

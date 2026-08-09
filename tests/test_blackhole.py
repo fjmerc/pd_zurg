@@ -10,6 +10,11 @@ from utils.blackhole import (
     _is_multi_season_pack, _extract_file_season, _build_season_release_name,
     _enrich_for_history,
     _is_valid_label, iter_release_dirs,
+    _is_rate_limit_response, _check_rate_limit, _mark_rate_limited,
+    _rate_limit_until,
+    _check_torbox_cooldown, _tb_cooldown_cache,
+    _is_resolving_video, _dir_has_video, _local_episodes,
+    _coalesced_root_refresh, _ROOT_REFRESH_COALESCE_S,
 )
 
 
@@ -629,6 +634,399 @@ class TestRetrySchedule:
         assert RETRY_SCHEDULE[0] >= 60
 
 
+class TestRateLimitGate:
+    """Per-provider rate-limit detection + backoff.
+
+    Regression for observed search-storm behaviour: Sonarr's
+    ``MissingEpisodeSearch`` fires dozens of magnet drops within the same
+    second.  Each one was being submitted to RD/TB/AD blindly — even after
+    the API returned ``rate limit exceeded`` — so the whole batch failed,
+    landed in the 5-min retry queue, then hit the rate limit again on the
+    next retry pass.  This class verifies the detector + per-provider
+    backoff window prevent that loop.
+    """
+
+    def setup_method(self):
+        """Clear the global rate-limit map so tests don't bleed into each other."""
+        _rate_limit_until.clear()
+
+    def teardown_method(self):
+        _rate_limit_until.clear()
+
+    @pytest.mark.parametrize('status,body,expected', [
+        (429, '', True),
+        (429, 'Too Many Requests', True),
+        (200, 'rate limit exceeded', True),  # RD returns 200 + error text
+        (503, 'rate_limit_exceeded', True),  # underscored variant
+        (200, 'success', False),
+        (500, 'internal server error', False),
+        (404, 'not found', False),
+    ])
+    def test_is_rate_limit_response(self, status, body, expected):
+        class _R:
+            def __init__(self, s, b):
+                self.status_code = s
+                self.text = b
+        assert _is_rate_limit_response(_R(status, body)) is expected
+
+    def test_is_rate_limit_response_handles_missing_attrs(self):
+        """A response object with no .text attribute must not crash."""
+        class _R:
+            status_code = 500
+        # Should not raise; non-429 with no body falls through to False.
+        assert _is_rate_limit_response(_R()) is False
+
+    def test_mark_then_check_sleeps_until_window_expires(self, monkeypatch):
+        """``_check_rate_limit`` blocks until the marked window expires."""
+        sleeps = []
+        monkeypatch.setattr('utils.blackhole.time.sleep', lambda s: sleeps.append(s))
+        _mark_rate_limited('realdebrid', seconds=2)
+        _check_rate_limit('realdebrid')
+        assert len(sleeps) == 1
+        # Slept for approximately the remaining window (allow 0.5s test jitter).
+        assert 1.0 < sleeps[0] <= 2.0
+
+    def test_check_rate_limit_no_op_when_no_window(self, monkeypatch):
+        """No active window → no sleep."""
+        sleeps = []
+        monkeypatch.setattr('utils.blackhole.time.sleep', lambda s: sleeps.append(s))
+        _check_rate_limit('realdebrid')
+        assert sleeps == []
+
+    def test_per_provider_isolation(self, monkeypatch):
+        """A rate-limit on RD must NOT pause adds to TB (cache_aware still works)."""
+        sleeps = []
+        monkeypatch.setattr('utils.blackhole.time.sleep', lambda s: sleeps.append(s))
+        _mark_rate_limited('realdebrid', seconds=5)
+        _check_rate_limit('torbox')
+        assert sleeps == []  # TB unaffected
+        _check_rate_limit('realdebrid')
+        assert len(sleeps) == 1  # RD waited
+
+    def test_window_expires(self, monkeypatch):
+        """An expired window doesn't cause a sleep."""
+        sleeps = []
+        monkeypatch.setattr('utils.blackhole.time.sleep', lambda s: sleeps.append(s))
+        # Mark with negative duration → already expired.
+        _mark_rate_limited('realdebrid', seconds=-1)
+        _check_rate_limit('realdebrid')
+        assert sleeps == []
+
+
+class TestTorboxCooldownProbe:
+    """``_check_torbox_cooldown`` converts TB's account-level
+    ``cooldown_until`` field into a "seconds remaining" value so a
+    failed createtorrent can be gated via the existing rate-limit
+    window infrastructure.  TB returns HTTP 400 + generic
+    ``DOWNLOAD_SERVER_ERROR`` while the cooldown is active (not the
+    standard 429 path), so without this probe every subsequent add
+    silently wastes an API call until the cooldown lifts.
+    """
+
+    def setup_method(self):
+        _tb_cooldown_cache['checked_at'] = 0.0
+        _tb_cooldown_cache['seconds_until'] = 0.0
+
+    def teardown_method(self):
+        _tb_cooldown_cache['checked_at'] = 0.0
+        _tb_cooldown_cache['seconds_until'] = 0.0
+
+    def _mock_response(self, status_code, json_body):
+        from unittest.mock import MagicMock
+        resp = MagicMock()
+        resp.status_code = status_code
+        resp.json.return_value = json_body
+        return resp
+
+    def test_active_cooldown_returns_seconds_remaining(self, monkeypatch):
+        """Cooldown_until 600s in the future → returns ~600.0 (within
+        wall-clock jitter)."""
+        from datetime import datetime, timedelta, timezone
+        future = datetime.now(timezone.utc) + timedelta(seconds=600)
+        iso = future.strftime('%Y-%m-%dT%H:%M:%SZ')
+        resp = self._mock_response(200, {'data': {'cooldown_until': iso}})
+        monkeypatch.setattr('utils.blackhole.requests.get', lambda *a, **kw: resp)
+        seconds = _check_torbox_cooldown('tb-key')
+        assert 595 <= seconds <= 605
+
+    def test_no_cooldown_returns_zero(self, monkeypatch):
+        """``cooldown_until`` absent / null → 0.0."""
+        resp = self._mock_response(200, {'data': {'cooldown_until': None}})
+        monkeypatch.setattr('utils.blackhole.requests.get', lambda *a, **kw: resp)
+        assert _check_torbox_cooldown('tb-key') == 0.0
+
+    def test_expired_cooldown_returns_zero(self, monkeypatch):
+        """A cooldown_until in the past must clamp to 0 (not negative)
+        so callers can use the raw value as a sleep duration."""
+        from datetime import datetime, timedelta, timezone
+        past = datetime.now(timezone.utc) - timedelta(seconds=60)
+        iso = past.strftime('%Y-%m-%dT%H:%M:%SZ')
+        resp = self._mock_response(200, {'data': {'cooldown_until': iso}})
+        monkeypatch.setattr('utils.blackhole.requests.get', lambda *a, **kw: resp)
+        assert _check_torbox_cooldown('tb-key') == 0.0
+
+    def test_network_failure_degrades_to_zero(self, monkeypatch):
+        """A network hiccup on /user/me must NOT wedge the add path —
+        treat unknown cooldown state as 'no cooldown' (caller will
+        decide based on the original error response)."""
+        def _boom(*a, **kw):
+            raise OSError('connection refused')
+        monkeypatch.setattr('utils.blackhole.requests.get', _boom)
+        assert _check_torbox_cooldown('tb-key') == 0.0
+
+    def test_non_200_response_returns_zero(self, monkeypatch):
+        """401/500/etc. → treat as unknown → 0.0."""
+        resp = self._mock_response(401, {})
+        monkeypatch.setattr('utils.blackhole.requests.get', lambda *a, **kw: resp)
+        assert _check_torbox_cooldown('tb-key') == 0.0
+
+    def test_missing_api_key_returns_zero_without_network(self, monkeypatch):
+        """Empty api_key must not hit /user/me — silently return 0."""
+        calls = []
+        monkeypatch.setattr('utils.blackhole.requests.get',
+                            lambda *a, **kw: calls.append(a) or None)
+        assert _check_torbox_cooldown('') == 0.0
+        assert _check_torbox_cooldown(None) == 0.0
+        assert calls == []
+
+    def test_cache_suppresses_repeat_calls(self, monkeypatch):
+        """Within the TTL the helper must NOT re-hit /user/me — a retry
+        storm of failed adds would otherwise hammer the cooldown probe."""
+        from datetime import datetime, timedelta, timezone
+        future = datetime.now(timezone.utc) + timedelta(seconds=300)
+        iso = future.strftime('%Y-%m-%dT%H:%M:%SZ')
+        resp = self._mock_response(200, {'data': {'cooldown_until': iso}})
+        call_count = {'n': 0}
+        def _get(*a, **kw):
+            call_count['n'] += 1
+            return resp
+        monkeypatch.setattr('utils.blackhole.requests.get', _get)
+        s1 = _check_torbox_cooldown('tb-key')
+        s2 = _check_torbox_cooldown('tb-key')
+        s3 = _check_torbox_cooldown('tb-key')
+        assert call_count['n'] == 1  # cache hit on second + third
+        assert s1 > 0 and s2 > 0 and s3 > 0
+        # Cached value decays with elapsed time so the caller sees a
+        # monotonically non-increasing snapshot, not a stale fixed number.
+        assert s2 <= s1 + 0.5  # allow tiny clock jitter
+        assert s3 <= s2 + 0.5
+
+    def test_cache_expires_after_ttl(self, monkeypatch):
+        """Past the TTL the helper re-fetches /user/me so a manually
+        lifted cooldown is picked up promptly."""
+        from datetime import datetime, timedelta, timezone
+        future = datetime.now(timezone.utc) + timedelta(seconds=300)
+        iso = future.strftime('%Y-%m-%dT%H:%M:%SZ')
+        resp = self._mock_response(200, {'data': {'cooldown_until': iso}})
+        call_count = {'n': 0}
+        def _get(*a, **kw):
+            call_count['n'] += 1
+            return resp
+        monkeypatch.setattr('utils.blackhole.requests.get', _get)
+        now = time.time()
+        _check_torbox_cooldown('tb-key', _now=now)
+        # Jump past the cache TTL — should refresh.
+        _check_torbox_cooldown('tb-key', _now=now + 999)
+        assert call_count['n'] == 2
+
+    def test_force_refresh_bypasses_fresh_cache(self, monkeypatch):
+        """The enforcement re-check must see a cooldown armed AFTER the
+        pass's advisory pre-check cached 0 — force_refresh re-queries even
+        within the TTL, so a just-armed cooldown isn't masked."""
+        from datetime import datetime, timedelta, timezone
+        # Pre-seed the cache as "no cooldown, just checked".
+        _tb_cooldown_cache['checked_at'] = time.time()
+        _tb_cooldown_cache['seconds_until'] = 0.0
+        future = datetime.now(timezone.utc) + timedelta(seconds=600)
+        iso = future.strftime('%Y-%m-%dT%H:%M:%SZ')
+        resp = self._mock_response(200, {'data': {'cooldown_until': iso}})
+        calls = {'n': 0}
+        def _get(*a, **kw):
+            calls['n'] += 1
+            return resp
+        monkeypatch.setattr('utils.blackhole.requests.get', _get)
+        # A normal read would return the cached 0; force_refresh re-queries.
+        assert _check_torbox_cooldown('tb-key') == 0.0
+        assert calls['n'] == 0
+        seconds = _check_torbox_cooldown('tb-key', force_refresh=True)
+        assert 595 <= seconds <= 605
+        assert calls['n'] == 1
+
+
+class TestCoalescedRootRefresh:
+    """``_coalesced_root_refresh`` collapses the N-way root-relist burst a
+    landing season pack would otherwise produce (one full-root PROPFIND per
+    episode monitor) into a single re-list per ``_ROOT_REFRESH_COALESCE_S``
+    window — without it the burst trips TorBox's WebDAV listing rate-limit.
+    """
+
+    def setup_method(self):
+        import utils.blackhole as bh
+        bh._root_refresh_ts = 0.0
+
+    def teardown_method(self):
+        import utils.blackhole as bh
+        bh._root_refresh_ts = 0.0
+
+    def _count_refreshes(self, monkeypatch):
+        calls = {'n': 0, 'dirs': []}
+
+        def _fake_refresh_dir(d='', recursive=False):
+            calls['n'] += 1
+            calls['dirs'].append(d)
+        monkeypatch.setattr('utils.rclone_rc.refresh_dir', _fake_refresh_dir)
+        return calls
+
+    def test_first_call_fires_refresh(self, monkeypatch):
+        calls = self._count_refreshes(monkeypatch)
+        assert _coalesced_root_refresh(_now=1000.0) is True
+        assert calls['n'] == 1
+        assert calls['dirs'] == ['']
+
+    def test_burst_within_window_collapses_to_one(self, monkeypatch):
+        """A season pack's N monitors all reaching Phase 2 in the same
+        second must trigger exactly one re-list, not N."""
+        calls = self._count_refreshes(monkeypatch)
+        results = [_coalesced_root_refresh(_now=2000.0 + i * 0.01)
+                   for i in range(8)]
+        assert results[0] is True
+        assert all(r is False for r in results[1:])
+        assert calls['n'] == 1
+
+    def test_call_after_window_fires_again(self, monkeypatch):
+        calls = self._count_refreshes(monkeypatch)
+        assert _coalesced_root_refresh(_now=3000.0) is True
+        # Just past the coalesce window — a genuinely later monitor refreshes.
+        later = 3000.0 + _ROOT_REFRESH_COALESCE_S + 0.01
+        assert _coalesced_root_refresh(_now=later) is True
+        assert calls['n'] == 2
+
+    def test_real_threads_collapse_to_one(self, monkeypatch):
+        """The actual motivation: N real monitor threads hitting the unseamed
+        path concurrently must fire exactly one refresh — this exercises the
+        lock, not the ``_now`` simulation."""
+        import threading
+        calls = self._count_refreshes(monkeypatch)
+        barrier = threading.Barrier(8)
+
+        def _worker():
+            barrier.wait()  # release all threads as simultaneously as possible
+            _coalesced_root_refresh()
+        threads = [threading.Thread(target=_worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert calls['n'] == 1
+
+    def test_refresh_failure_is_swallowed_but_claims_window(self, monkeypatch):
+        """A failed refresh must not raise, and must still claim the window
+        so a retry storm can't bypass the coalesce guard."""
+        import utils.blackhole as bh
+        def _boom(d='', recursive=False):
+            raise RuntimeError('rc down')
+        monkeypatch.setattr('utils.rclone_rc.refresh_dir', _boom)
+        assert _coalesced_root_refresh(_now=4000.0) is True
+        # The window is claimed (timestamp advanced) even though refresh raised.
+        assert bh._root_refresh_ts == 4000.0
+        assert _coalesced_root_refresh(_now=4000.5) is False
+
+
+class TestTorboxAddCooldownGate:
+    """``_add_to_torbox`` must convert a TB cooldown-shape failure
+    (HTTP 400 ``DOWNLOAD_SERVER_ERROR`` while /user/me reports an
+    active cooldown) into a rate-limit window so subsequent adds
+    block on ``_check_rate_limit('torbox')`` rather than wasting an
+    API call each.  Plain non-cooldown failures must still surface as
+    a generic error without setting a window.
+    """
+
+    def setup_method(self):
+        _rate_limit_until.clear()
+        _tb_cooldown_cache['checked_at'] = 0.0
+        _tb_cooldown_cache['seconds_until'] = 0.0
+
+    def teardown_method(self):
+        _rate_limit_until.clear()
+        _tb_cooldown_cache['checked_at'] = 0.0
+        _tb_cooldown_cache['seconds_until'] = 0.0
+
+    def _make_watcher(self, tmp_dir, monkeypatch):
+        monkeypatch.setattr('utils.blackhole.os.path.exists', lambda *_a, **_k: True)
+        return BlackholeWatcher(
+            watch_dir=tmp_dir, debrid_api_key='tb-key',
+            debrid_service='torbox', completed_dir=tmp_dir,
+        )
+
+    def _magnet_path(self, tmp_dir):
+        path = os.path.join(tmp_dir, 'test.magnet')
+        with open(path, 'w') as f:
+            f.write('magnet:?xt=urn:btih:' + ('a' * 40))
+        return path
+
+    def test_cooldown_failure_marks_rate_limit_window(self, tmp_dir, monkeypatch):
+        """A 400 ``DOWNLOAD_SERVER_ERROR`` while cooldown_until is set
+        must set the TB rate-limit window so the *next* add blocks
+        instead of hitting createtorrent again."""
+        from unittest.mock import MagicMock
+        from datetime import datetime, timedelta, timezone
+
+        watcher = self._make_watcher(tmp_dir, monkeypatch)
+        path = self._magnet_path(tmp_dir)
+
+        # First call: createtorrent returns 400 cooldown error.
+        post_resp = MagicMock()
+        post_resp.status_code = 400
+        post_resp.text = '{"success":false,"error":"DOWNLOAD_SERVER_ERROR"}'
+        post_resp.json.return_value = {'success': False, 'error': 'DOWNLOAD_SERVER_ERROR'}
+        # /user/me returns an active cooldown.
+        future = datetime.now(timezone.utc) + timedelta(seconds=300)
+        iso = future.strftime('%Y-%m-%dT%H:%M:%SZ')
+        get_resp = MagicMock()
+        get_resp.status_code = 200
+        get_resp.json.return_value = {'data': {'cooldown_until': iso}}
+
+        monkeypatch.setattr('utils.blackhole.tracked_request',
+                            lambda *a, **kw: post_resp)
+        monkeypatch.setattr('utils.blackhole.requests.get',
+                            lambda *a, **kw: get_resp)
+
+        ok, msg = watcher._add_to_torbox(path)
+        assert ok is False
+        assert 'cooldown' in msg.lower()
+        # Window must be set so the next _check_rate_limit('torbox') blocks.
+        assert _rate_limit_until.get('torbox', 0) > time.time() + 250
+
+    def test_plain_failure_does_not_set_window(self, tmp_dir, monkeypatch):
+        """A non-cooldown error (e.g. 400 with no active cooldown) must
+        propagate without arming a rate-limit window — otherwise a
+        single bad torrent would gate the whole TB pipeline for the
+        full window duration."""
+        from unittest.mock import MagicMock
+
+        watcher = self._make_watcher(tmp_dir, monkeypatch)
+        path = self._magnet_path(tmp_dir)
+
+        post_resp = MagicMock()
+        post_resp.status_code = 400
+        post_resp.text = '{"success":false,"error":"INVALID_MAGNET"}'
+        post_resp.json.return_value = {'success': False, 'error': 'INVALID_MAGNET'}
+        get_resp = MagicMock()
+        get_resp.status_code = 200
+        # No cooldown_until → helper returns 0 → no window arming.
+        get_resp.json.return_value = {'data': {'cooldown_until': None}}
+
+        monkeypatch.setattr('utils.blackhole.tracked_request',
+                            lambda *a, **kw: post_resp)
+        monkeypatch.setattr('utils.blackhole.requests.get',
+                            lambda *a, **kw: get_resp)
+
+        ok, msg = watcher._add_to_torbox(path)
+        assert ok is False
+        assert 'cooldown' not in msg.lower()
+        assert _rate_limit_until.get('torbox', 0) <= time.time()
+
+
 class TestSymlinkConstants:
 
     def test_media_extensions_include_common_video(self):
@@ -790,6 +1188,136 @@ class TestFindOnMount:
         assert path is None
         assert matched is None
 
+    def test_torbox_flat_mount(self, tmp_dir):
+        """TorBox's WebDAV mount has no category subdirs — search the bare root."""
+        # TB mount layout: /<rclone_mount>/torbox/<release_name>
+        tb_mount = os.path.join(tmp_dir, 'torbox')
+        release_dir = os.path.join(tb_mount, 'Show.S01E01.1080p-FLUX')
+        os.makedirs(release_dir)
+
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox', rclone_mount=tmp_dir)
+        path, category, matched = watcher._find_on_mount('Show.S01E01.1080p-FLUX', debrid='torbox')
+        assert path == release_dir
+        assert category == ''  # Flat layout — no category subdivision
+        assert matched == 'Show.S01E01.1080p-FLUX'
+
+    def test_torbox_strips_indexer_prefix(self, tmp_dir):
+        """TB API ``data.name`` sometimes has a leading ``[indexer.to] ``
+        prefix the actual mount folder doesn't — strip it for the lookup.
+
+        Regression: live grab of Landman S02E01 — TB API returned
+        ``[bitsearch.to] www.UIndex.org    -    Landman ...`` but mount
+        folder was ``www.UIndex.org    -    Landman ...``.
+        """
+        tb_mount = os.path.join(tmp_dir, 'torbox')
+        # Mount folder has NO indexer prefix
+        release_dir = os.path.join(
+            tb_mount,
+            'www.UIndex.org    -    Landman S02E01 Death and a Sunset 1080p AMZN WEB-DL DDP5 1 H 264-FLUX'
+        )
+        os.makedirs(release_dir)
+
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox', rclone_mount=tmp_dir)
+        # API returns name WITH the leading bracket prefix
+        api_name = '[bitsearch.to] www.UIndex.org    -    Landman S02E01 Death and a Sunset 1080p AMZN WEB-DL DDP5 1 H 264-FLUX'
+        path, category, matched = watcher._find_on_mount(api_name, debrid='torbox')
+        assert path == release_dir
+        assert category == ''
+        # matched is the actual folder name on the mount (without prefix)
+        assert matched == 'www.UIndex.org    -    Landman S02E01 Death and a Sunset 1080p AMZN WEB-DL DDP5 1 H 264-FLUX'
+
+    def test_torbox_fuzzy_listdir_fallback(self, tmp_dir):
+        """When exact + leading-bracket-strip both miss, walk the mount
+        and fuzzy-norm-match against folder names. Handles the inverse
+        case: mount has a leading bracket the API name dropped.
+        """
+        tb_mount = os.path.join(tmp_dir, 'torbox')
+        # Mount has leading [indexer] that API name dropped
+        release_dir = os.path.join(
+            tb_mount,
+            '[scraper.to] My Show S01E01 1080p WEB-DL-FLUX [TGx]'
+        )
+        os.makedirs(release_dir)
+
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox', rclone_mount=tmp_dir)
+        api_name = 'My Show S01E01 1080p WEB-DL-FLUX [TGx]'
+        path, category, matched = watcher._find_on_mount(api_name, debrid='torbox')
+        assert path == release_dir
+        assert category == ''
+        # matched is the folder name that exists on the mount
+        assert matched == '[scraper.to] My Show S01E01 1080p WEB-DL-FLUX [TGx]'
+
+    def test_torbox_not_found_when_no_match(self, tmp_dir):
+        """No match anywhere on TB mount returns (None, None, None)."""
+        tb_mount = os.path.join(tmp_dir, 'torbox')
+        os.makedirs(tb_mount)
+        os.makedirs(os.path.join(tb_mount, 'Other.Release.S01E01-NTb'))
+
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox', rclone_mount=tmp_dir)
+        path, category, matched = watcher._find_on_mount('Something.Else.S05E10-XYZ', debrid='torbox')
+        assert path is None
+        assert category is None
+        assert matched is None
+
+    def test_torbox_fuzzy_match_refuses_ambiguous(self, tmp_dir):
+        """If multiple TB mount folders fuzzy-match, refuse to guess."""
+        tb_mount = os.path.join(tmp_dir, 'torbox')
+        # Two folders that norm to the same fuzzy key after leading-bracket strip
+        os.makedirs(os.path.join(tb_mount, '[a.to] Show S01E01 GROUP'))
+        os.makedirs(os.path.join(tb_mount, '[b.to] Show S01E01 GROUP'))
+
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox', rclone_mount=tmp_dir)
+        path, category, matched = watcher._find_on_mount('Show S01E01 GROUP', debrid='torbox')
+        # Exact-path probes miss (both candidates have brackets); fuzzy
+        # finds two matches → refuses.
+        assert path is None
+        assert category is None
+        assert matched is None
+
+    @pytest.mark.parametrize('hostile', [
+        '/etc',
+        '/etc/passwd',
+        '../../etc',
+        '..',
+        '.',
+        'foo/../bar',
+        'a/b',
+        '',
+        'name\x00with\x00nul',
+    ])
+    def test_torbox_rejects_path_traversal_candidates(self, tmp_dir, hostile):
+        """Adversarial release-name candidates must NEVER escape mount_path.
+
+        ``os.path.join('/mnt/tb', '/etc')`` collapses to ``'/etc'`` because
+        the absolute right-side argument resets the join — a TB ``data.name``
+        field that an uploader chose as ``/etc`` would otherwise make
+        ``os.path.isdir`` return True for the real ``/etc`` and walk it as
+        the symlink-source tree. ``..`` segments are equally dangerous.
+        Regression guard for the CRITICAL bug-hunter finding.
+        """
+        tb_mount = os.path.join(tmp_dir, 'torbox')
+        os.makedirs(tb_mount)
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox', rclone_mount=tmp_dir)
+        path, category, matched = watcher._find_on_mount(hostile, debrid='torbox')
+        assert path is None
+        assert category is None
+        assert matched is None
+
+    @pytest.mark.parametrize('hostile', [
+        '/etc',
+        '../../etc',
+        '..',
+        'a/b',
+    ])
+    def test_rd_mount_rejects_path_traversal_candidates(self, tmp_dir, hostile):
+        """Same path-traversal guard applies to the Zurg (RD/AD) branch."""
+        os.makedirs(os.path.join(tmp_dir, 'shows'))
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid', rclone_mount=tmp_dir)
+        path, category, matched = watcher._find_on_mount(hostile)
+        assert path is None
+        assert category is None
+        assert matched is None
+
 
 class TestCreateSymlinks:
 
@@ -922,6 +1450,185 @@ class TestCreateSymlinks:
         count = watcher._create_symlinks(release, 'movies', release_dir)
         # Should not create symlinks outside the completed release dir
         assert not os.path.exists(os.path.join(completed, 'escape'))
+
+
+class TestIsObfuscatedName:
+
+    def test_hex_folder_with_tracker_tag_is_obfuscated(self):
+        from utils.blackhole import is_obfuscated_name
+        assert is_obfuscated_name('1f9da83faaf847949e043d0dae9684aa[eztv.re]')
+        assert is_obfuscated_name('050bd19ee9934249a2ce4c9762c0d710[EZTVx.to]')
+
+    def test_hex_media_file_is_obfuscated(self):
+        from utils.blackhole import is_obfuscated_name
+        assert is_obfuscated_name('1f9da83faaf847949e043d0dae9684aa[eztv.re].mkv')
+
+    def test_hex_magnet_file_is_obfuscated(self):
+        from utils.blackhole import is_obfuscated_name
+        assert is_obfuscated_name('06bc5039b73b477f83c1e6750991d607[EZTVx.to].magnet')
+
+    def test_bare_hex_is_obfuscated(self):
+        from utils.blackhole import is_obfuscated_name
+        assert is_obfuscated_name('050bd19ee9934249a2ce4c9762c0d710')
+
+    def test_real_release_is_not_obfuscated(self):
+        from utils.blackhole import is_obfuscated_name
+        assert not is_obfuscated_name(
+            'What We Do in the Shadows S05E03 1080p DSNP WEB-DL DDP5 1 H 264-NTb')
+        assert not is_obfuscated_name('Movie.2024.1080p.BluRay.x264-GROUP')
+        assert not is_obfuscated_name('My.Show.S01E01.mkv')
+
+    def test_short_hex_is_not_obfuscated(self):
+        # Below the 16-char floor — could be a legit short title fragment.
+        from utils.blackhole import is_obfuscated_name
+        assert not is_obfuscated_name('deadbeef')
+
+    def test_empty_and_none_are_not_obfuscated(self):
+        from utils.blackhole import is_obfuscated_name
+        assert not is_obfuscated_name('')
+        assert not is_obfuscated_name(None)
+
+
+class TestCreateSymlinksObfuscated:
+
+    def _make_watcher(self, tmp_dir):
+        completed = os.path.join(tmp_dir, 'completed')
+        mount = os.path.join(tmp_dir, 'mount')
+        os.makedirs(completed)
+        os.makedirs(mount)
+        watcher = BlackholeWatcher(
+            os.path.join(tmp_dir, 'watch'), 'key', 'realdebrid',
+            symlink_enabled=True,
+            completed_dir=completed,
+            rclone_mount=mount,
+            symlink_target_base='/mnt/debrid',
+        )
+        return watcher, completed, mount
+
+    def test_obfuscated_payload_uses_display_name(self, tmp_dir):
+        """Hex mount folder + single hex media file: completed dir and link
+        basename take the display name; target keeps the hex mount name."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        matched = '1f9da83faaf847949e043d0dae9684aa[eztv.re]'
+        release_dir = os.path.join(mount, matched)
+        os.makedirs(release_dir)
+        with open(os.path.join(release_dir, matched + '.mkv'), 'w') as f:
+            f.write('data')
+
+        display = 'What We Do in the Shadows S05E03 1080p DSNP WEB-DL DDP5 1 H 264-NTb'
+        count = watcher._create_symlinks(matched, '', release_dir, display_name=display)
+        assert count == 1
+
+        symlink = os.path.join(completed, display, display + '.mkv')
+        assert os.path.islink(symlink)
+        # Target still points at the real (hex) mount folder + file
+        target = os.readlink(symlink)
+        assert target == f'/mnt/debrid/{matched}/{matched}.mkv'
+
+    def test_non_obfuscated_ignores_display_name(self, tmp_dir):
+        """A normal release name must keep its own folder/file names even
+        when a display_name is passed."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        release = 'My.Show.S01E01.1080p-GROUP'
+        release_dir = os.path.join(mount, release)
+        os.makedirs(release_dir)
+        with open(os.path.join(release_dir, 'episode.mkv'), 'w') as f:
+            f.write('data')
+
+        count = watcher._create_symlinks(release, 'shows', release_dir,
+                                         display_name='Something Else')
+        assert count == 1
+        assert os.path.islink(os.path.join(completed, release, 'episode.mkv'))
+
+    def test_obfuscated_multi_file_keeps_original_basenames(self, tmp_dir):
+        """When the payload has >1 media file we can't safely rename any single
+        one to the release title — completed dir is renamed, files are not."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        matched = 'abcdef0123456789abcdef0123456789[eztv.re]'
+        release_dir = os.path.join(mount, matched)
+        os.makedirs(release_dir)
+        for name in ['aaaa1111bbbb2222aaaa1111bbbb2222.mkv',
+                     'cccc3333dddd4444cccc3333dddd4444.mkv']:
+            with open(os.path.join(release_dir, name), 'w') as f:
+                f.write('data')
+
+        display = 'Some Show S01 1080p WEB-DL-GRP'
+        count = watcher._create_symlinks(matched, '', release_dir, display_name=display)
+        assert count == 2
+        # Dir renamed to display; files keep their (hex) basenames
+        assert os.path.isdir(os.path.join(completed, display))
+        assert os.path.islink(os.path.join(
+            completed, display, 'aaaa1111bbbb2222aaaa1111bbbb2222.mkv'))
+
+    def test_obfuscated_multiseason_uses_display_name_for_season_dirs(self, tmp_dir):
+        """Obfuscated mount folder + season-parseable files + multi-season
+        display name: per-season completed dirs must be built from the
+        display name (so Sonarr parses them), targets from the hex folder."""
+        watcher, completed, mount = self._make_watcher(tmp_dir)
+
+        matched = 'abcdef0123456789abcdef0123456789[eztv.re]'
+        release_dir = os.path.join(mount, matched)
+        os.makedirs(release_dir)
+        # Real season/episode names inside a hex folder (partial obfuscation).
+        for name in ['Show.S01E01.mkv', 'Show.S02E01.mkv']:
+            with open(os.path.join(release_dir, name), 'w') as f:
+                f.write('data')
+
+        display = 'Show.S01-S02.1080p.WEB-DL-GRP'
+        count = watcher._create_symlinks(matched, '', release_dir, display_name=display)
+        assert count == 2
+        # Season dirs derive from the display name, not the hex folder.
+        s1 = os.path.join(completed, 'Show.S01.1080p.WEB-DL-GRP', 'Show.S01E01.mkv')
+        s2 = os.path.join(completed, 'Show.S02.1080p.WEB-DL-GRP', 'Show.S02E01.mkv')
+        assert os.path.islink(s1)
+        assert os.path.islink(s2)
+        # Target still points at the real (hex) mount folder.
+        assert os.readlink(s1) == f'/mnt/debrid/{matched}/Show.S01E01.mkv'
+
+
+class TestAuditReleaseCompleteness:
+
+    def _make_watcher(self, tmp_dir):
+        completed = os.path.join(tmp_dir, 'completed')
+        mount = os.path.join(tmp_dir, 'mount')
+        os.makedirs(completed)
+        os.makedirs(mount)
+        return BlackholeWatcher(
+            os.path.join(tmp_dir, 'watch'), 'key', 'realdebrid',
+            symlink_enabled=True,
+            completed_dir=completed,
+            rclone_mount=mount,
+            symlink_target_base='/mnt/debrid',
+        )
+
+    def test_obfuscated_payload_skips_audit(self, tmp_dir, monkeypatch):
+        """An obfuscated payload's hex file names carry no episode info, so a
+        parse-derived 'missing' must NOT trigger blocklist/history/re-search."""
+        import utils.blackhole as bh
+        watcher = self._make_watcher(tmp_dir)
+
+        matched = '1f9da83faaf847949e043d0dae9684aa[eztv.re]'
+        mount_path = os.path.join(tmp_dir, 'mount', matched)
+        os.makedirs(mount_path)
+        with open(os.path.join(mount_path, matched + '.mkv'), 'w') as f:
+            f.write('data')
+
+        events = []
+        fake_history = type('H', (), {'log_event': lambda self, *a, **k: events.append((a, k))})()
+        blocked = []
+        fake_blocklist = type('B', (), {'add': lambda self, *a, **k: blocked.append((a, k))})()
+        monkeypatch.setattr(bh, '_history', fake_history, raising=False)
+        monkeypatch.setattr(bh, '_blocklist', fake_blocklist, raising=False)
+
+        # filename is the REAL release name (claims S05E03)
+        filename = 'What.We.Do.in.the.Shadows.S05E03.1080p.mkv'
+        watcher._audit_release_completeness(filename, matched, mount_path, {})
+
+        assert events == []
+        assert blocked == []
 
 
 class TestPendingMonitors:
@@ -1126,9 +1833,31 @@ class TestTorrentStatusHelpers:
         assert watcher._is_torrent_ready('Downloading') is False
 
     def test_is_torrent_ready_torbox(self):
+        """TB returns ``cached`` for instant cache hits (the dominant
+        case under plan 39 cache_aware routing — every TB-routed grab
+        is cache-positive at probe time), ``completed`` for torrents
+        that went through a full BT cycle, and ``uploading`` for the
+        post-download seeding phase.  All three indicate the file is
+        on TB storage and reachable via WebDAV, so the blackhole
+        should stop polling and proceed to symlink creation.
+
+        Pre-fix this checked only ``status == 'completed'`` — every
+        cached TB grab timed out at ``mount_poll_timeout`` (default
+        300s) and got auto-blocklisted as 'Uncached on debrid (timed
+        out)', even though the file was ready immediately."""
         watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        # Ready states — all three must be accepted.
         assert watcher._is_torrent_ready('completed') is True
+        assert watcher._is_torrent_ready('cached') is True
+        assert watcher._is_torrent_ready('uploading') is True
+        # Not-ready states — file isn't on TB storage yet.
         assert watcher._is_torrent_ready('downloading') is False
+        assert watcher._is_torrent_ready('queued') is False
+        assert watcher._is_torrent_ready('metadl') is False
+        assert watcher._is_torrent_ready('paused') is False
+        # Defensive: unknown/garbage strings don't accidentally pass.
+        assert watcher._is_torrent_ready('') is False
+        assert watcher._is_torrent_ready('something_new') is False
 
     def test_is_terminal_error_realdebrid(self):
         watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid')
@@ -1248,6 +1977,76 @@ class TestParseReleaseName:
         assert is_tv is True
 
 
+class TestDirHasVideo:
+    """Unit tests for the resolving-video helpers underpinning local dedup."""
+
+    def test_is_resolving_video_real_file(self, tmp_dir):
+        p = os.path.join(tmp_dir, 'ep.mkv')
+        with open(p, 'w') as f:
+            f.write('data')
+        assert _is_resolving_video(p) is True
+
+    def test_is_resolving_video_subtitle_rejected(self, tmp_dir):
+        p = os.path.join(tmp_dir, 'ep.srt')
+        with open(p, 'w') as f:
+            f.write('sub')
+        assert _is_resolving_video(p) is False
+
+    def test_is_resolving_video_broken_symlink_rejected(self, tmp_dir):
+        link = os.path.join(tmp_dir, 'ep.mkv')
+        os.symlink(os.path.join(tmp_dir, 'gone.mkv'), link)
+        assert _is_resolving_video(link) is False
+
+    def test_dir_has_video_flat_true(self, tmp_dir):
+        with open(os.path.join(tmp_dir, 'movie.mp4'), 'w') as f:
+            f.write('data')
+        assert _dir_has_video(tmp_dir) is True
+
+    def test_dir_has_video_subtitle_only_false(self, tmp_dir):
+        with open(os.path.join(tmp_dir, 'movie.srt'), 'w') as f:
+            f.write('sub')
+        assert _dir_has_video(tmp_dir) is False
+
+    def test_dir_has_video_nonrecursive_ignores_subdir(self, tmp_dir):
+        sub = os.path.join(tmp_dir, 'Season 01')
+        os.makedirs(sub)
+        with open(os.path.join(sub, 'ep.mkv'), 'w') as f:
+            f.write('data')
+        assert _dir_has_video(tmp_dir, recursive=False) is False
+
+    def test_dir_has_video_recursive_finds_subdir(self, tmp_dir):
+        sub = os.path.join(tmp_dir, 'Season 01')
+        os.makedirs(sub)
+        with open(os.path.join(sub, 'ep.mkv'), 'w') as f:
+            f.write('data')
+        assert _dir_has_video(tmp_dir, recursive=True) is True
+
+    def test_dir_has_video_recursive_subtitle_only_false(self, tmp_dir):
+        sub = os.path.join(tmp_dir, 'Season 01')
+        os.makedirs(sub)
+        with open(os.path.join(sub, 'ep.srt'), 'w') as f:
+            f.write('sub')
+        assert _dir_has_video(tmp_dir, recursive=True) is False
+
+    def test_dir_has_video_recursive_depth_bounded(self, tmp_dir):
+        """Recursion is one level only — video two levels deep is NOT found."""
+        deep = os.path.join(tmp_dir, 'Season 01', 'extras')
+        os.makedirs(deep)
+        with open(os.path.join(deep, 'ep.mkv'), 'w') as f:
+            f.write('data')
+        assert _dir_has_video(tmp_dir, recursive=True) is False
+
+    def test_dir_has_video_missing_path_false(self, tmp_dir):
+        assert _dir_has_video(os.path.join(tmp_dir, 'nope')) is False
+
+    def test_local_episodes_skips_subtitles(self, tmp_dir):
+        with open(os.path.join(tmp_dir, 'Show.S01E01.mkv'), 'w') as f:
+            f.write('data')
+        with open(os.path.join(tmp_dir, 'Show.S01E02.srt'), 'w') as f:
+            f.write('sub')
+        assert _local_episodes(tmp_dir) == {1}
+
+
 class TestCheckLocalLibrary:
 
     def _make_watcher(self, tmp_dir):
@@ -1309,6 +2108,51 @@ class TestCheckLocalLibrary:
         watcher, _, _ = self._make_watcher(tmp_dir)
         assert watcher._check_local_library('Gattaca.1997.1080p.BluRay.torrent') is False
 
+    def test_skips_punctuation_movie(self, tmp_dir):
+        """Apostrophe in the on-disk folder must not defeat dedup.
+
+        parse_release_name strips punctuation from the release side
+        (dots→spaces), but arr folders keep it — a strict compare misses
+        "Whats Eating Gilbert Grape" vs "What's Eating Gilbert Grape (1993)"
+        and lets a duplicate import through.
+        """
+        watcher, _, movies_dir = self._make_watcher(tmp_dir)
+        movie_dir = os.path.join(movies_dir, "What's Eating Gilbert Grape (1993)")
+        os.makedirs(movie_dir)
+        with open(os.path.join(movie_dir, 'movie.mkv'), 'w') as f:
+            f.write('data')
+
+        assert watcher._check_local_library(
+            'Whats.Eating.Gilbert.Grape.1993.1080p.BluRay.torrent') is True
+
+    def test_skips_punctuation_tv_episode(self, tmp_dir):
+        """Same punctuation tolerance on the TV side."""
+        watcher, tv_dir, _ = self._make_watcher(tmp_dir)
+        season_dir = os.path.join(tv_dir, "Schitt's Creek (2015)", 'Season 01')
+        os.makedirs(season_dir)
+        with open(os.path.join(season_dir, "Schitt's Creek - S01E01.mkv"), 'w') as f:
+            f.write('data')
+
+        assert watcher._check_local_library('Schitts.Creek.S01E01.1080p.WEB.torrent') is True
+
+    def test_dedup_empty_fuzzy_forms_never_match(self, tmp_dir):
+        """Two distinct non-ASCII titles that both collapse to '' under
+        transliteration must not fuzzy-match each other; identical names
+        still match via the strict path."""
+        watcher, _, _ = self._make_watcher(tmp_dir)
+        assert watcher._dedup_names_match('妖猫伝 (2017)', '悪人', '') is False
+        assert watcher._dedup_names_match('悪人 (2010)', '悪人', '') is True
+
+    def test_fuzzy_does_not_conflate_distinct_titles(self, tmp_dir):
+        """Fuzzy fallback must not match a genuinely different movie."""
+        watcher, _, movies_dir = self._make_watcher(tmp_dir)
+        movie_dir = os.path.join(movies_dir, 'Gattaca (1997)')
+        os.makedirs(movie_dir)
+        with open(os.path.join(movie_dir, 'movie.mkv'), 'w') as f:
+            f.write('data')
+
+        assert watcher._check_local_library('Attack.1997.1080p.BluRay.torrent') is False
+
     def test_disabled_by_default(self, tmp_dir):
         """Should always return False when dedup is disabled."""
         watcher = BlackholeWatcher(os.path.join(tmp_dir, 'watch'), 'key', 'realdebrid')
@@ -1342,6 +2186,64 @@ class TestCheckLocalLibrary:
         # Empty season dir
 
         assert watcher._check_local_library('Fargo.S05E01.1080p.WEB.torrent') is False
+
+    def test_subtitle_only_season_pack_not_matched(self, tmp_dir):
+        """A season folder holding only subtitles must NOT block a season pack.
+
+        Regression: an orphan ``.srt`` season made every Sonarr grab skip with
+        "Season N exists locally", leaving the show permanently missing.
+        """
+        watcher, tv_dir, _ = self._make_watcher(tmp_dir)
+        season_dir = os.path.join(tv_dir, 'Adolescence', 'Season 01')
+        os.makedirs(season_dir)
+        for ep in range(1, 5):
+            with open(os.path.join(season_dir, f'Adolescence.S01E{ep:02d}.srt'), 'w') as f:
+                f.write('1\n00:00:00,000 --> 00:00:01,000\nhi\n')
+
+        # Season pack (no specific episodes) — subtitles alone must not count.
+        assert watcher._check_local_library('Adolescence.S01.1080p.NF.WEB-DL.magnet') is False
+
+    def test_subtitle_only_does_not_satisfy_episode(self, tmp_dir):
+        """A stray ``.srt`` for an episode must not mark that episode present."""
+        watcher, tv_dir, _ = self._make_watcher(tmp_dir)
+        season_dir = os.path.join(tv_dir, 'Fargo (2014)', 'Season 05')
+        os.makedirs(season_dir)
+        with open(os.path.join(season_dir, 'Fargo.S05E01.srt'), 'w') as f:
+            f.write('sub')
+
+        assert watcher._check_local_library('Fargo.S05E01.1080p.WEB.torrent') is False
+
+    def test_subtitle_only_movie_not_matched(self, tmp_dir):
+        """A movie folder with only a subtitle must not block the grab."""
+        watcher, _, movies_dir = self._make_watcher(tmp_dir)
+        movie_dir = os.path.join(movies_dir, 'Gattaca (1997)')
+        os.makedirs(movie_dir)
+        with open(os.path.join(movie_dir, 'Gattaca.srt'), 'w') as f:
+            f.write('sub')
+
+        assert watcher._check_local_library('Gattaca.1997.1080p.BluRay.torrent') is False
+
+    def test_broken_symlink_video_not_matched(self, tmp_dir):
+        """A dangling video symlink (dead debrid target) must not count as local."""
+        watcher, tv_dir, _ = self._make_watcher(tmp_dir)
+        season_dir = os.path.join(tv_dir, 'Fargo (2014)', 'Season 05')
+        os.makedirs(season_dir)
+        link = os.path.join(season_dir, 'Fargo (2014) - S05E01.mkv')
+        os.symlink(os.path.join(tmp_dir, 'does-not-exist.mkv'), link)
+
+        assert watcher._check_local_library('Fargo.S05E01.1080p.WEB.torrent') is False
+
+    def test_mixed_video_and_subtitle_still_matches(self, tmp_dir):
+        """A real video alongside subtitles must still register as present."""
+        watcher, tv_dir, _ = self._make_watcher(tmp_dir)
+        season_dir = os.path.join(tv_dir, 'Fargo (2014)', 'Season 05')
+        os.makedirs(season_dir)
+        with open(os.path.join(season_dir, 'Fargo.S05E01.srt'), 'w') as f:
+            f.write('sub')
+        with open(os.path.join(season_dir, 'Fargo (2014) - S05E01.mkv'), 'w') as f:
+            f.write('data')
+
+        assert watcher._check_local_library('Fargo.S05E01.1080p.WEB.torrent') is True
 
 
 class TestCheckLocalLibraryPreferDebridBypass:
@@ -2900,7 +3802,9 @@ class TestPendingMonitorsWithLabel:
         captured = []
         monkeypatch.setattr(
             w, '_start_monitor',
-            lambda tid, fn, label=None: captured.append((tid, label)),
+            # **_ swallows the new `debrid` kwarg added in plan 39 phase 2
+            # — this test only cares about (tid, label) sanitisation.
+            lambda tid, fn, label=None, **_: captured.append((tid, label)),
         )
         w._resume_pending_monitors()
         by_id = dict(captured)
@@ -2924,7 +3828,8 @@ class TestPendingMonitorsWithLabel:
         captured = []
         monkeypatch.setattr(
             w, '_start_monitor',
-            lambda tid, fn, label=None: captured.append(tid),
+            # **_ swallows the new `debrid` kwarg added in plan 39 phase 2.
+            lambda tid, fn, label=None, **_: captured.append(tid),
         )
         w._resume_pending_monitors()  # must not raise
         assert captured == ['t_ok']
@@ -3173,3 +4078,1707 @@ class TestCleanupSymlinksLabeled:
         watcher._cleanup_symlinks()
         # Empty label dir must survive cleanup (the user created it for a reason)
         assert os.path.isdir(sonarr_dir)
+
+
+# ---------------------------------------------------------------------------
+# Plan 41 phase A — add-time filter-block cross-rescue
+# ---------------------------------------------------------------------------
+
+class TestAddTimeFilterBlockRescue:
+    """When RD returns infringing_file on a magnet add and TB is configured,
+    the same hash is routed to TB before the file is failed.  Data-loss
+    bug — regression here means popular Disney/HBO/Apple titles silently
+    vanish into /watch/.alt_pending/ instead of landing on TB.
+    """
+
+    _HASH = 'A' * 40  # canonical magnet info-hash
+    _MAGNET_CONTENT = f'magnet:?xt=urn:btih:{_HASH}&dn=Andor.S02E01'
+    _FILENAME = 'Andor.S02E01.1080p.DSNP.WEB-DL.DDP5.1.Atmos.H.264-FLUX.magnet'
+
+    def _make_watcher(self, tmp_dir, monkeypatch, with_tb=True):
+        """BlackholeWatcher with both RD and TB configured."""
+        watch_dir = os.path.join(tmp_dir, 'watch')
+        completed_dir = os.path.join(tmp_dir, 'completed')
+        os.makedirs(watch_dir)
+        os.makedirs(completed_dir)
+
+        monkeypatch.setenv('RD_API_KEY', 'rd-key')
+        if with_tb:
+            monkeypatch.setenv('TORBOX_API_KEY', 'tb-key')
+        else:
+            monkeypatch.delenv('TORBOX_API_KEY', raising=False)
+
+        watcher = BlackholeWatcher(
+            watch_dir, 'rd-key', 'realdebrid',
+            symlink_enabled=True,
+            completed_dir=completed_dir,
+            debrid_api_keys={'realdebrid': 'rd-key', 'torbox': 'tb-key'} if with_tb else {'realdebrid': 'rd-key'},
+        )
+        return watcher, watch_dir
+
+    def _drop_magnet(self, watch_dir):
+        path = os.path.join(watch_dir, self._FILENAME)
+        with open(path, 'w') as f:
+            f.write(self._MAGNET_CONTENT)
+        os.utime(path, (time.time() - 10, time.time() - 10))
+        return path
+
+    class _FakeTbClient:
+        """Stub TB client matching the surface attempt_add_rescue uses."""
+
+        def __init__(self, configured=True):
+            self.configured = configured
+            self.delete_calls = []
+
+        def add_magnet(self, h):
+            # Should NOT be called — blackhole uses _add_to_torbox instead.
+            raise AssertionError('add_magnet should not be called from blackhole rescue')
+
+        def torrent_status(self, tid):
+            return 'cached'
+
+        def delete_torrent(self, tid):
+            self.delete_calls.append(tid)
+            return True
+
+    def test_rescues_to_tb_on_rd_filter_block(self, tmp_dir, monkeypatch):
+        watcher, watch_dir = self._make_watcher(tmp_dir, monkeypatch)
+        magnet_path = self._drop_magnet(watch_dir)
+
+        # RD says filter-block.  TB cache says yes (probed via search.check_debrid_cache).
+        # TB add succeeds.
+        rd_calls = []
+
+        def fake_rd_add(file_path, api_key=None):
+            rd_calls.append(file_path)
+            return False, '{"error":"infringing_file","error_code":35}'
+
+        tb_calls = []
+
+        def fake_tb_add(file_path, api_key=None):
+            tb_calls.append(file_path)
+            return True, {'data': {'torrent_id': 'tb-123'}}
+
+        monkeypatch.setattr(watcher, '_add_to_realdebrid', fake_rd_add)
+        monkeypatch.setattr(watcher, '_add_to_torbox', fake_tb_add)
+
+        def fake_cache(hashes, service=None, api_key=None):
+            # Both providers report cached — but RD's filter still hits
+            # at the add stage (the cache check is informational, the add
+            # is where the filter actually fires).
+            return {h.lower(): True for h in hashes}
+
+        monkeypatch.setattr('utils.search.check_debrid_cache', fake_cache)
+        # Stub the existing-hashes dedup check to avoid hitting RD's
+        # /torrents endpoint during the route decision.
+        monkeypatch.setattr('utils.search._existing_hashes', lambda *a, **kw: set())
+
+        fake_tb_client = self._FakeTbClient()
+        monkeypatch.setattr(
+            'utils.debrid_client.get_debrid_client',
+            lambda service=None, api_key=None: (fake_tb_client, service),
+        )
+
+        # Force routing to RD as primary so the rescue direction is RD→TB
+        # even though the cache probe lies and says both are cached.
+        monkeypatch.setenv('BLACKHOLE_DEBRID_PRIMARY', 'realdebrid')
+
+        # Capture history events
+        history_events = []
+        import utils.history as history_mod
+        original_log = history_mod.log_event
+
+        def capture_log(*args, **kwargs):
+            history_events.append((args, kwargs))
+            return original_log(*args, **kwargs)
+
+        monkeypatch.setattr(history_mod, 'log_event', capture_log)
+
+        # Capture monitor starts
+        monitor_calls = []
+        monkeypatch.setattr(
+            watcher, '_start_monitor',
+            lambda tid, fn, label=None, debrid=None, **kw: monitor_calls.append((tid, fn, debrid)),
+        )
+
+        watcher._process_file(magnet_path)
+
+        # The watch-dir file should be gone (rescued — moved to staged
+        # path during rescue, then removed after success).
+        assert not os.path.exists(magnet_path), \
+            f"magnet should be removed after rescue, still at {magnet_path}"
+        # The unique staged path should also be cleaned up post-rescue.
+        staging_dir = os.path.join(watch_dir, '.alt_pending')
+        if os.path.exists(staging_dir):
+            staged_entries = [e for e in os.listdir(staging_dir) if e.startswith('.rescue-')]
+            assert staged_entries == [], \
+                f"staged rescue file should be removed after success, found: {staged_entries}"
+        # TB add was called once via _add_to_torbox.  Plan-41-phase-A
+        # rev-2 stages the file under .alt_pending/.rescue-<uuid8>-<name>
+        # BEFORE the rescue wait_ready loop to protect against Sonarr
+        # re-grab clobbering file_path during a 60s wait — so the TB
+        # add now reads from the staged path, not the original.
+        assert len(tb_calls) == 1, f"expected exactly one TB add call, got {tb_calls}"
+        assert os.path.basename(tb_calls[0]).startswith('.rescue-'), \
+            f"TB add should target the rescue-staged file; got {tb_calls[0]}"
+        assert os.path.basename(tb_calls[0]).endswith(self._FILENAME), \
+            f"staged filename should preserve original suffix; got {tb_calls[0]}"
+        # Monitor entry started on TB
+        assert len(monitor_calls) == 1
+        tid, fn, debrid = monitor_calls[0]
+        assert tid == 'tb-123'
+        assert debrid == 'torbox'
+        # History event emitted with rescue_stage='add_time'
+        rescue_events = [
+            (a, kw) for a, kw in history_events
+            if kw.get('meta', {}).get('cause') == 'debrid_rescued'
+        ]
+        assert len(rescue_events) == 1, f"expected 1 debrid_rescued event, got {len(rescue_events)}"
+        _args, kw = rescue_events[0]
+        meta = kw['meta']
+        assert meta['rescue_stage'] == 'add_time'
+        assert meta['from'] == 'realdebrid'
+        assert meta['to'] == 'torbox'
+
+    def test_no_tb_configured_falls_through_to_alt_release(self, tmp_dir, monkeypatch):
+        """When only RD is configured, the rescue helper short-circuits and
+        the existing alt-release search path runs."""
+        watcher, watch_dir = self._make_watcher(tmp_dir, monkeypatch, with_tb=False)
+        magnet_path = self._drop_magnet(watch_dir)
+
+        def fake_rd_add(file_path, api_key=None):
+            return False, '{"error":"infringing_file","error_code":35}'
+
+        monkeypatch.setattr(watcher, '_add_to_realdebrid', fake_rd_add)
+        monkeypatch.setattr('utils.search.check_debrid_cache', lambda *a, **kw: {})
+        monkeypatch.setattr('utils.search._existing_hashes', lambda *a, **kw: set())
+
+        # Track whether the alt-release thread was kicked off (it's the
+        # fallback path when cross-rescue isn't available).
+        import threading as _threading
+        alt_thread_started = []
+        original_thread = _threading.Thread
+
+        class _CapturingThread(original_thread):
+            def __init__(self, *a, **kw):
+                if 'alt-retry' in kw.get('name', ''):
+                    alt_thread_started.append(True)
+                super().__init__(*a, **kw)
+
+            def start(self):
+                pass  # Don't actually run the alt-release search
+
+        monkeypatch.setattr('utils.blackhole.threading.Thread', _CapturingThread)
+
+        watcher._process_file(magnet_path)
+
+        assert alt_thread_started == [True], \
+            "alt-release thread should fire when cross-rescue isn't available"
+
+    def test_tb_also_filter_blocks_blocklists_hash(self, tmp_dir, monkeypatch):
+        """If TB also returns infringing_file, the hash is filter-blocked on
+        BOTH debrids — annotate the blocklist so future re-grabs short-circuit."""
+        watcher, watch_dir = self._make_watcher(tmp_dir, monkeypatch)
+        magnet_path = self._drop_magnet(watch_dir)
+
+        def fake_rd_add(file_path, api_key=None):
+            return False, '{"error":"infringing_file","error_code":35}'
+
+        def fake_tb_add(file_path, api_key=None):
+            return False, '{"error":"infringing_file","error_code":35}'
+
+        monkeypatch.setattr(watcher, '_add_to_realdebrid', fake_rd_add)
+        monkeypatch.setattr(watcher, '_add_to_torbox', fake_tb_add)
+        monkeypatch.setattr('utils.search.check_debrid_cache',
+                            lambda h, service=None, api_key=None: {x.lower(): True for x in h})
+        monkeypatch.setattr('utils.search._existing_hashes', lambda *a, **kw: set())
+
+        monkeypatch.setattr(
+            'utils.debrid_client.get_debrid_client',
+            lambda service=None, api_key=None: (self._FakeTbClient(), service),
+        )
+        monkeypatch.setenv('BLACKHOLE_DEBRID_PRIMARY', 'realdebrid')
+
+        # Mock the blocklist
+        blocklist_adds = []
+        import utils.blocklist as bl_mod
+
+        class _FakeBlocklist:
+            def add(self, h, fn, reason='', source=''):
+                blocklist_adds.append((h, fn, reason, source))
+                return 'entry-1'
+
+            def is_blocked(self, h):
+                return False
+
+        monkeypatch.setattr('utils.blackhole._blocklist', _FakeBlocklist())
+
+        # Disable alt-release fallback (we're testing the blocklist annotation)
+        monkeypatch.setattr(watcher, '_alt_exhausted', lambda fp: True)
+
+        watcher._process_file(magnet_path)
+
+        # Blocklist should have the "filter_blocked_everywhere" annotation.
+        # One entry from rescue (the add-time double-block) — alt-release
+        # was disabled via _alt_exhausted so no second entry from that path.
+        rescue_entries = [
+            e for e in blocklist_adds if 'filter_blocked_everywhere' in e[2]
+        ]
+        assert len(rescue_entries) >= 1, \
+            f"expected filter_blocked_everywhere blocklist entry, got {blocklist_adds!r}"
+
+    def test_unsupported_source_does_not_rescue(self, tmp_dir, monkeypatch):
+        """ALLDEBRID has no rescue partner — _attempt_add_time_rescue
+        returns False quickly without contacting the network."""
+        watcher, watch_dir = self._make_watcher(tmp_dir, monkeypatch)
+        magnet_path = self._drop_magnet(watch_dir)
+
+        cache_calls = []
+
+        def fake_cache(*args, **kwargs):
+            cache_calls.append(args)
+            return {}
+
+        monkeypatch.setattr('utils.search.check_debrid_cache', fake_cache)
+
+        result = watcher._attempt_add_time_rescue(
+            magnet_path, self._FILENAME, self._HASH,
+            'alldebrid', label=None, dispatch={'alldebrid': lambda *a, **kw: (True, {})},
+        )
+        assert result is False
+        # No cache probe was issued — short-circuit before hitting the network
+        assert cache_calls == []
+
+    def test_invalid_torrent_does_not_trigger_rescue(self, tmp_dir, monkeypatch):
+        """RD code 30 (torrent_file_invalid) is a permanent rejection
+        for the hash — cross-rescue would just hit the same wall on TB.
+        The _process_file gate compares classify_add_failure(result) ==
+        'filter_block' so invalid_torrent falls through to alt-release
+        search WITHOUT touching the TB pipeline at all.  Regression
+        guard for the code-reviewer's missing-integration-test gap."""
+        watcher, watch_dir = self._make_watcher(tmp_dir, monkeypatch)
+        magnet_path = self._drop_magnet(watch_dir)
+
+        def fake_rd_add(file_path, api_key=None):
+            return False, '{"error":"torrent_file_invalid","error_code":30}'
+
+        tb_calls = []
+
+        def fake_tb_add(file_path, api_key=None):
+            tb_calls.append(file_path)
+            return True, {'data': {'torrent_id': 'tb-shouldnt-be-called'}}
+
+        monkeypatch.setattr(watcher, '_add_to_realdebrid', fake_rd_add)
+        monkeypatch.setattr(watcher, '_add_to_torbox', fake_tb_add)
+        monkeypatch.setattr('utils.search.check_debrid_cache',
+                            lambda h, service=None, api_key=None: {x.lower(): True for x in h})
+        monkeypatch.setattr('utils.search._existing_hashes', lambda *a, **kw: set())
+
+        # Stub the alt-release thread so it doesn't fire real work
+        import threading as _threading
+        original_thread = _threading.Thread
+
+        class _NoOpThread(original_thread):
+            def start(self):
+                pass
+
+        monkeypatch.setattr('utils.blackhole.threading.Thread', _NoOpThread)
+
+        watcher._process_file(magnet_path)
+
+        # TB add must NOT have been called — invalid_torrent isn't a
+        # filter_block, so the rescue gate never opens.
+        assert tb_calls == [], \
+            f"invalid_torrent must not trigger TB rescue; tb_calls={tb_calls}"
+
+    def test_torrent_file_path_routes_through_rescue(self, tmp_dir, monkeypatch):
+        """`.torrent` files (bencoded) should rescue identically to
+        `.magnet` files — _add_to_torbox handles both by extension, and
+        the rescue closure passes the staged file path through opaquely.
+        Regression guard for the code-reviewer's missing-test gap."""
+        watcher, watch_dir = self._make_watcher(tmp_dir, monkeypatch)
+
+        # Drop a synthetic .torrent file (content doesn't need to be
+        # valid bencoding — _add_to_torbox is mocked).
+        torrent_path = os.path.join(watch_dir, 'Andor.S02E01.torrent')
+        with open(torrent_path, 'wb') as f:
+            f.write(b'd4:infod4:name20:Andor.S02E01.WEB-DL5:filesle4:type5:hashee')
+        os.utime(torrent_path, (time.time() - 10, time.time() - 10))
+
+        # Patch the info-hash extractor so we get a deterministic hash
+        # without depending on .torrent bencoding.
+        monkeypatch.setattr(watcher, '_extract_info_hash_from_file',
+                            lambda fp: self._HASH)
+
+        def fake_rd_add(file_path, api_key=None):
+            return False, '{"error":"infringing_file","error_code":35}'
+
+        tb_calls = []
+
+        def fake_tb_add(file_path, api_key=None):
+            tb_calls.append(file_path)
+            return True, {'data': {'torrent_id': 'tb-456'}}
+
+        monkeypatch.setattr(watcher, '_add_to_realdebrid', fake_rd_add)
+        monkeypatch.setattr(watcher, '_add_to_torbox', fake_tb_add)
+        monkeypatch.setattr('utils.search.check_debrid_cache',
+                            lambda h, service=None, api_key=None: {x.lower(): True for x in h})
+        monkeypatch.setattr('utils.search._existing_hashes', lambda *a, **kw: set())
+        monkeypatch.setattr(
+            'utils.debrid_client.get_debrid_client',
+            lambda service=None, api_key=None: (self._FakeTbClient(), service),
+        )
+        monkeypatch.setenv('BLACKHOLE_DEBRID_PRIMARY', 'realdebrid')
+
+        monitor_calls = []
+        monkeypatch.setattr(
+            watcher, '_start_monitor',
+            lambda tid, fn, label=None, debrid=None, **kw: monitor_calls.append((tid, fn, debrid)),
+        )
+
+        watcher._process_file(torrent_path)
+
+        assert not os.path.exists(torrent_path), \
+            f".torrent should be removed after rescue, still at {torrent_path}"
+        assert len(tb_calls) == 1
+        # Staging preserves the extension so _add_to_torbox's ext branch
+        # picks the .torrent code path.
+        assert tb_calls[0].endswith('.torrent'), \
+            f"staged path should end with .torrent; got {tb_calls[0]}"
+        assert monitor_calls == [('tb-456', 'Andor.S02E01.torrent', 'torbox')]
+
+
+class TestRescueOrphanRecovery:
+    """Plan 41 phase A second-pass reviewer fix-up: rescue orphans
+    (files staged under ``.alt_pending/.rescue-<uuid8>-<filename>``
+    when the container died mid-rescue) must be recovered to ``failed/``
+    under their ORIGINAL filename so Sonarr/Radarr's blackhole import
+    recognises them on the next retry cycle.  Pre-fix the recovery
+    moved them with the ``.rescue-`` prefix intact and they rotted
+    silently."""
+
+    def test_restore_basename_strips_prefix(self):
+        """Pure-function pin on the prefix-strip regex."""
+        from utils.blackhole import _restore_rescue_basename
+        assert _restore_rescue_basename(
+            '.rescue-deadbeef-Show.Name.S01E01.1080p.WEB-DL.magnet'
+        ) == 'Show.Name.S01E01.1080p.WEB-DL.magnet'
+
+    def test_restore_basename_passes_through_non_prefixed(self):
+        """Files staged by the older alt-release path have no prefix —
+        must be returned unchanged."""
+        from utils.blackhole import _restore_rescue_basename
+        assert _restore_rescue_basename('Show.Name.S01E01.torrent') == 'Show.Name.S01E01.torrent'
+
+    def test_restore_basename_only_matches_8_hex_chars(self):
+        """The regex is anchored to 8 hex chars exactly — a file that
+        coincidentally starts with ``.rescue-`` but has a non-hex segment
+        (or different length) is NOT treated as a rescue orphan."""
+        from utils.blackhole import _restore_rescue_basename
+        # 7 hex chars — too short, regex misses, name unchanged.
+        assert _restore_rescue_basename('.rescue-deadbee-name') == '.rescue-deadbee-name'
+        # 9 hex chars — too long, regex anchors on 8, but then the next
+        # char is hex not '-', so the regex doesn't match. Unchanged.
+        assert _restore_rescue_basename('.rescue-deadbeef9-name') == '.rescue-deadbeef9-name'
+        # Non-hex chars in the uuid slot — must NOT match.
+        assert _restore_rescue_basename('.rescue-xyzzy123-name') == '.rescue-xyzzy123-name'
+
+    def test_restore_basename_empty(self):
+        from utils.blackhole import _restore_rescue_basename
+        assert _restore_rescue_basename('') == ''
+        assert _restore_rescue_basename(None) is None
+
+    def test_recover_alt_pending_strips_rescue_prefix(self, tmp_dir):
+        """Integration: a rescue orphan in .alt_pending/ gets moved to
+        failed/ under its ORIGINAL filename so Sonarr/Radarr's
+        blackhole import can recognise it on the next retry."""
+        watch_dir = os.path.join(tmp_dir, 'watch')
+        alt_pending = os.path.join(watch_dir, '.alt_pending')
+        os.makedirs(alt_pending)
+
+        # Simulate a rescue orphan — file staged with the .rescue-<uuid8>- prefix.
+        orphan_path = os.path.join(alt_pending, '.rescue-deadbeef-Andor.S02E01.magnet')
+        with open(orphan_path, 'w') as f:
+            f.write('magnet:?xt=urn:btih:abc')
+
+        watcher = BlackholeWatcher(watch_dir, 'rd-key', 'realdebrid')
+        watcher._recover_alt_pending()
+
+        # The rescue orphan must now be in failed/ as ``Andor.S02E01.magnet``
+        # (the prefix stripped), NOT ``.rescue-deadbeef-Andor.S02E01.magnet``.
+        failed_dir = os.path.join(watch_dir, 'failed')
+        assert os.path.isdir(failed_dir)
+        recovered = os.path.join(failed_dir, 'Andor.S02E01.magnet')
+        assert os.path.isfile(recovered), \
+            f"orphan not recovered under original name; failed/ contents: {os.listdir(failed_dir)}"
+        # Mangled name must NOT be present.
+        mangled = os.path.join(failed_dir, '.rescue-deadbeef-Andor.S02E01.magnet')
+        assert not os.path.exists(mangled), \
+            f"orphan recovered with prefix intact — Sonarr would not recognise this"
+
+    def test_recover_alt_pending_with_label(self, tmp_dir):
+        """Labeled rescue orphan recovered under the matching failed/label/."""
+        watch_dir = os.path.join(tmp_dir, 'watch')
+        alt_pending_sonarr = os.path.join(watch_dir, '.alt_pending', 'sonarr')
+        os.makedirs(alt_pending_sonarr)
+
+        orphan_path = os.path.join(alt_pending_sonarr, '.rescue-cafebabe-Yellowjackets.S02E09.magnet')
+        with open(orphan_path, 'w') as f:
+            f.write('magnet:?xt=urn:btih:def')
+
+        watcher = BlackholeWatcher(watch_dir, 'rd-key', 'realdebrid')
+        watcher._recover_alt_pending()
+
+        recovered = os.path.join(watch_dir, 'failed', 'sonarr', 'Yellowjackets.S02E09.magnet')
+        assert os.path.isfile(recovered), \
+            f"labeled orphan not recovered correctly; failed/sonarr/ contents: " \
+            f"{os.listdir(os.path.join(watch_dir, 'failed', 'sonarr')) if os.path.isdir(os.path.join(watch_dir, 'failed', 'sonarr')) else 'missing'}"
+
+    def test_recover_alt_pending_legacy_no_prefix_unchanged(self, tmp_dir):
+        """Alt-release-path orphans (no .rescue- prefix) keep their
+        original behaviour — moved to failed/ with the same name."""
+        watch_dir = os.path.join(tmp_dir, 'watch')
+        alt_pending = os.path.join(watch_dir, '.alt_pending')
+        os.makedirs(alt_pending)
+
+        # No prefix — pre-plan-41 alt-release staging.
+        orphan_path = os.path.join(alt_pending, 'Old.Style.Release.torrent')
+        with open(orphan_path, 'w') as f:
+            f.write('d4:infod4:name3:Olde')
+
+        watcher = BlackholeWatcher(watch_dir, 'rd-key', 'realdebrid')
+        watcher._recover_alt_pending()
+
+        recovered = os.path.join(watch_dir, 'failed', 'Old.Style.Release.torrent')
+        assert os.path.isfile(recovered), \
+            f"non-prefixed orphan should recover unchanged; failed/ contents: " \
+            f"{os.listdir(os.path.join(watch_dir, 'failed'))}"
+
+    def test_recover_alt_pending_rescue_orphan_not_alt_exhausted(self, tmp_dir):
+        """A rescue orphan never ran an alt-release search, so it must NOT
+        be marked alt_exhausted on recovery — that flag makes _retry_failed
+        skip the file forever (permanent dead-end). Alt-release orphans
+        (no prefix) keep the exhausted marker."""
+        from utils.blackhole import RetryMeta
+        watch_dir = os.path.join(tmp_dir, 'watch')
+        alt_pending = os.path.join(watch_dir, '.alt_pending')
+        os.makedirs(alt_pending)
+
+        rescue_orphan = os.path.join(alt_pending, '.rescue-deadbeef-Andor.S02E01.magnet')
+        with open(rescue_orphan, 'w') as f:
+            f.write('magnet:?xt=urn:btih:' + 'a' * 40)
+        legacy_orphan = os.path.join(alt_pending, 'Old.Style.Release.magnet')
+        with open(legacy_orphan, 'w') as f:
+            f.write('magnet:?xt=urn:btih:' + 'b' * 40)
+
+        watcher = BlackholeWatcher(watch_dir, 'rd-key', 'realdebrid')
+        watcher._recover_alt_pending()
+
+        failed_dir = os.path.join(watch_dir, 'failed')
+        recovered_rescue = os.path.join(failed_dir, 'Andor.S02E01.magnet')
+        recovered_legacy = os.path.join(failed_dir, 'Old.Style.Release.magnet')
+        assert os.path.isfile(recovered_rescue)
+        assert os.path.isfile(recovered_legacy)
+        assert not RetryMeta.is_alt_exhausted(recovered_rescue), \
+            "rescue orphan wrongly marked alt_exhausted — _retry_failed would skip it forever"
+        assert RetryMeta.is_alt_exhausted(recovered_legacy), \
+            "alt-release orphan lost its alt_exhausted marker"
+
+
+class TestAltReleaseProviderBinding:
+    """The alt-release / compromise chain must bind torrent-ID extraction
+    and the symlink monitor to the ROUTED provider, not the primary.
+    Regression: with RD primary and the handler routed to TorBox,
+    _extract_torrent_id defaulted to RD's schema (str(result)) and the
+    monitor polled RD for a TorBox torrent — content landed on TorBox
+    but was never symlinked."""
+
+    def test_try_releases_binds_routed_debrid(self, tmp_dir, monkeypatch):
+        watch_dir = os.path.join(tmp_dir, 'watch')
+        os.makedirs(watch_dir)
+        watcher = BlackholeWatcher(watch_dir, 'rd-key', 'realdebrid',
+                                   symlink_enabled=True)
+
+        orig_path = os.path.join(tmp_dir, 'orig.magnet')
+        with open(orig_path, 'w') as f:
+            f.write('magnet:?xt=urn:btih:' + 'c' * 40)
+
+        tb_result = {'success': True, 'data': {'torrent_id': 999}}
+        captured = {}
+        monkeypatch.setattr(
+            watcher, '_start_monitor',
+            lambda tid, fn, label=None, debrid=None, **_: captured.update(
+                {'tid': tid, 'debrid': debrid}),
+        )
+
+        releases = [{'guid': 'magnet:?xt=urn:btih:' + 'd' * 40,
+                     'title': 'Alt.Release.1080p'}]
+        ok = watcher._try_releases(
+            releases, lambda path: (True, tb_result),
+            'orig.magnet', orig_path, label=None, debrid='torbox',
+        )
+        assert ok is True
+        assert captured['tid'] == '999', \
+            f"TorBox result parsed with wrong provider schema: {captured['tid']!r}"
+        assert captured['debrid'] == 'torbox', \
+            "monitor not bound to the routed provider"
+
+
+class TestRescueStagingFilenameLength:
+    """Plan 41 phase A second-pass reviewer fix-up: long multi-byte
+    filenames (Russian-tracker releases with Cyrillic in the .torrent
+    name) can push the staged basename over POSIX NAME_MAX (255
+    bytes).  Truncation in the staging path keeps ``os.rename`` from
+    raising ENAMETOOLONG and silently dropping the rescue.
+    """
+
+    _HASH = 'A' * 40
+
+    def _make_watcher(self, tmp_dir, monkeypatch):
+        watch_dir = os.path.join(tmp_dir, 'watch')
+        completed_dir = os.path.join(tmp_dir, 'completed')
+        os.makedirs(watch_dir)
+        os.makedirs(completed_dir)
+        monkeypatch.setenv('RD_API_KEY', 'rd-key')
+        monkeypatch.setenv('TORBOX_API_KEY', 'tb-key')
+        return BlackholeWatcher(
+            watch_dir, 'rd-key', 'realdebrid',
+            symlink_enabled=True,
+            completed_dir=completed_dir,
+            debrid_api_keys={'realdebrid': 'rd-key', 'torbox': 'tb-key'},
+        ), watch_dir
+
+    def test_long_filename_staged_under_name_max(self, tmp_dir, monkeypatch):
+        """A 240-byte filename + .rescue-<uuid8>- prefix would exceed
+        NAME_MAX without truncation.  Verify the staged basename is
+        capped so ``os.rename`` succeeds."""
+        watcher, watch_dir = self._make_watcher(tmp_dir, monkeypatch)
+        # 240-char filename — plus the 17-byte prefix overhead would
+        # push past 255 if not truncated.
+        long_filename = 'A' * 240 + '.magnet'
+        magnet_path = os.path.join(watch_dir, long_filename)
+        with open(magnet_path, 'w') as f:
+            f.write(f'magnet:?xt=urn:btih:{self._HASH}')
+        os.utime(magnet_path, (time.time() - 10, time.time() - 10))
+
+        def fake_rd_add(file_path, api_key=None):
+            return False, '{"error":"infringing_file","error_code":35}'
+
+        tb_calls = []
+
+        def fake_tb_add(file_path, api_key=None):
+            tb_calls.append(file_path)
+            return True, {'data': {'torrent_id': 'tb-long-1'}}
+
+        monkeypatch.setattr(watcher, '_add_to_realdebrid', fake_rd_add)
+        monkeypatch.setattr(watcher, '_add_to_torbox', fake_tb_add)
+        monkeypatch.setattr('utils.search.check_debrid_cache',
+                            lambda h, service=None, api_key=None: {x.lower(): True for x in h})
+        monkeypatch.setattr('utils.search._existing_hashes', lambda *a, **kw: set())
+
+        class _FakeTbClient:
+            configured = True
+
+            def add_magnet(self, h):
+                raise AssertionError('should not be called')
+
+            def torrent_status(self, tid):
+                return 'cached'
+
+            def delete_torrent(self, tid):
+                return True
+
+        monkeypatch.setattr(
+            'utils.debrid_client.get_debrid_client',
+            lambda service=None, api_key=None: (_FakeTbClient(), service),
+        )
+        monkeypatch.setenv('BLACKHOLE_DEBRID_PRIMARY', 'realdebrid')
+        monkeypatch.setattr(watcher, '_start_monitor', lambda *a, **kw: None)
+
+        # Should not raise (used to raise ENAMETOOLONG inside the staging
+        # os.rename before the truncation fix).
+        watcher._process_file(magnet_path)
+
+        # Rescue should have run successfully.
+        assert len(tb_calls) == 1
+        # The staged basename used for the TB add must fit under NAME_MAX.
+        assert len(os.path.basename(tb_calls[0]).encode('utf-8')) <= 255, \
+            f"staged basename exceeds NAME_MAX: {os.path.basename(tb_calls[0])!r}"
+
+
+class TestRescueRestoreAtomicity:
+    """Plan 41 phase A second-pass reviewer fix-up: the rescue-failure
+    restore path uses ``os.link`` + ``os.unlink`` instead of a
+    check-then-rename sequence so a fresh Sonarr drop landing at
+    ``file_path`` during the rescue wait cannot be silently
+    overwritten by the staged file.
+    """
+
+    _HASH = 'A' * 40
+
+    def _make_watcher(self, tmp_dir, monkeypatch, with_tb=True):
+        watch_dir = os.path.join(tmp_dir, 'watch')
+        completed_dir = os.path.join(tmp_dir, 'completed')
+        os.makedirs(watch_dir)
+        os.makedirs(completed_dir)
+        monkeypatch.setenv('RD_API_KEY', 'rd-key')
+        if with_tb:
+            monkeypatch.setenv('TORBOX_API_KEY', 'tb-key')
+        return BlackholeWatcher(
+            watch_dir, 'rd-key', 'realdebrid',
+            symlink_enabled=True,
+            completed_dir=completed_dir,
+            debrid_api_keys={'realdebrid': 'rd-key', 'torbox': 'tb-key'} if with_tb else {'realdebrid': 'rd-key'},
+        ), watch_dir
+
+    def test_fresh_drop_during_rescue_wait_preserves_both_files(self, tmp_dir, monkeypatch):
+        """Simulate Sonarr re-grabbing the same filename while our rescue
+        is in flight: the fresh drop at file_path survives, AND the
+        rescue's staged content survives under its unique name."""
+        watcher, watch_dir = self._make_watcher(tmp_dir, monkeypatch)
+        filename = 'Andor.S02E01.magnet'
+        original_path = os.path.join(watch_dir, filename)
+        with open(original_path, 'w') as f:
+            f.write('magnet:?xt=urn:btih:' + self._HASH + '&n=original')
+        os.utime(original_path, (time.time() - 10, time.time() - 10))
+
+        def fake_rd_add(file_path, api_key=None):
+            return False, '{"error":"infringing_file","error_code":35}'
+
+        # Closure: during the alt_add_fn call, simulate Sonarr dropping
+        # a new file at the ORIGINAL file_path while we're "waiting"
+        # for the alt add to complete.  The rescue's restore path
+        # should then leave the original at the staged path.
+        def fake_tb_add(file_path, api_key=None):
+            # Fresh Sonarr drop arrives mid-rescue, before we've decided
+            # success/failure.
+            with open(original_path, 'w') as f:
+                f.write('magnet:?xt=urn:btih:' + self._HASH + '&n=fresh-drop')
+            # Then we return a failure so the rescue tries to restore.
+            return False, '{"error":"rate limit exceeded"}'
+
+        monkeypatch.setattr(watcher, '_add_to_realdebrid', fake_rd_add)
+        monkeypatch.setattr(watcher, '_add_to_torbox', fake_tb_add)
+        monkeypatch.setattr('utils.search.check_debrid_cache',
+                            lambda h, service=None, api_key=None: {x.lower(): True for x in h})
+        monkeypatch.setattr('utils.search._existing_hashes', lambda *a, **kw: set())
+
+        class _FakeTbClient:
+            configured = True
+
+            def add_magnet(self, h):
+                raise AssertionError('unreached')
+
+            def torrent_status(self, tid):
+                return ''
+
+            def delete_torrent(self, tid):
+                return True
+
+        monkeypatch.setattr(
+            'utils.debrid_client.get_debrid_client',
+            lambda service=None, api_key=None: (_FakeTbClient(), service),
+        )
+        monkeypatch.setenv('BLACKHOLE_DEBRID_PRIMARY', 'realdebrid')
+
+        # Disable the existing alt-release fallback so we can observe
+        # the rescue-restore behaviour in isolation.
+        import threading as _threading
+
+        class _NoOpThread(_threading.Thread):
+            def start(self):
+                pass
+
+        monkeypatch.setattr('utils.blackhole.threading.Thread', _NoOpThread)
+
+        watcher._process_file(original_path)
+
+        # After _process_file: fresh drop has been processed by the
+        # post-rescue rejection-handling path (alt-release staging or
+        # failed-dir move).  We don't care WHICH happened — both are
+        # legitimate outcomes for an ``infringing_file``-shaped failure
+        # after rescue couldn't recover.  We DO care that:
+        #   (a) the fresh-drop content survived rather than being
+        #       overwritten by the older staged file, and
+        #   (b) the rescue's staged file remained at its unique
+        #       .rescue-* name for manual recovery.
+        # Walk the watch-dir tree looking for the content markers.
+        fresh_drop_survived = False
+        rescue_orphan_survived = False
+        for dp, _dn, files in os.walk(watch_dir):
+            for fn in files:
+                fpath = os.path.join(dp, fn)
+                try:
+                    with open(fpath) as f:
+                        body = f.read()
+                except OSError:
+                    continue
+                if 'fresh-drop' in body:
+                    fresh_drop_survived = True
+                if 'n=original' in body and fn.startswith('.rescue-'):
+                    rescue_orphan_survived = True
+
+        assert fresh_drop_survived, \
+            "Fresh Sonarr drop must survive the rescue-restore path " \
+            "(silently overwritten = data loss)"
+        assert rescue_orphan_survived, \
+            "Rescue's staged file must remain under its unique .rescue-* " \
+            "name for manual recovery — collision-with-fresh-drop case"
+
+
+class TestScannerHandoff:
+    """Mount-timeout-but-confirmed-ready hand-off to the library scanner.
+
+    When a torrent is confirmed added + ready on the debrid but doesn't
+    surface on the rclone mount within mount_poll_timeout (common under
+    TorBox 429 rate-limiting), the worker must NOT treat it as a hard
+    failure.  It registers a 'to-debrid' library pending entry so the
+    scanner resolves it on a later pass.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_prefs(self, tmp_dir, monkeypatch):
+        import utils.library_prefs as lp
+        monkeypatch.setattr(lp, 'PREFS_PATH', os.path.join(tmp_dir, 'library_prefs.json'))
+        monkeypatch.setattr(lp, 'PENDING_PATH', os.path.join(tmp_dir, 'library_pending.json'))
+
+    # ── _register_scanner_handoff unit tests ──────────────────────────
+
+    def test_handoff_movie_registers_pending(self):
+        import utils.library_prefs as lp
+        from utils.library import normalize_title
+        watcher = BlackholeWatcher('/tmp', 'key', 'realdebrid')
+        ok = watcher._register_scanner_handoff(
+            'Inside.Out.2.2024.1080p.WEB-DL.x264.magnet')
+        assert ok is True
+        pending = lp.get_all_pending()
+        key = normalize_title('Inside Out 2')
+        assert key in pending
+        entry = pending[key]
+        assert entry['direction'] == 'to-debrid'
+        assert entry['episodes'] == [{'season': 0, 'episode': 0}]
+        assert entry.get('created')  # escalation clock starts
+
+    def test_handoff_show_single_episode(self):
+        import utils.library_prefs as lp
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        ok = watcher._register_scanner_handoff(
+            'The.Show.S01E05.1080p.WEB.H264-GROUP.torrent')
+        assert ok is True
+        pending = lp.get_all_pending()
+        # exactly one entry, direction to-debrid, the parsed episode
+        assert len(pending) == 1
+        entry = next(iter(pending.values()))
+        assert entry['direction'] == 'to-debrid'
+        assert entry['episodes'] == [{'season': 1, 'episode': 5}]
+
+    def test_handoff_show_episode_range(self):
+        import utils.library_prefs as lp
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        ok = watcher._register_scanner_handoff(
+            'The.Show.S02E01-E03.1080p.WEB.torrent')
+        assert ok is True
+        entry = next(iter(lp.get_all_pending().values()))
+        assert entry['episodes'] == [
+            {'season': 2, 'episode': 1},
+            {'season': 2, 'episode': 2},
+            {'season': 2, 'episode': 3},
+        ]
+
+    def test_handoff_season_pack_skips(self):
+        """Season pack (no parseable episodes) must NOT register pending —
+        an empty episode list would falsely escalate to debrid-unavailable
+        even after the scanner creates symlinks."""
+        import utils.library_prefs as lp
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        ok = watcher._register_scanner_handoff(
+            'The.Show.S03.1080p.WEB.Complete.Season.torrent')
+        assert ok is False
+        assert lp.get_all_pending() == {}
+
+    def test_handoff_multi_season_pack_skips(self):
+        """Multi-season pack (S01-S05) parses as is_tv=False — must NOT
+        register a bogus movie (0,0) entry under the show's title (would
+        never resolve and falsely escalate to debrid-unavailable)."""
+        import utils.library_prefs as lp
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        ok = watcher._register_scanner_handoff(
+            'The.Show.S01-S05.1080p.WEB.Complete.torrent')
+        assert ok is False
+        assert lp.get_all_pending() == {}
+
+    def test_handoff_cross_season_range_skips(self):
+        """Cross-season episode range (S01E01-S02E10) can't be one
+        (season, episodes) entry — must skip, not register a partial list."""
+        import utils.library_prefs as lp
+        watcher = BlackholeWatcher('/tmp', 'key', 'torbox')
+        ok = watcher._register_scanner_handoff(
+            'The.Show.S01E01-S02E10.1080p.WEB.torrent')
+        assert ok is False
+        assert lp.get_all_pending() == {}
+
+    # ── timeout-branch integration ────────────────────────────────────
+
+    def _make_symlink_watcher(self, tmp_dir, debrid):
+        completed = os.path.join(tmp_dir, 'completed')
+        os.makedirs(completed, exist_ok=True)
+        return BlackholeWatcher(
+            os.path.join(tmp_dir, 'watch'), 'key', debrid,
+            symlink_enabled=True, completed_dir=completed,
+            rclone_mount=os.path.join(tmp_dir, 'data'),
+            mount_poll_timeout=0.3, mount_poll_interval=0.02,
+        )
+
+    def _drive_timeout(self, watcher, monkeypatch, torrent_id, filename,
+                       debrid, ready_status, label=None):
+        """Run _monitor_and_symlink with stubs so it reaches the Phase-2
+        mount-timeout branch (ready on debrid, never on mount)."""
+        status_attr = {
+            'realdebrid': '_check_realdebrid_status',
+            'torbox': '_check_torbox_status',
+        }[debrid]
+        monkeypatch.setattr(
+            watcher, status_attr,
+            lambda tid, api_key=None: (ready_status, {'filename': filename}))
+        monkeypatch.setattr(watcher, '_has_usable_media_files',
+                            lambda *a, **k: True)
+        monkeypatch.setattr(watcher, '_extract_release_name',
+                            lambda info, debrid=None: filename.rsplit('.', 1)[0])
+        monkeypatch.setattr(watcher, '_extract_filenames_from_info',
+                            lambda *a, **k: [])
+        # Never surfaces on the mount → forces the timeout branch.
+        monkeypatch.setattr(watcher, '_find_on_mount',
+                            lambda *a, **k: (None, None, None))
+        # Seed the blackhole monitor entry so we can assert it's removed.
+        watcher._add_pending(torrent_id, filename, label=label, debrid=debrid)
+        watcher._monitor_and_symlink(torrent_id, filename, label, debrid)
+
+    def test_mount_timeout_movie_hands_off(self, tmp_dir, monkeypatch):
+        import utils.library_prefs as lp
+        from utils.library import normalize_title
+        watcher = self._make_symlink_watcher(tmp_dir, 'realdebrid')
+        self._drive_timeout(
+            watcher, monkeypatch, 'rd-abc',
+            'Inside.Out.2.2024.1080p.WEB-DL.x264.magnet',
+            'realdebrid', 'downloaded')
+        # Library pending registered for the scanner.
+        pending = lp.get_all_pending()
+        assert normalize_title('Inside Out 2') in pending
+        assert pending[normalize_title('Inside Out 2')]['direction'] == 'to-debrid'
+        # Blackhole monitor handed off (removed) — not retried / resumed.
+        assert all(e['torrent_id'] != 'rd-abc' for e in watcher._load_pending())
+
+    def test_mount_timeout_show_hands_off(self, tmp_dir, monkeypatch):
+        """Sonarr parity: a show grab takes the same hand-off path."""
+        import utils.library_prefs as lp
+        watcher = self._make_symlink_watcher(tmp_dir, 'torbox')
+        self._drive_timeout(
+            watcher, monkeypatch, 'tb-xyz',
+            'The.Show.S01E05.1080p.WEB.H264-GROUP.torrent',
+            'torbox', 'completed', label='sonarr')
+        pending = lp.get_all_pending()
+        assert len(pending) == 1
+        entry = next(iter(pending.values()))
+        assert entry['direction'] == 'to-debrid'
+        assert entry['episodes'] == [{'season': 1, 'episode': 5}]
+        assert all(e['torrent_id'] != 'tb-xyz' for e in watcher._load_pending())
+
+
+class TestTorboxCachedAlternative:
+    """_try_torbox_cached_alternative: when a grabbed release is uncached,
+    grab a same-title, same-tier alternative that IS cached on TorBox rather
+    than dropping the title to 'Wanted'."""
+
+    REJECTED = 'a' * 40   # the uncached hash the arr picked
+    CACHED_ALT = 'b' * 40  # a same-title release cached on TorBox
+
+    @pytest.fixture(autouse=True)
+    def _ledger(self):
+        """Reset attempt_ledger to the pristine uninitialized state.
+
+        The sibling-grab dedup now mirrors into the module-global
+        attempt_ledger, so a ledger initialized by an unrelated earlier
+        test would leak tbaltdedup keys across tests in this class.
+        Subclasses that WANT a live ledger (TestTorboxAltGiveUpCap)
+        override this fixture with one that reloads AND initializes.
+        """
+        import importlib
+        from utils import attempt_ledger
+        importlib.reload(attempt_ledger)
+        yield
+
+    def _make_watcher(self, tmp_dir, tb_key='tbkey', symlink_enabled=False):
+        return BlackholeWatcher(
+            os.path.join(tmp_dir, 'watch'), tb_key, 'torbox',
+            symlink_enabled=symlink_enabled,
+            completed_dir=os.path.join(tmp_dir, 'completed'),
+            rclone_mount=os.path.join(tmp_dir, 'data'),
+            debrid_api_keys={'torbox': tb_key} if tb_key else None,
+        )
+
+    def _make_file(self, tmp_dir, name):
+        os.makedirs(tmp_dir, exist_ok=True)
+        path = os.path.join(tmp_dir, name)
+        with open(path, 'w') as f:
+            f.write('magnet:?xt=urn:btih:' + self.REJECTED)
+        return path
+
+    def _stub_search(self, monkeypatch, results):
+        import utils.search as search
+        monkeypatch.setattr(search, 'search_torrentio',
+                            lambda *a, **k: results)
+
+    def _stub_cache(self, monkeypatch, cache_map):
+        import utils.search as search
+        monkeypatch.setattr(search, 'check_debrid_cache',
+                            lambda hashes, **k: {h: cache_map.get(h) for h in hashes})
+        monkeypatch.setattr(search, 'remember_added_hash', lambda *a, **k: None)
+
+    def _candidate(self, info_hash, tier='1080p', seeds=10, size=8_000_000_000,
+                   title=None):
+        score = {'2160p': 4, '1080p': 3, '720p': 2}.get(tier, 0)
+        return {
+            'title': title or f'Sing.2.{tier}.WEB.x264-GRP',
+            'info_hash': info_hash,
+            'size_bytes': size,
+            'seeds': seeds,
+            'quality': {'label': tier, 'score': score},
+        }
+
+    def test_disabled_via_env_declines_and_keeps_file(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'false')
+        w = self._make_watcher(tmp_dir)
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert os.path.exists(fp)
+
+    def test_no_info_hash_declines(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), '', 'realdebrid') is False
+        assert os.path.exists(fp)
+
+    def test_no_torbox_key_declines(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir, tb_key='')
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert os.path.exists(fp)
+
+    def test_unparseable_tier_declines(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        # No 1080p/720p/2160p marker -> parse_quality returns 'Unknown'.
+        fp = self._make_file(tmp_dir, 'Sing.2.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert os.path.exists(fp)
+
+    def test_no_imdb_declines(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: (None, None, None, None))
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert os.path.exists(fp)
+
+    def test_no_cached_alternative_declines_and_keeps_file(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt1234567', 'movie', None, None))
+        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        # The only alternative is uncached on TorBox.
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: False})
+        add_called = []
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: add_called.append(1) or (True, {}))
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert not add_called
+        assert os.path.exists(fp)
+
+    def test_wrong_tier_alternative_declined(self, tmp_dir, monkeypatch):
+        """A cached alternative at a DIFFERENT tier than the arr approved
+        must not be grabbed (don't silently downgrade/upgrade quality)."""
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt1234567', 'movie', None, None))
+        # Rejected release was 1080p; only cached alt is 720p.
+        self._stub_search(monkeypatch,
+                          [self._candidate(self.CACHED_ALT, tier='720p')])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: (True, {}))
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert os.path.exists(fp)
+
+    def test_mislabeled_same_tier_candidate_excluded(self, tmp_dir, monkeypatch):
+        """A same-tier cached candidate whose release name doesn't match the
+        arr-approved title is a mislabeled Torrentio upload — grabbing it
+        would park the wrong movie under this title."""
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt1234567', 'movie', None, None))
+        self._stub_search(monkeypatch, [self._candidate(
+            self.CACHED_ALT, title='Fight.Club.1999.1080p.WEB.x264-JUNK')])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        adds = []
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: adds.append(1) or (True, {}))
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert not adds
+        assert os.path.exists(fp)
+
+    def test_rejected_hash_excluded_from_candidates(self, tmp_dir, monkeypatch):
+        """Even if the rejected hash is reported cached, it is excluded from
+        the candidate set (it's the one we already know fails downstream)."""
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt1234567', 'movie', None, None))
+        # Search returns ONLY the rejected hash -> nothing left after exclusion.
+        self._stub_search(monkeypatch, [self._candidate(self.REJECTED)])
+        self._stub_cache(monkeypatch, {self.REJECTED: True})
+        monkeypatch.setattr(w, '_add_to_torbox', lambda *a, **k: (True, {}))
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert os.path.exists(fp)
+
+    def test_happy_path_grabs_cached_alt_and_removes_file(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt1234567', 'movie', None, None))
+        # One uncached alt + one cached alt, same tier as rejected (1080p).
+        self._stub_search(monkeypatch, [
+            self._candidate(self.CACHED_ALT, tier='1080p', seeds=50),
+            self._candidate('c' * 40, tier='1080p', seeds=5),
+        ])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True, 'c' * 40: False})
+        added = {}
+        def fake_add(path, api_key=None):
+            with open(path) as f:
+                added['magnet'] = f.read()
+            return True, {'data': {'torrent_id': 999}}
+        monkeypatch.setattr(w, '_add_to_torbox', fake_add)
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+
+        events = []
+        import utils.blackhole as bh
+        monkeypatch.setattr(bh, '_history', type('H', (), {
+            'log_event': staticmethod(lambda *a, **k: events.append((a, k)))})())
+
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is True
+        # Grabbed the cached alternative (best seeded), not the uncached one.
+        assert self.CACHED_ALT in added['magnet']
+        # Original watch-dir file removed so the scanner won't re-process it.
+        assert not os.path.exists(fp)
+        # History event records the recovery with the right cause + provider.
+        assert events
+        _, kwargs = events[0]
+        assert kwargs['meta']['cause'] == 'tb_cached_alt_grabbed'
+        assert kwargs['meta']['provider'] == 'torbox'
+        assert kwargs['meta']['rejected_provider'] == 'realdebrid'
+        assert kwargs['meta']['info_hash'] == self.CACHED_ALT
+
+    def test_torbox_add_failure_keeps_file(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt1234567', 'movie', None, None))
+        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: (False, 'rate limit exceeded'))
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        # Add failed -> leave the file for the caller's normal handling.
+        assert os.path.exists(fp)
+
+    def test_symlink_mode_starts_monitor_and_removes_file(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir, symlink_enabled=True)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt1234567', 'movie', None, None))
+        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: (True, {'data': {'torrent_id': 777}}))
+        started = []
+        monkeypatch.setattr(w, '_start_monitor',
+                            lambda tid, fn, label=None, debrid=None: started.append((tid, debrid)))
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is True
+        assert started == [('777', 'torbox')]
+        assert not os.path.exists(fp)
+
+    def test_symlink_mode_no_torrent_id_declines_and_keeps_file(self, tmp_dir, monkeypatch):
+        """If the torrent id can't be extracted in symlink mode, the alt would
+        be orphaned on TorBox with no monitor — decline (and keep the original
+        for the caller's normal handling) rather than silently claim success."""
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir, symlink_enabled=True)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt1234567', 'movie', None, None))
+        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        # TorBox add "succeeds" but returns a body with no extractable id.
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: (True, {'data': {}}))
+        started = []
+        monkeypatch.setattr(w, '_start_monitor',
+                            lambda *a, **k: started.append(1))
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert not started
+        assert os.path.exists(fp)
+
+    def test_dedup_suppresses_second_grab_for_same_season(self, tmp_dir, monkeypatch):
+        """One cached pack recovers a whole season: after the first episode of
+        a season grabs an alternative, a sibling episode is skipped before any
+        search/probe/grab — this is what stops 3+ packs landing for one season
+        and overdriving the rclone VFS into a TorBox 429 storm."""
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt999', 'series', 2, 1))
+        self._stub_search(monkeypatch, [self._candidate(
+            self.CACHED_ALT, title='Show.S02.1080p.WEB.x264-GRP')])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        adds = []
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: adds.append(1) or (True, {}))
+        fp1 = self._make_file(tmp_dir, 'Show.S02E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp1, os.path.basename(fp1), self.REJECTED, 'realdebrid') is True
+        assert len(adds) == 1
+        # Sibling episode of the SAME season: suppressed, file kept, no 2nd add.
+        fp2 = self._make_file(tmp_dir, 'Show.S02E02.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp2, os.path.basename(fp2), self.REJECTED, 'realdebrid') is False
+        assert len(adds) == 1
+        assert os.path.exists(fp2)
+
+    def test_dedup_does_not_suppress_a_different_season(self, tmp_dir, monkeypatch):
+        """The dedup key is (imdb_id, season) — a grab for S02 must not block
+        recovery of S03."""
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        ident = {'season': 2}
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt999', 'series', ident['season'], 1))
+        self._stub_search(monkeypatch, [self._candidate(
+            self.CACHED_ALT, title='Show.S02.1080p.WEB.x264-GRP')])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        adds = []
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: adds.append(1) or (True, {}))
+        fp1 = self._make_file(tmp_dir, 'Show.S02E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp1, os.path.basename(fp1), self.REJECTED, 'realdebrid') is True
+        ident['season'] = 3
+        fp2 = self._make_file(tmp_dir, 'Show.S03E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp2, os.path.basename(fp2), self.REJECTED, 'realdebrid') is True
+        assert len(adds) == 2
+
+    def test_dedup_not_set_when_grab_fails(self, tmp_dir, monkeypatch):
+        """The guard records only on a committed grab — a failed first attempt
+        (no cached alt) must not poison the season so a later sibling can still
+        recover once an alternative becomes cached."""
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt999', 'series', 2, 1))
+        self._stub_search(monkeypatch, [self._candidate(
+            self.CACHED_ALT, title='Show.S02.1080p.WEB.x264-GRP')])
+        cache = {self.CACHED_ALT: False}  # uncached on first attempt
+        import utils.search as search
+        monkeypatch.setattr(search, 'check_debrid_cache',
+                            lambda hashes, **k: {h: cache.get(h) for h in hashes})
+        monkeypatch.setattr(search, 'remember_added_hash', lambda *a, **k: None)
+        adds = []
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: adds.append(1) or (True, {}))
+        fp1 = self._make_file(tmp_dir, 'Show.S02E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp1, os.path.basename(fp1), self.REJECTED, 'realdebrid') is False
+        assert not adds
+        # Now the alternative is cached — the season was NOT poisoned, so a
+        # sibling episode recovers normally.
+        cache[self.CACHED_ALT] = True
+        fp2 = self._make_file(tmp_dir, 'Show.S02E02.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp2, os.path.basename(fp2), self.REJECTED, 'realdebrid') is True
+        assert len(adds) == 1
+
+
+class TestTorboxAltGiveUpCap(TestTorboxCachedAlternative):
+    """Persistent give-up cap: after BLACKHOLE_TB_ALT_MAX_ATTEMPTS cached-alt
+    grabs for one (imdb_id, season), decline so the title falls back to Wanted
+    instead of re-arming TorBox's abuse cooldown on every .magnet re-drop."""
+
+    @pytest.fixture(autouse=True)
+    def _ledger(self, tmp_dir):
+        import importlib
+        from utils import attempt_ledger
+        importlib.reload(attempt_ledger)
+        attempt_ledger.init(config_dir=tmp_dir)
+        self.ledger = attempt_ledger
+        yield
+
+    def test_successful_grab_bumps_ledger(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt777', 'series', 2, 1))
+        self._stub_search(monkeypatch, [self._candidate(
+            self.CACHED_ALT, title='Show.S02.1080p.WEB.x264-GRP')])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        monkeypatch.setattr(w, '_add_to_torbox', lambda *a, **k: (True, {}))
+        fp = self._make_file(tmp_dir, 'Show.S02E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is True
+        assert self.ledger.get('tbalt:tt777:s2') == 1
+
+    def test_cap_declines_and_keeps_file(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        w._tb_alt_max_attempts = 2
+        for _ in range(2):
+            self.ledger.bump('tbalt:tt777:s2')
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt777', 'series', 2, 1))
+        self._stub_search(monkeypatch, [self._candidate(
+            self.CACHED_ALT, title='Show.S02.1080p.WEB.x264-GRP')])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        adds = []
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: adds.append(1) or (True, {}))
+        fp = self._make_file(tmp_dir, 'Show.S02E03.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert not adds              # never probed/grabbed
+        assert os.path.exists(fp)    # caller falls through to its own delete
+
+    def test_dedup_key_for_movie_uses_none_season(self, tmp_dir, monkeypatch):
+        """Movies key on (imdb_id, None).  A successful grab records the key,
+        so a re-drop of the same movie is suppressed — and the None season
+        never collides with a different movie's key."""
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        imdb = {'id': 'tt111'}
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: (imdb['id'], 'movie', None, None))
+        alt_b = 'c' * 40
+        self._stub_search(monkeypatch, [
+            self._candidate(self.CACHED_ALT, title='Movie.A.1080p.WEB.x264-GRP'),
+            self._candidate(alt_b, title='Movie.B.1080p.WEB.x264-GRP'),
+        ])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True, alt_b: True})
+        adds = []
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: adds.append(1) or (True, {}))
+        fp1 = self._make_file(tmp_dir, 'Movie.A.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp1, os.path.basename(fp1), self.REJECTED, 'realdebrid') is True
+        # Same movie re-dropped -> suppressed (already recovered).
+        fp2 = self._make_file(tmp_dir, 'Movie.A.REPACK.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp2, os.path.basename(fp2), self.REJECTED, 'realdebrid') is False
+        # A DIFFERENT movie (different imdb) is not collided by the None season.
+        imdb['id'] = 'tt222'
+        fp3 = self._make_file(tmp_dir, 'Movie.B.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp3, os.path.basename(fp3), self.REJECTED, 'realdebrid') is True
+        assert len(adds) == 2
+
+    def test_sibling_dedup_survives_restart(self, tmp_dir):
+        """The 6h sibling-grab suppression must survive a container restart.
+
+        Pre-fix it lived only in an in-memory dict, so a restart
+        mid-backfill re-enabled sibling season-pack grabs — each redundant
+        TB create being the volume event that arms TB Essential's cooldown.
+        """
+        import importlib
+        from utils import attempt_ledger
+        w = self._make_watcher(tmp_dir)
+        w._remember_tb_alt_grab(('tt777', 2))
+
+        # "Restart": reload the ledger from the same file, fresh watcher
+        # (empty in-memory dedup dict).
+        importlib.reload(attempt_ledger)
+        attempt_ledger.init(config_dir=tmp_dir)
+        w2 = self._make_watcher(tmp_dir)
+        assert w2._tb_alt_recently_grabbed(('tt777', 2)) is True
+        assert w2._tb_alt_recently_grabbed(('tt777', 3)) is False
+        assert w2._tb_alt_recently_grabbed(('tt888', 2)) is False
+
+    def test_sibling_dedup_ledger_entry_expires(self, tmp_dir):
+        """A ledger-mirrored dedup entry older than the TTL does not suppress."""
+        from datetime import datetime, timezone, timedelta
+        from utils.blackhole import _TB_ALT_DEDUP_TTL
+        w = self._make_watcher(tmp_dir)
+        key = ('tt777', 2)
+        w._remember_tb_alt_grab(key)
+        with w._tb_alt_grabs_lock:
+            w._tb_alt_recent_grabs.clear()  # drop the in-memory fast path
+        old = (datetime.now(timezone.utc)
+               - timedelta(seconds=_TB_ALT_DEDUP_TTL + 60)).isoformat(timespec='seconds')
+        self.ledger._state['tbaltdedup:tt777:s2']['last_ts'] = old
+        assert w._tb_alt_recently_grabbed(key) is False
+
+class TestTorboxAltRetryLoopBreaker(TestTorboxCachedAlternative):
+    """Failed-import loop breaker: a cached alternative that was already
+    grabbed (or blocklisted) must never be re-grabbed for the same
+    (imdb_id, season).  Pre-fix, an alt that failed to import (mislabeled
+    payload, no symlink) was re-grabbed every ~6h — the sibling dedup TTL
+    expiring in step with the arr's search cycle — burning a TorBox create
+    and re-arming the abuse cooldown each time."""
+
+    @pytest.fixture(autouse=True)
+    def _ledger(self, tmp_dir):
+        import importlib
+        from utils import attempt_ledger
+        importlib.reload(attempt_ledger)
+        attempt_ledger.init(config_dir=tmp_dir)
+        self.ledger = attempt_ledger
+        yield
+
+    def test_blocklisted_candidate_excluded(self, tmp_dir, monkeypatch):
+        """A blocklisted hash must not be selectable as a cached alternative
+        (parity with the legacy alt-retry path and the main grab gate)."""
+        import utils.blackhole as bh
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt1234567', 'movie', None, None))
+        self._stub_search(monkeypatch, [self._candidate(self.CACHED_ALT)])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        seen = []
+        stub = type('B', (), {'is_blocked': staticmethod(
+            lambda h: seen.append(h) or h.lower() == self.CACHED_ALT)})()
+        monkeypatch.setattr(bh, '_blocklist', stub)
+        adds = []
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: adds.append(1) or (True, {}))
+        fp = self._make_file(tmp_dir, 'Sing.2.1080p.WEB.x264-CYBER.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is False
+        assert not adds
+        assert os.path.exists(fp)
+        assert seen  # the blocklist was actually consulted
+
+    def test_grab_records_tried_hash_in_ledger(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt777', 'series', 2, 1))
+        self._stub_search(monkeypatch, [self._candidate(
+            self.CACHED_ALT, title='Show.S02.1080p.WEB.x264-GRP')])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        monkeypatch.setattr(w, '_add_to_torbox', lambda *a, **k: (True, {}))
+        fp = self._make_file(tmp_dir, 'Show.S02E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp, os.path.basename(fp), self.REJECTED, 'realdebrid') is True
+        assert self.ledger.get(f'tbalttried:tt777:s2:{self.CACHED_ALT}') == 1
+
+    def test_tried_alt_not_regrabbed_next_cycle(self, tmp_dir, monkeypatch):
+        """Second recovery cycle for the same (imdb, season) — i.e. the first
+        alt failed to import and the arr searched again after the dedup TTL —
+        must pick a DIFFERENT candidate, and give up once all are tried."""
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt777', 'series', 2, 1))
+        alt_b = 'c' * 40
+        self._stub_search(monkeypatch, [
+            self._candidate(self.CACHED_ALT, seeds=50,
+                            title='Show.S02.1080p.WEB.x264-GRP'),
+            self._candidate(alt_b, seeds=5,
+                            title='Show.S02.1080p.WEB.x264-OTHER'),
+        ])
+        self._stub_cache(monkeypatch,
+                         {self.CACHED_ALT: True, alt_b: True})
+        added = []
+        def fake_add(path, api_key=None):
+            with open(path) as f:
+                added.append(f.read())
+            return True, {}
+        monkeypatch.setattr(w, '_add_to_torbox', fake_add)
+
+        # Cycle 1: grabs the best-seeded candidate.
+        fp1 = self._make_file(tmp_dir, 'Show.S02E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp1, os.path.basename(fp1), self.REJECTED, 'realdebrid') is True
+        assert self.CACHED_ALT in added[0]
+        # Original removed by the grab — the later cycles' _make_file calls
+        # reuse this name, so a leaked file would silently mask cycle 3's
+        # file-kept assertion.
+        assert not os.path.exists(fp1)
+
+        # The 6h sibling dedup would suppress the next call outright; the
+        # real loop fires only after it expires, so neutralize it here to
+        # isolate the tried-hash memory.
+        monkeypatch.setattr(w, '_tb_alt_recently_grabbed', lambda k: False)
+
+        # Cycle 2: the tried hash is excluded -> the OTHER candidate wins.
+        fp2 = self._make_file(tmp_dir, 'Show.S02E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp2, os.path.basename(fp2), self.REJECTED, 'realdebrid') is True
+        assert alt_b in added[1]
+
+        # Cycle 3: every candidate tried -> decline, no TorBox create.
+        fp3 = self._make_file(tmp_dir, 'Show.S02E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp3, os.path.basename(fp3), self.REJECTED, 'realdebrid') is False
+        assert len(added) == 2
+        assert os.path.exists(fp3)
+
+    def test_tried_hash_is_season_scoped(self, tmp_dir, monkeypatch):
+        """A pack tried for S02 must not be barred for S03 of the same show
+        (and vice versa) — the key is (imdb, season, hash)."""
+        monkeypatch.setenv('BLACKHOLE_TB_ALT_RECOVERY_ENABLED', 'true')
+        w = self._make_watcher(tmp_dir)
+        ident = {'season': 2}
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt777', 'series', ident['season'], 1))
+        self._stub_search(monkeypatch, [self._candidate(
+            self.CACHED_ALT, title='Show.1080p.WEB.x264-GRP')])
+        self._stub_cache(monkeypatch, {self.CACHED_ALT: True})
+        adds = []
+        monkeypatch.setattr(w, '_add_to_torbox',
+                            lambda *a, **k: adds.append(1) or (True, {}))
+        fp1 = self._make_file(tmp_dir, 'Show.S02E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp1, os.path.basename(fp1), self.REJECTED, 'realdebrid') is True
+        ident['season'] = 3
+        fp2 = self._make_file(tmp_dir, 'Show.S03E01.1080p.WEB.x264-GRP.mkv.magnet')
+        assert w._try_torbox_cached_alternative(
+            fp2, os.path.basename(fp2), self.REJECTED, 'realdebrid') is True
+        assert len(adds) == 2
+
+
+class TestArrFailedFeedback:
+    """_push_arr_failed_feedback: an uncached-rejected grab must be reported
+    back to the owning arr (blocklist + immediate re-search) instead of
+    silently deleted — otherwise the arr re-grabs the identical release on
+    every RSS pass.  A persistent per-title strike cap bounds the walk down
+    the arr's candidate list."""
+
+    HASH = 'c' * 40
+
+    @pytest.fixture(autouse=True)
+    def _ledger(self, tmp_dir):
+        import importlib
+        from utils import attempt_ledger
+        importlib.reload(attempt_ledger)
+        attempt_ledger.init(config_dir=tmp_dir)
+        self.ledger = attempt_ledger
+        yield
+
+    def _make_watcher(self, tmp_dir):
+        return BlackholeWatcher(
+            os.path.join(tmp_dir, 'watch'), 'rdkey', 'realdebrid',
+            completed_dir=os.path.join(tmp_dir, 'completed'),
+            rclone_mount=os.path.join(tmp_dir, 'data'),
+        )
+
+    def _fake_arrs(self, monkeypatch, configured=True, result=True,
+                   raise_on_call=False):
+        """Patch SonarrClient/RadarrClient with call-recording fakes."""
+        import utils.arr_client as arr_client
+        record = {'sonarr': [], 'radarr': []}
+
+        def make(service):
+            class Fake:
+                def __init__(self):
+                    self.configured = configured
+
+                def mark_download_failed(self, info_hash, search_again=True):
+                    if raise_on_call:
+                        raise RuntimeError('boom')
+                    record[service].append(info_hash)
+                    return result
+            return Fake
+
+        monkeypatch.setattr(arr_client, 'SonarrClient', make('sonarr'))
+        monkeypatch.setattr(arr_client, 'RadarrClient', make('radarr'))
+        return record
+
+    TV_FILE = 'Show.S01E02.1080p.WEB.x264-GRP.mkv.magnet'
+    MOVIE_FILE = 'Sing.2.2021.1080p.WEB.x264-GRP.mkv.magnet'
+
+    def test_disabled_via_env_declines(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_ARR_FAILED_FEEDBACK_ENABLED', 'false')
+        w = self._make_watcher(tmp_dir)
+        record = self._fake_arrs(monkeypatch)
+        assert w._push_arr_failed_feedback(
+            self.TV_FILE, self.HASH, 'realdebrid') is False
+        assert record == {'sonarr': [], 'radarr': []}
+
+    def test_no_info_hash_declines(self, tmp_dir, monkeypatch):
+        w = self._make_watcher(tmp_dir)
+        record = self._fake_arrs(monkeypatch)
+        assert w._push_arr_failed_feedback(
+            self.TV_FILE, None, 'realdebrid') is False
+        assert record == {'sonarr': [], 'radarr': []}
+
+    def test_tv_success_routes_sonarr_and_bumps_ledger(self, tmp_dir, monkeypatch):
+        w = self._make_watcher(tmp_dir)
+        record = self._fake_arrs(monkeypatch)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt123', 'series', 1, 2))
+        assert w._push_arr_failed_feedback(
+            self.TV_FILE, self.HASH, 'realdebrid') is True
+        assert record['sonarr'] == [self.HASH]
+        assert record['radarr'] == []
+        assert self.ledger.get('arrfail:tt123:s1e2') == 1
+
+    def test_movie_success_routes_radarr_and_bumps_ledger(self, tmp_dir, monkeypatch):
+        w = self._make_watcher(tmp_dir)
+        record = self._fake_arrs(monkeypatch)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt777', 'movie', None, None))
+        assert w._push_arr_failed_feedback(
+            self.MOVIE_FILE, self.HASH, 'realdebrid') is True
+        assert record['radarr'] == [self.HASH]
+        assert record['sonarr'] == []
+        assert self.ledger.get('arrfail:tt777') == 1
+
+    def test_label_overrides_parsed_media_type(self, tmp_dir, monkeypatch):
+        # A movie-looking filename dropped in the sonarr/ label dir must be
+        # reported to Sonarr — directory layout is authoritative routing.
+        w = self._make_watcher(tmp_dir)
+        record = self._fake_arrs(monkeypatch)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt555', 'movie', None, None))
+        assert w._push_arr_failed_feedback(
+            self.MOVIE_FILE, self.HASH, 'realdebrid', label='sonarr') is True
+        assert record['sonarr'] == [self.HASH]
+        assert record['radarr'] == []
+
+    def test_resolve_identity_honors_label_override(self, tmp_dir, monkeypatch):
+        # The identity lookup must follow the same authoritative label
+        # routing as the client choice — a movie-shaped filename under the
+        # sonarr/ label queried against Radarr would return the wrong (or
+        # no) IMDb id, corrupting the strike key.
+        import utils.arr_client as arr_client
+        w = self._make_watcher(tmp_dir)
+
+        class FakeSonarr:
+            configured = True
+
+            def find_series_in_library(self, title=None):
+                return {'imdbId': 'tt42'}
+
+        class FakeRadarr:
+            configured = True
+
+            def find_movie_in_library(self, title=None):
+                raise AssertionError(
+                    'label said sonarr — Radarr must not be queried')
+
+        monkeypatch.setattr(arr_client, 'SonarrClient', FakeSonarr)
+        monkeypatch.setattr(arr_client, 'RadarrClient', FakeRadarr)
+        imdb, mtype, _season, _episode = w._resolve_arr_identity(
+            self.MOVIE_FILE, label='sonarr')
+        assert imdb == 'tt42'
+        assert mtype == 'series'
+
+    def test_strike_cap_declines_without_calling_arr(self, tmp_dir, monkeypatch):
+        monkeypatch.setenv('BLACKHOLE_ARR_FEEDBACK_MAX_STRIKES', '2')
+        w = self._make_watcher(tmp_dir)
+        record = self._fake_arrs(monkeypatch)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt123', 'series', 1, 2))
+        self.ledger.bump('arrfail:tt123:s1e2')
+        self.ledger.bump('arrfail:tt123:s1e2')
+        assert w._push_arr_failed_feedback(
+            self.TV_FILE, self.HASH, 'realdebrid') is False
+        assert record['sonarr'] == []
+        assert self.ledger.get('arrfail:tt123:s1e2') == 2
+
+    def test_unconfigured_arr_declines(self, tmp_dir, monkeypatch):
+        w = self._make_watcher(tmp_dir)
+        self._fake_arrs(monkeypatch, configured=False)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt123', 'series', 1, 2))
+        assert w._push_arr_failed_feedback(
+            self.TV_FILE, self.HASH, 'realdebrid') is False
+        assert self.ledger.get('arrfail:tt123:s1e2') == 0
+
+    def test_arr_rejection_does_not_bump_ledger(self, tmp_dir, monkeypatch):
+        w = self._make_watcher(tmp_dir)
+        self._fake_arrs(monkeypatch, result=False)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt123', 'series', 1, 2))
+        assert w._push_arr_failed_feedback(
+            self.TV_FILE, self.HASH, 'realdebrid') is False
+        assert self.ledger.get('arrfail:tt123:s1e2') == 0
+
+    def test_arr_exception_degrades_to_false(self, tmp_dir, monkeypatch):
+        w = self._make_watcher(tmp_dir)
+        self._fake_arrs(monkeypatch, raise_on_call=True)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt123', 'series', 1, 2))
+        assert w._push_arr_failed_feedback(
+            self.TV_FILE, self.HASH, 'realdebrid') is False
+
+    def test_identity_fallback_uses_parsed_title(self, tmp_dir, monkeypatch):
+        # Arr lookup failed (no IMDb id) — the strike key falls back to the
+        # parsed title so the cap still binds.
+        w = self._make_watcher(tmp_dir)
+        self._fake_arrs(monkeypatch)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: (None, None, None, None))
+        assert w._push_arr_failed_feedback(
+            self.MOVIE_FILE, self.HASH, 'realdebrid') is True
+        keys = [k for k in self.ledger._state if k.startswith('arrfail:')]
+        assert len(keys) == 1
+        assert self.ledger.get(keys[0]) == 1
+
+    def test_success_logs_history_event(self, tmp_dir, monkeypatch):
+        import utils.blackhole as bh
+        events = []
+
+        class FakeHistory:
+            @staticmethod
+            def log_event(type, title, **kwargs):
+                events.append((type, title, kwargs))
+                return 'evt-1'
+
+        monkeypatch.setattr(bh, '_history', FakeHistory)
+        w = self._make_watcher(tmp_dir)
+        self._fake_arrs(monkeypatch)
+        monkeypatch.setattr(w, '_resolve_arr_identity',
+                            lambda fn, label=None: ('tt123', 'series', 1, 2))
+        assert w._push_arr_failed_feedback(
+            self.TV_FILE, self.HASH, 'realdebrid') is True
+        assert len(events) == 1
+        etype, _title, kwargs = events[0]
+        assert etype == 'blocklisted'
+        meta = kwargs['meta']
+        assert meta['cause'] == 'arr_feedback_blocklisted'
+        assert meta['info_hash'] == self.HASH
+        assert meta['arr_service'] == 'sonarr'
+        assert meta['strikes'] == 1

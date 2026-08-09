@@ -166,6 +166,12 @@ def _fmt_blackhole_grab_submitted(ev, meta):
     return f'Submitted to {prov}', f'Submitted to {prov}'
 
 
+def _fmt_blackhole_mount_handoff(ev, meta):
+    prov = meta.get('provider', 'debrid')
+    short = f'Ready on {prov}, mount slow — handed to library scanner'
+    return short, short
+
+
 def _fmt_compromise_grab(ev, meta):
     pref = meta.get('preferred_tier', '?')
     got = meta.get('grabbed_tier', '?')
@@ -262,6 +268,78 @@ def _fmt_auto_blocklist(ev, meta):
     return f'Auto-blocklisted: {reason}', f'Auto-blocklisted: {reason}'
 
 
+def _fmt_debrid_filtered(ev, meta):
+    """Format a debrid-filter remediation event.
+
+    The same cause slug fires whether AUTO_REMEDIATE is on (with action
+    flags set) or detection only (no action flags). The action tail
+    surfaces what actually succeeded so a partial failure (e.g. delete
+    worked but arr re-search didn't) reads clearly in the activity feed.
+    """
+    reason = meta.get('reason', 'infringing_file')
+    http = meta.get('http')
+    head = f'Filter-blocked on debrid ({reason}'
+    if http:
+        head += f', HTTP {http}'
+    head += ')'
+    actions = []
+    if meta.get('deleted'):
+        actions.append('removed from debrid')
+    if meta.get('blocklisted'):
+        actions.append('hash blocklisted')
+    if meta.get('researched'):
+        actions.append('arr re-search triggered')
+    tail = ' — ' + ', '.join(actions) if actions else ' — detection only'
+    return head + tail, head + tail
+
+
+def _fmt_debrid_rescued(ev, meta):
+    """Format a cross-debrid rescue event.
+
+    Two rescue stages produce this event with slightly different shapes:
+
+      - ``rescue_stage='sweep'`` (plan 39 phase 3, ``debrid_health``):
+        a previously-grabbed torrent went filter-blocked between syncs;
+        cross-rescue re-hosted it on the alt and retargeted existing
+        in-library symlinks.  ``retargeted`` is the symlink count.
+
+      - ``rescue_stage='add_time'`` (plan 41 phase A, ``blackhole``):
+        a fresh Sonarr/Radarr grab hit the filter at magnet-add;
+        cross-rescue routed the same hash to the alt before the watch-dir
+        file was failed.  No symlinks exist yet — the alt-side monitor
+        takes over from here.
+
+    Pre-plan-41 events lack the ``rescue_stage`` field; default to
+    ``sweep`` semantics for back-compat with events still inside the
+    30-day retention window.
+    """
+    frm = (meta.get('from') or '?').upper()
+    to = (meta.get('to') or '?').upper()
+    head = f'Filter-blocked on {frm} — rescued via {to}'
+    stage = meta.get('rescue_stage') or 'sweep'
+
+    if stage == 'add_time':
+        tail = ' — routed to alt at add time, alt monitor took over'
+    else:
+        n = meta.get('retargeted', 0)
+        if n:
+            tail = f' — {n} symlink(s) retargeted'
+        elif meta.get('rescue_outcome') == 'no_symlinks_found':
+            tail = ' — alt-debrid has cache, no in-library symlinks to retarget'
+        else:
+            tail = ' — alt-debrid has cache, file accessible via alt mount'
+    return head + tail, head + tail
+
+
+def _fmt_tb_cached_alt_grabbed(ev, meta):
+    tier = meta.get('tier')
+    rejected = (meta.get('rejected_provider') or 'debrid')
+    tier_part = f' {tier}' if tier else ''
+    msg = (f'Recovered — release uncached on {rejected}, grabbed a cached'
+           f'{tier_part} alternative on TorBox')
+    return msg, msg
+
+
 def _fmt_debrid_unavailable_marked(ev, meta):
     days = meta.get('age_days')
     attempts = meta.get('search_attempts')
@@ -286,7 +364,10 @@ def _fmt_uncached_timeout(ev, meta):
 
 def _fmt_uncached_rejected(ev, meta):
     prov = meta.get('provider', 'debrid')
-    return f'Rejected — not cached on {prov}', f'Rejected — not cached on {prov}'
+    cross = meta.get('cross_confirmed_via')
+    suffix = f' (cross-confirmed via {cross})' if cross else ''
+    msg = f'Rejected — not cached on {prov}{suffix}'
+    return msg, msg
 
 
 def _fmt_incomplete_release(ev, meta):
@@ -312,6 +393,17 @@ def _fmt_blocklisted_hash(ev, meta):
     return 'Skipped — info hash is blocklisted', 'Skipped — info hash is blocklisted'
 
 
+def _fmt_arr_feedback_blocklisted(ev, meta):
+    arr = {'sonarr': 'Sonarr', 'radarr': 'Radarr'}.get(
+        str(meta.get('arr_service', '')).lower(), 'arr')
+    msg = f'Reported failed to {arr} — release blocklisted, new search triggered'
+    strikes = meta.get('strikes')
+    cap = meta.get('max_strikes')
+    if strikes and cap:
+        msg += f' (strike {strikes}/{cap})'
+    return msg, msg
+
+
 def _fmt_disc_rip_rejected(ev, meta):
     return 'Rejected — disc rip (no usable media files)', 'Rejected — disc rip (no usable media files)'
 
@@ -324,6 +416,32 @@ def _fmt_debrid_add_failed(ev, meta):
 def _fmt_debrid_add_via_search(ev, meta):
     svc = meta.get('service', 'debrid')
     return f'Added to {svc} via search', f'Added to {svc} via search'
+
+
+def _fmt_wanted_tb_recovered(ev, meta):
+    svc = meta.get('service', 'TorBox')
+    msg = f'Recovered Wanted — added cached copy on {svc}'
+    return msg, msg
+
+
+def _fmt_wanted_rd_recovered(ev, meta):
+    svc = meta.get('service', 'RealDebrid')
+    msg = f'Recovered Wanted — added cached copy on {svc}'
+    return msg, msg
+
+
+def _fmt_wanted_rd_uncached(ev, meta):
+    if meta.get('reason') in ('infringing_file', 'infringing_add'):
+        msg = 'Wanted recovery — release is filter-blocked on RealDebrid'
+    else:
+        msg = 'Wanted recovery — not cached on RealDebrid (probe add removed)'
+    return msg, msg
+
+
+def _fmt_wanted_filter_giveup(ev, meta):
+    msg = ('Recovery gave up — filter-blocked on RealDebrid and uncached '
+           'on TorBox')
+    return msg, msg
 
 
 def _fmt_symlink_create_failed(ev, meta):
@@ -376,6 +494,17 @@ def _fmt_task_verify_symlinks(ev, meta):
     return short, short
 
 
+def _fmt_mount_selfheal(ev, meta):
+    mount = meta.get('mount', 'mount')
+    ok = meta.get('restarted')
+    if ok:
+        short = f'Self-healed dead mount {mount} — rclone remounted'
+    else:
+        short = (f'Dead mount {mount} — unmounted stale FUSE but rclone '
+                 f'restart failed, operator attention needed')
+    return short, short
+
+
 def _fmt_library_symlink_cleanup(ev, meta):
     s = meta.get('searched', 0)
     d = meta.get('deleted', 0)
@@ -395,6 +524,7 @@ _CAUSE_FORMATTERS = {
     'blackhole_new_import': _fmt_blackhole_new_import,
     'blackhole_cache_hit': _fmt_blackhole_cache_hit,
     'blackhole_grab_submitted': _fmt_blackhole_grab_submitted,
+    'blackhole_mount_handoff': _fmt_blackhole_mount_handoff,
     'compromise_grab': _fmt_compromise_grab,
     'post_symlink_rescan': _fmt_post_symlink_rescan,
     'post_grab_rescan': _fmt_post_grab_rescan,
@@ -411,6 +541,9 @@ _CAUSE_FORMATTERS = {
     'arr_deleted_cleanup': _fmt_arr_deleted,
     'auto_blocklist_added': _fmt_auto_blocklist,
     'debrid_unavailable_marked': _fmt_debrid_unavailable_marked,
+    'debrid_filtered': _fmt_debrid_filtered,
+    'debrid_rescued': _fmt_debrid_rescued,
+    'tb_cached_alt_grabbed': _fmt_tb_cached_alt_grabbed,
     'terminal_error': _fmt_terminal_error,
     'uncached_timeout': _fmt_uncached_timeout,
     'uncached_rejected': _fmt_uncached_rejected,
@@ -418,9 +551,14 @@ _CAUSE_FORMATTERS = {
     'alts_exhausted': _fmt_alts_exhausted,
     'duplicate_skipped': _fmt_duplicate_skipped,
     'blocklisted_hash': _fmt_blocklisted_hash,
+    'arr_feedback_blocklisted': _fmt_arr_feedback_blocklisted,
     'disc_rip_rejected': _fmt_disc_rip_rejected,
     'debrid_add_failed': _fmt_debrid_add_failed,
     'debrid_add_via_search': _fmt_debrid_add_via_search,
+    'wanted_tb_recovered': _fmt_wanted_tb_recovered,
+    'wanted_rd_recovered': _fmt_wanted_rd_recovered,
+    'wanted_rd_uncached': _fmt_wanted_rd_uncached,
+    'wanted_filter_giveup': _fmt_wanted_filter_giveup,
     'symlink_create_failed': _fmt_symlink_create_failed,
     'task_library_scan': _fmt_task_library_scan,
     'task_housekeeping': _fmt_task_housekeeping,
@@ -428,6 +566,7 @@ _CAUSE_FORMATTERS = {
     'task_routing_audit': _fmt_task_routing_audit,
     'task_verify_symlinks': _fmt_task_verify_symlinks,
     'library_symlink_cleanup': _fmt_library_symlink_cleanup,
+    'mount_selfheal': _fmt_mount_selfheal,
 }
 
 
@@ -537,6 +676,7 @@ FORMATTER_JS = r"""
     },
     blackhole_cache_hit: function(ev,m){ return 'Cached on ' + (m.provider || 'debrid') + ' — ready to link'; },
     blackhole_grab_submitted: function(ev,m){ return 'Submitted to ' + (m.provider || 'debrid'); },
+    blackhole_mount_handoff: function(ev,m){ return 'Ready on ' + (m.provider || 'debrid') + ', mount slow — handed to library scanner'; },
     compromise_grab: function(ev,m){
       var s = 'Compromise grab: preferred ' + (m.preferred_tier||'?') + ', grabbed ' + (m.grabbed_tier||'?');
       if (m.strategy) s += ' (' + m.strategy + ')';
@@ -572,9 +712,38 @@ FORMATTER_JS = r"""
         : ' — retries continue in arr';
       return base + tail;
     },
+    debrid_filtered: function(ev,m){
+      var reason = m.reason || 'infringing_file';
+      var head = 'Filter-blocked on debrid (' + reason + (m.http ? (', HTTP ' + m.http) : '') + ')';
+      var actions = [];
+      if (m.deleted)     actions.push('removed from debrid');
+      if (m.blocklisted) actions.push('hash blocklisted');
+      if (m.researched)  actions.push('arr re-search triggered');
+      return head + ' — ' + (actions.length ? actions.join(', ') : 'detection only');
+    },
+    debrid_rescued: function(ev,m){
+      var frm = (m.from || '?').toUpperCase();
+      var to  = (m.to   || '?').toUpperCase();
+      var head = 'Filter-blocked on ' + frm + ' — rescued via ' + to;
+      var stage = m.rescue_stage || 'sweep';
+      var tail;
+      if (stage === 'add_time') {
+        tail = ' — routed to alt at add time, alt monitor took over';
+      } else {
+        var n = m.retargeted || 0;
+        if (n) tail = ' — ' + n + ' symlink(s) retargeted';
+        else if (m.rescue_outcome === 'no_symlinks_found') tail = ' — alt-debrid has cache, no in-library symlinks to retarget';
+        else tail = ' — alt-debrid has cache, file accessible via alt mount';
+      }
+      return head + tail;
+    },
+    tb_cached_alt_grabbed: function(ev,m){
+      var tier = m.tier ? (' ' + m.tier) : '';
+      return 'Recovered — release uncached on ' + (m.rejected_provider||'debrid') + ', grabbed a cached' + tier + ' alternative on TorBox';
+    },
     terminal_error: function(ev,m){ return 'Failed on ' + (m.provider||'debrid') + ': ' + (m.status || m.error || 'unknown'); },
     uncached_timeout: function(ev,m){ return 'Timed out waiting for cache' + (m.deleted ? ' — removed from debrid' : ' — debrid cleanup skipped'); },
-    uncached_rejected: function(ev,m){ return 'Rejected — not cached on ' + (m.provider||'debrid'); },
+    uncached_rejected: function(ev,m){ return 'Rejected — not cached on ' + (m.provider||'debrid') + (m.cross_confirmed_via ? ' (cross-confirmed via ' + m.cross_confirmed_via + ')' : ''); },
     incomplete_release: function(ev,m){
       var miss = Array.isArray(m.missing) ? m.missing.join(', ') : String(m.missing || '');
       return miss ? ('Incomplete release — missing ' + miss) : 'Incomplete release';
@@ -582,9 +751,19 @@ FORMATTER_JS = r"""
     alts_exhausted: function(){ return 'All alternative releases tried and failed'; },
     duplicate_skipped: function(ev,m){ return 'Skipped — already on ' + (m.provider||'debrid'); },
     blocklisted_hash: function(){ return 'Skipped — info hash is blocklisted'; },
+    arr_feedback_blocklisted: function(ev,m){
+      var arr = m.arr_service === 'sonarr' ? 'Sonarr' : (m.arr_service === 'radarr' ? 'Radarr' : 'arr');
+      var msg = 'Reported failed to ' + arr + ' — release blocklisted, new search triggered';
+      if (m.strikes && m.max_strikes) msg += ' (strike ' + m.strikes + '/' + m.max_strikes + ')';
+      return msg;
+    },
     disc_rip_rejected: function(){ return 'Rejected — disc rip (no usable media files)'; },
     debrid_add_failed: function(ev,m){ return 'Debrid add failed — ' + (m.error || 'unknown error'); },
     debrid_add_via_search: function(ev,m){ return 'Added to ' + (m.service || 'debrid') + ' via search'; },
+    wanted_tb_recovered: function(ev,m){ return 'Recovered Wanted — added cached copy on ' + (m.service || 'TorBox'); },
+    wanted_rd_recovered: function(ev,m){ return 'Recovered Wanted — added cached copy on ' + (m.service || 'RealDebrid'); },
+    wanted_rd_uncached: function(ev,m){ return (m.reason === 'infringing_file' || m.reason === 'infringing_add') ? 'Wanted recovery — release is filter-blocked on RealDebrid' : 'Wanted recovery — not cached on RealDebrid (probe add removed)'; },
+    wanted_filter_giveup: function(){ return 'Recovery gave up — filter-blocked on RealDebrid and uncached on TorBox'; },
     symlink_create_failed: function(ev,m){ return 'Symlink creation failed — ' + (m.error || 'unknown error'); },
     task_library_scan: function(ev,m){
       var parts = [(m.movies||0) + ' movies', (m.shows||0) + ' shows'];
@@ -612,6 +791,11 @@ FORMATTER_JS = r"""
       if (m.searched) parts.push('searched ' + m.searched);
       if (m.deleted)  parts.push('deleted ' + m.deleted);
       return 'Library symlink cleanup — ' + (parts.length ? parts.join(', ') : 'nothing to do');
+    },
+    mount_selfheal: function(ev,m){
+      var mount = m.mount || 'mount';
+      if (m.restarted) return 'Self-healed dead mount ' + mount + ' — rclone remounted';
+      return 'Dead mount ' + mount + ' — unmounted stale FUSE but rclone restart failed, operator attention needed';
     }
   };
 

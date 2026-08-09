@@ -307,6 +307,53 @@ class TestPending:
         assert 'show' not in lp.get_all_pending()
 
 
+class TestClearPendingWithAliases:
+
+    class _FakeScanner:
+        def __init__(self, aliases):
+            self._aliases = aliases
+
+        def aliases_for(self, norm):
+            return self._aliases.get(norm, set())
+
+    def test_clears_primary_norm(self, monkeypatch):
+        import utils.library
+        monkeypatch.setattr(utils.library, 'get_scanner', lambda: None)
+        lp.set_pending('show', [{'season': 1, 'episode': 1}], 'to-debrid')
+        assert lp.clear_pending_with_aliases('show') == 1
+        assert 'show' not in lp.get_all_pending()
+
+    def test_sweeps_aliases(self, monkeypatch):
+        import utils.library
+        fake = self._FakeScanner({'show': {'show 2020', 'the show'}})
+        monkeypatch.setattr(utils.library, 'get_scanner', lambda: fake)
+        lp.set_pending('show', [{'season': 1, 'episode': 1}], 'to-debrid')
+        lp.set_pending('show 2020', [{'season': 2, 'episode': 1}], 'to-local')
+        lp.set_pending('unrelated', [{'season': 1, 'episode': 1}], 'to-debrid')
+        assert lp.clear_pending_with_aliases('show') == 2
+        pending = lp.get_all_pending()
+        assert 'show' not in pending
+        assert 'show 2020' not in pending
+        assert 'unrelated' in pending
+
+    def test_scanner_unavailable_still_clears_primary(self, monkeypatch):
+        import utils.library
+
+        def _boom():
+            raise RuntimeError('scanner down')
+
+        monkeypatch.setattr(utils.library, 'get_scanner', _boom)
+        lp.set_pending('show', [{'season': 1, 'episode': 1}], 'to-debrid')
+        assert lp.clear_pending_with_aliases('show') == 1
+        assert 'show' not in lp.get_all_pending()
+
+    def test_no_pending_is_noop(self, monkeypatch):
+        import utils.library
+        monkeypatch.setattr(utils.library, 'get_scanner', lambda: None)
+        assert lp.clear_pending_with_aliases('ghost') == 0
+        assert lp.get_all_pending() == {}
+
+
 # ---------------------------------------------------------------------------
 # Pending error tracking
 # ---------------------------------------------------------------------------

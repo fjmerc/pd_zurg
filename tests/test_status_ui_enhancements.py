@@ -139,6 +139,24 @@ class TestReadLogLines:
         assert len(lines) == 1
         assert 'new log' in lines[0]
 
+    def test_prefers_active_file_over_rotation_backup(self, tmp_dir):
+        """The active ``ZURGARR-<date>.log`` must win over a rolled-over
+        ``ZURGARR-<date>_1.log`` backup.  A plain lexicographic max() picks
+        ``_1`` (``_`` > ``.``) and shows stale logs that stop at the last
+        rollover — selection must be by mtime, not name."""
+        import time as _time
+        backup = os.path.join(tmp_dir, 'ZURGARR-2026-03-21_1.log')
+        with open(backup, 'w') as f:
+            f.write('rolled-over backup line\n')
+        # Ensure the active file is strictly newer on disk.
+        _time.sleep(0.01)
+        active = os.path.join(tmp_dir, 'ZURGARR-2026-03-21.log')
+        with open(active, 'w') as f:
+            f.write('live active line\n')
+        lines = read_log_lines(lines=10, log_dir=tmp_dir)
+        assert len(lines) == 1
+        assert 'live active line' in lines[0]
+
     def test_handles_empty_log_file(self, tmp_dir):
         """Should return empty list for empty log file."""
         log_file = os.path.join(tmp_dir, 'ZURGARR-2026-03-21.log')
@@ -228,6 +246,56 @@ class TestGetSanitizedConfig:
         assert 'PASS' in _SENSITIVE_PATTERNS
         assert 'SECRET' in _SENSITIVE_PATTERNS
 
+    def test_notification_url_masked(self, monkeypatch):
+        """NOTIFICATION_URL embeds a credential the name-pattern misses."""
+        monkeypatch.setenv('NOTIFICATION_URL', 'discord://sekrettoken@webhookid')
+        config = get_sanitized_config()
+        assert 'sekrettoken' not in config['NOTIFICATION_URL']
+        assert '****' in config['NOTIFICATION_URL']
+        # partial-mask, not over-masked to a bare '****' (still identifiable)
+        assert config['NOTIFICATION_URL'].startswith('disc')
+
+    def test_all_schema_secret_keys_masked(self, monkeypatch):
+        """Every schema secret-typed field must be masked, name or not."""
+        from utils.settings_api import _SECRET_KEYS
+        for key in _SECRET_KEYS:
+            monkeypatch.setenv(key, 'plaintextsecretvalue123')
+        config = get_sanitized_config()
+        for key in _SECRET_KEYS:
+            assert 'plaintextsecretvalue123' not in config[key], key
+            assert '****' in config[key], key
+
+    def test_embedded_credential_key_consulted(self, monkeypatch):
+        """A key in _EMBEDDED_CREDENTIAL_KEYS is masked even with a clean name."""
+        import utils.status_server as ss
+        # STATUS_UI_* matches a config prefix but the name has no secret token
+        monkeypatch.setattr(ss, '_EMBEDDED_CREDENTIAL_KEYS', {'STATUS_UI_FAKECRED'})
+        monkeypatch.setenv('STATUS_UI_FAKECRED', 'shouldbemaskedvalue')
+        config = ss.get_sanitized_config()
+        assert 'shouldbemaskedvalue' not in config['STATUS_UI_FAKECRED']
+        assert '****' in config['STATUS_UI_FAKECRED']
+
+    def test_all_schema_keys_present(self):
+        """Every schema key must appear in the config dump (anti-drift)."""
+        from utils.settings_api import _ALL_KEYS
+        config = get_sanitized_config()
+        missing = _ALL_KEYS - set(config.keys())
+        assert not missing, f"schema keys missing from config dump: {sorted(missing)}"
+
+    def test_formerly_missing_feature_keys_present(self):
+        """Feature keys not covered by _CONFIG_PREFIXES still show up."""
+        config = get_sanitized_config()
+        for key in ('WANTED_TB_RECOVERY_ENABLED',
+                    'QUALITY_COMPROMISE_ENABLED',
+                    'DEBRID_HEALTH_ENABLED'):
+            assert key in config, f"{key} missing from config dump"
+
+    def test_prefix_only_var_still_shows(self, monkeypatch):
+        """A prefix-matched var absent from the schema still appears."""
+        monkeypatch.setenv('ZURG_INSTANCES_CONFIG', '/config/zurg.yml')
+        config = get_sanitized_config()
+        assert config.get('ZURG_INSTANCES_CONFIG') == '/config/zurg.yml'
+
 
 # ---------------------------------------------------------------------------
 # localStorage keys (post-Phase-6)
@@ -296,3 +364,110 @@ class TestRestartService:
         assert restart_service('ZURG') is False
         assert restart_service('zurg') is False
         assert restart_service('Zurg') is False
+
+    @staticmethod
+    def _fake_entry(name, key_type, restarted):
+        class FakeHandler:
+            process = None
+            subprocess_logger = None
+            _restart_count = 3
+            _first_restart_time = 123.0
+
+            def restart_process(self):
+                restarted.append((name, key_type))
+        return {'process_name': name, 'key_type': key_type,
+                'handler': FakeHandler()}
+
+    def test_no_key_type_restarts_every_instance(self, monkeypatch):
+        """The UI's 'restart rclone' must reach BOTH mounts — key_type=None
+        restarts every registered instance of the name, not just the
+        first-registered one."""
+        import utils.processes as processes
+        restarted = []
+        monkeypatch.setattr(processes, '_process_registry', [
+            self._fake_entry('rclone', 'zurgarr', restarted),
+            self._fake_entry('rclone', 'torbox', restarted),
+            self._fake_entry('Zurg', 'zurgarr', restarted),
+        ])
+        assert restart_service('rclone') is True
+        assert restarted == [('rclone', 'zurgarr'), ('rclone', 'torbox')]
+
+    def test_key_type_filter_restarts_only_matching_instance(self, monkeypatch):
+        import utils.processes as processes
+        restarted = []
+        monkeypatch.setattr(processes, '_process_registry', [
+            self._fake_entry('rclone', 'zurgarr', restarted),
+            self._fake_entry('rclone', 'torbox', restarted),
+        ])
+        assert restart_service('rclone', key_type='torbox') is True
+        assert restarted == [('rclone', 'torbox')]
+        assert restart_service('rclone', key_type='nosuchmount') is False
+
+
+# ---------------------------------------------------------------------------
+# StatusHandler — client-disconnect swallowing
+# ---------------------------------------------------------------------------
+
+class TestStatusHandlerClientDisconnect:
+    """The handler must swallow BrokenPipeError/ConnectionResetError so a
+    client that closes mid-response doesn't spam multi-line tracebacks
+    into zurgarr's logs.  Other exceptions must still propagate (those
+    are real bugs the operator wants surfaced).
+
+    Regression for live-observed log spam: traefik / watchtower /
+    browser-closed-tab clients disconnect mid-response on the polling
+    endpoints, and socketserver's default ``handle_error`` prints a
+    ~10-line traceback per disconnect.
+    """
+
+    def _make_handler(self):
+        """Construct a bare StatusHandler instance without driving
+        BaseHTTPRequestHandler.__init__ (which expects a live socket)."""
+        from utils.status_server import StatusHandler
+        h = StatusHandler.__new__(StatusHandler)
+        h.client_address = ('127.0.0.1', 9999)
+        return h
+
+    def test_broken_pipe_swallowed(self, monkeypatch):
+        from utils import status_server as ss
+        h = self._make_handler()
+        def boom(self):
+            raise BrokenPipeError("client gone")
+        monkeypatch.setattr(
+            ss.http.server.BaseHTTPRequestHandler, 'handle_one_request', boom,
+        )
+        h.handle_one_request()  # must NOT raise
+
+    def test_connection_reset_swallowed(self, monkeypatch):
+        from utils import status_server as ss
+        h = self._make_handler()
+        def boom(self):
+            raise ConnectionResetError("RST")
+        monkeypatch.setattr(
+            ss.http.server.BaseHTTPRequestHandler, 'handle_one_request', boom,
+        )
+        h.handle_one_request()  # must NOT raise
+
+    def test_other_exceptions_still_raise(self, monkeypatch):
+        """Real bugs must NOT be silently swallowed."""
+        from utils import status_server as ss
+        h = self._make_handler()
+        def boom(self):
+            raise ValueError("real bug")
+        monkeypatch.setattr(
+            ss.http.server.BaseHTTPRequestHandler, 'handle_one_request', boom,
+        )
+        with pytest.raises(ValueError, match="real bug"):
+            h.handle_one_request()
+
+    def test_normal_request_passes_through(self, monkeypatch):
+        """No exception → no interference."""
+        from utils import status_server as ss
+        h = self._make_handler()
+        called = []
+        monkeypatch.setattr(
+            ss.http.server.BaseHTTPRequestHandler, 'handle_one_request',
+            lambda self: called.append(True),
+        )
+        h.handle_one_request()
+        assert called == [True]

@@ -1,5 +1,7 @@
 from ui.ui_print import *
 import releases
+import threading
+import time as _time
 
 # (required) Name of the Debrid service
 name = "Torbox"
@@ -8,6 +10,41 @@ short = "TB"
 api_key = ""
 # Define Variables
 session = requests.Session()
+
+# Local modification (zurgarr): pace createtorrent calls so plex_debrid can't
+# arm TorBox's abuse cooldown (documented account limit: 60 creates/hour;
+# burst overruns freeze the whole account for 24h). Deliberately does NOT
+# gate on the /user/me cooldown_until flag — that flag is advisory on paid
+# plans and gating on it starves adds that would have succeeded.
+_create_pace_lock = threading.Lock()
+_create_next_ok = 0.0
+_CREATE_MIN_INTERVAL = 61.0
+_RATE_LIMIT_PENALTY = 300.0
+
+
+def _pace_create():
+    # Sleeping under the lock is intentional: concurrent creators must queue
+    # so each one gets its own full interval.
+    global _create_next_ok
+    with _create_pace_lock:
+        wait = _create_next_ok - _time.monotonic()
+        if wait > 0:
+            ui_print("[torbox] pacing createtorrent " + str(int(wait)) + "s to stay under the 60/hour create limit")
+            _time.sleep(wait)
+        _create_next_ok = _time.monotonic() + _CREATE_MIN_INTERVAL
+
+
+def _note_rate_limited():
+    # Non-blocking: a creator may be sleeping under the lock for minutes, and
+    # this is called from post() on arbitrary threads — never make an
+    # unrelated request wait out that sleep. If the lock is busy the penalty
+    # is skipped; persistent 429s re-trigger it on the next response.
+    global _create_next_ok
+    if _create_pace_lock.acquire(blocking=False):
+        try:
+            _create_next_ok = max(_create_next_ok, _time.monotonic() + _RATE_LIMIT_PENALTY)
+        finally:
+            _create_pace_lock.release()
 errors = [
     [202, " action already done"],
     [400, " bad Request (see error message)"],
@@ -64,6 +101,8 @@ def post(url, data=None, json_data=None):
         ui_print("[torbox] (post): " + url + " with data " + repr(data if data else json_data), debug=ui_settings.debug)
         response = session.post(url, headers=headers, json=json.dumps(json_data)) if json_data else session.post(url, headers=headers, data=data)
         logerror(response)
+        if response.status_code == 429:
+            _note_rate_limited()
         response = json.loads(response.content, object_hook=lambda d: SimpleNamespace(**d))
         if hasattr(response, "detail"):
             if hasattr(response, "success") and not response.success:
@@ -144,6 +183,7 @@ def download(element, stream=True, query='', force=False):
                             for file in version.files:
                                 cached_ids += [file.id]
                             try:
+                                _pace_create()
                                 response = post('https://api.torbox.app/v1/api/torrents/createtorrent', {'magnet': str(release.download[0]), 'seed': 3, 'allow_zip': 'false'})
 
                                 if response is None or not response.success or not hasattr(response, "data") or not hasattr(response.data, "torrent_id"):
@@ -191,6 +231,7 @@ def download(element, stream=True, query='', force=False):
                 ui_print('[torbox] error: no streamable version could be selected for release: ' + release.title)
                 return False
             else:
+                _pace_create()
                 response = post('https://api.torbox.app/v1/api/torrents/createtorrent', {'magnet': str(release.download[0]), 'seed': 3, 'allow_zip': 'false'})
                 ui_print('[torbox] adding uncached release: ' + release.title + (" with torrent_id=" + str(response.data.torrent_id) if hasattr(response, "data") and hasattr(response.data, "torrent_id") else ""))
                 return True

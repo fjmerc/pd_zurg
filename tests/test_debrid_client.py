@@ -327,6 +327,15 @@ class TestRealDebrid:
         with pytest.raises(req.HTTPError):
             rd.list_torrents()
 
+    @patch('utils.debrid_client.requests.get')
+    def test_list_torrents_non_list_payload_raises(self, mock_get, rd):
+        """RD can return HTTP 200 with an error dict — a silent [] would
+        read as 'account is empty' to consumers like debrid_health's
+        stale-entry pruning, so it must raise instead."""
+        mock_get.return_value = _mock_response({'error': 'bad_token'})
+        with pytest.raises(ValueError):
+            rd.list_torrents()
+
     @patch('utils.debrid_client.requests.delete')
     def test_delete_success(self, mock_del, rd):
         mock_del.return_value = _mock_response(status_code=204)
@@ -358,6 +367,270 @@ class TestRealDebrid:
         mock_get.return_value = _mock_response([])
         rd.list_torrents()
         assert mock_get.call_args[1]['params']['limit'] == 2500
+
+    @patch('utils.debrid_client.requests.get')
+    def test_torrent_status_returns_status(self, mock_get, rd):
+        mock_get.return_value = _mock_response(
+            {'id': 'ABC123', 'status': 'downloaded'})
+        assert rd.torrent_status('ABC123') == 'downloaded'
+        assert '/torrents/info/ABC123' in mock_get.call_args[0][0]
+
+    @patch('utils.debrid_client.requests.get')
+    def test_torrent_status_non_200_is_empty(self, mock_get, rd):
+        mock_get.return_value = _mock_response({}, status_code=404)
+        assert rd.torrent_status('ABC123') == ''
+
+    @patch('utils.debrid_client.requests.get')
+    def test_torrent_status_non_dict_payload_is_empty(self, mock_get, rd):
+        mock_get.return_value = _mock_response(['not', 'a', 'dict'])
+        assert rd.torrent_status('ABC123') == ''
+
+    @patch('utils.debrid_client.requests.get')
+    def test_torrent_status_network_error_is_empty(self, mock_get, rd):
+        import requests as req
+        mock_get.side_effect = req.ConnectionError('timeout')
+        assert rd.torrent_status('ABC123') == ''
+
+    def test_torrent_status_invalid_id_is_empty(self, rd):
+        assert rd.torrent_status('../../etc/passwd') == ''
+
+    @patch('utils.debrid_client.requests.post')
+    def test_select_files_success(self, mock_post, rd):
+        mock_post.return_value = _mock_response(status_code=204)
+        assert rd.select_files('ABC123') is True
+        assert '/torrents/selectFiles/ABC123' in mock_post.call_args[0][0]
+        assert mock_post.call_args[1]['data'] == {'files': 'all'}
+
+    @patch('utils.debrid_client.requests.post')
+    def test_select_files_failure_status(self, mock_post, rd):
+        mock_post.return_value = _mock_response(status_code=400)
+        assert rd.select_files('ABC123') is False
+
+    @patch('utils.debrid_client.requests.post')
+    def test_select_files_network_error(self, mock_post, rd):
+        import requests as req
+        mock_post.side_effect = req.ConnectionError('timeout')
+        assert rd.select_files('ABC123') is False
+
+    def test_select_files_invalid_id(self, rd):
+        assert rd.select_files('../../etc/passwd') is False
+
+
+# ---------------------------------------------------------------------------
+# RealDebrid probe_file — debrid health reconcile detection primitive
+# ---------------------------------------------------------------------------
+
+class TestProbeFile:
+    """Tests for RealDebridClient.probe_file — the detection primitive
+    for the May 2026 RD keyword filter-gate (infringing_file / error 35).
+
+    The probe POSTs to ``/unrestrict/link`` with a sample file link and
+    classifies the response:
+        200 → healthy
+        403 or 451 with body ``error_code: 35`` / ``error: 'infringing_file'`` → blocked
+        404 → blocked (not_found)
+        anything else → unknown (retry-eligible)
+
+    Note: live RD probing on 2026-05-24 confirmed the May 2026 filter
+    returns HTTP 451 (RFC 7725 "Unavailable For Legal Reasons"), not 403
+    as ElfHosted's writeup and Decypharr's repair worker assume. Body
+    shape matches docs: ``{"error":"infringing_file","error_code":35}``.
+    """
+
+    _SAMPLE_LINK = 'https://real-debrid.com/d/ABC123XYZ'
+
+    def _info_response(self, files, links):
+        """Build a /torrents/info response body."""
+        return {'id': 'ABC123', 'files': files, 'links': links}
+
+    @patch('utils.debrid_client.requests.post')
+    def test_healthy_returns_status_healthy(self, mock_post, rd):
+        mock_post.return_value = _mock_response(status_code=200, json_data={'download': 'https://...'})
+        result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
+        assert result == {'status': 'healthy'}
+
+    @patch('utils.debrid_client.requests.post')
+    def test_blocked_infringing_by_error_code_on_403(self, mock_post, rd):
+        """Documented-but-not-observed shape: HTTP 403 + error_code 35.
+        Kept supported since ElfHosted's writeup specified 403 — RD's
+        previous response format may resurface."""
+        mock_post.return_value = _mock_response(
+            status_code=403,
+            json_data={'error': 'infringing_file', 'error_code': 35},
+        )
+        result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
+        assert result == {'status': 'blocked', 'reason': 'infringing_file', 'http': 403}
+
+    @patch('utils.debrid_client.requests.post')
+    def test_blocked_infringing_by_error_code_on_451(self, mock_post, rd):
+        """Live-observed (2026-05-24) shape: HTTP 451 + error_code 35.
+        This is the actual May 2026 filter response in production. Without
+        451 handling, every filter-blocked torrent buckets as unknown and
+        the reconciler's blocked-set stays empty."""
+        mock_post.return_value = _mock_response(
+            status_code=451,
+            json_data={'error': 'infringing_file', 'error_code': 35},
+        )
+        result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
+        assert result == {'status': 'blocked', 'reason': 'infringing_file', 'http': 451}
+
+    @patch('utils.debrid_client.requests.post')
+    def test_blocked_infringing_by_error_key_alone(self, mock_post, rd):
+        """If RD drops error_code but keeps the error string, still classify
+        as blocked — defense against minor body-format drift. Exercised on
+        the live 451 path."""
+        mock_post.return_value = _mock_response(
+            status_code=451,
+            json_data={'error': 'infringing_file'},
+        )
+        result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
+        assert result == {'status': 'blocked', 'reason': 'infringing_file', 'http': 451}
+
+    @patch('utils.debrid_client.requests.post')
+    def test_blocked_not_found(self, mock_post, rd):
+        mock_post.return_value = _mock_response(status_code=404)
+        result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
+        assert result == {'status': 'blocked', 'reason': 'not_found', 'http': 404}
+
+    @patch('utils.debrid_client.requests.post')
+    def test_503_returns_unknown_retry_eligible(self, mock_post, rd):
+        mock_post.return_value = _mock_response(status_code=503)
+        result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
+        assert result == {'status': 'unknown', 'error': 'http_503'}
+
+    @patch('utils.debrid_client.requests.post')
+    def test_451_with_malformed_body_does_not_crash(self, mock_post, rd):
+        """A 451 with a body that fails JSON parsing must NOT crash the
+        sweep — classifying as unknown lets the next probe retry. (Same
+        defensive path for 403; the implementation shares the branch.)"""
+        resp = _mock_response(status_code=451)
+        resp.json.side_effect = ValueError('not json')
+        mock_post.return_value = resp
+        result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
+        assert result == {'status': 'unknown', 'error': 'http_451_unclassified'}
+
+    @patch('utils.debrid_client.requests.post')
+    def test_451_with_unrecognised_body_is_unknown_not_blocked(self, mock_post, rd, caplog):
+        """A 451 whose body shape we don't recognise must NOT be silently
+        treated as blocked (would mass-delete on auto-remediate). Surface
+        at WARN so future RD filter-format drift is visible — same posture
+        for 403."""
+        mock_post.return_value = _mock_response(
+            status_code=451,
+            json_data={'error': 'some_other_legal_reason'},
+        )
+        import logging
+        with caplog.at_level(logging.WARNING):
+            result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
+        assert result == {'status': 'unknown', 'error': 'http_451_unclassified'}
+        assert any('unclassified 451' in r.message for r in caplog.records)
+
+    @patch('utils.debrid_client.requests.post')
+    def test_network_error_returns_unknown(self, mock_post, rd):
+        import requests as req
+        mock_post.side_effect = req.ConnectionError('timeout')
+        result = rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
+        assert result == {'status': 'unknown', 'error': 'ConnectionError'}
+
+    def test_invalid_torrent_id_returns_unknown_without_http_call(self, rd):
+        """Bad torrent IDs must be rejected before any HTTP call —
+        same posture as ``delete_torrent``."""
+        with patch('utils.debrid_client.requests.post') as mock_post, \
+             patch('utils.debrid_client.requests.get') as mock_get:
+            result = rd.probe_file('../../etc/passwd', sample_file_link=self._SAMPLE_LINK)
+            assert result == {'status': 'unknown', 'error': 'invalid_torrent_id'}
+            assert mock_post.call_count == 0
+            assert mock_get.call_count == 0
+
+    @patch('utils.debrid_client.requests.post')
+    @patch('utils.debrid_client.requests.get')
+    def test_picks_smallest_media_file_when_link_not_provided(self, mock_get, mock_post, rd):
+        """No sample_file_link → fetch /torrents/info, pick smallest media
+        file, probe that link. Non-media files (.nfo, .srt) and unselected
+        files are excluded."""
+        mock_get.return_value = _mock_response(json_data=self._info_response(
+            files=[
+                {'id': 1, 'path': '/big.mkv',    'bytes': 5_000_000_000, 'selected': 1},
+                {'id': 2, 'path': '/small.mkv',  'bytes': 1_000_000_000, 'selected': 1},
+                {'id': 3, 'path': '/medium.mkv', 'bytes': 3_000_000_000, 'selected': 1},
+                {'id': 4, 'path': '/sample.nfo', 'bytes': 1_000,         'selected': 1},
+                {'id': 5, 'path': '/extras.mkv', 'bytes': 100_000,       'selected': 0},  # unselected
+            ],
+            links=[
+                'https://real-debrid.com/d/BIG',
+                'https://real-debrid.com/d/SMALL',
+                'https://real-debrid.com/d/MEDIUM',
+                'https://real-debrid.com/d/NFO',
+            ],
+        ))
+        mock_post.return_value = _mock_response(status_code=200)
+        result = rd.probe_file('ABC123')
+        assert result == {'status': 'healthy'}
+        # Smallest MEDIA file is /small.mkv at 1GB (not /sample.nfo, not /extras.mkv).
+        assert mock_post.call_args[1]['data']['link'] == 'https://real-debrid.com/d/SMALL'
+
+    @patch('utils.debrid_client.requests.get')
+    def test_no_media_files_in_torrent_is_unknown(self, mock_get, rd):
+        """Torrent with only non-media files → can't probe, return unknown.
+        Don't POST anything."""
+        mock_get.return_value = _mock_response(json_data=self._info_response(
+            files=[
+                {'id': 1, 'path': '/readme.txt', 'bytes': 1000, 'selected': 1},
+                {'id': 2, 'path': '/cover.jpg',  'bytes': 5000, 'selected': 1},
+            ],
+            links=['https://real-debrid.com/d/TXT', 'https://real-debrid.com/d/JPG'],
+        ))
+        with patch('utils.debrid_client.requests.post') as mock_post:
+            result = rd.probe_file('ABC123')
+            assert result == {'status': 'unknown', 'error': 'no_media_files'}
+            assert mock_post.call_count == 0
+
+    @patch('utils.debrid_client.requests.get')
+    def test_info_files_links_length_mismatch_bails(self, mock_get, rd):
+        """RD's contract: links is parallel to selected files. A mismatch
+        means we can't safely pair link to file — bail rather than probe
+        the wrong one (which could mis-flag the wrong torrent on filter
+        detection)."""
+        mock_get.return_value = _mock_response(json_data=self._info_response(
+            files=[
+                {'id': 1, 'path': '/a.mkv', 'bytes': 1000, 'selected': 1},
+                {'id': 2, 'path': '/b.mkv', 'bytes': 2000, 'selected': 1},
+            ],
+            links=['https://real-debrid.com/d/A'],  # length 1 vs selected 2
+        ))
+        with patch('utils.debrid_client.requests.post') as mock_post:
+            result = rd.probe_file('ABC123')
+            assert result == {'status': 'unknown', 'error': 'no_media_files'}
+            assert mock_post.call_count == 0
+
+    @patch('utils.debrid_client.requests.get')
+    def test_info_request_fails_returns_unknown(self, mock_get, rd):
+        import requests as req
+        mock_get.side_effect = req.ConnectionError('timeout')
+        result = rd.probe_file('ABC123')
+        assert result == {'status': 'unknown', 'error': 'no_media_files'}
+
+    @patch('utils.debrid_client.requests.get')
+    def test_info_returns_non_dict_is_unknown(self, mock_get, rd):
+        """Defensive: if RD returns a list or scalar instead of an info
+        dict (e.g. an error envelope shape change), don't crash."""
+        mock_get.return_value = _mock_response(json_data=['not', 'a', 'dict'])
+        result = rd.probe_file('ABC123')
+        assert result == {'status': 'unknown', 'error': 'no_media_files'}
+
+    @patch('utils.debrid_client.requests.post')
+    def test_probe_does_not_leak_api_key_in_logs(self, mock_post, rd, caplog):
+        """The sample file link contains the user's RD path. A network
+        failure log line must go through _sanitize_error so the API key
+        (if it appears in the exception message) is masked."""
+        import requests as req
+        mock_post.side_effect = req.ConnectionError('failure with key test-rd-key embedded')
+        import logging
+        with caplog.at_level(logging.WARNING):
+            rd.probe_file('ABC123', sample_file_link=self._SAMPLE_LINK)
+        for record in caplog.records:
+            assert 'test-rd-key' not in record.message, \
+                f"API key leaked in log: {record.message!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +706,11 @@ class TestTorBox:
         body = mock_post.call_args[1]['json']
         assert body['torrent_id'] == 456
         assert isinstance(body['torrent_id'], int)
-        assert body['operation'] == 'Delete'
+        # TB's API expects lowercase operation verbs.  Capital-D
+        # "Delete" returns 200 + success=False + error=INVALID_OPTION,
+        # which silently fails every delete in production — the source
+        # of the user's ghost-TB-entry accumulation.
+        assert body['operation'] == 'delete'
 
     def test_delete_rejects_float_id(self, tb):
         """IDs with dots are rejected by _SAFE_ID validation."""
@@ -443,6 +720,28 @@ class TestTorBox:
         """Non-success response returns False without leaking response body."""
         with patch('utils.debrid_client.requests.post') as mock_post:
             mock_post.return_value = _mock_response({'success': False, 'detail': 'not found'})
+            assert tb.delete_torrent('456') is False
+
+    def test_delete_failure_response_with_null_detail(self, tb):
+        """Regression: ``{"detail": null}`` must NOT crash with TypeError.
+
+        ``data.get('detail', '')`` returns ``None`` when the key exists with
+        a null value (the default is only used when the key is absent).
+        ``None[:80]`` then raises ``TypeError``, which previously escaped
+        the except tuple and tore down every cleanup-on-failure caller —
+        precisely on the unhappy path the diagnostic log was supposed to
+        illuminate.
+        """
+        with patch('utils.debrid_client.requests.post') as mock_post:
+            mock_post.return_value = _mock_response({'success': False, 'detail': None})
+            assert tb.delete_torrent('456') is False
+
+    def test_delete_failure_response_with_error_field(self, tb):
+        """TB returns ``error`` (not ``detail``) for INVALID_OPTION-style
+        failures — make sure the log falls back to that field too.
+        """
+        with patch('utils.debrid_client.requests.post') as mock_post:
+            mock_post.return_value = _mock_response({'success': False, 'error': 'INVALID_OPTION'})
             assert tb.delete_torrent('456') is False
 
     def test_delete_invalid_id(self, tb):

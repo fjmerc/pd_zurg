@@ -36,7 +36,7 @@ Everything else has a sensible default or is opt-in.
 | `ZURG_ENABLED` | Enable Zurg | `false` |
 | `RD_API_KEY` | [Real-Debrid API key](https://real-debrid.com/apitoken) | |
 | `AD_API_KEY` | [AllDebrid API key](https://alldebrid.com/apikeys/) | |
-| `TORBOX_API_KEY` | [TorBox API key](https://torbox.app/settings) | |
+| `TORBOX_API_KEY` | [TorBox API key](https://torbox.app/settings). Powers cache probes, search-add, and dual-debrid blackhole routing. For the WebDAV mount, see [TorBox co-debrid](#torbox-co-debrid-mount-plan-39). | |
 | `RCLONE_MOUNT_NAME` | Name for the rclone mount | |
 | `RCLONE_LOG_LEVEL` | [rclone log level](https://rclone.org/docs/#log-level-level). `OFF` to suppress | `NOTICE` |
 | `RCLONE_DIR_CACHE_TIME` | [Directory cache duration](https://rclone.org/commands/rclone_mount/#vfs-directory-cache) | `10s` |
@@ -56,6 +56,31 @@ Everything else has a sensible default or is opt-in.
 | `ZURG_PORT` | WebDAV port. Set a fixed value if exposing to other machines | random |
 | `NFS_ENABLED` | Enable rclone NFS server (does NOT create a local mount — use FUSE if Plex is on the same host) | `false` |
 | `NFS_PORT` | NFS server port | random |
+
+---
+
+## TorBox co-debrid mount (plan 39)
+
+TorBox runs as an *additive* co-debrid alongside Real-Debrid (or AllDebrid).
+Zurg can't proxy TorBox, so the mount goes through rclone's native webdav
+remote against `https://webdav.torbox.app/`. Setting `TORBOX_API_KEY` alone
+enables cache probes / search-add / blackhole routing. To get the WebDAV
+mount you need the two `TORBOX_WEBDAV_*` vars as well.
+
+| Variable | Description | Default |
+|---|---|---|
+| `TORBOX_API_KEY` | TorBox API key (cache probes, search, blackhole) | |
+| `TORBOX_WEBDAV_USER` | TorBox account email used for WebDAV Basic auth | |
+| `TORBOX_WEBDAV_PASS` | WebDAV-only password from the TorBox dashboard → Settings → Integrations → WebDAV. **Not** the account password, **not** the API key. | |
+| `TORBOX_MOUNT_NAME` | Mount path under `/data` (must not collide with `RCLONE_MOUNT_NAME`) | `torbox` |
+| `TORBOX_RCLONE_TPSLIMIT` | Max requests-per-second issued by the TB rclone mount. TB rate-limits reads aggressively under concurrent Plex/Bazarr scans; capping tps avoids the `too many errors 11/10` 429 cascade. Set to `0` to omit the flag entirely. | `5` |
+| `TORBOX_RCLONE_TPSLIMIT_BURST` | Short-burst allowance on top of `TORBOX_RCLONE_TPSLIMIT`. Lets quick peeks (ffprobe header reads) succeed without blocking. Set to `0` to omit the flag entirely. Lowered from `10` to `3` to avoid an N-way burst tripping TorBox's WebDAV listing rate-limit. | `3` |
+| `TORBOX_RCLONE_DIR_CACHE_TIME` | How long the TB rclone mount caches directory listings (rclone `--dir-cache-time` syntax, e.g. `2h`). Must exceed `LIBRARY_SCAN_INTERVAL`; with a shorter value every cold scan re-lists all TB folders at the throttled tps limit and times out, dropping TB titles (they show as "Wanted"). The blackhole grab hook calls `vfs/refresh`, so newly-grabbed content still appears between expiries. | `2h` |
+| `TORBOX_SCAN_TIMEOUT` | Seconds the library scan may spend walking the TB FUSE mount, separate from the 30s main scan deadline. The main deadline cannot enumerate a large TB mount on a cold cache at the throttled tps limit (~450 folders ≈ 90s), so TB gets its own budget. Raise it if a very large TB library still truncates. | `180` |
+
+> **Note**: plex_debrid (`PD_ENABLED=true`) speaks directly to RD via its
+> own client and bypasses pd_zurg's blackhole entirely — multi-debrid
+> routing therefore does not apply to plex_debrid-driven grabs.
 
 ---
 
@@ -105,7 +130,10 @@ See the [Blackhole Symlink Guide](BLACKHOLE_SYMLINK_GUIDE.md) for full setup.
 | `BLACKHOLE_ENABLED` | Enable blackhole watch folder | `false` |
 | `BLACKHOLE_DIR` | Watch dir for `.torrent`/`.magnet`. Supports per-arr label subdirs (`sonarr/`, `radarr/`) — see the [Blackhole Guide](BLACKHOLE_SYMLINK_GUIDE.md) | `/watch` |
 | `BLACKHOLE_POLL_INTERVAL` | Seconds between folder scans | `5` |
-| `BLACKHOLE_DEBRID` | Debrid service: `realdebrid`, `alldebrid`, `torbox`. Auto-detected if unset | auto |
+| `BLACKHOLE_DEBRID` | Legacy: single debrid for all grabs (`realdebrid`/`alldebrid`/`torbox`). Auto-detected if unset. Superseded by `BLACKHOLE_DEBRID_PRIMARY` when both are set. | auto |
+| `BLACKHOLE_DEBRID_ROUTING` | Per-grab routing (plan 39): `cache_aware` (probe both, prefer cached side) or `primary_only` (ignore cache, always use primary). When unset: `cache_aware` if two or more debrids configured, `primary_only` otherwise. | auto |
+| `BLACKHOLE_DEBRID_PRIMARY` | Primary debrid for fallback / tiebreak in cache_aware mode. Defaults to first-configured-of `realdebrid`, `alldebrid`, `torbox`. | auto |
+| `BLACKHOLE_SYMLINK_TARGET_BASE_TORBOX` | Host path for TorBox-routed symlinks. Distinct from `BLACKHOLE_SYMLINK_TARGET_BASE` so Plex sees TorBox content as a separate library (plan 39 Q1). Defaults to `<BLACKHOLE_SYMLINK_TARGET_BASE>_torbox`. | auto |
 | `BLACKHOLE_SYMLINK_ENABLED` | Enable symlink creation after download | `false` |
 | `BLACKHOLE_COMPLETED_DIR` | Staging directory for completed symlinks. Under per-arr label layout, symlinks are nested (`.../sonarr/`, `.../radarr/`). Flat layout works when no label subdirs | `/completed` |
 | `BLACKHOLE_RCLONE_MOUNT` | rclone mount path inside the container. Append mount name (e.g. `/data/zurgarr`) | `/data` |
@@ -137,6 +165,10 @@ for recommended settings per provider.
 | `BLACKHOLE_DEBRID_DEDUP_ENABLED` | Skip if the hash is already on the debrid account. Stops Sonarr/Radarr re-grabs from producing duplicate entries in DMM | `true` |
 | `BLACKHOLE_REQUIRE_CACHED` | Refuse `.torrent`/`.magnet` drops that aren't confirmed cached. **RD users leave OFF** (RD deprecated its cache probe Nov 2024); AD/TB users can turn this ON | `false` |
 | `BLACKHOLE_DELETE_UNCACHED_ON_TIMEOUT` | When the blackhole gives up waiting for debrid to cache a torrent (`BLACKHOLE_MOUNT_POLL_TIMEOUT`), actively delete it from the debrid account instead of leaving it as a 0%/0-seed entry. **Recommended ON for RD users** — see [TROUBLESHOOTING](TROUBLESHOOTING.md#uncached-torrents-pile-up-on-my-debrid-account-from-the-blackhole) | `false` |
+| `BLACKHOLE_TB_ALT_RECOVERY_ENABLED` | When a grabbed release is uncached and would be rejected, search Torrentio for other releases of the same title cached on **TorBox** (at the same quality tier the arr approved) and grab one instead. Stops well-cached titles falling to "Wanted" because the specific hash Sonarr/Radarr picked is uncached. Requires TorBox configured; no-op without it | `true` |
+| `BLACKHOLE_TB_ALT_MAX_ATTEMPTS` | Cached-alternative grabs for one season before giving up and letting the title fall back to "Wanted". Each grab re-arms TorBox's abuse cooldown, so this caps re-grabbing a never-completing title on every `.magnet` re-drop. Persists across restarts; decays after 30 idle days | `12` |
+| `BLACKHOLE_ARR_FAILED_FEEDBACK_ENABLED` | When an uncached grab is rejected (and no cached alternative was found), report the failure back to Sonarr/Radarr via the failed-download API so the arr blocklists that release and immediately searches for a different one. Without feedback the arr is never told anything went wrong and re-grabs the identical release on every RSS pass | `true` |
+| `BLACKHOLE_ARR_FEEDBACK_MAX_STRIKES` | Failed-download reports per title (per episode for TV) before giving up. Each report makes the arr blocklist a release and grab the next candidate, so an entirely-uncached title would otherwise walk its whole release list. Past the cap, rejects fall back to silent deletion and the Wanted recovery pass owns the title. Persists across restarts; decays after 30 idle days | `8` |
 
 ### Quality compromise + season-pack fallback (opt-in)
 
@@ -168,6 +200,26 @@ here is inert while it's OFF.
 
 ---
 
+## Debrid health reconciler
+
+Background sweep that probes each Real-Debrid torrent for the **May 2026 keyword filter-gate** (RD returns `infringing_file` / error 35 for cached torrents whose filenames trip its keyword blocklist — `WEB-DL`, `AMZN`, `[RARBG]`, etc.). Without this, Zurg's WebDAV listing keeps showing blocked torrents as healthy and your library renders phantom content that won't play. State is persisted to `/config/debrid_health.json`.
+
+**Real-Debrid only.** AllDebrid and TorBox don't currently filter cached content this way, so the reconciler is gated on `RD_API_KEY` being configured — if you only have AD/TB credentials, the task never registers and the sweep never runs (zero overhead). The architecture has a multi-debrid extension hook (per plan 38), so adding AD/TB support if either provider ever introduces a similar filter is one method per provider.
+
+| Variable | Description | Default |
+|---|---|---|
+| `DEBRID_HEALTH_ENABLED` | Master kill switch for the periodic probe sweep. Turn OFF only if RD's API drifts and the prober misbehaves, or to silence background API calls entirely | `true` |
+| `DEBRID_HEALTH_AUTO_REMEDIATE` | When a probe confirms a torrent is filter-blocked: blocklist the hash, delete from RD, trigger Sonarr/Radarr re-search. OFF by default because this mutates your RD account state. Hard-capped at 100 remediations per sweep so first-run enable cannot mass-delete | `false` |
+| `DEBRID_HEALTH_CROSS_RESCUE` | Plan 39 phase 3: when RD filter-blocks a torrent that TorBox has cached, auto-rehost on TB (no blocklist, no RD delete, no arr re-search) and retarget arr-library symlinks to the TB mount. Skipped silently when TB doesn't have it cached or the add never reaches `completed` (60 s budget) — the existing remediation pipeline then runs as if rescue wasn't configured. Defaults to ON when both RD and TB API keys are configured; OFF when only one. Set explicit `true`/`false` to override. | auto |
+
+Sweep cadence (`DEBRID_HEALTH_INTERVAL`, default 12h) is a power-user override read directly from env and not surfaced in the Settings UI. Per-torrent re-probe TTL (7 d for healthy), rate limit (60/min, well under RD's 250/min user quota), sweep cap (2000 probes per run), and remediation cap (100 deletes per run) are intentionally hardcoded module constants to keep the env surface minimal — open a feature request if you actually need to tune one.
+
+**Recommended rollout when enabling auto-remediate**: Leave `DEBRID_HEALTH_ENABLED=true` and `DEBRID_HEALTH_AUTO_REMEDIATE=false` for at least one sweep (12 h). Inspect `/config/debrid_health.json` (entries with `status: "blocked"`) and confirm the kill list looks right. Then flip auto-remediate ON. Subsequent sweeps will batch-process blocked entries (≤100 per sweep) — for a large backlog, this takes several sweeps to drain. Each remediation produces an Activity-feed entry with cause `debrid_filtered`; a single per-sweep summary notification fires under the `debrid_filtered` event (subscribe via `NOTIFICATION_EVENTS`).
+
+**Media recovery snapshots**: the hourly library scan records a once-per-day data point of library composition (debrid-playable / local-only / wanted, counted per movie and per episode) plus filter-gate deltas to `/config/recovery_snapshots.json`, queryable at `GET /api/recovery`. Retention is `RECOVERY_SNAPSHOT_RETENTION_DAYS` (default 365) — a power-user override read directly from env, not surfaced in the Settings UI.
+
+---
+
 ## Library browser, preferences, gap-fill
 
 | Variable | Description | Default |
@@ -178,8 +230,14 @@ here is inert while it's OFF.
 | `BLOCKLIST_EXPIRY_DAYS` | Auto-expire auto-added blocklist entries after N days (0=never). Manual entries kept forever | `0` |
 | `LIBRARY_PREFERENCE_AUTO_ENFORCE` | Auto-switch sources when content arrives matching a stored preference | `false` |
 | `DEBRID_UNAVAILABLE_THRESHOLD_DAYS` | Days of failed searches before marking content debrid-unavailable | `3` |
+| `FORCE_GRAB_MAX_ATTEMPTS` | Force-grabs of a debrid release for one stuck title before giving up (marks debrid-unavailable). Each force-grab re-arms TorBox's abuse cooldown, so this caps the self-inflicted churn. Persists across restarts; resets when the title lands on debrid or after 30 idle days | `12` |
 | `PENDING_WARNING_HOURS` | Hours before `pending_warning` notification for stuck items (0 disables) | `24` |
 | `GAP_FILL_ENABLED` | Reconcile monitored shows against TMDB and search Sonarr/Radarr for aired episodes missing from both sources. Also auto-enables `verify_symlinks` re-search on broken symlinks | `true` |
+| `WANTED_TB_RECOVERY_ENABLED` | For each "Wanted" title the arr never grabbed, search Torrentio directly, probe TorBox's cache, and add the best cached release straight to TorBox — bypassing the arr's indexer pool. Closes the gap where a title is cached on TorBox but the arr never surfaces a grabbable release. Requires TorBox + `TORRENTIO_URL` | `true` |
+| `WANTED_TB_RECOVERY_MAX_PER_SCAN` | Max Wanted titles the recovery pass adds to TorBox per library scan. Kept small so creates trickle across scans — create-volume bursts arm TorBox Essential's ~24h abuse cooldown, which starves recovery far more than a low cap | `2` |
+| `WANTED_RD_RECOVERY_ENABLED` | RD leg of the Wanted recovery pass — a fallback that fires only on titles the TorBox cache probe reports uncached (or when TorBox can't answer this pass); TorBox-cached titles are claimed by the TorBox leg exclusively. RD's cache probe is dead, so the add is the probe: add the top release to RealDebrid, keep it if it goes instantly ready (cached), delete it otherwise. Requires RealDebrid + `TORRENTIO_URL` | `true` |
+| `WANTED_RD_RECOVERY_MAX_PER_SCAN` | Max RealDebrid probe-adds per library scan (attempts, not successes). RD has no create-volume cooldown, so this can sit higher than the TorBox cap; each uncached attempt burns up to ~20s of ready-polling | `4` |
+| `WANTED_SEASON_RECOVERY_ENABLED` | Extend Wanted recovery to partially-present shows: each season with missing aired episodes is probed for a TorBox-cached season pack (single-episode release for the first missing episode as fallback). One cached pack add fills every gap in the season — the symlink phase skips episodes already on disk. TorBox-only; shares `WANTED_TB_RECOVERY_MAX_PER_SCAN` with whole-title targets, which keep first claim. Requires `WANTED_TB_RECOVERY_ENABLED` | `true` |
 
 ---
 
@@ -230,6 +288,7 @@ homelab-scale installs — most users don't need to touch these.
 | `ROUTING_AUDIT_INTERVAL` | Minutes between Sonarr/Radarr routing audits (debrid-tag self-heal) | `360` (6h) |
 | `QUEUE_CLEANUP_INTERVAL` | Minutes between Sonarr/Radarr queue cleanup passes | `60` |
 | `LIBRARY_SCAN_INTERVAL` | Minutes between library scans | `60` |
+| `LIBRARY_RESCAN_NFS_DELAY` | Seconds to sleep between symlink creation and the immediate Sonarr/Radarr rescan trigger, to let an NFS attribute cache invalidate before the arr walks the share. `0` disables (default; correct for local-FS arr-side libraries). Bump to `30` when symptomatic — see TROUBLESHOOTING for "Sonarr says hasFile=false right after a scan but imports correctly a minute later". Clamped to `[0, 300]`. | `0` |
 | `SYMLINK_VERIFY_INTERVAL` | Minutes between symlink verification sweeps | `360` (6h) |
 | `PREFERENCE_ENFORCE_INTERVAL` | Minutes between preference-enforcement passes | `60` |
 | `HOUSEKEEPING_INTERVAL` | Minutes between housekeeping (history prune, cache rotation) | `1440` (24h) |
@@ -237,6 +296,7 @@ homelab-scale installs — most users don't need to touch these.
 | `CONFIG_BACKUP_RETENTION` | Number of scheduled backup archives to retain. Older ones are pruned after each run | `7` |
 | `CONFIG_BACKUP_DIR` | Directory that receives scheduled backup archives. Pre-restore snapshots also land here (under `pre-restore-<timestamp>/` subdirs) | `/config/backups` |
 | `MOUNT_LIVENESS_INTERVAL` | Minutes between rclone mount liveness probes | `5` |
+| `MOUNT_SELFHEAL_ENABLED` | When the liveness probe finds a dead FUSE mount (stale mount-table entry after a container recreate — rclone crashloops on "directory already mounted"), automatically lazy-unmount the corpse and restart the owning rclone process. Fires only after 2 consecutive dead probes, only for the dead-daemon signature (never a merely slow or rate-limited mount), at most once per 10 minutes per mount. Set `false` to require manual recovery | `true` |
 
 ---
 

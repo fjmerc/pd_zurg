@@ -1,6 +1,7 @@
-"""HTML template for the Activity page (History + Blocklist).
+"""HTML template for the Activity page (History + Blocklist + Stuck).
 
-Displays event history and blocklisted torrents in a two-tab interface.
+Displays event history, blocklisted torrents, and stuck-content records
+(titles caught in retry loops, from /api/stuck) in a tabbed interface.
 Extracted from the monolithic dashboard to reduce scroll depth and match
 the Sonarr/Radarr-style page-per-concern layout.
 """
@@ -49,6 +50,7 @@ __NAV_HTML__
 <div class="tabs">
   <div class="tab active" data-kb="tab-1" onclick="switchTab('history')">History</div>
   <div class="tab" data-kb="tab-2" onclick="switchTab('blocklist')">Blocklist <span class="badge" id="bl-tab-count" style="display:none">0</span></div>
+  <div class="tab" data-kb="tab-3" onclick="switchTab('stuck')">Stuck <span class="badge" id="stuck-tab-count" style="display:none">0</span></div>
 </div>
 
 <!-- History Tab -->
@@ -67,6 +69,7 @@ __NAV_HTML__
       <option value="task_completed">Task</option>
       <option value="blocklisted">Blocklisted</option>
       <option value="blocklist_added">Auto-Blocked</option>
+      <option value="debrid">Debrid Health</option>
     </select>
     <input type="text" id="activity-search" data-kb="search" placeholder="Search titles... (/)" oninput="loadActivity(1)" style="flex:1;background:var(--input-bg);border:1px solid var(--input-border);border-radius:4px;padding:4px 8px;font-size:.8em;color:var(--text);outline:none;min-width:120px">
     <label style="font-size:.78em;color:var(--text2);display:inline-flex;align-items:center;gap:4px;user-select:none">
@@ -91,6 +94,17 @@ __NAV_HTML__
   <tbody id="blocklist-body"></tbody></table>
 </div>
 
+<!-- Stuck Tab -->
+<div class="tab-panel" id="panel-stuck">
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+    <span style="font-size:.78em;color:var(--text3)">Titles caught in retry loops with no progress. Retry clears give-up caps so the next scan tries again.</span>
+    <span id="stuck-dismissed-note" style="font-size:.78em;color:var(--text3);margin-left:auto;display:none"></span>
+    <button class="btn btn-ghost btn-sm" data-kb="refresh" onclick="loadStuck()">Refresh</button>
+  </div>
+  <table><thead><tr><th>Title</th><th>Why</th><th style="width:80px;text-align:center">Since</th><th style="width:70px;text-align:center">Attempts</th><th>Last event</th><th style="width:180px;text-align:center" id="stuck-actions-hdr"></th></tr></thead>
+  <tbody id="stuck-body"></tbody></table>
+</div>
+
 <div class="footer" style="margin-top:16px"></div>
 
 <script>
@@ -101,7 +115,7 @@ function switchTab(name){
   document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});
   document.querySelectorAll('.tab-panel').forEach(function(p){p.classList.remove('active')});
   document.getElementById('panel-'+name).classList.add('active');
-  var idx=name==='history'?0:1;
+  var idx=name==='history'?0:name==='blocklist'?1:2;
   document.querySelectorAll('.tab')[idx].classList.add('active');
 }
 
@@ -263,16 +277,159 @@ function clearBlocklist(){
   });
 }
 
+/* Stuck */
+var _stuckList=[];
+var _dismissedList=[];
+var _showDismissed=false;
+function stuckRowHtml(it,i,dismissed){
+  var chips=(it.reason_labels||[]).map(function(l){return '<span class="stuck-chip">'+esc(l)+'</span>'}).join(' ');
+  if(it.blocklisted)chips+=' <span class="stuck-chip stuck-chip-red">On local blocklist</span>';
+  var last='';
+  if(it.last_event){
+    var fmt=window._formatActivityEvent?window._formatActivityEvent(it.last_event):{short:it.last_event.detail||''};
+    last=esc(fmt.short||it.last_event.detail||'')+' <span style="color:var(--text3)">('+timeAgo(it.last_event.ts)+')</span>';
+  }
+  var mt=it.media_type==='show'?'show':'movie';
+  var titleCell=it.title?'<a class="act-link" href="/library?detail='+encodeURIComponent(it.title)+'&type='+mt+'&from=activity">'+esc(it.title)+'</a>':'<span style="color:var(--text3)">(unknown)</span>';
+  var h='<tr'+(dismissed?' style="opacity:.55"':'')+'>';
+  h+='<td style="font-size:.85em">'+titleCell+(it.provider?' <span style="color:var(--text3);font-size:.8em">['+esc(it.provider)+']</span>':'')+'</td>';
+  h+='<td>'+chips+'</td>';
+  h+='<td style="font-size:.8em;color:var(--text3);white-space:nowrap">'+(it.since?timeAgo(it.since):'—')+'</td>';
+  h+='<td style="font-size:.85em;font-family:monospace">'+(it.attempts||0)+'</td>';
+  h+='<td style="font-size:.8em;color:var(--text2)">'+last+'</td>';
+  h+='<td class="stuck-actions">';
+  if(window._hasAuth){
+    /* Buttons reference items by list index — item keys derive from
+       torrent filenames and must never land in an HTML attribute
+       (esc() does not escape quotes). */
+    if(dismissed){
+      h+='<button class="btn btn-ghost btn-sm stuck-undismiss" data-i="'+i+'">Undismiss</button>';
+    }else{
+      h+='<button class="btn btn-ghost btn-sm stuck-retry" data-i="'+i+'">Retry</button> ';
+      if(it.title&&!it.blocklisted)h+='<button class="btn btn-ghost btn-sm stuck-block" data-i="'+i+'">Blocklist</button> ';
+      h+='<button class="btn btn-ghost btn-sm stuck-dismiss" data-i="'+i+'">Dismiss</button>';
+    }
+  }
+  h+='</td></tr>';
+  return h;
+}
+function loadStuck(){
+  fetch('/api/stuck').then(function(r){return r.json()}).then(function(d){
+    var el=document.getElementById('stuck-body');
+    var cnt=document.getElementById('stuck-tab-count');
+    var note=document.getElementById('stuck-dismissed-note');
+    _stuckList=[];_dismissedList=[];
+    var dItems=d.dismissed_items||[];
+    if(d.dismissed){
+      var label=d.dismissed+' dismissed';
+      if(_showDismissed&&dItems.length<d.dismissed)label=d.dismissed+' dismissed (showing '+dItems.length+')';
+      note.textContent=label+' '+(_showDismissed?'▾':'▸');
+      note.style.display='';note.style.cursor='pointer';
+    }else{note.style.display='none';_showDismissed=false;}
+    var h='';
+    if(!d.items||!d.items.length){
+      h+='<tr><td colspan="6" style="color:var(--text3);text-align:center;padding:16px">Nothing stuck — all retry loops are making progress</td></tr>';
+      cnt.style.display='none';
+    }else{
+      cnt.textContent=d.total;
+      cnt.style.display='';
+      d.items.forEach(function(it,i){
+        _stuckList[i]=it;
+        h+=stuckRowHtml(it,i,false);
+      });
+    }
+    if(_showDismissed){
+      dItems.forEach(function(it,i){
+        _dismissedList[i]=it;
+        h+=stuckRowHtml(it,i,true);
+      });
+    }
+    el.innerHTML=h;
+    el.querySelectorAll('.stuck-retry').forEach(function(b){b.addEventListener('click',function(){stuckRetry(_stuckList[+this.dataset.i])})});
+    el.querySelectorAll('.stuck-block').forEach(function(b){b.addEventListener('click',function(){stuckBlock(_stuckList[+this.dataset.i])})});
+    el.querySelectorAll('.stuck-dismiss').forEach(function(b){b.addEventListener('click',function(){stuckDismiss(_stuckList[+this.dataset.i])})});
+    el.querySelectorAll('.stuck-undismiss').forEach(function(b){b.addEventListener('click',function(){stuckUndismiss(_dismissedList[+this.dataset.i])})});
+    if(window._hasAuth)document.getElementById('stuck-actions-hdr').textContent='Actions';
+  }).catch(function(){});
+}
+document.getElementById('stuck-dismissed-note').addEventListener('click',function(){
+  _showDismissed=!_showDismissed;loadStuck();
+});
+function stuckUndismiss(it){
+  if(!it)return;
+  fetch('/api/stuck/undismiss',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({key:it.key})
+  }).then(function(r){
+    showToast(r.ok?'Undismissed':'Undismiss failed',r.ok?'success':'error');
+    if(r.ok)loadStuck();
+  }).catch(function(){showToast('Undismiss failed','error')});
+}
+function stuckRetry(it){
+  if(!it)return;
+  var isMovie=it.media_type!=='show';
+  var extra=(isMovie&&it.title)?' and trigger a Radarr search now':' — the next scan will retry';
+  showConfirm('Retry '+(it.title||'this item')+'?','Clears the give-up caps and retry memos'+extra+'.').then(function(ok){
+    if(!ok)return;
+    fetch('/api/stuck/retry',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({key:it.key,title:it.title||'',imdb_id:it.imdb_id||''})
+    }).then(function(r){
+      if(!r.ok)throw 0;
+      if(isMovie&&it.title){
+        return fetch('/api/library/download',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({title:it.title,type:'movie'})
+        }).then(function(r2){
+          showToast(r2.ok?'Retry state cleared — Radarr search triggered':'Retry state cleared — search failed, next scan will retry',r2.ok?'success':'warning');
+        });
+      }
+      showToast('Retry state cleared — next scan will retry','success');
+    }).then(function(){loadStuck()}).catch(function(){showToast('Retry failed','error')});
+  });
+}
+function stuckBlock(it){
+  if(!it||!it.title)return;
+  showConfirm('Blocklist '+it.title+'?','Future grabs of this release will be rejected.').then(function(ok){
+    if(!ok)return;
+    fetch('/api/blocklist',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({info_hash:it.info_hash||'',title:it.title,reason:'stuck: manual block'})
+    }).then(function(r){
+      showToast(r.ok?'Blocklisted':'Blocklist failed',r.ok?'success':'error');
+      if(r.ok){loadStuck();loadBlocklist();}
+    }).catch(function(){showToast('Blocklist failed','error')});
+  });
+}
+function stuckDismiss(it){
+  if(!it)return;
+  fetch('/api/stuck/dismiss',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({key:it.key})
+  }).then(function(r){
+    showToast(r.ok?'Dismissed for 7 days':'Dismiss failed',r.ok?'success':'error');
+    if(r.ok)loadStuck();
+  }).catch(function(){showToast('Dismiss failed','error')});
+}
+
 /* Escape handler */
 window.onKbEscape=function(){
   var s=document.getElementById('activity-search');
   if(s&&s.value){s.value='';loadActivity(1);return;}
 };
 
+/* Preselect the type filter from the URL (?type=...) so deep links from
+   other pages — e.g. the System page Debrid Health cards' "View activity"
+   button (?type=debrid) — land on a pre-filtered view. */
+(function(){
+  var t=new URLSearchParams(window.location.search).get('type');
+  if(!t)return;
+  var sel=document.getElementById('activity-type');
+  for(var i=0;i<sel.options.length;i++){
+    if(sel.options[i].value===t){sel.value=t;break;}
+  }
+})();
+
 /* Initial load (wait for auth detection) + polling */
-window._hasAuthReady.then(function(){loadActivity();loadBlocklist();});
+window._hasAuthReady.then(function(){loadActivity();loadBlocklist();loadStuck();});
 setInterval(loadActivity,15000);
 setInterval(loadBlocklist,30000);
+setInterval(loadStuck,60000);
 __WANTED_BADGE_JS__
 </script>
 </main>
@@ -285,11 +442,15 @@ th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border2);fon
 th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;letter-spacing:.05em}
 #activity-body td:nth-child(1),#activity-body td:nth-child(2),#activity-body td:nth-child(5){text-align:center}
 #blocklist-body td:nth-child(5){text-align:center}
+#stuck-body td:nth-child(3),#stuck-body td:nth-child(4),#stuck-body td:nth-child(6){text-align:center}
+.stuck-chip{display:inline-block;padding:2px 7px;border-radius:4px;font-size:.72em;font-weight:500;white-space:nowrap;background:#d299221a;color:var(--yellow);margin:1px 0}
+.stuck-chip-red{background:#f851491a;color:var(--red)}
+.stuck-actions .btn{font-size:.7em;padding:2px 6px}
 .act-link{color:inherit;text-decoration:none;border-bottom:1px dotted var(--text3);transition:color var(--motion-fast),border-color var(--motion-fast)}
 .act-link:hover{color:var(--blue);border-bottom-color:var(--blue);text-decoration:none}
 .type-badge{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-size:.75em;font-weight:500;white-space:nowrap}
 .act-run-count{display:inline-block;padding:0 5px;margin-left:4px;border-radius:3px;font-size:.78em;font-weight:600;background:var(--border);color:var(--text);font-family:monospace}
-.type-grabbed{background:#58a6ff1a;color:var(--blue)}.type-cached{background:#3fb9501a;color:var(--green)}.type-symlink_created{background:#bc8cff1a;color:#bc8cff}.type-failed{background:#f851491a;color:var(--red)}.type-cleanup{background:#d299221a;color:var(--yellow)}.type-switched_source{background:#db6d281a;color:var(--orange)}.type-search_triggered{background:#58a6ff1a;color:var(--blue)}.type-rescan_triggered{background:#3fb9501a;color:var(--green)}.type-task_completed{background:var(--border);color:var(--text2)}.type-blocklisted{background:#f851491a;color:var(--red)}.type-blocklist_added{background:#db6d281a;color:var(--orange)}
+.type-grabbed{background:#58a6ff1a;color:var(--blue)}.type-cached{background:#3fb9501a;color:var(--green)}.type-symlink_created{background:#bc8cff1a;color:#bc8cff}.type-failed{background:#f851491a;color:var(--red)}.type-cleanup{background:#d299221a;color:var(--yellow)}.type-switched_source{background:#db6d281a;color:var(--orange)}.type-search_triggered{background:#58a6ff1a;color:var(--blue)}.type-rescan_triggered{background:#3fb9501a;color:var(--green)}.type-task_completed{background:var(--border);color:var(--text2)}.type-blocklisted{background:#f851491a;color:var(--red)}.type-blocklist_added{background:#db6d281a;color:var(--orange)}.type-debrid{background:#bc8cff1a;color:#bc8cff}
 #activity-search:focus{border-color:var(--input-focus)}
 .footer{display:flex;justify-content:flex-end;align-items:center;gap:8px;color:var(--text3);font-size:.78em}
 
@@ -297,14 +458,22 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
   /* Card-stacked layout for Activity tables. Uses flex `order` to reshuffle
      cells visually without touching DOM order (History/Blocklist JS renders
      in schema order; cards need a different visual sequence). */
-  #panel-history table,#panel-blocklist table{display:block}
-  #panel-history thead,#panel-blocklist thead{display:none}
-  #panel-history tbody,#panel-blocklist tbody{display:block}
-  #activity-body tr,#blocklist-body tr{display:flex;flex-wrap:wrap;align-items:baseline;border:1px solid var(--border2);border-radius:6px;padding:10px 12px;margin-bottom:8px}
-  #activity-body td,#blocklist-body td{border:none;padding:2px 0;width:auto !important;text-align:left !important}
+  #panel-history table,#panel-blocklist table,#panel-stuck table{display:block}
+  #panel-history thead,#panel-blocklist thead,#panel-stuck thead{display:none}
+  #panel-history tbody,#panel-blocklist tbody,#panel-stuck tbody{display:block}
+  #activity-body tr,#blocklist-body tr,#stuck-body tr{display:flex;flex-wrap:wrap;align-items:baseline;border:1px solid var(--border2);border-radius:6px;padding:10px 12px;margin-bottom:8px}
+  #activity-body td,#blocklist-body td,#stuck-body td{border:none;padding:2px 0;width:auto !important;text-align:left !important}
   /* Empty-state row: single td with colspan. Strip card look, center message. */
-  #activity-body tr:has(td[colspan]),#blocklist-body tr:has(td[colspan]){display:block;border:none;padding:0;margin-bottom:0}
-  #activity-body tr td[colspan],#blocklist-body tr td[colspan]{display:block;text-align:center !important;padding:16px 0 !important}
+  #activity-body tr:has(td[colspan]),#blocklist-body tr:has(td[colspan]),#stuck-body tr:has(td[colspan]){display:block;border:none;padding:0;margin-bottom:0}
+  #activity-body tr td[colspan],#blocklist-body tr td[colspan],#stuck-body tr td[colspan]{display:block;text-align:center !important;padding:16px 0 !important}
+  /* Stuck card: row1 = Title, row2 = Why chips, row3 = Since + Attempts, row4 = Last event, row5 = Actions. */
+  #stuck-body td:nth-child(1){order:1;flex-basis:100%;font-size:.95em;margin-bottom:2px}
+  #stuck-body td:nth-child(2){order:2;flex-basis:100%;margin-bottom:4px}
+  #stuck-body td:nth-child(3){order:3;margin-right:10px;font-size:.75em;color:var(--text3)}
+  #stuck-body td:nth-child(4){order:4;font-size:.75em}
+  #stuck-body td:nth-child(5){order:5;flex-basis:100%;color:var(--text2);font-size:.8em}
+  #stuck-body td:nth-child(6){order:6;flex-basis:100%;text-align:right !important;margin-top:6px}
+  #stuck-body .stuck-actions .btn{font-size:.8em !important;padding:6px 12px !important}
   /* History card: row1 = Time + Type + Source, row2 = Title, row3 = Detail. */
   #activity-body td:nth-child(1){order:1;margin-right:8px;font-size:.75em}
   #activity-body td:nth-child(2){order:2;margin-right:8px}

@@ -33,6 +33,9 @@ __NAV_HTML__
 <main class="main-content">
 <style>
 .main-content{max-width:1400px}
+/* Status-strip / legend palette — single source of truth for the poster
+   progress-bar colors and the color-key legend (theme-independent). */
+:root{--status-continuing:#5d9cec;--status-complete:#27c24c;--status-missing:#f05050;--status-switching:#7a43b6}
 
 /* Sticky toolbar wrapper (keeps tabs + controls visible while scrolling) */
 .toolbar-sticky{position:sticky;top:0;z-index:10;background:var(--bg);margin:0 -20px;padding:0 20px;box-shadow:0 2px 6px rgba(0,0,0,.15)}
@@ -51,6 +54,9 @@ __NAV_HTML__
 
 /* Controls row */
 .controls{display:flex;gap:8px;align-items:center;padding:12px 0;flex-wrap:wrap}
+/* Give search its own full-width row on narrow screens so the filter/sort
+   controls wrap as one predictable group beneath it instead of raggedly. */
+@media(max-width:560px){.controls .search-wrap{flex-basis:100%}}
 .search-wrap{flex:1;min-width:180px;position:relative}
 .search-wrap input{width:100%;background:var(--input-bg);border:1px solid var(--input-border);border-radius:6px;padding:8px 32px 8px 32px;color:var(--text);font-size:.85em;outline:none;transition:border-color .15s;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='15' height='15' fill='%23636e7b' viewBox='0 0 16 16'%3E%3Cpath d='M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85zm-5.242.156a5 5 0 1 1 0-10 5 5 0 0 1 0 10z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:9px center}
 .search-wrap input:focus{border-color:var(--input-focus)}
@@ -65,7 +71,9 @@ __NAV_HTML__
 .btn-select:hover{border-color:var(--blue);color:var(--blue)}
 .btn-select.active{background:var(--blue);color:#fff;border-color:var(--blue)}
 .btn-select .select-count{display:inline-block;background:rgba(255,255,255,.25);border-radius:10px;font-size:.82em;font-weight:600;padding:1px 7px;margin-left:5px;min-width:18px;text-align:center}
-.scan-info{font-size:.78em;color:var(--text3);white-space:nowrap}
+.scan-info{font-size:.78em;color:var(--text2);white-space:nowrap}
+#btn-refresh{min-width:104px;text-align:center}
+#btn-refresh .spinner{width:12px;height:12px;margin-right:6px;vertical-align:-1px}
 
 /* Scanning indicator */
 .scanning-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--yellow);margin-right:5px;animation:pulse-dot 1s ease-in-out infinite}
@@ -95,7 +103,7 @@ __NAV_HTML__
 [data-theme="light"] .poster-placeholder .pp-initial{color:rgba(255,255,255,.9)}
 [data-theme="light"] .poster-placeholder .pp-title{color:rgba(255,255,255,.8)}
 .corner-badge{position:absolute;top:0;right:0;width:0;height:0;border-style:solid;border-width:0 28px 28px 0;border-color:transparent transparent transparent transparent;z-index:1}
-.corner-badge.ended{border-color:transparent #f05050 transparent transparent}
+.corner-badge.ended{border-color:transparent var(--status-missing) transparent transparent}
 .progress-bar{height:5px;background:#5b5b5b;width:100%}
 .progress-fill{height:100%;transition:width .3s ease}
 [data-theme="light"] .progress-bar{background:#d0d7de}
@@ -110,8 +118,15 @@ __NAV_HTML__
 .skeleton-poster{overflow:hidden;border-radius:8px;background:var(--card)}
 .skeleton-poster .poster-container{aspect-ratio:2/3}
 
-/* Color legend */
+/* Color legend — persistent, collapsible color key above the grid */
+.legend-details{margin:8px 0 0}
+.legend-details>summary{cursor:pointer;font-size:.78em;color:var(--text2);user-select:none;list-style:none;display:inline-flex;align-items:center;gap:6px;padding:4px 0}
+.legend-details>summary::-webkit-details-marker{display:none}
+.legend-details>summary::before{content:'\25B8';display:inline-block;color:var(--text2);transition:transform .15s}
+.legend-details[open]>summary::before{transform:rotate(90deg)}
+.legend-details>summary:focus-visible{outline:2px solid var(--blue);outline-offset:2px;border-radius:3px}
 .legend{display:flex;flex-wrap:wrap;gap:8px 16px;padding:12px 0;font-size:.78em;color:var(--text2)}
+.legend-details .legend{padding:4px 0 8px}
 .legend-item{display:inline-flex;align-items:center;gap:6px}
 .legend-swatch{width:16px;height:5px;border-radius:1px;display:inline-block}
 
@@ -142,7 +157,7 @@ __NAV_HTML__
 .card-meta{font-size:.78em;color:var(--text2)}
 .badge-pending.has-error{border-color:#db6d2866}
 .badge-pending.has-error::after{content:'\26A0';margin-left:4px;font-size:.85em}
-.pending-callout{font-size:.78em;color:var(--orange);margin-top:6px;padding:6px 10px;background:#db6d280a;border-left:3px solid var(--orange);border-radius:0 4px 4px 0;line-height:1.5}
+.pending-callout{font-size:.78em;color:var(--text2);margin-top:6px;padding:6px 10px;background:#db6d280a;border-left:3px solid var(--orange);border-radius:0 4px 4px 0;line-height:1.5}
 [data-theme="light"] .pending-callout{background:#bc4c000d;border-left-color:#bc4c00;color:#bc4c00}
 .pending-callout-icon{margin-right:3px}
 .card-badges{display:flex;gap:5px;flex-wrap:wrap}
@@ -322,7 +337,7 @@ __NAV_HTML__
 .cast-card{flex:0 0 92px;text-align:center}
 .cast-photo{width:92px;height:92px;border-radius:50%;background:var(--border);background-size:cover;background-position:center;margin-bottom:4px}
 .cast-name{font-size:.78em;color:var(--text);font-weight:600;line-height:1.2;max-width:92px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
-.cast-role{font-size:.72em;color:var(--text3);line-height:1.2;max-width:92px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.cast-role{font-size:.72em;color:var(--text2);line-height:1.2;max-width:92px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 .cast-arrow{position:absolute;top:46px;width:32px;height:32px;border-radius:50%;border:1px solid var(--border);background:var(--card);color:var(--text);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:1.2em;font-weight:600;line-height:1;padding:0;box-shadow:0 2px 6px rgba(0,0,0,.3);opacity:.9;transition:opacity .15s,background .15s;z-index:2}
 .cast-arrow:hover{background:var(--border);opacity:1}
 .cast-arrow:disabled{opacity:0;pointer-events:none}
@@ -333,7 +348,7 @@ __NAV_HTML__
 .ep-title{color:var(--text);font-size:.95em;font-weight:600;display:inline}
 .ep-date{color:var(--text2);font-size:.82em;white-space:nowrap;margin-left:8px}
 .ep-relative{color:var(--text3);font-size:.9em;margin-left:4px}
-.ep-filename{color:var(--text3);font-size:.75em;display:block;word-break:break-all;margin-top:2px}
+.ep-filename{color:var(--text2);font-size:.75em;display:block;word-break:break-all;margin-top:2px}
 .ep-missing td{color:var(--text3)}
 .badge-missing{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#f851490f;color:var(--red);border:1px solid #f8514933;vertical-align:middle}
 .badge-upcoming{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:600;background:#58a6ff0f;color:var(--blue);border:1px solid #58a6ff33;vertical-align:middle}
@@ -547,6 +562,10 @@ body.has-bulk-bar{padding-bottom:60px}
   <span class="wanted-progress" id="wanted-progress"></span>
 </div>
 
+<details class="legend-details" id="legend-box" style="display:none">
+  <summary>Color key</summary>
+  <div class="legend" id="legend-body"></div>
+</details>
 <div class="jump-bar" id="jump-bar" role="navigation" aria-label="Alphabetical jump bar" style="display:none"></div>
 <div id="content-area" role="tabpanel" tabindex="0" aria-label="Library results">
   <div class="grid" id="skeleton-grid"></div>
@@ -696,7 +715,7 @@ function relativeTime(isoStr) {
 function updateScanInfo() {
   const el = document.getElementById('scan-info');
   if (_scanning) {
-    el.innerHTML = '<span class="scanning-dot"></span>Refreshing...';
+    el.innerHTML = '<span class="scanning-dot"></span>Scanning…';
     return;
   }
   if (_lastScan) {
@@ -946,47 +965,51 @@ function bulkApplyPreference() {
   var items = _getSelectedItemsList();
   if (!items.length) return;
   var prefLabel = pref === 'prefer-debrid' ? 'Prefer Debrid' : pref === 'prefer-local' ? 'Prefer Local' : 'No Preference';
-  if (!confirm('Set preference to "' + prefLabel + '" for ' + items.length + ' item(s)?')) return;
-  _bulkInFlight = true;
-  _setBulkActionsDisabled(true);
-  var done = 0;
-  var failed = 0;
-  var total = items.length;
-  function _next() {
-    if (done >= total) {
-      _bulkInFlight = false;
-      var msg = 'Applied preference to ' + (total - failed) + '/' + total + ' item(s).';
-      if (failed > 0) msg += ' ' + failed + ' failed.';
-      _showBulkProgress(msg);
-      _setBulkActionsDisabled(false);
-      sel.value = '';
-      setTimeout(function() {
-        _showBulkProgress('');
-        toggleSelectMode();
-        fetchLibrary();
-      }, 1500);
-      return;
-    }
-    var it = items[done];
-    _showBulkProgress('Applying ' + (done + 1) + '/' + total + '...');
-    fetch('/api/library/preference', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({title: it.nk, preference: pref})
-    }).then(function(r) {
-      if (!r.ok) { failed++; return; }
-      return r.json();
-    }).then(function(d) {
-      if (d) {
-        if (pref === 'none') { delete _preferences[it.nk]; }
-        else { _preferences[it.nk] = pref; }
+  showConfirm('Apply preference to selection',
+    'Set preference to "' + prefLabel + '" for ' + items.length + ' item(s)?',
+    {confirmLabel: 'Apply'}).then(function(ok) {
+    if (!ok) return;
+    _bulkInFlight = true;
+    _setBulkActionsDisabled(true);
+    var done = 0;
+    var failed = 0;
+    var total = items.length;
+    function _next() {
+      if (done >= total) {
+        _bulkInFlight = false;
+        var msg = 'Applied preference to ' + (total - failed) + '/' + total + ' item(s).';
+        if (failed > 0) msg += ' ' + failed + ' failed.';
+        _showBulkProgress(msg);
+        _setBulkActionsDisabled(false);
+        sel.value = '';
+        setTimeout(function() {
+          _showBulkProgress('');
+          toggleSelectMode();
+          fetchLibrary();
+        }, 1500);
+        return;
       }
-    }).catch(function() { failed++; }).finally(function() {
-      done++;
-      setTimeout(_next, 100);
-    });
-  }
-  _next();
+      var it = items[done];
+      _showBulkProgress('Applying ' + (done + 1) + '/' + total + '...');
+      fetch('/api/library/preference', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({title: it.nk, preference: pref})
+      }).then(function(r) {
+        if (!r.ok) { failed++; return; }
+        return r.json();
+      }).then(function(d) {
+        if (d) {
+          if (pref === 'none') { delete _preferences[it.nk]; }
+          else { _preferences[it.nk] = pref; }
+        }
+      }).catch(function() { failed++; }).finally(function() {
+        done++;
+        setTimeout(_next, 100);
+      });
+    }
+    _next();
+  });
 }
 
 function bulkSearchMissing() {
@@ -1026,46 +1049,50 @@ function bulkSearchMissing() {
     return;
   }
   var totalShows = new Set(tasks.map(function(t) { return normTitle(t.item.title); })).size;
-  if (!confirm('Search for missing content across ' + totalShows + ' item(s) (' + tasks.length + ' request(s))?')) return;
-  _bulkInFlight = true;
-  _setBulkActionsDisabled(true);
-  var done = 0;
-  var total = tasks.length;
-  var succeeded = 0;
-  function _nextSearch() {
-    if (done >= total) {
-      _bulkInFlight = false;
-      var failed = total - succeeded;
-      var msg = 'Triggered search for ' + succeeded + '/' + total + ' request(s).';
-      if (failed > 0) msg += ' ' + failed + ' failed.';
-      _showBulkProgress(msg);
-      _setBulkActionsDisabled(false);
-      setTimeout(function() {
-        _showBulkProgress('');
-        toggleSelectMode();
-        fetchLibrary();
-      }, 2000);
-      return;
+  showConfirm('Search selected on debrid',
+    'Search for missing content across ' + totalShows + ' item(s) (' + tasks.length + ' request(s))?',
+    {confirmLabel: 'Search'}).then(function(ok) {
+    if (!ok) return;
+    _bulkInFlight = true;
+    _setBulkActionsDisabled(true);
+    var done = 0;
+    var total = tasks.length;
+    var succeeded = 0;
+    function _nextSearch() {
+      if (done >= total) {
+        _bulkInFlight = false;
+        var failed = total - succeeded;
+        var msg = 'Triggered search for ' + succeeded + '/' + total + ' request(s).';
+        if (failed > 0) msg += ' ' + failed + ' failed.';
+        _showBulkProgress(msg);
+        _setBulkActionsDisabled(false);
+        setTimeout(function() {
+          _showBulkProgress('');
+          toggleSelectMode();
+          fetchLibrary();
+        }, 2000);
+        return;
+      }
+      var t = tasks[done];
+      _showBulkProgress('Searching ' + (done + 1) + '/' + total + '...');
+      var payload = {title: t.item.title, type: t.item.type};
+      if (t.season !== null) {
+        payload.season = t.season;
+        payload.episodes = t.episodes;
+      }
+      fetch('/api/library/download', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+      }).then(function(r) {
+        if (r.ok) succeeded++;
+      }).catch(function() {}).finally(function() {
+        done++;
+        setTimeout(_nextSearch, 500);
+      });
     }
-    var t = tasks[done];
-    _showBulkProgress('Searching ' + (done + 1) + '/' + total + '...');
-    var payload = {title: t.item.title, type: t.item.type};
-    if (t.season !== null) {
-      payload.season = t.season;
-      payload.episodes = t.episodes;
-    }
-    fetch('/api/library/download', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(payload)
-    }).then(function(r) {
-      if (r.ok) succeeded++;
-    }).catch(function() {}).finally(function() {
-      done++;
-      setTimeout(_nextSearch, 500);
-    });
-  }
-  _nextSearch();
+    _nextSearch();
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1190,7 +1217,7 @@ function computeProgress(item) {
       return {width:'0%', color:'#f85149',
               tooltip:'Wanted — not yet downloaded'};
     }
-    return {width:'100%', color: isPending ? '#7a43b6' : '#27c24c',
+    return {width:'100%', color: isPending ? 'var(--status-switching)' : 'var(--status-complete)',
             tooltip: isPending ? 'Switching source' : 'Available'};
   }
   // Prefer Sonarr's monitored-aware total so the bar agrees with the
@@ -1209,10 +1236,10 @@ function computeProgress(item) {
   }
   var pct = Math.min(100, Math.round(have / total * 100));
   var color;
-  if (isPending) color = '#7a43b6';
-  else if (pct >= 100 && (item.tmdb_status === 'Ended' || item.tmdb_status === 'Canceled')) color = '#27c24c';
-  else if (pct >= 100) color = '#5d9cec';
-  else color = '#f05050';
+  if (isPending) color = 'var(--status-switching)';
+  else if (pct >= 100 && (item.tmdb_status === 'Ended' || item.tmdb_status === 'Canceled')) color = 'var(--status-complete)';
+  else if (pct >= 100) color = 'var(--status-continuing)';
+  else color = 'var(--status-missing)';
   return {width: pct + '%', color: color,
           tooltip: have + ' / ' + total + ' episodes'};
 }
@@ -1460,33 +1487,37 @@ function renderGrid(items) {
         + '<div class="state-hint">Make sure your debrid mount and local paths are configured correctly.</div>'
         + '</div>';
     }
+    updateLegend();
     return;
   }
   var gridHtml = '<div class="grid">' + items.map(function(item, i) { return buildCard(item, i); }).join('') + '</div>';
-
-  // Color legend (only when TMDB data is present)
-  var hasTmdb = items.some(function(i) { return !!i.poster_url || !!i.tmdb_status; });
-  if (hasTmdb) {
-    if (_activeTab === 'shows') {
-      gridHtml += '<div class="legend">'
-        + '<span class="legend-item"><span class="legend-swatch" style="background:#5d9cec"></span>Continuing (Complete)</span>'
-        + '<span class="legend-item"><span class="legend-swatch" style="background:#27c24c"></span>Ended (Complete)</span>'
-        + '<span class="legend-item"><span class="legend-swatch" style="background:#f05050"></span>Missing Episodes</span>'
-        + '<span class="legend-item"><span class="legend-swatch" style="background:#7a43b6"></span>Switching Source</span>'
-        + '</div>';
-    } else {
-      gridHtml += '<div class="legend">'
-        + '<span class="legend-item"><span class="legend-swatch" style="background:#27c24c"></span>Available</span>'
-        + '<span class="legend-item"><span class="legend-swatch" style="background:#7a43b6"></span>Switching Source</span>'
-        + '</div>';
-    }
-  }
 
   area.innerHTML = gridHtml;
   if (_selectMode) area.classList.add('select-mode');
   else area.classList.remove('select-mode');
   _observeUncachedCards();
   _updateJumpBar(items);
+  updateLegend();
+}
+
+// Populate the persistent, collapsible color-key legend for the active tab.
+// Content mirrors the poster progress-bar colors (computeProgress); hidden
+// when the current view has no cards to explain.
+function updateLegend() {
+  var box = document.getElementById('legend-box');
+  var body = document.getElementById('legend-body');
+  if (!box || !body) return;
+  if (!_displayedItems || !_displayedItems.length) { box.style.display = 'none'; return; }
+  box.style.display = '';
+  if (_activeTab === 'shows') {
+    body.innerHTML = '<span class="legend-item"><span class="legend-swatch" style="background:var(--status-continuing)"></span>Continuing (Complete)</span>'
+      + '<span class="legend-item"><span class="legend-swatch" style="background:var(--status-complete)"></span>Ended (Complete)</span>'
+      + '<span class="legend-item"><span class="legend-swatch" style="background:var(--status-missing)"></span>Missing Episodes</span>'
+      + '<span class="legend-item"><span class="legend-swatch" style="background:var(--status-switching)"></span>Switching Source</span>';
+  } else {
+    body.innerHTML = '<span class="legend-item"><span class="legend-swatch" style="background:var(--status-complete)"></span>Available</span>'
+      + '<span class="legend-item"><span class="legend-swatch" style="background:var(--status-switching)"></span>Switching Source</span>';
+  }
 }
 
 var _JUMP_LETTERS = ['#','A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z'];
@@ -1673,10 +1704,10 @@ function _applyMeta(card, meta) {
       var pct = Math.min(100, Math.round(haveEps / totalEps * 100));
       var isPending = !!_pending[nk];
       var color;
-      if (isPending) color = '#7a43b6';
-      else if (pct >= 100 && (meta.status === 'Ended' || meta.status === 'Canceled')) color = '#27c24c';
-      else if (pct >= 100) color = '#5d9cec';
-      else color = '#f05050';
+      if (isPending) color = 'var(--status-switching)';
+      else if (pct >= 100 && (meta.status === 'Ended' || meta.status === 'Canceled')) color = 'var(--status-complete)';
+      else if (pct >= 100) color = 'var(--status-continuing)';
+      else color = 'var(--status-missing)';
       var fill = card.querySelector('.progress-fill');
       if (fill) {
         fill.style.width = pct + '%';
@@ -1952,37 +1983,41 @@ function _runWantedBulk(endpoint, btnId, actionLabel, progressLabel) {
       return;
     }
     var totalShows = new Set(tasks.map(function(t) { return normTitle(t.item.title); })).size;
-    if (!confirm(actionLabel + ' across ' + totalShows + ' item(s) (' + tasks.length + ' request(s))?')) {
-      _wantedInFlight = false;
-      document.getElementById(btnId).disabled = false;
-      _showWantedProgress('');
-      return;
-    }
-    var done = 0, total = tasks.length, succeeded = 0;
-    function _next() {
-      if (done >= total) {
-        var msg = progressLabel + ' ' + succeeded + '/' + total + ' request(s).';
-        if (total - succeeded > 0) msg += ' ' + (total - succeeded) + ' failed.';
-        _showWantedProgress(msg);
-        setTimeout(function() {
-          _wantedInFlight = false;
-          document.getElementById(btnId).disabled = false;
-          _showWantedProgress('');
-          fetchLibrary();
-        }, 2000);
+    showConfirm(actionLabel,
+      actionLabel + ' across ' + totalShows + ' item(s) (' + tasks.length + ' request(s))?',
+      {confirmLabel: 'Confirm'}).then(function(ok) {
+      if (!ok) {
+        _wantedInFlight = false;
+        document.getElementById(btnId).disabled = false;
+        _showWantedProgress('');
         return;
       }
-      var t = tasks[done];
-      _showWantedProgress(progressLabel + ' ' + (done + 1) + '/' + total + '...');
-      var payload = {title: t.item.title, type: t.item.type};
-      if (t.season !== null) { payload.season = t.season; payload.episodes = t.episodes; }
-      fetch(endpoint, {
-        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
-      }).then(function(r) { if (r.ok) succeeded++; }).catch(function() {}).finally(function() {
-        done++; setTimeout(_next, 500);
-      });
-    }
-    _next();
+      var done = 0, total = tasks.length, succeeded = 0;
+      function _next() {
+        if (done >= total) {
+          var msg = progressLabel + ' ' + succeeded + '/' + total + ' request(s).';
+          if (total - succeeded > 0) msg += ' ' + (total - succeeded) + ' failed.';
+          _showWantedProgress(msg);
+          setTimeout(function() {
+            _wantedInFlight = false;
+            document.getElementById(btnId).disabled = false;
+            _showWantedProgress('');
+            fetchLibrary();
+          }, 2000);
+          return;
+        }
+        var t = tasks[done];
+        _showWantedProgress(progressLabel + ' ' + (done + 1) + '/' + total + '...');
+        var payload = {title: t.item.title, type: t.item.type};
+        if (t.season !== null) { payload.season = t.season; payload.episodes = t.episodes; }
+        fetch(endpoint, {
+          method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+        }).then(function(r) { if (r.ok) succeeded++; }).catch(function() {}).finally(function() {
+          done++; setTimeout(_next, 500);
+        });
+      }
+      _next();
+    });
   });
 }
 
@@ -2186,7 +2221,7 @@ function _finishRefresh() {
     _refreshPollTimer = null;
   }
   _scanning = false;
-  document.getElementById('btn-refresh').disabled = false;
+  _setRefreshButtonDisabled(false);
   updateScanInfo();
 }
 
@@ -2197,7 +2232,13 @@ function _finishRefresh() {
 // return`` guard.
 function _setRefreshButtonDisabled(disabled) {
   var btn = document.getElementById('btn-refresh');
-  if (btn) btn.disabled = !!disabled;
+  if (!btn) return;
+  btn.disabled = !!disabled;
+  if (disabled) {
+    btn.innerHTML = '<span class="spinner"></span>Scanning\u2026';
+  } else {
+    btn.textContent = 'Refresh';
+  }
 }
 
 // Deadline (ms epoch) for the active background-scan auto-poll cycle.
@@ -2281,7 +2322,7 @@ function _ensureBackgroundScanPoll() {
 function triggerRefresh() {
   if (_scanning) return;
   _scanning = true;
-  document.getElementById('btn-refresh').disabled = true;
+  _setRefreshButtonDisabled(true);
   updateScanInfo();
 
   var attempts = 0;
@@ -2370,6 +2411,7 @@ function showDetail(index) {
   document.getElementById('wanted-actions').style.display = 'none';
   document.getElementById('footer').style.display = 'none';
   document.getElementById('jump-bar').style.display = 'none';
+  document.getElementById('legend-box').style.display = 'none';
   document.getElementById('bulk-bar').style.display = 'none';
   document.body.classList.remove('has-bulk-bar');
 
@@ -4570,6 +4612,7 @@ try {
     document.getElementById('wanted-actions').style.display = 'none';
     document.getElementById('footer').style.display = 'none';
     document.getElementById('jump-bar').style.display = 'none';
+    document.getElementById('legend-box').style.display = 'none';
     document.getElementById('content-area').innerHTML =
       '<div class="state-panel"><div>Loading...</div></div>';
   }

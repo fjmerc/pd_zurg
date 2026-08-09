@@ -633,7 +633,7 @@ h1{color:var(--blue);font-size:1.5em;margin-bottom:8px}
 .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:20px}
 .card h2{font-size:1em;font-weight:600;margin-bottom:16px;color:var(--text)}
 .step{display:flex;gap:14px;margin-bottom:20px}
-.step-num{background:var(--blue);color:#fff;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.85em;font-weight:700;flex-shrink:0}
+.step-num{background:var(--blue-solid);color:#fff;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.85em;font-weight:700;flex-shrink:0}
 .step-content{flex:1}
 .step-content p{font-size:.9em;line-height:1.6;color:var(--text2)}
 .step-content p strong{color:var(--text)}
@@ -693,9 +693,11 @@ __BASE_HEAD__
 <body>
 __NAV_HTML__
 <main class="main-content">
+<h1 class="sr-only">Status</h1>
+<div id="sr-status" class="sr-only" aria-live="polite"></div>
 <div class="meta">Uptime: <span id="uptime"></span> <span class="freshness"><span class="pulse-dot" id="fetch-dot"></span><span id="freshness-text"></span></span></div>
 <div class="meta" id="error-line" style="display:none;color:var(--red)">Errors: <span id="errors">0</span></div>
-<div class="banner" id="banner"></div>
+<div id="banner" aria-live="polite"></div>
 <div class="grid full">
   <div class="card">
     <h2>Services</h2>
@@ -705,12 +707,12 @@ __NAV_HTML__
 <div class="grid">
   <div class="card">
     <h2>Processes</h2>
-    <table><thead><tr><th>Name</th><th style="text-align:center">PID</th><th style="text-align:center">Restarts</th><th style="text-align:center">Status</th><th id="actions-hdr"></th></tr></thead>
+    <table><thead><tr><th scope="col">Name</th><th scope="col" style="text-align:center">PID</th><th scope="col" style="text-align:center">Restarts</th><th scope="col" style="text-align:center">Status</th><th scope="col" id="actions-hdr"></th></tr></thead>
     <tbody id="procs"></tbody></table>
   </div>
   <div class="card">
     <h2>Mounts</h2>
-    <table><thead><tr><th>Role</th><th>Path</th><th style="text-align:center">Status</th></tr></thead>
+    <table><thead><tr><th scope="col">Role</th><th scope="col">Path</th><th scope="col" style="text-align:center">Status</th></tr></thead>
     <tbody id="mounts"></tbody></table>
     <div class="mount-timeline" id="mount-timeline"></div>
   </div>
@@ -718,10 +720,19 @@ __NAV_HTML__
 <div class="grid">
   <div class="card">
     <h2>System</h2>
-    <div class="stats-row">
-      <div class="stat-container"><svg class="stat-ring" viewBox="0 0 120 120"><circle cx="60" cy="60" r="52" class="ring-bg"/><circle cx="60" cy="60" r="52" class="ring-fill" id="mem-ring-fill"/></svg><div class="stat-inner"><div class="stat-value" id="mem-used">-</div><div class="stat-label" id="mem-label">Memory Used</div></div></div>
-      <div class="stat-container"><svg class="stat-ring" viewBox="0 0 120 120"><circle cx="60" cy="60" r="52" class="ring-bg"/><circle cx="60" cy="60" r="52" class="ring-fill" id="cpu-ring-fill"/></svg><div class="stat-inner"><div class="stat-value" id="cpu-used">-</div><div class="stat-label" id="cpu-label">CPU</div></div></div>
-      <div class="stat-container"><svg class="stat-ring" viewBox="0 0 120 120"><circle cx="60" cy="60" r="52" class="ring-bg"/><circle cx="60" cy="60" r="52" class="ring-fill" id="disk-ring-fill"/></svg><div class="stat-inner"><div class="stat-value" id="disk-used">-</div><div class="stat-label" id="disk-label">Disk</div></div></div>
+    <div class="usage-list">
+      <div class="usage-item">
+        <div class="usage-head"><span class="usage-label" id="mem-label">Memory Used</span><span class="usage-val" id="mem-used">-</span></div>
+        <div class="usage-track" id="mem-track" role="progressbar" aria-labelledby="mem-label" aria-valuemin="0" aria-valuemax="100"><span class="usage-fill" id="mem-fill"></span></div>
+      </div>
+      <div class="usage-item">
+        <div class="usage-head"><span class="usage-label" id="cpu-label">CPU</span><span class="usage-val" id="cpu-used">-</span></div>
+        <div class="usage-track" id="cpu-track" role="progressbar" aria-labelledby="cpu-label" aria-valuemin="0" aria-valuemax="100"><span class="usage-fill" id="cpu-fill"></span></div>
+      </div>
+      <div class="usage-item">
+        <div class="usage-head"><span class="usage-label" id="disk-label">Disk</span><span class="usage-val" id="disk-used">-</span></div>
+        <div class="usage-track" id="disk-track" role="progressbar" aria-labelledby="disk-label" aria-valuemin="0" aria-valuemax="100"><span class="usage-fill" id="disk-fill"></span></div>
+      </div>
     </div>
     <div class="info-row" id="sys-info-row">
       <div class="info-item"><span class="info-value" id="sys-uptime">-</span><span class="info-label">Uptime</span></div>
@@ -744,10 +755,10 @@ __NAV_HTML__
       </div>
       <div class="lib-headline-meta" id="lib-headline-meta"></div>
     </div>
-    <div class="lib-filter" id="lib-filter" role="tablist" aria-label="Source filter">
-      <button class="lib-filter-btn" data-flt="all" role="tab">All</button>
-      <button class="lib-filter-btn" data-flt="local" role="tab">Local</button>
-      <button class="lib-filter-btn" data-flt="debrid" role="tab">Cloud</button>
+    <div class="lib-filter" id="lib-filter" role="group" aria-label="Source filter">
+      <button class="lib-filter-btn" data-flt="all" aria-pressed="true">All</button>
+      <button class="lib-filter-btn" data-flt="local" aria-pressed="false">Local</button>
+      <button class="lib-filter-btn" data-flt="debrid" aria-pressed="false">Cloud</button>
     </div>
     <div class="lib-filter-empty" id="lib-filter-empty" hidden>
       <span>No items match this filter.</span>
@@ -775,7 +786,8 @@ __NAV_HTML__
     <div class="lib-foot" id="lib-foot"></div>
   </div>
 </div>
-<div class="footer"><span id="conn-status"></span>Refresh: <select id="refresh-interval" onchange="setRefreshInterval(this.value)" style="background:var(--bg);color:var(--text2);border:1px solid var(--border);border-radius:3px;font-size:1em;padding:1px 4px"><option value="5">5s</option><option value="10" selected>10s</option><option value="30">30s</option><option value="0">Paused</option></select></div>
+<button data-kb="refresh" onclick="update()" class="sr-only" tabindex="-1" aria-hidden="true">Refresh</button>
+<div class="footer"><span id="conn-status" role="alert"></span><label for="refresh-interval">Refresh: </label><select id="refresh-interval" onchange="setRefreshInterval(this.value)" style="background:var(--bg);color:var(--text2);border:1px solid var(--border);border-radius:3px;font-size:1em;padding:1px 4px"><option value="5">5s</option><option value="10" selected>10s</option><option value="30">30s</option><option value="0">Paused</option></select></div>
 <script>
 __THEME_TOGGLE_JS__
 
@@ -785,10 +797,11 @@ var _refreshSec=10;
 var _prevNet=null;
 function dot(ok){return '<span class="dot '+(ok?'green':'red')+'"></span>'+(ok?'Running':'Stopped');}
 function mdot(ok,yes,no){return '<span class="dot '+(ok?'green':'red')+'"></span>'+(ok?(yes||'Yes'):(no||'No'));}
-function sdot(s){return '<span class="dot '+(s==='ok'?'green':'red')+'"></span>';}
+function sdot(s){return '<span class="dot '+(s==='ok'?'green':'red')+'"></span><span class="sr-only">'+(s==='ok'?'Connected':'Down')+'</span>';}
 
 const _providerKeyMap={'Real-Debrid':'realdebrid','AllDebrid':'alldebrid','TorBox':'torbox'};
 let _providerHealth={};
+var _svcOpen={};  // service name -> true when its metrics disclosure is expanded (survives poll rebuilds)
 function renderServices(svcs){
   if(!svcs||!svcs.length)return '<div style="color:var(--text2);padding:8px">No services configured</div>';
   let h='';
@@ -803,20 +816,23 @@ function renderServices(svcs){
     }else{
       h+='<div class="svc-detail" style="color:var(--red)">'+(s.detail?esc(s.detail):'Unreachable')+'</div>';
     }
+    // Routine health metrics (call volume, latency, rate-limit) are noise on a
+    // healthy provider, so they collapse behind a per-tile disclosure. Open
+    // state is keyed by service name in _svcOpen and re-applied after each poll
+    // rebuild (see update()). The actionable last-error stays visible below.
     if(ph&&ph.calls_today>0){
-      h+='<div class="svc-health">';
-      h+='<span>API: '+esc(ph.calls_today)+(ph.errors_today?' ('+esc(ph.errors_today)+' err)':'')+'</span>';
-      h+='<span>Avg: '+esc((ph.avg_response_ms/1000).toFixed(1))+'s</span>';
+      let mh='<span>API: '+esc(ph.calls_today)+(ph.errors_today?' ('+esc(ph.errors_today)+' err)':'')+'</span>';
+      mh+='<span>Avg: '+esc((ph.avg_response_ms/1000).toFixed(1))+'s</span>';
       if(ph.rate_limit_remaining!=null&&ph.rate_limit_limit!=null&&ph.rate_limit_limit>0){
         const pct=Math.round((ph.rate_limit_remaining/ph.rate_limit_limit)*100);
         const used=100-pct;
         const cls=used>80?'red':used>50?'yellow':'green';
-        h+='<span>RL: <span class="rl-bar"><span class="rl-fill '+cls+'" style="width:'+used+'%"></span></span> '+esc(ph.rate_limit_remaining)+'/'+esc(ph.rate_limit_limit)+'</span>';
+        mh+='<span>RL: <span class="rl-bar"><span class="rl-fill '+cls+'" style="width:'+used+'%"></span></span> '+esc(ph.rate_limit_remaining)+'/'+esc(ph.rate_limit_limit)+'</span>';
       }
-      h+='</div>';
-      if(ph.last_error){
-        h+='<div class="svc-health" style="color:var(--red)"><span>Last err: '+esc(ph.last_error)+(ph.last_error_time?' ('+esc(ph.last_error_time)+')':'')+'</span></div>';
-      }
+      h+='<details class="svc-more"'+(_svcOpen[s.name]?' open':'')+'><summary>Metrics</summary><div class="svc-health">'+mh+'</div></details>';
+    }
+    if(ph&&ph.last_error){
+      h+='<div class="svc-health svc-err"><span>Last error: '+esc(ph.last_error)+(ph.last_error_time?' ('+esc(ph.last_error_time)+')':'')+'</span></div>';
     }
     h+='</div>';
     if(s.days_remaining!==undefined&&s.days_remaining!==null){
@@ -836,7 +852,7 @@ function renderServices(svcs){
 }
 
 var _lastFetchTime=0;
-function updateRing(id,pct){var f=document.getElementById(id);if(!f)return;var c=326.73,o=c-(c*Math.min(pct,100)/100);f.style.strokeDashoffset=o;f.style.stroke=pct>85?'var(--red)':pct>60?'var(--yellow)':'var(--green)';}
+function updateBar(id,pct){var f=document.getElementById(id);if(!f)return;var p=Math.max(0,Math.min(pct,100));f.style.width=p+'%';var col=pct>85?'var(--red)':pct>60?'var(--yellow)':'var(--green)';f.style.background=col;var base=id.replace('-fill','');var v=document.getElementById(base+'-used');if(v)v.style.color=col;var t=document.getElementById(base+'-track');if(t)t.setAttribute('aria-valuenow',Math.round(p));}
 
 // Persisted across refreshes (the card re-renders every 10s on /api/status
 // poll). Read from localStorage, fall back to defaults.  'all' filter shows
@@ -948,7 +964,7 @@ function renderLibrary(lib){
 
   // Reflect active filter in the segmented control
   var fbtns=document.querySelectorAll('#lib-filter .lib-filter-btn');
-  fbtns.forEach(function(b){b.classList.toggle('active',b.getAttribute('data-flt')===_libFilter);});
+  fbtns.forEach(function(b){var on=b.getAttribute('data-flt')===_libFilter;b.classList.toggle('active',on);b.setAttribute('aria-pressed',on?'true':'false');});
 
   // Empty-state when an active filter excludes everything — the Total Size
   // and per-category bars all read zero with no explanation otherwise.
@@ -996,6 +1012,7 @@ function renderLibrary(lib){
   document.getElementById('lib-foot').textContent=lib.last_scan?('Last scan: '+timeAgo(lib.last_scan)):'';
 }
 function setCardHealth(h2Text,cls){var heads=document.querySelectorAll('.card h2');for(var i=0;i<heads.length;i++){if(heads[i].textContent.trim().startsWith(h2Text)){var c=heads[i].parentElement;c.classList.remove('card-ok','card-warn','card-crit');if(cls)c.classList.add(cls);break;}}}
+var _lastOverall=null;
 function updateCardStates(d){
   var sH='ok',pH='ok',mH='ok',yH='ok',eH='ok',overall='ok';
   if(d.services){d.services.forEach(function(s){if(s.status!=='ok')sH='crit';if(s.days_remaining!=null){if(s.days_remaining<=3)sH='crit';else if(s.days_remaining<=7&&sH==='ok')sH='warn';}});for(var pk in _providerHealth){var ph=_providerHealth[pk];if(ph.rate_limit_remaining!=null&&ph.rate_limit_limit!=null&&ph.rate_limit_limit>0){var u=Math.round(((ph.rate_limit_limit-ph.rate_limit_remaining)/ph.rate_limit_limit)*100);if(u>=80&&sH==='ok')sH='warn';}}}
@@ -1013,7 +1030,48 @@ function updateCardStates(d){
   setCardHealth('Services','card-'+sH);setCardHealth('Processes','card-'+pH);setCardHealth('Mounts','card-'+mH);setCardHealth('System','card-'+yH);setCardHealth('Recent Events','card-'+eH);
   if(sH==='crit'||pH==='crit'||mH==='crit'||yH==='crit')overall='crit';else if(sH==='warn'||pH==='warn'||mH==='warn'||yH==='warn')overall='warn';
   if(typeof updateFavicon==='function')updateFavicon(overall);
+  // Announce overall-health transitions to the polite live region so screen
+  // readers hear state changes without re-reading on every 10s poll.
+  if(overall!==_lastOverall){
+    var el=document.getElementById('sr-status');
+    if(el)el.textContent=overall==='crit'?'System status: critical. One or more services need attention.':overall==='warn'?'System status: warning.':'System status: all healthy.';
+    _lastOverall=overall;
+  }
 }
+
+// Stacked banner alerts. Every active fault renders as its own row so a
+// second live fault can't hide behind the first. Dismiss suppresses the
+// current set until the underlying state (keys+levels) actually changes.
+var _lastAlerts=[];
+var _bannerDismissedSig=null;
+var _bannerRenderedSig=null;
+function _bannerSig(a){return a.map(function(x){return x.key+':'+x.level;}).join('|');}
+// href guard: only http(s), and percent-encode chars that could break out of
+// the double-quoted attribute. esc() alone escapes <>& but NOT quotes, and it
+// wouldn't block a javascript: scheme.
+function _safeUrl(u){u=String(u==null?'':u);if(!/^https?:\\/\\//i.test(u))return '';return u.replace(/["'<>\\\\]/g,function(c){return '%'+c.charCodeAt(0).toString(16).toUpperCase();});}
+function renderBanners(alerts){
+  var el=document.getElementById('banner');if(!el)return;
+  alerts=alerts.slice().sort(function(a,b){var d=(a.level==='crit'?0:1)-(b.level==='crit'?0:1);return d||(a.key<b.key?-1:a.key>b.key?1:0);});
+  _lastAlerts=alerts;
+  var sig=_bannerSig(alerts);
+  if(!alerts.length){el.innerHTML='';_bannerDismissedSig=null;_bannerRenderedSig=null;return;}
+  if(_bannerDismissedSig===sig){el.innerHTML='';_bannerRenderedSig=null;return;}
+  // Identical content already on screen — skip the innerHTML rewrite so the
+  // aria-live region doesn't re-announce the same alerts on every poll.
+  if(_bannerRenderedSig===sig)return;
+  var shown=alerts.slice(0,3),extra=alerts.length-shown.length,h='';
+  shown.forEach(function(a){
+    var u=_safeUrl(a.url);
+    h+='<div class="banner '+a.level+'"><span class="banner-msg">'+a.msg+
+      (u?' <a href="'+u+'" target="_blank" rel="noopener noreferrer">Open</a>':'')+
+      '</span><button class="banner-close" aria-label="Dismiss alerts" onclick="dismissBanners()">&times;</button></div>';
+  });
+  if(extra>0)h+='<div class="banner-more">+'+extra+' more alert'+(extra!==1?'s':'')+'</div>';
+  el.innerHTML=h;
+  _bannerRenderedSig=sig;
+}
+function dismissBanners(){_bannerDismissedSig=_bannerSig(_lastAlerts);_bannerRenderedSig=null;var el=document.getElementById('banner');if(el)el.innerHTML='';}
 
 function update(){
   var _fd=document.getElementById('fetch-dot');if(_fd)_fd.className='pulse-dot fetching';
@@ -1026,36 +1084,36 @@ function update(){
     // Store provider health for renderServices
     _providerHealth=d.provider_health||{};
 
-    // Banner for RD premium expiry + rate limit warnings
-    const banner=document.getElementById('banner');
-    let bannerShown=false;
-    if(d.services)d.services.forEach(s=>{
-      if(s.days_remaining!==undefined&&s.days_remaining!==null&&s.days_remaining<=7){
-        banner.className='banner '+(s.days_remaining<=3?'crit':'warn');
-        banner.innerHTML=(s.days_remaining<=0?
+    // Collect EVERY active alert (expiry per service + rate-limit per
+    // provider) so a second live fault can't hide behind the first.
+    var alerts=[];
+    if(d.services)d.services.forEach(function(s){
+      if(s.days_remaining!=null&&s.days_remaining<=7){
+        var msg=s.days_remaining<=0?
           esc(s.name)+' premium has EXPIRED. Your setup will not work until renewed.':
-          esc(s.name)+' premium expires in '+s.days_remaining+' day'+(s.days_remaining!==1?'s':'')+'. Renew to avoid service interruption.');
-        bannerShown=true;
+          esc(s.name)+' premium expires in '+s.days_remaining+' day'+(s.days_remaining!==1?'s':'')+'. Renew to avoid service interruption.';
+        alerts.push({key:'exp:'+s.name,level:s.days_remaining<=3?'crit':'warn',msg:msg,url:s.url||''});
       }
     });
-    if(!bannerShown){
-      for(const[pk,ph] of Object.entries(_providerHealth)){
-        if(ph.rate_limit_remaining!=null&&ph.rate_limit_limit!=null&&ph.rate_limit_limit>0){
-          const usedPct=Math.round(((ph.rate_limit_limit-ph.rate_limit_remaining)/ph.rate_limit_limit)*100);
-          if(usedPct>=80){
-            const name=Object.entries(_providerKeyMap).find(([,v])=>v===pk);
-            const label=name?name[0]:pk;
-            banner.className='banner '+(usedPct>=95?'crit':'warn');
-            banner.innerHTML=esc(label)+' API rate limit at '+usedPct+'% — automated searches may be throttled.';
-            bannerShown=true;break;
-          }
+    for(var pk in _providerHealth){
+      var ph=_providerHealth[pk];
+      if(ph.rate_limit_remaining!=null&&ph.rate_limit_limit!=null&&ph.rate_limit_limit>0){
+        var usedPct=Math.round(((ph.rate_limit_limit-ph.rate_limit_remaining)/ph.rate_limit_limit)*100);
+        if(usedPct>=80){
+          var nm=Object.entries(_providerKeyMap).find(function(e){return e[1]===pk;});
+          var label=nm?nm[0]:pk;
+          alerts.push({key:'rl:'+pk,level:usedPct>=95?'crit':'warn',msg:esc(label)+' API rate limit at '+usedPct+'% — automated searches may be throttled.',url:''});
         }
       }
     }
-    if(!bannerShown)banner.className='banner';
+    renderBanners(alerts);
 
     // Services
     document.getElementById('services').innerHTML=renderServices(d.services);
+    // Each .svc-item maps 1:1 to d.services in order; correlate by index so the
+    // service name never has to be embedded in an attribute (no injection), and
+    // persist toggle state into _svcOpen so the disclosure survives the rebuild.
+    (function(){var items=document.querySelectorAll('#services .svc-item');items.forEach(function(item,i){var det=item.querySelector('.svc-more');if(!det||!d.services[i])return;var name=d.services[i].name;det.addEventListener('toggle',function(){_svcOpen[name]=det.open;});});})();
 
     // Processes (with optional restart buttons when auth is configured)
     let p='';const hasAuth=window._hasAuth;
@@ -1082,8 +1140,8 @@ function update(){
         else if(x.role==='Debrid'&&!x.mounted){ok=false;label='Not mounted';}
         else if(!x.accessible){ok=false;label='Not accessible';}
         else{ok=true;label='OK';}
-        const roleCell=i===0?'<td rowspan="'+rows.length+'" style="vertical-align:top;color:var(--text2);font-size:.85em">'+esc(role)+'</td>':'';
-        m+='<tr>'+roleCell+'<td style="font-family:monospace;font-size:.88em">'+esc(x.path)+'</td><td>'+mdot(ok,label,label)+'</td></tr>';
+        const roleCell=i===0?'<th scope="row" rowspan="'+rows.length+'" style="text-align:left;font-weight:400;vertical-align:top;color:var(--text2);font-size:.85em">'+esc(role)+'</th>':'';
+        m+='<tr>'+roleCell+'<td style="font-family:monospace;font-size:.88em;word-break:break-all">'+esc(x.path)+'</td><td>'+mdot(ok,label,label)+'</td></tr>';
       });
     });
     document.getElementById('mounts').innerHTML=m||'<tr><td colspan="3" style="color:var(--text2)">No mounts</td></tr>';
@@ -1098,21 +1156,24 @@ function update(){
         document.getElementById('mem-label').textContent='Memory Used (no limit)';
       }
     }
-    updateRing('mem-ring-fill',d.system.memory_percent||0);
+    updateBar('mem-fill',d.system.memory_percent||0);
     // System — CPU
+    var _cpuTrack=document.getElementById('cpu-track');
     if(d.system.cpu_percent!==undefined){
       document.getElementById('cpu-used').textContent=d.system.cpu_percent.toFixed(1)+'%';
       document.getElementById('cpu-label').textContent='CPU';
-      updateRing('cpu-ring-fill',d.system.cpu_percent);
+      if(_cpuTrack)_cpuTrack.style.display='';
+      updateBar('cpu-fill',d.system.cpu_percent);
     }else if(d.system.cpu_usage_usec!==undefined){
       document.getElementById('cpu-used').textContent=(d.system.cpu_usage_usec/1000000).toFixed(1)+'s';
       document.getElementById('cpu-label').textContent='CPU Time';
+      if(_cpuTrack)_cpuTrack.style.display='none';  // cumulative counter, not a 0-100 ratio
     }
     // System — Disk
     if(d.system.disk_used_bytes!==undefined&&d.system.disk_total_bytes!==undefined){
       document.getElementById('disk-used').textContent=(d.system.disk_percent||0)+'%';
       document.getElementById('disk-label').textContent=fmtBytes(d.system.disk_used_bytes)+' / '+fmtBytes(d.system.disk_total_bytes);
-      updateRing('disk-ring-fill',d.system.disk_percent||0);
+      updateBar('disk-fill',d.system.disk_percent||0);
     }
     // System — Uptime
     if(d.uptime_seconds!==undefined){
@@ -1219,6 +1280,7 @@ function updateMountHistory(){
 // Configurable refresh
 function setRefreshInterval(sec){
   _refreshSec=parseInt(sec)||0;
+  try{localStorage.setItem('zurgarr_refresh',String(_refreshSec));}catch(e){}
   if(_statusTimer)clearInterval(_statusTimer);
   if(_mtTimer)clearInterval(_mtTimer);
   if(_refreshSec>0){
@@ -1227,7 +1289,9 @@ function setRefreshInterval(sec){
   }
 }
 update();
-setRefreshInterval(10);
+var _savedRefresh=(function(){try{var v=localStorage.getItem('zurgarr_refresh');if(v==='0'||v==='5'||v==='10'||v==='30')return parseInt(v);}catch(e){}return 10;})();
+(function(){var sel=document.getElementById('refresh-interval');if(sel)sel.value=String(_savedRefresh);})();
+setRefreshInterval(_savedRefresh);
 setTimeout(updateMountHistory,1000);
 setInterval(function(){if(!_lastFetchTime)return;var s=Math.floor((Date.now()-_lastFetchTime)/1000);var el=document.getElementById('freshness-text');if(!el)return;if(s<5)el.textContent='Updated just now';else if(s<60)el.textContent='Updated '+s+'s ago';else el.textContent='Updated '+Math.floor(s/60)+'m ago';},1000);
 __WANTED_BADGE_JS__
@@ -1237,7 +1301,19 @@ __WANTED_BADGE_JS__
 </html>'''
 
 _DASHBOARD_EXTRA_CSS = """
+/* Library source colors. Single value per theme: darkened enough that the
+   white in-bar labels clear WCAG AA (4.5:1) in both light and dark. */
+:root{--lib-local:#9333ea;--lib-cloud:#0e7490}
 .main-content{max-width:1600px}
+#banner:not(:empty){margin-bottom:16px}
+#banner .banner{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:8px}
+#banner .banner:last-child{margin-bottom:0}
+.banner-msg{flex:1;min-width:0}
+#banner .banner a{color:inherit;text-decoration:underline;font-weight:600}
+.banner-close{flex:none;background:none;border:none;color:inherit;cursor:pointer;font-size:1.2em;line-height:1;padding:0 2px;opacity:.7}
+.banner-close:hover{opacity:1}
+.banner-close:focus-visible{outline:2px solid currentColor;outline-offset:2px}
+.banner-more{font-size:.8em;color:var(--text2);padding:2px 4px}
 .meta{color:var(--text2);font-size:.85em;margin-bottom:20px}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
 .grid.full{grid-template-columns:1fr}
@@ -1254,7 +1330,18 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
 .dot.green{background:var(--green)}.dot.red{background:var(--red);border-radius:2px}.dot.yellow{background:transparent;border:2px solid var(--yellow);width:8px;height:8px}
 .svc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
-.svc-item{display:flex;align-items:center;padding:10px 12px;background:var(--bg);border-radius:6px;border:1px solid var(--border2)}
+.svc-item{display:flex;align-items:flex-start;padding:10px 12px;background:var(--bg);border-radius:6px;border:1px solid var(--border2)}
+.svc-item>.dot{margin-top:5px}
+.svc-more{margin-top:5px}
+.svc-more>summary{font-size:.72em;color:var(--text2);cursor:pointer;list-style:none;display:inline-flex;align-items:center;gap:4px;user-select:none;width:fit-content}
+.svc-more>summary::-webkit-details-marker{display:none}
+.svc-more>summary::before{content:'\\25B8';transition:transform var(--motion-fast)}
+.svc-more[open]>summary::before{transform:rotate(90deg)}
+.svc-more>summary:hover{color:var(--text)}
+.svc-more>summary:focus-visible{outline:2px solid var(--blue);outline-offset:2px;border-radius:2px}
+.svc-more .svc-health{margin-top:5px}
+.svc-health.svc-err{color:var(--red);margin-top:4px}
+@media(pointer:coarse){.svc-more>summary{min-height:32px}}
 .svc-item .svc-info{flex:1;min-width:0;margin-left:8px}
 .svc-item .svc-name{font-size:.85em;font-weight:500;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .svc-name a{color:inherit;text-decoration:none}.svc-name a:hover{color:var(--blue)}
@@ -1273,9 +1360,16 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .event .time{color:var(--text3);min-width:55px;font-family:monospace;font-size:.85em}
 .event .comp{color:var(--blue);font-weight:500;min-width:70px}
 .event.error .msg{color:var(--red)}.event.warning .msg{color:var(--yellow)}
-.stat-value{font-size:1.8em;font-weight:600;color:var(--blue)}
-.stat-label{font-size:.75em;color:var(--text2);margin-top:2px}
-.stats-row{display:flex;gap:32px}.stats-row>div{flex:1;text-align:center}
+/* Utilization meters: one horizontal-bar idiom for the three comparable
+   scalars (mem/cpu/disk), sharing the "proportion" grammar with the rl/lib
+   bars instead of three donut gauges. */
+.usage-list{display:flex;flex-direction:column;gap:14px;margin-bottom:4px}
+.usage-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:5px}
+.usage-label{font-size:.8em;color:var(--text2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.usage-val{font-size:.95em;font-weight:600;color:var(--text);font-variant-numeric:tabular-nums;flex:none}
+.usage-track{height:8px;background:var(--border);border-radius:4px;overflow:hidden}
+.usage-fill{display:block;height:100%;width:0;border-radius:4px;background:var(--green);transition:width var(--motion-slow) ease,background var(--motion-normal)}
+@media(prefers-reduced-motion:reduce){.usage-fill{transition:none}}
 .mount-timeline{margin-top:8px}
 .mt-row{display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:.8em}
 .mt-path{color:var(--text2);min-width:120px;overflow:hidden;text-overflow:ellipsis}
@@ -1294,16 +1388,11 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .card-ok{box-shadow:inset 3px 0 0 var(--green)}
 .card-warn{box-shadow:inset 3px 0 0 var(--yellow)}
 .card-crit{box-shadow:inset 3px 0 0 var(--red)}
-.stat-container{position:relative;flex:1;display:flex;flex-direction:column;align-items:center}
-.stat-ring{width:140px;height:140px;transform:rotate(-90deg)}
-.ring-bg{fill:none;stroke:var(--border);stroke-width:6}
-.ring-fill{fill:none;stroke:var(--green);stroke-width:6;stroke-linecap:round;stroke-dasharray:326.73;stroke-dashoffset:326.73;transition:stroke-dashoffset var(--motion-slow) ease,stroke var(--motion-normal)}
-.stat-inner{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;pointer-events:none}
 .info-row{display:flex;gap:24px;justify-content:center;margin-top:24px;padding-top:16px;border-top:1px solid var(--border2)}
 .info-item{text-align:center;flex:1;min-width:0}
 .info-value{display:block;font-size:1em;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .info-label{display:block;font-size:.7em;color:var(--text3);margin-top:2px;letter-spacing:.05em}
-@media(max-width:600px){.stats-row{flex-wrap:nowrap;gap:12px}.stats-row>div{flex:1 1 0;min-width:0;width:auto}.stat-ring{width:100%;height:auto;max-width:140px}.stat-value{font-size:1.3em}.info-row{flex-wrap:wrap;gap:12px}.info-item{flex:none;width:calc(50% - 6px)}}
+@media(max-width:600px){.info-row{flex-wrap:wrap;gap:12px}.info-item{flex:none;width:calc(50% - 6px)}}
 .lib-headline{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;padding:0 0 18px 0;border-bottom:1px solid var(--border2);margin-bottom:18px;flex-wrap:wrap}
 .lib-headline-main{display:flex;flex-direction:column;min-width:0}
 .lib-headline-value{font-size:2.4em;font-weight:700;color:var(--text);line-height:1.05;font-variant-numeric:tabular-nums}
@@ -1333,28 +1422,23 @@ th{color:var(--text2);font-weight:500;font-size:.75em;text-transform:uppercase;l
 .lib-filter-btn:last-child{border-radius:0 4px 4px 0;border-left:none}
 .lib-filter-btn:not(:first-child):not(:last-child){border-left:none}
 .lib-filter-btn:hover{color:var(--text);background:var(--border2)}
-.lib-filter-btn.active{background:var(--blue);color:#fff;border-color:var(--blue)}
+.lib-filter-btn.active{background:var(--blue-solid);color:#fff;border-color:var(--blue-solid)}
 .lib-filter-btn:focus-visible{outline:2px solid var(--blue);outline-offset:2px;z-index:1;position:relative}
+@media(pointer:coarse){.lib-filter-btn{min-height:36px}}
 .lib-bar{display:flex;height:26px;border-radius:5px;overflow:hidden;background:var(--border);position:relative}
 .lib-bar.lib-bar-eps{height:18px}
 .lib-bar-empty{flex:1;background:repeating-linear-gradient(45deg,var(--border) 0 6px,transparent 6px 12px)}
 .lib-bar-seg{height:100%;display:flex;align-items:center;justify-content:center;overflow:hidden;transition:width .4s ease;min-width:0;cursor:default}
 .lib-bar-label{font-size:.72em;font-weight:600;color:#fff;white-space:nowrap;text-shadow:0 1px 2px rgba(0,0,0,.45);padding:0 6px;font-variant-numeric:tabular-nums;letter-spacing:.01em}
-.lib-bar-seg.local{background:#a855f7}
-.lib-bar-seg.debrid{background:#0891b2}
-.lib-bar-seg.both{background:repeating-linear-gradient(45deg,#a855f7 0 8px,#0891b2 8px 16px)}
-[data-theme="light"] .lib-bar-seg.local{background:#9333ea}
-[data-theme="light"] .lib-bar-seg.debrid{background:#0e7490}
-[data-theme="light"] .lib-bar-seg.both{background:repeating-linear-gradient(45deg,#9333ea 0 8px,#0e7490 8px 16px)}
+.lib-bar-seg.local{background:var(--lib-local)}
+.lib-bar-seg.debrid{background:var(--lib-cloud)}
+.lib-bar-seg.both{background:repeating-linear-gradient(45deg,var(--lib-local) 0 8px,var(--lib-cloud) 8px 16px)}
 .lib-legend{display:flex;gap:18px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border2);font-size:.75em;color:var(--text2);justify-content:center;flex-wrap:wrap}
 .lib-legend>span{display:inline-flex;align-items:center;gap:6px}
 .lib-swatch{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:middle}
-.lib-swatch.local{background:#a855f7}
-.lib-swatch.debrid{background:#0891b2}
-.lib-swatch.both{background:repeating-linear-gradient(45deg,#a855f7 0 4px,#0891b2 4px 8px)}
-[data-theme="light"] .lib-swatch.local{background:#9333ea}
-[data-theme="light"] .lib-swatch.debrid{background:#0e7490}
-[data-theme="light"] .lib-swatch.both{background:repeating-linear-gradient(45deg,#9333ea 0 4px,#0e7490 4px 8px)}
+.lib-swatch.local{background:var(--lib-local)}
+.lib-swatch.debrid{background:var(--lib-cloud)}
+.lib-swatch.both{background:repeating-linear-gradient(45deg,var(--lib-local) 0 4px,var(--lib-cloud) 4px 8px)}
 .lib-foot{margin-top:10px;font-size:.7em;color:var(--text3);text-align:right}
 """
 

@@ -11,8 +11,11 @@ these constants rather than defining its own copy.
 
 BASE_CSS = r"""
 /* === CSS Custom Properties === */
-:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--border2:#21262d;--text:#c9d1d9;--text2:#8b949e;--text3:#636e7b;--blue:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#d29922;--orange:#db6d28;--input-bg:#0d1117;--input-border:#30363d;--input-focus:#58a6ff;--motion-fast:100ms;--motion-normal:200ms;--motion-slow:300ms;--sidebar-bg:#010409;--sidebar-w:220px}
-[data-theme="light"]{--bg:#f6f8fa;--card:#ffffff;--border:#d0d7de;--border2:#d8dee4;--text:#1f2328;--text2:#656d76;--text3:#8b949e;--blue:#0969da;--green:#1a7f37;--red:#cf222e;--yellow:#9a6700;--orange:#bc4c00;--input-bg:#ffffff;--input-border:#d0d7de;--input-focus:#0969da;--sidebar-bg:#f0f3f6}
+/* --*-solid are the WCAG-safe fills for white-text buttons/badges: the bright
+   --blue/--green/--red read fine as text/borders on dark but only hit ~2.5:1
+   behind white text, so filled controls use the -solid variants instead. */
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--border2:#21262d;--text:#c9d1d9;--text2:#8b949e;--text3:#7d8792;--blue:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#d29922;--orange:#db6d28;--blue-solid:#1f6feb;--green-solid:#1f7a33;--red-solid:#cf222e;--input-bg:#0d1117;--input-border:#30363d;--input-focus:#58a6ff;--motion-fast:100ms;--motion-normal:200ms;--motion-slow:300ms;--sidebar-bg:#010409;--sidebar-w:220px}
+[data-theme="light"]{--bg:#f6f8fa;--card:#ffffff;--border:#d0d7de;--border2:#d8dee4;--text:#1f2328;--text2:#656d76;--text3:#6a737d;--blue:#0969da;--green:#1a7f37;--red:#cf222e;--yellow:#9a6700;--orange:#bc4c00;--blue-solid:#0969da;--green-solid:#1a7f37;--red-solid:#cf222e;--input-bg:#ffffff;--input-border:#d0d7de;--input-focus:#0969da;--sidebar-bg:#f0f3f6}
 
 /* === Reset === */
 *{margin:0;padding:0;box-sizing:border-box}
@@ -40,11 +43,11 @@ a:hover{text-decoration:underline}
 [data-theme="light"] .sidebar-link.active{background:rgba(9,105,218,.08)}
 [data-theme="light"] .sidebar-link.active:hover{background:rgba(9,105,218,.12)}
 .sidebar-link svg{width:18px;height:18px;flex-shrink:0;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-.sidebar-badge{display:inline-block;background:var(--red);color:#fff;border-radius:8px;font-size:.72em;font-weight:700;padding:1px 6px;margin-left:auto;min-width:16px;text-align:center;line-height:1.4}
+.sidebar-badge{display:inline-block;background:var(--red-solid);color:#fff;border-radius:8px;font-size:.72em;font-weight:700;padding:1px 6px;margin-left:auto;min-width:16px;text-align:center;line-height:1.4}
 .sidebar-divider{height:1px;background:var(--border);margin:4px 12px}
 .sidebar-footer{padding:12px 14px;border-top:1px solid var(--border)}
 .theme-switch{display:flex;background:var(--border2);border-radius:999px;padding:3px;gap:2px}
-.theme-opt{flex:1;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:6px 10px;background:none;border:none;color:var(--text3);cursor:pointer;border-radius:999px;font-size:.78em;font-weight:500;line-height:1;font-family:inherit;transition:background var(--motion-fast),color var(--motion-fast)}
+.theme-opt{flex:1;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:6px 10px;background:none;border:none;color:var(--text2);cursor:pointer;border-radius:999px;font-size:.78em;font-weight:500;line-height:1;font-family:inherit;transition:background var(--motion-fast),color var(--motion-fast)}
 .theme-opt:hover{color:var(--text2)}
 .theme-opt.active{background:var(--card);color:var(--text);box-shadow:0 1px 2px rgba(0,0,0,.25)}
 [data-theme="light"] .theme-opt.active{box-shadow:0 1px 2px rgba(0,0,0,.08)}
@@ -73,14 +76,14 @@ a:hover{text-decoration:underline}
 .btn:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 .btn-ghost{background:none;border-color:var(--border);color:var(--text2)}
 .btn-ghost:hover:not(:disabled){border-color:var(--blue);color:var(--blue)}
-.btn-primary{background:var(--green);color:#fff;border-color:var(--green)}
+.btn-primary{background:var(--green-solid);color:#fff;border-color:var(--green-solid)}
 .btn-primary:hover:not(:disabled){opacity:.85}
 .btn-primary.dirty{box-shadow:0 0 0 2px var(--yellow);animation:pulse-save 2s ease-in-out infinite}
 @keyframes pulse-save{0%,100%{box-shadow:0 0 0 2px var(--yellow)}50%{box-shadow:0 0 8px 2px var(--yellow)}}
 .btn-danger{color:var(--red);border-color:#f8514933}
 .btn-danger:hover:not(:disabled){border-color:var(--red);color:var(--red);background:#f851490f}
-.btn-danger.filled{background:var(--red);color:#fff;border-color:var(--red)}
-.btn-danger.filled:hover:not(:disabled){filter:brightness(1.15);background:var(--red)}
+.btn-danger.filled{background:var(--red-solid);color:#fff;border-color:var(--red-solid)}
+.btn-danger.filled:hover:not(:disabled){filter:brightness(.9);background:var(--red-solid)}
 .btn-sm{padding:4px 10px;font-size:.78em}
 .btn-icon{padding:4px;width:28px;height:28px;font-size:.9em;flex-shrink:0}
 .btn.confirming{border-color:var(--orange);color:var(--orange);font-weight:600;animation:pulse-confirm .8s ease-in-out infinite}
@@ -106,6 +109,12 @@ a:hover{text-decoration:underline}
 
 /* === Reduced Motion === */
 @media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
+
+/* === Screen-reader-only === */
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+
+/* === Touch target minimums (coarse pointers only, keeps desktop density) === */
+@media(pointer:coarse){.btn-sm{min-height:36px}.theme-opt{min-height:40px}.hamburger-btn{padding:10px}}
 
 """
 
@@ -512,8 +521,8 @@ def get_base_head(title, extra_css=''):
         'dialog .dlg-btn{padding:8px 18px;border-radius:6px;font-size:.85em;cursor:pointer;'
         'border:none;font-weight:500}'
         'dialog .dlg-cancel{background:var(--border);color:var(--text)}'
-        'dialog .dlg-confirm{background:var(--blue);color:#fff}'
-        'dialog .dlg-danger{background:var(--red);color:#fff}'
+        'dialog .dlg-confirm{background:var(--blue-solid);color:#fff}'
+        'dialog .dlg-danger{background:var(--red-solid);color:#fff}'
     )
     parts = [
         '<meta charset="utf-8">',

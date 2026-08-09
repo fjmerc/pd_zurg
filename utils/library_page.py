@@ -485,11 +485,11 @@ body.has-bulk-bar{padding-bottom:60px}
 
 <div class="toolbar-sticky">
 <div class="tabs" role="tablist">
-  <div class="tab active" role="tab" tabindex="0" aria-selected="true" aria-controls="tab-movies"
+  <div class="tab active" role="tab" tabindex="0" aria-selected="true" aria-controls="content-area" data-tab="movies"
        data-kb="tab-1" onclick="switchTab('movies')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('movies')}">
     Movies<span class="badge" id="badge-movies">0</span>
   </div>
-  <div class="tab" role="tab" tabindex="0" aria-selected="false" aria-controls="tab-shows"
+  <div class="tab" role="tab" tabindex="0" aria-selected="false" aria-controls="content-area" data-tab="shows"
        data-kb="tab-2" onclick="switchTab('shows')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchTab('shows')}">
     Shows<span class="badge" id="badge-shows">0</span>
   </div>
@@ -548,7 +548,7 @@ body.has-bulk-bar{padding-bottom:60px}
 </div>
 
 <div class="jump-bar" id="jump-bar" role="navigation" aria-label="Alphabetical jump bar" style="display:none"></div>
-<div id="content-area">
+<div id="content-area" role="tabpanel" tabindex="0" aria-label="Library results">
   <div class="grid" id="skeleton-grid"></div>
 </div>
 <script>
@@ -646,6 +646,38 @@ function esc(s) {
   const d = document.createElement('div');
   d.appendChild(document.createTextNode(String(s ?? '')));
   return d.innerHTML;
+}
+function _toggleOverview(el) {
+  var expanded = el.classList.toggle('expanded');
+  el.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+}
+// Shared a11y wiring for the lightweight overlay modals (blocklist + search):
+// remembers pre-open focus, moves focus into the dialog, and traps Tab. The
+// trap listener rides on the overlay node, so it's discarded when the overlay
+// is removed — only focus restoration needs an explicit close call.
+var _modalPrevFocus = null;
+function _modalTabTrap(e) {
+  if (e.key !== 'Tab') return;
+  var f = e.currentTarget.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select,textarea,[tabindex]:not([tabindex="-1"])');
+  if (!f.length) return;
+  var first = f[0], last = f[f.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+}
+function _modalA11yOpen(overlay, focusTarget) {
+  // Capture pre-open focus only on the outermost open — both modals share the
+  // single _modalPrevFocus slot, so a nested open must not clobber it.
+  if (_modalPrevFocus === null) _modalPrevFocus = document.activeElement;
+  overlay.addEventListener('keydown', _modalTabTrap);
+  if (focusTarget) { try { focusTarget.focus(); } catch (_) {} }
+}
+function _modalA11yClose() {
+  // Called after the closing overlay has already been removed; if another
+  // overlay modal is still up, defer restore/reset to its own close so we
+  // don't strand focus while an outer modal remains open.
+  if (document.querySelector('.search-overlay')) return;
+  if (_modalPrevFocus && _modalPrevFocus.focus) { try { _modalPrevFocus.focus(); } catch (_) {} }
+  _modalPrevFocus = null;
 }
 function escAttr(s) {
   return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -1050,7 +1082,7 @@ function switchTab(name) {
   // friction when ghost-movies started populating the Movies side.
   _wantedTabAutoLanded = true;
   document.querySelectorAll('.tab').forEach(function(t) {
-    const active = t.getAttribute('aria-controls') === 'tab-' + name;
+    const active = t.getAttribute('data-tab') === name;
     t.classList.toggle('active', active);
     t.setAttribute('aria-selected', active ? 'true' : 'false');
   });
@@ -2034,7 +2066,7 @@ function _applyLibraryData(data, opts) {
     if (_targetTab && _targetTab !== _activeTab) {
       _activeTab = _targetTab;
       document.querySelectorAll('.tab').forEach(function(t) {
-        var active = t.getAttribute('aria-controls') === 'tab-' + _targetTab;
+        var active = t.getAttribute('data-tab') === _targetTab;
         t.classList.toggle('active', active);
         t.setAttribute('aria-selected', active ? 'true' : 'false');
       });
@@ -2126,7 +2158,7 @@ function _restoreDetailFromUrl() {
         if (_activeTab !== wantTab) {
           _activeTab = wantTab;
           document.querySelectorAll('.tab').forEach(function(t) {
-            var active = t.getAttribute('aria-controls') === 'tab-' + _activeTab;
+            var active = t.getAttribute('data-tab') === _activeTab;
             t.classList.toggle('active', active);
             t.setAttribute('aria-selected', active ? 'true' : 'false');
           });
@@ -2502,7 +2534,7 @@ function _renderMovieDetail(movie, meta) {
   }
   if (meta) {
     html += _renderDetailMeta(movie, meta);
-    if (meta.overview) html += '<div class="detail-overview" onclick="this.classList.toggle(\'expanded\')">' + esc(meta.overview) + '</div>';
+    if (meta.overview) html += '<div class="detail-overview" role="button" tabindex="0" aria-expanded="false" aria-label="Toggle full synopsis" onclick="_toggleOverview(this)" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();_toggleOverview(this)}">' + esc(meta.overview) + '</div>';
   }
   // Movie preference dropdown + action buttons
   var movieNk = normTitle(movie.title);
@@ -2887,7 +2919,7 @@ function _renderShowDetail(show, meta) {
   }
   if (meta) {
     html += _renderDetailMeta(show, meta);
-    if (meta.overview) html += '<div class="detail-overview" onclick="this.classList.toggle(\'expanded\')">' + esc(meta.overview) + '</div>';
+    if (meta.overview) html += '<div class="detail-overview" role="button" tabindex="0" aria-expanded="false" aria-label="Toggle full synopsis" onclick="_toggleOverview(this)" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();_toggleOverview(this)}">' + esc(meta.overview) + '</div>';
   }
   if ((show.source === 'debrid' || show.source === 'both') && !_downloadServices.show) {
     html += '<div style="font-size:.82em;color:var(--text3);margin-top:8px">To switch episodes to local, configure <a href="/settings">Sonarr or Overseerr</a> in Settings.</div>';
@@ -3625,8 +3657,8 @@ function _blockItem(folder) {
   overlay.className = 'search-overlay';
   overlay.id = 'bl-overlay';
   overlay.dataset.blTarget = blockTarget;
-  var html = '<div class="bl-dialog">';
-  html += '<div class="bl-dialog-hdr"><h3>Block: ' + esc(blockTarget) + '</h3>';
+  var html = '<div class="bl-dialog" role="dialog" aria-modal="true" aria-labelledby="bl-dialog-title">';
+  html += '<div class="bl-dialog-hdr"><h3 id="bl-dialog-title">Block: ' + esc(blockTarget) + '</h3>';
   html += '<button class="search-dialog-close" onclick="_closeBlockModal()" title="Close">&times;</button></div>';
   html += '<div class="bl-dialog-body">';
   html += '<div class="bl-reasons">';
@@ -3653,6 +3685,7 @@ function _blockItem(folder) {
     });
   }
   document.addEventListener('keydown', _blockModalKeyHandler);
+  _modalA11yOpen(overlay, overlay.querySelector('.bl-reason-btn'));
 }
 
 function _blockModalKeyHandler(e) {
@@ -3671,6 +3704,7 @@ function _closeBlockModal() {
   var overlay = document.getElementById('bl-overlay');
   if (overlay) { overlay.remove(); document.body.style.overflow = ''; }
   document.removeEventListener('keydown', _blockModalKeyHandler);
+  _modalA11yClose();
 }
 
 function _confirmBlock() {
@@ -4257,8 +4291,8 @@ function openSearchModal(imdbId, mediaType, season, episode, displayTitle, media
   var episodeStr = episode !== null && episode !== undefined ? String(episode) : '';
   var headerTitle = displayTitle || 'Search';
 
-  var html = '<div class="search-dialog">';
-  html += '<div class="search-dialog-hdr"><h3>Search: ' + esc(headerTitle) + '</h3>';
+  var html = '<div class="search-dialog" role="dialog" aria-modal="true" aria-labelledby="search-dialog-title">';
+  html += '<div class="search-dialog-hdr"><h3 id="search-dialog-title">Search: ' + esc(headerTitle) + '</h3>';
   html += '<button class="search-dialog-close" onclick="closeSearchModal()" title="Close">&times;</button></div>';
   html += '<div class="search-dialog-body" id="search-body">';
   html += '<div style="text-align:center;padding:24px 0;color:var(--text3)"><span class="spinner" style="display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle;margin-right:8px"></span>Searching Torrentio\u2026</div>';
@@ -4266,6 +4300,8 @@ function openSearchModal(imdbId, mediaType, season, episode, displayTitle, media
   overlay.innerHTML = html;
   document.body.appendChild(overlay);
   document.body.style.overflow = 'hidden';
+  document.addEventListener('keydown', _searchModalKeyHandler);
+  _modalA11yOpen(overlay, overlay.querySelector('.search-dialog-close'));
 
   // Reset state
   _searchResults = [];
@@ -4308,10 +4344,16 @@ function openSearchModal(imdbId, mediaType, season, episode, displayTitle, media
   });
 }
 
+function _searchModalKeyHandler(e) {
+  if (e.key === 'Escape') { e.stopImmediatePropagation(); e.preventDefault(); closeSearchModal(); }
+}
+
 function closeSearchModal() {
   var overlay = document.getElementById('search-overlay');
   if (overlay) overlay.remove();
   document.body.style.overflow = '';
+  document.removeEventListener('keydown', _searchModalKeyHandler);
+  _modalA11yClose();
   // Clear add-context so a future addSearchResult call (e.g. from a
   // future code path that reuses the helper) can't mis-tag an unrelated
   // event with stale show/episode context.

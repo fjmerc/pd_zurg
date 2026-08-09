@@ -69,7 +69,7 @@ __NAV_HTML__
 .filter-select:focus{border-color:var(--input-focus)}
 .btn-select{background:none;border:1px solid var(--border);color:var(--text2);border-radius:6px;padding:8px 14px;font-size:.85em;cursor:pointer;white-space:nowrap;transition:border-color .15s,color .15s,background .15s}
 .btn-select:hover{border-color:var(--blue);color:var(--blue)}
-.btn-select.active{background:var(--blue);color:#fff;border-color:var(--blue)}
+.btn-select.active{background:var(--blue-solid);color:#fff;border-color:var(--blue-solid)}
 .btn-select .select-count{display:inline-block;background:rgba(255,255,255,.25);border-radius:10px;font-size:.82em;font-weight:600;padding:1px 7px;margin-left:5px;min-width:18px;text-align:center}
 .scan-info{font-size:.78em;color:var(--text2);white-space:nowrap}
 #btn-refresh{min-width:104px;text-align:center}

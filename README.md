@@ -2,8 +2,6 @@
 
 Local media and debrid content, managed as one library — for Plex, Jellyfin, Sonarr, and Radarr.
 
-![Build Status](https://img.shields.io/github/actions/workflow/status/fjmerc/zurgarr/docker-image.yml)
-
 ## What is Zurgarr?
 
 Zurgarr bridges your local media library and a Real-Debrid / AllDebrid /
@@ -388,8 +386,8 @@ This repository also redistributes or vendors third-party components,
 each governed by its own upstream terms:
 
 - **rclone** — MIT, see [LICENSES/rclone.LICENSE](LICENSES/rclone.LICENSE)
-- **Zurg** — no license declared upstream; downloaded as a binary at
-  image build time
+- **Zurg** — no license declared upstream; the binary is downloaded at
+  container startup (image build only bakes its config template)
 - **plex_debrid** — no license declared upstream; vendored under
   [plex_debrid/](plex_debrid/) with notes in
   [plex_debrid/ATTRIBUTION.md](plex_debrid/ATTRIBUTION.md)

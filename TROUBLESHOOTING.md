@@ -268,8 +268,8 @@ download/restore in the Settings UI still works.
 ### Compose file
 
 - Rename `container_name`, `image`, and the service key:
-  `pd_zurg` → `zurgarr`. Old Docker Hub images under `fjmerc/pd_zurg`
-  remain accessible; new pushes go to `fjmerc/zurgarr`.
+  `pd_zurg` → `zurgarr`. Zurgarr is built from source (see the README
+  quickstart) — there is currently no prebuilt image to pull.
 
 ### Mount path
 

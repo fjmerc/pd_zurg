@@ -21,9 +21,10 @@ retain the copyright and license terms of their respective upstreams.
 - **Upstream:** https://github.com/debridmediamanager/zurg-public
 - **Author:** yowmamasita / debridmediamanager
 - **License:** No license declared by the upstream project.
-- **How it is used:** Zurg is downloaded as a binary at Docker image
-  build time and invoked as a subprocess at runtime to expose a debrid
-  account as a WebDAV server. The Python wrappers under `zurg/` are
+- **How it is used:** the Zurg binary is downloaded at container
+  startup (the Docker image only bakes Zurg's config template) and
+  invoked as a subprocess to expose a debrid account as a WebDAV
+  server. The Python wrappers under `zurg/` are
   Zurgarr-original code that orchestrates the Zurg binary; they are
   covered by Zurgarr's own LICENSE.
 - **Note on licensing:** the upstream Zurg repository does not declare

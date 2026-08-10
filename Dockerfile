@@ -6,8 +6,8 @@ COPY --from=rclone-stage /usr/local/bin/rclone /usr/local/bin/rclone
 WORKDIR /
 
 ADD . / ./
-ADD https://raw.githubusercontent.com/debridmediamanager/zurg-testing/f41746b6f6142c773ae86c6059e6e6338d864ba0/config.yml /zurg/
-ADD https://raw.githubusercontent.com/debridmediamanager/zurg-testing/f41746b6f6142c773ae86c6059e6e6338d864ba0/scripts/plex_update.sh /zurg/
+ADD https://raw.githubusercontent.com/debridmediamanager/zurg-public/ae54761f514023a1fd3bdb48e65f8e91329f8e1e/config.yml /zurg/
+ADD https://raw.githubusercontent.com/debridmediamanager/zurg-public/ae54761f514023a1fd3bdb48e65f8e91329f8e1e/scripts/plex_update.sh /zurg/
 
 ENV \
   XDG_CONFIG_HOME=/config \

@@ -58,7 +58,7 @@ class ZurgUpdate(Update, ProcessHandler):
                 repo_name = 'zurg'
             else:
                 repo_owner = 'debridmediamanager'
-                repo_name = 'zurg-testing'
+                repo_name = 'zurg-public'
 
             current_version = os.getenv('ZURG_CURRENT_VERSION')
 

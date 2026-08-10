@@ -82,6 +82,32 @@ def zurg_setup():
                     else:
                         file.write(line)
                                     
+    def _rclone_enabled_true(line):
+        stripped = line.strip()
+        if not stripped.startswith("rclone_enabled:"):
+            return False
+        # Normalize the YAML scalar: drop inline comments and quotes so
+        # forms like `rclone_enabled: true  # per docs` are still caught.
+        val = stripped.split(':', 1)[1].split('#', 1)[0].strip().strip('"').strip("'").lower()
+        return val in ('true', 'yes', 'on', '1')
+
+    def disable_zurg_rclone(file_path):
+        # pd_zurg runs rclone as its own managed process (rclone/rclone.py);
+        # zurg's built-in mount supervision (rclone_enabled, added upstream in
+        # zurg-public) would spawn a second rclone against the same mount.
+        logger.debug(f"Checking rclone_enabled in config file: {file_path}")
+        with open(file_path, 'r') as file:
+            lines = file.readlines()
+        if not any(_rclone_enabled_true(line) for line in lines):
+            return
+        logger.warning(f"'rclone_enabled: true' found in {file_path} — disabling it; pd_zurg manages rclone itself and zurg's built-in mount would conflict")
+        with atomic_write(file_path) as file:
+            for line in lines:
+                if _rclone_enabled_true(line):
+                    file.write("# rclone_enabled: true  # disabled by pd_zurg: rclone runs as a separate managed process\n")
+                else:
+                    file.write(line)
+
     def plex_refresh(file_path):
         logger.info(f"Updating Plex Refresh in config file: {file_path}")
         yaml = YAML()
@@ -175,7 +201,8 @@ def zurg_setup():
             os.environ[f'ZURG_PORT_{key_type}'] = str(port)       
             logger.debug(f"Zurg w/ {key_type} instance configured to port: {port}")
             
-            update_token(config_file_path, token)            
+            update_token(config_file_path, token)
+            disable_zurg_rclone(config_file_path)
             if PLEXREFRESH is not None and PLEXREFRESH.lower() == "true":
                 if PLEXADD and PLEXTOKEN and PLEXMOUNT:
                     plex_refresh(config_file_path)

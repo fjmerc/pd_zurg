@@ -11,7 +11,7 @@ TorBox account so your *arr stack and media server see them as one
 unified library instead of two parallel systems.
 
 At its base it packages
-**[Zurg](https://github.com/debridmediamanager/zurg-testing)** (WebDAV
+**[Zurg](https://github.com/debridmediamanager/zurg-public)** (WebDAV
 for your debrid account), **[rclone](https://github.com/rclone/rclone)**
 (mounts it as a local directory), and optionally
 **[plex_debrid](https://github.com/itsToggle/plex_debrid)** (watchlist

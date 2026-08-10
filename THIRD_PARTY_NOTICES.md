@@ -18,7 +18,7 @@ retain the copyright and license terms of their respective upstreams.
 
 ## Zurg
 
-- **Upstream:** https://github.com/debridmediamanager/zurg-testing
+- **Upstream:** https://github.com/debridmediamanager/zurg-public
 - **Author:** yowmamasita / debridmediamanager
 - **License:** No license declared by the upstream project.
 - **How it is used:** Zurg is downloaded as a binary at Docker image

@@ -100,7 +100,7 @@ def version_check():
             repo_name = 'zurg'
         else:
             repo_owner = 'debridmediamanager'
-            repo_name = 'zurg-testing'
+            repo_name = 'zurg-public'
 
         nightly = False
 

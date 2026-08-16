@@ -422,6 +422,18 @@ class TestAddToDebrid:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _tb_probe_state_isolation():
+    """Module-wide: the TB probe verdict cache / breaker / rate window
+    are module-level state in utils.search — leaked verdicts would let
+    one test's probe result satisfy another test from cache."""
+    import utils.search as search_mod
+    reset = getattr(search_mod, '_reset_tb_probe_state', lambda: None)
+    reset()
+    yield
+    reset()
+
+
 def _mock_urlopen_response(payload):
     """Build a context-manager mock that yields *payload* as JSON bytes."""
     resp = MagicMock()
@@ -532,35 +544,31 @@ class TestCheckDebridCache:
             search_mod._ad_cache_warning_emitted = False
 
     @patch('urllib.request.urlopen')
-    def test_torbox_per_hash_success(self, mock_urlopen):
-        """TB returns per-hash payload; presence in ``data`` dict = cached."""
-        mock_urlopen.side_effect = [
-            _mock_urlopen_response({
-                'success': True,
-                'data': {'a' * 40: {'name': 'some.file'}},
-            }),
-            _mock_urlopen_response({'success': True, 'data': {}}),
-        ]
+    def test_torbox_batch_success(self, mock_urlopen):
+        """TB returns a dict keyed by hash; presence = cached.  All
+        hashes ride ONE batched request (per-hash fan-out earned the
+        2026-08-16 abuse warning)."""
+        mock_urlopen.return_value = _mock_urlopen_response({
+            'success': True,
+            'data': {'a' * 40: {'name': 'some.file'}},
+        })
         with patch('utils.search._get_debrid_service') as ms:
             ms.return_value = ('torbox', 'tb-key')
             result = check_debrid_cache(['a' * 40, 'b' * 40])
         assert result == {'a' * 40: True, 'b' * 40: False}
-        assert mock_urlopen.call_count == 2
+        assert mock_urlopen.call_count == 1
 
     @patch('urllib.request.urlopen')
-    def test_torbox_failure_per_hash_isolates_unknowns(self, mock_urlopen):
-        """A failure on one hash must not poison the other — each
-        probe is independent, and partial info is better than none."""
-        mock_urlopen.side_effect = [
-            _mock_urlopen_response({
-                'success': True, 'data': {'a' * 40: {'name': 'ok'}},
-            }),
-            OSError('transient'),
-        ]
+    def test_torbox_batch_failure_returns_unknowns(self, mock_urlopen):
+        """A failed batch request leaves every probed hash as None
+        (unknown) — request-volume control outweighs per-hash
+        isolation."""
+        mock_urlopen.side_effect = OSError('transient')
         with patch('utils.search._get_debrid_service') as ms:
             ms.return_value = ('torbox', 'tb-key')
             result = check_debrid_cache(['a' * 40, 'b' * 40])
-        assert result == {'a' * 40: True, 'b' * 40: None}
+        assert result == {'a' * 40: None, 'b' * 40: None}
+        assert mock_urlopen.call_count == 1
 
     @patch('urllib.request.urlopen')
     def test_torbox_url_redaction(self, mock_urlopen, caplog):
@@ -599,23 +607,21 @@ class TestCheckDebridCache:
         assert result == {'a' * 40: None}
 
     @patch('urllib.request.urlopen')
-    def test_torbox_caps_hash_fan_out(self, mock_urlopen):
-        """HIGH: unbounded TB per-hash calls is a DoS vector
-        (50+ Torrentio results × 10 s timeout = 8-min worker stall).
-        The cap keeps the wall-clock budget bounded; hashes beyond
-        the cap stay as None (unknown)."""
+    def test_torbox_caps_batch_size(self, mock_urlopen):
+        """The batch is capped at _TORBOX_MAX_PROBES hashes; overflow
+        hashes never hit the network and stay as None (unknown)."""
         mock_urlopen.return_value = _mock_urlopen_response({
             'success': True, 'data': {},
         })
         n = _TORBOX_MAX_PROBES + 5
-        # Build N unique valid hashes (hex 40 chars each)
         hashes = [f'{i:040x}' for i in range(n)]
         with patch('utils.search._get_debrid_service') as ms:
             ms.return_value = ('torbox', 'tb-key')
             result = check_debrid_cache(hashes)
-        # Exactly _TORBOX_MAX_PROBES HTTP calls — the overflow hashes
-        # never hit the network.
-        assert mock_urlopen.call_count == _TORBOX_MAX_PROBES
+        # ONE batched HTTP call carrying exactly _TORBOX_MAX_PROBES hashes
+        assert mock_urlopen.call_count == 1
+        url = mock_urlopen.call_args[0][0].full_url
+        assert url.count(',') == _TORBOX_MAX_PROBES - 1
         # Probed hashes get a confirmed False (empty dict = uncached);
         # un-probed overflow hashes stay as None (unknown).
         probed = [h for h, v in result.items() if v is False]
@@ -656,6 +662,179 @@ class TestCheckDebridCache:
             # Auto-detect must NOT have been consulted when both overrides
             # supplied
             ms.assert_not_called()
+
+
+class TestTorboxProbeThrottling:
+    """TB probe-storm fixes (2026-08-16 TorBox abuse warning): batched
+    checkcached requests, TTL verdict cache, auth circuit breaker, and
+    a global rate-limit backstop.  The live per-hash fan-out sustained
+    ~175 req/min and got the account flagged + key rotated."""
+
+    @patch('urllib.request.urlopen')
+    def test_batches_all_hashes_into_single_request(self, mock_urlopen):
+        """One checkcached call for N hashes — per-hash fan-out is the
+        request volume that tripped TorBox abuse detection."""
+        mock_urlopen.return_value = _mock_urlopen_response({
+            'success': True,
+            'data': {'a' * 40: {'name': 'some.file'}},
+        })
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('torbox', 'tb-key')
+            result = check_debrid_cache(['a' * 40, 'b' * 40])
+        assert result == {'a' * 40: True, 'b' * 40: False}
+        assert mock_urlopen.call_count == 1
+        url = mock_urlopen.call_args[0][0].full_url
+        assert f"{'a' * 40},{'b' * 40}" in url
+        assert 'format=object' in url
+
+    @patch('urllib.request.urlopen')
+    def test_verdict_cache_serves_repeat_probes_without_network(self, mock_urlopen):
+        """A hash probed twice within the TTL hits the network once —
+        periodic passes re-probing the same backlog were the sustained
+        volume component of the storm."""
+        mock_urlopen.return_value = _mock_urlopen_response({
+            'success': True, 'data': {'a' * 40: {'name': 'f'}},
+        })
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('torbox', 'tb-key')
+            first = check_debrid_cache(['a' * 40, 'b' * 40])
+            second = check_debrid_cache(['a' * 40, 'b' * 40])
+        assert first == {'a' * 40: True, 'b' * 40: False}
+        assert second == first
+        assert mock_urlopen.call_count == 1
+
+    @patch('urllib.request.urlopen')
+    def test_verdict_cache_expires_after_ttl(self, mock_urlopen):
+        """Aged-out cache entries must re-probe — cache-state changes on
+        TB's side (newly cached releases) have to become visible."""
+        import utils.search as search_mod
+        mock_urlopen.return_value = _mock_urlopen_response({
+            'success': True, 'data': {},
+        })
+        h = 'a' * 40
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('torbox', 'tb-key')
+            check_debrid_cache([h])
+            ts, verdict = search_mod._tb_verdict_cache[h]
+            search_mod._tb_verdict_cache[h] = (
+                ts - search_mod._TB_VERDICT_TTL - 1, verdict)
+            check_debrid_cache([h])
+        assert mock_urlopen.call_count == 2
+
+    @patch('urllib.request.urlopen')
+    def test_auth_failure_opens_circuit_breaker(self, mock_urlopen):
+        """A 401/403 means the key is dead/rotated — hot-retrying auth
+        failures is what kept hammering TB after the key rotation.  One
+        auth failure must halt ALL TB probes for the cooldown window."""
+        import urllib.error
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            'https://api.torbox.app/x', 403, 'Forbidden', {}, None)
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('torbox', 'tb-key')
+            first = check_debrid_cache(['a' * 40])
+            second = check_debrid_cache(['b' * 40])
+        assert first == {'a' * 40: None}
+        assert second == {'b' * 40: None}
+        # Breaker open after the first 403 — the second probe never
+        # reaches the network.
+        assert mock_urlopen.call_count == 1
+
+    @patch('urllib.request.urlopen')
+    def test_circuit_breaker_closes_after_cooldown(self, mock_urlopen):
+        """Once the cooldown expires probes resume (a fixed key must
+        recover without a restart)."""
+        import urllib.error
+        import utils.search as search_mod
+        mock_urlopen.side_effect = [
+            urllib.error.HTTPError(
+                'https://api.torbox.app/x', 403, 'Forbidden', {}, None),
+            _mock_urlopen_response({'success': True, 'data': {}}),
+        ]
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('torbox', 'tb-key')
+            check_debrid_cache(['a' * 40])
+            # the 403 must have armed the breaker…
+            assert search_mod._tb_auth_block_until > 0
+            # …then age it past its cooldown
+            search_mod._tb_auth_block_until = 0.0
+            result = check_debrid_cache(['b' * 40])
+        assert result == {'b' * 40: False}
+        assert mock_urlopen.call_count == 2
+
+    @patch('urllib.request.urlopen')
+    def test_non_auth_http_error_does_not_trip_breaker(self, mock_urlopen):
+        """A 500/503 is transient TB-side trouble, not a dead key — it
+        must not blind the app to TB for the whole cooldown."""
+        import urllib.error
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            'https://api.torbox.app/x', 503, 'Unavailable', {}, None)
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('torbox', 'tb-key')
+            check_debrid_cache(['a' * 40])
+            check_debrid_cache(['b' * 40])
+        assert mock_urlopen.call_count == 2
+
+    @patch('urllib.request.urlopen')
+    def test_rate_limit_backstop_caps_requests_per_minute(self, mock_urlopen):
+        """Hard backstop: no matter how many callers stack up, TB sees
+        at most _TB_PROBE_MAX_PER_MIN batch requests per sliding minute;
+        excess probes return None (unknown) without network."""
+        import utils.search as search_mod
+        mock_urlopen.return_value = _mock_urlopen_response({
+            'success': True, 'data': {},
+        })
+        limit = search_mod._TB_PROBE_MAX_PER_MIN
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('torbox', 'tb-key')
+            results = [check_debrid_cache([f'{i:040x}'])
+                       for i in range(limit + 5)]
+        assert mock_urlopen.call_count == limit
+        # throttled calls are unknown, not confirmed-uncached
+        assert all(v is None
+                   for r in results[limit:] for v in r.values())
+
+    @patch('urllib.request.urlopen')
+    def test_rate_limit_window_slides(self, mock_urlopen):
+        """Requests older than the window free up budget — the backstop
+        throttles, it must not permanently blind the app to TB."""
+        import utils.search as search_mod
+        mock_urlopen.return_value = _mock_urlopen_response({
+            'success': True, 'data': {},
+        })
+        limit = search_mod._TB_PROBE_MAX_PER_MIN
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('torbox', 'tb-key')
+            for i in range(limit):
+                check_debrid_cache([f'{i:040x}'])
+            # age every recorded request out of the sliding window
+            with search_mod._tb_probe_state_lock:
+                aged = [t - 61 for t in search_mod._tb_probe_call_times]
+                search_mod._tb_probe_call_times.clear()
+                search_mod._tb_probe_call_times.extend(aged)
+            result = check_debrid_cache(['f' * 40])
+        assert result == {'f' * 40: False}
+        assert mock_urlopen.call_count == limit + 1
+
+    @patch('urllib.request.urlopen')
+    def test_verdict_cache_is_bounded(self, mock_urlopen):
+        """The verdict cache must not grow without bound over weeks of
+        daemon uptime — inserts past the cap evict oldest entries."""
+        import time as _time
+        import utils.search as search_mod
+        mock_urlopen.return_value = _mock_urlopen_response({
+            'success': True, 'data': {},
+        })
+        cap = search_mod._TB_VERDICT_CACHE_MAX
+        now = _time.monotonic()
+        with search_mod._tb_probe_state_lock:
+            for i in range(cap):
+                search_mod._tb_verdict_cache[f'{i:040x}'] = (now, False)
+        with patch('utils.search._get_debrid_service') as ms:
+            ms.return_value = ('torbox', 'tb-key')
+            check_debrid_cache(['f' * 40])
+        assert len(search_mod._tb_verdict_cache) <= cap
+        # the new verdict is present; something old was evicted for it
+        assert ('f' * 40) in search_mod._tb_verdict_cache
 
 
 class TestSearchTorrentsCacheAnnotation:

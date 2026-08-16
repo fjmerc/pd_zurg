@@ -5,6 +5,7 @@ and one-click add them to their debrid provider.  Uses urllib only
 (no requests dependency).
 """
 
+import collections
 import json
 import os
 import re
@@ -13,8 +14,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
-
 from base import load_secret_or_env
 from utils.logger import get_logger
 
@@ -444,81 +443,108 @@ def _check_cache_ad(hashes, api_key):
     return {h: None for h in hashes}
 
 
-def _probe_tb_hash(info_hash, headers):
-    """Probe one hash against TorBox checkcached.  Returns True/False/None.
-
-    TorBox returns {"success": true, "data": {<hash>: {...}} } when
-    cached, and {"success": true, "data": {}} / [] when not.  An
-    unexpected type (None, string, etc.) is "unknown" per I4 — we must
-    not conflate API error with a confirmed-uncached.
-    """
-    url = f'https://api.torbox.app/v1/api/torrents/checkcached?hash={info_hash}'
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=_CACHE_PROBE_TIMEOUT) as resp:
-            raw = resp.read(1 * 1024 * 1024)
-            if not raw:
-                return None
-            data = json.loads(raw.decode('utf-8'))
-    except (urllib.error.URLError, urllib.error.HTTPError,
-            json.JSONDecodeError, OSError, ValueError) as e:
-        logger.warning(
-            f"[search] TB cache probe {_safe_log_url(url)} "
-            f"(hash={info_hash[:8]}…): {type(e).__name__}"
-        )
-        return None
-    if not data.get('success'):
-        return None
-    payload = data.get('data')
-    if not isinstance(payload, dict):
-        return None
-    return info_hash in payload
+# TB probe throttling state (2026-08-16 abuse-warning fixes).  All three
+# mechanisms live behind one lock: the TTL verdict cache stops periodic
+# passes from re-probing the same backlog hashes every cycle.
+_TB_VERDICT_TTL = 900  # seconds a True/False verdict stays servable
+_TB_VERDICT_CACHE_MAX = 5000  # entries; oldest evicted past the cap
+_tb_verdict_cache = {}  # {hash: (monotonic_ts, True/False)}, insertion-ordered
+# Auth circuit breaker: a 401/403 means the key is dead or rotated —
+# retrying is pure abuse-signal.  All TB probes halt until the cooldown
+# expires (a fixed key then recovers without a restart).
+_TB_AUTH_COOLDOWN = 1800
+_tb_auth_block_until = 0.0
+# Rate-limit backstop: a hard cap on batch requests per sliding minute.
+# Even a misbehaving caller loop upstream cannot push TB past
+# _TB_PROBE_MAX_PER_MIN req/min (the abuse flag was earned at ~175/min).
+_TB_PROBE_MAX_PER_MIN = 10
+_tb_probe_call_times = collections.deque()
+_tb_probe_state_lock = threading.Lock()
 
 
-# Concurrency for the TB per-hash probe fan-out.  8 keeps a 25-probe batch
-# at ~3 sequential rounds (worst case ~30 s instead of ~4 min when TB is
-# timing out) without hammering the API.  The pool is a shared module-level
-# singleton so concurrent callers (status-server request threads, the
-# compromise engine, the Wanted→TB recovery pass) share ONE budget of 8
-# in-flight probes — per-call pools would multiply thread count and TB API
-# pressure by the number of stacked searches.
-_TORBOX_PROBE_WORKERS = 8
-_tb_probe_pool = None
-_tb_probe_pool_lock = threading.Lock()
-
-
-def _get_tb_probe_pool():
-    global _tb_probe_pool
-    with _tb_probe_pool_lock:
-        if _tb_probe_pool is None:
-            _tb_probe_pool = ThreadPoolExecutor(
-                max_workers=_TORBOX_PROBE_WORKERS,
-                thread_name_prefix='tb-probe')
-        return _tb_probe_pool
+def _reset_tb_probe_state():
+    """Clear all TB probe throttling state (test isolation hook)."""
+    global _tb_auth_block_until
+    with _tb_probe_state_lock:
+        _tb_verdict_cache.clear()
+        _tb_auth_block_until = 0.0
+        _tb_probe_call_times.clear()
 
 
 def _check_cache_tb(hashes, api_key):
-    """TorBox per-hash cache probe via ``/api/torrents/checkcached``.
+    """TorBox batched cache probe via ``/api/torrents/checkcached``.
 
-    TB's endpoint is per-hash; the batch is capped at
-    ``_TORBOX_MAX_PROBES`` and fanned out across the shared probe pool so
-    a large Torrentio result set cannot blow out the
-    ``_CACHE_PROBE_TIMEOUT`` budget linearly.  Hashes beyond the cap
-    stay as ``None`` (unknown) — callers rank candidates before probing
-    so the top few always get probed.
+    All hashes go out as ONE comma-joined request (``format=object``) —
+    the endpoint accepts multiple hashes per call, so per-hash fan-out
+    is pure request-volume waste (the live per-hash loop sustained
+    ~175 req/min and earned a TorBox abuse warning + key rotation on
+    2026-08-16).  The batch is capped at ``_TORBOX_MAX_PROBES``; hashes
+    beyond the cap stay as ``None`` (unknown) — callers rank candidates
+    before probing so the top few always get probed.
     """
+    global _tb_auth_block_until
+    result = {h: None for h in hashes}
+    now = time.monotonic()
+    with _tb_probe_state_lock:
+        for h in hashes:
+            entry = _tb_verdict_cache.get(h)
+            if entry is not None and now - entry[0] < _TB_VERDICT_TTL:
+                result[h] = entry[1]
+        if now < _tb_auth_block_until:
+            return result
+    batch = [h for h in hashes if result[h] is None][:_TORBOX_MAX_PROBES]
+    if not batch:
+        return result
+    # The rate slot is consumed on ATTEMPT, not success — an errored
+    # request may still have reached TB (a 503 certainly did), and at
+    # warning 1-of-3 over-throttling beats under-throttling.
+    with _tb_probe_state_lock:
+        now = time.monotonic()
+        while _tb_probe_call_times and now - _tb_probe_call_times[0] > 60:
+            _tb_probe_call_times.popleft()
+        if len(_tb_probe_call_times) >= _TB_PROBE_MAX_PER_MIN:
+            return result
+        _tb_probe_call_times.append(now)
     headers = {
         'Authorization': f'Bearer {api_key}',
         'User-Agent': 'zurgarr/1.0',
     }
-    result = {h: None for h in hashes}
-    batch = hashes[:_TORBOX_MAX_PROBES]
-    if not batch:
+    url = ('https://api.torbox.app/v1/api/torrents/checkcached'
+           f'?hash={",".join(batch)}&format=object')
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=_CACHE_PROBE_TIMEOUT) as resp:
+            raw = resp.read(1 * 1024 * 1024)
+            data = json.loads(raw.decode('utf-8')) if raw else None
+    except (urllib.error.URLError, urllib.error.HTTPError,
+            json.JSONDecodeError, OSError, ValueError) as e:
+        if isinstance(e, urllib.error.HTTPError) and e.code in (401, 403):
+            with _tb_probe_state_lock:
+                _tb_auth_block_until = time.monotonic() + _TB_AUTH_COOLDOWN
+            logger.error(
+                f"[search] TB checkcached returned HTTP {e.code} — API key "
+                f"rejected (rotated/expired?); suspending ALL TorBox cache "
+                f"probes for {_TB_AUTH_COOLDOWN // 60} min"
+            )
+        else:
+            logger.warning(
+                f"[search] TB batch cache probe ({len(batch)} hashes): "
+                f"{type(e).__name__}"
+            )
         return result
-    pool = _get_tb_probe_pool()
-    for h, verdict in zip(batch, pool.map(
-            lambda x: _probe_tb_hash(x, headers), batch)):
-        result[h] = verdict
+    if not isinstance(data, dict) or not data.get('success'):
+        return result
+    payload = data.get('data')
+    if not isinstance(payload, dict):
+        return result
+    with _tb_probe_state_lock:
+        for h in batch:
+            result[h] = h in payload
+            # re-insert at the tail so insertion order tracks recency
+            _tb_verdict_cache.pop(h, None)
+            _tb_verdict_cache[h] = (now, result[h])
+        while len(_tb_verdict_cache) > _TB_VERDICT_CACHE_MAX:
+            _tb_verdict_cache.pop(next(iter(_tb_verdict_cache)))
     return result
 
 

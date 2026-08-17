@@ -5782,3 +5782,144 @@ class TestArrFailedFeedback:
         assert meta['info_hash'] == self.HASH
         assert meta['arr_service'] == 'sonarr'
         assert meta['strikes'] == 1
+
+
+class TestRequireCachedTbCrossProbeReroute:
+    """require_cached gate: when the routed debrid's cache verdict is
+    None (RD/AD stubs always are — their cache endpoints are dead) and
+    the TorBox cross-probe confirms the hash IS cached, the drop must be
+    re-routed and added to TorBox in the same pass.
+
+    Normally ``cache_aware`` routing already picks TorBox before the
+    gate.  But the router's per-instance probe cache holds outcomes for
+    ``_PROBE_CACHE_TTL`` (60s) — a stale None cached while the TB probe
+    budget was exhausted keeps routing at the primary even after the
+    gate's cross-probe lands a fresh True verdict.  Discarding that True
+    defers the file and burns duplicate probe budget on the next cycle.
+    """
+
+    _HASH = 'b' * 40
+
+    def _make_watcher(self, tmp_dir, monkeypatch):
+        watch_dir = os.path.join(tmp_dir, 'watch')
+        os.makedirs(watch_dir)
+        monkeypatch.setenv('RD_API_KEY', 'rd-key')
+        monkeypatch.setenv('TORBOX_API_KEY', 'tb-key')
+        monkeypatch.setenv('BLACKHOLE_REQUIRE_CACHED', 'true')
+        monkeypatch.setenv('BLACKHOLE_DEBRID_PRIMARY', 'realdebrid')
+        return BlackholeWatcher(
+            watch_dir, 'rd-key', 'realdebrid',
+            symlink_enabled=False,
+            debrid_api_keys={'realdebrid': 'rd-key', 'torbox': 'tb-key'},
+        ), watch_dir
+
+    def test_router_picks_torbox_on_cached_hit(self, tmp_dir, monkeypatch):
+        """Documents the normal path: cache_aware routing re-routes a
+        TB-cached hash to TorBox before the require_cached gate runs."""
+        watcher, watch_dir = self._make_watcher(tmp_dir, monkeypatch)
+        magnet_path = os.path.join(watch_dir, 'Andor.S02E03.magnet')
+        with open(magnet_path, 'w') as f:
+            f.write(f'magnet:?xt=urn:btih:{self._HASH}')
+        os.utime(magnet_path, (time.time() - 10, time.time() - 10))
+
+        probes = []
+
+        def fake_cache(hashes, service=None, api_key=None):
+            probes.append(service)
+            if service == 'torbox':
+                return {h.lower(): True for h in hashes}
+            return {h.lower(): None for h in hashes}
+
+        monkeypatch.setattr('utils.search.check_debrid_cache', fake_cache)
+        monkeypatch.setattr('utils.search._existing_hashes', lambda *a, **kw: set())
+
+        rd_calls, tb_calls = [], []
+        monkeypatch.setattr(
+            watcher, '_add_to_realdebrid',
+            lambda fp, api_key=None: rd_calls.append((fp, api_key)) or (True, {'id': 'rd-1'}))
+        monkeypatch.setattr(
+            watcher, '_add_to_torbox',
+            lambda fp, api_key=None: tb_calls.append((fp, api_key)) or (True, {'data': {'torrent_id': 'tb-1'}}))
+
+        watcher._process_file(magnet_path)
+
+        assert rd_calls == [], "RD add must not fire — RD cache verdict was unknown"
+        assert len(tb_calls) == 1, "TB-confirmed-cached drop must be added to TorBox"
+        assert tb_calls[0][1] == 'tb-key', "TB add must use the TorBox key, not the RD key"
+        assert not os.path.exists(magnet_path), "drop must leave the watch dir (not defer forever)"
+        assert 'torbox' in probes
+
+    def test_gate_cross_probe_true_reroutes_despite_stale_router_probe(
+            self, tmp_dir, monkeypatch):
+        """The skew window: the router's probe cache holds a stale None
+        for torbox (cached while the TB probe budget was exhausted), so
+        routing falls back to the primary — but the gate's cross-probe
+        gets a fresh True.  That True must trigger a TorBox add, not the
+        defer path."""
+        watcher, watch_dir = self._make_watcher(tmp_dir, monkeypatch)
+        magnet_path = os.path.join(watch_dir, 'Andor.S02E05.magnet')
+        with open(magnet_path, 'w') as f:
+            f.write(f'magnet:?xt=urn:btih:{self._HASH}')
+        os.utime(magnet_path, (time.time() - 10, time.time() - 10))
+
+        # Seed the stale router-side None verdict for torbox.
+        watcher._ensure_probe_cache()
+        watcher._probe_cache[('torbox', self._HASH.lower())] = (
+            time.time() + 60, None)
+
+        def fake_cache(hashes, service=None, api_key=None):
+            if service == 'torbox':
+                return {h.lower(): True for h in hashes}
+            return {h.lower(): None for h in hashes}
+
+        monkeypatch.setattr('utils.search.check_debrid_cache', fake_cache)
+        monkeypatch.setattr('utils.search._existing_hashes', lambda *a, **kw: set())
+
+        rd_calls, tb_calls = [], []
+        monkeypatch.setattr(
+            watcher, '_add_to_realdebrid',
+            lambda fp, api_key=None: rd_calls.append((fp, api_key)) or (True, {'id': 'rd-1'}))
+        monkeypatch.setattr(
+            watcher, '_add_to_torbox',
+            lambda fp, api_key=None: tb_calls.append((fp, api_key)) or (True, {'data': {'torrent_id': 'tb-1'}}))
+
+        watcher._process_file(magnet_path)
+
+        assert rd_calls == [], "RD add must not fire — RD cache verdict was unknown"
+        assert len(tb_calls) == 1, \
+            "gate cross-probe True must re-route the add to TorBox"
+        assert tb_calls[0][1] == 'tb-key', \
+            "TB add must use the TorBox key, not the RD key"
+        assert not os.path.exists(magnet_path), \
+            "drop must leave the watch dir, not defer"
+        # The stale router-side None must be repaired so the next routing
+        # decision (e.g. a Sonarr re-drop) agrees without a fresh probe.
+        with watcher._probe_cache_lock:
+            entry = watcher._probe_cache.get(('torbox', self._HASH.lower()))
+        assert entry is not None, "probe cache must be refreshed after re-route"
+        assert entry[1] is True, "probe cache must hold the True verdict"
+        assert entry[0] > time.time(), "probe cache entry must not be expired"
+
+    def test_tb_cached_none_still_defers(self, tmp_dir, monkeypatch):
+        """Regression guard: an actually-unknown TB verdict (probe outage)
+        must keep the existing defer-and-retry behaviour."""
+        watcher, watch_dir = self._make_watcher(tmp_dir, monkeypatch)
+        magnet_path = os.path.join(watch_dir, 'Andor.S02E04.magnet')
+        with open(magnet_path, 'w') as f:
+            f.write(f'magnet:?xt=urn:btih:{self._HASH}')
+        os.utime(magnet_path, (time.time() - 10, time.time() - 10))
+
+        monkeypatch.setattr('utils.search.check_debrid_cache',
+                            lambda h, service=None, api_key=None: {x.lower(): None for x in h})
+        monkeypatch.setattr('utils.search._existing_hashes', lambda *a, **kw: set())
+
+        added = []
+        monkeypatch.setattr(watcher, '_add_to_realdebrid',
+                            lambda fp, api_key=None: added.append('rd') or (True, {}))
+        monkeypatch.setattr(watcher, '_add_to_torbox',
+                            lambda fp, api_key=None: added.append('tb') or (True, {}))
+
+        watcher._process_file(magnet_path)
+
+        assert added == []
+        assert os.path.exists(magnet_path), "unknown-everywhere drop must stay in watch dir"

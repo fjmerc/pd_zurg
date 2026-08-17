@@ -4870,21 +4870,82 @@ class BlackholeWatcher:
                             pass
                         return
 
-                    # Unknown — API outage, rate-limit, key rotation, or
-                    # RD's deprecated endpoint.  Do NOT delete: leave the
-                    # drop in the watch dir so the next poll retries.  An
-                    # AD/TB blip during a Sonarr grab burst must not
-                    # silently eat every in-flight drop.
-                    logger.warning(
-                        f"[blackhole] Deferring {filename}: cache status unknown on "
-                        f"{debrid} (API unavailable?) — leaving in watch dir"
-                    )
-                    try:
-                        from utils.metrics import metrics
-                        metrics.inc('blackhole_processed', {'status': 'deferred_cache_unknown'})
-                    except Exception:
-                        pass
-                    return
+                    if tb_key and tb_cached is True:
+                        # Routed debrid can't verify (RD/AD cache endpoints
+                        # are dead) but TorBox confirms the hash cached —
+                        # act on the verdict instead of discarding it.
+                        # Normally cache_aware routing already picks TB,
+                        # but a stale None in the router's probe cache
+                        # (cached while the TB probe budget was exhausted)
+                        # can leave the grab on the primary even though a
+                        # fresh True just landed here.  Deferring would
+                        # burn duplicate probe budget every poll cycle.
+                        #
+                        # Refresh the router's probe cache FIRST (with the
+                        # sibling prune from ``_route_grab``) so the next
+                        # routing decision — including a Sonarr re-drop
+                        # while a dedup-hit below is being handled — agrees
+                        # with this verdict instead of re-burning a probe.
+                        self._ensure_probe_cache()
+                        _now = time.time()
+                        with self._probe_cache_lock:
+                            self._probe_cache = {
+                                k: v for k, v in self._probe_cache.items()
+                                if v[0] > _now
+                            }
+                            self._probe_cache[('torbox', lowered)] = (
+                                _now + self._PROBE_CACHE_TTL, True)
+                        if debrid_dedup_enabled:
+                            existing = _existing_hashes('torbox', tb_key)
+                            if existing is not None and lowered in existing:
+                                logger.info(
+                                    f"[blackhole] Skipping duplicate: {filename} "
+                                    f"already in torbox account (cross-probe re-route)"
+                                )
+                                if _history:
+                                    _mt, _ep = _enrich_for_history(filename)
+                                    _history.log_event('duplicate', filename, episode=_ep,
+                                                       source='blackhole',
+                                                       detail='Skipped — already in torbox',
+                                                       meta={'cause': 'duplicate_skipped',
+                                                             'info_hash': info_hash,
+                                                             'provider': 'torbox'},
+                                                       media_title=_mt)
+                                try:
+                                    os.remove(file_path)
+                                except OSError as e:
+                                    logger.warning(
+                                        f"[blackhole] Could not remove duplicate file {filename}: {e}"
+                                    )
+                                try:
+                                    from utils.metrics import metrics
+                                    metrics.inc('blackhole_processed',
+                                                {'status': 'skipped_duplicate'})
+                                except Exception:
+                                    pass
+                                return
+                        logger.info(
+                            f"[blackhole] Re-routing {filename} to torbox: cache "
+                            f"status unknown on {debrid}, TB cross-probe confirms cached"
+                        )
+                        debrid = 'torbox'
+                        api_key = tb_key
+                    else:
+                        # Unknown — API outage, rate-limit, key rotation, or
+                        # RD's deprecated endpoint.  Do NOT delete: leave the
+                        # drop in the watch dir so the next poll retries.  An
+                        # AD/TB blip during a Sonarr grab burst must not
+                        # silently eat every in-flight drop.
+                        logger.warning(
+                            f"[blackhole] Deferring {filename}: cache status unknown on "
+                            f"{debrid} (API unavailable?) — leaving in watch dir"
+                        )
+                        try:
+                            from utils.metrics import metrics
+                            metrics.inc('blackhole_processed', {'status': 'deferred_cache_unknown'})
+                        except Exception:
+                            pass
+                        return
 
         dispatch = {
             'realdebrid': self._add_to_realdebrid,

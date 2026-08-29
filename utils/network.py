@@ -36,9 +36,18 @@ def wait_for_url(url, endpoint="/", auth=None, timeout=600,
     # (no recursive listing).  Body is empty — TorBox accepts that.
     propfind_headers = {'Depth': '0'} if method.upper() == 'PROPFIND' else None
 
-    while time.time() - start_time < timeout:
+    # ``timeout`` is a wall-clock cap: both the per-request socket timeout
+    # and the between-attempt sleep shrink to the remaining window, so a
+    # hanging endpoint can't push the probe meaningfully past deadline.
+    # The deferred mount retry runs this on the scheduler thread with a
+    # short timeout — an unbounded overshoot there stalls every other
+    # scheduled task.
+    while True:
+        remaining = timeout - (time.time() - start_time)
+        if remaining <= 0:
+            break
         try:
-            kwargs = {'timeout': 10}
+            kwargs = {'timeout': min(10, remaining)}
             if auth:
                 kwargs['auth'] = auth
             if propfind_headers:
@@ -55,7 +64,10 @@ def wait_for_url(url, endpoint="/", auth=None, timeout=600,
         except requests.RequestException as e:
             logger.debug(f"Request error for {full_url}: {e}")
 
-        time.sleep(delay)
+        remaining = timeout - (time.time() - start_time)
+        if remaining <= 0:
+            break
+        time.sleep(min(delay, remaining))
         delay = min(delay * 2, max_delay)
 
     logger.error(f"Timeout: {description} at {full_url} not accessible after {timeout}s")

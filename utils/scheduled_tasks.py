@@ -1285,6 +1285,33 @@ def mount_liveness_probe():
     """
     rclone_mount = os.environ.get('BLACKHOLE_RCLONE_MOUNT', '/data')
 
+    # Deferred-start retry: a WebDAV endpoint unreachable during startup
+    # (host crash-reboot → container up before network/DNS) makes setup()
+    # skip that mount permanently — _maybe_selfheal_mount can't help
+    # because no rclone process was ever registered.  Piggyback on this
+    # probe's cadence to retry the skipped setup until it succeeds.
+    if _selfheal_enabled():
+        try:
+            from rclone.rclone import retry_pending_mounts
+            started = retry_pending_mounts()
+        except Exception as e:
+            logger.error(f"[scheduler] Deferred rclone mount retry failed: {e}")
+            started = []
+        for mn in started:
+            mount_path = f"/data/{mn}"
+            logger.info(f"[scheduler] Deferred rclone setup succeeded — "
+                        f"mount '{mn}' is now starting")
+            if _history:
+                try:
+                    _history.log_event(
+                        'repair',
+                        f'Mount {mount_path}',
+                        source='scheduler',
+                        meta={'cause': _history.CAUSE_MOUNT_DEFERRED_START,
+                              'mount': mount_path})
+                except Exception:
+                    pass
+
     # Primary (RD/AD) — always checked.  This is the load-bearing mount;
     # an absent or unresponsive primary is always an error.
     primary_status, primary_msg, primary_items = _probe_mount(rclone_mount)

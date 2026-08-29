@@ -505,6 +505,12 @@ def _fmt_mount_selfheal(ev, meta):
     return short, short
 
 
+def _fmt_mount_deferred_start(ev, meta):
+    mount = meta.get('mount', 'mount')
+    short = f'Deferred rclone setup succeeded — {mount} starting'
+    return short, short
+
+
 def _fmt_library_symlink_cleanup(ev, meta):
     s = meta.get('searched', 0)
     d = meta.get('deleted', 0)
@@ -567,6 +573,7 @@ _CAUSE_FORMATTERS = {
     'task_verify_symlinks': _fmt_task_verify_symlinks,
     'library_symlink_cleanup': _fmt_library_symlink_cleanup,
     'mount_selfheal': _fmt_mount_selfheal,
+    'mount_deferred_start': _fmt_mount_deferred_start,
 }
 
 
@@ -796,6 +803,9 @@ FORMATTER_JS = r"""
       var mount = m.mount || 'mount';
       if (m.restarted) return 'Self-healed dead mount ' + mount + ' — rclone remounted';
       return 'Dead mount ' + mount + ' — unmounted stale FUSE but rclone restart failed, operator attention needed';
+    },
+    mount_deferred_start: function(ev,m){
+      return 'Deferred rclone setup succeeded — ' + (m.mount || 'mount') + ' starting';
     }
   };
 

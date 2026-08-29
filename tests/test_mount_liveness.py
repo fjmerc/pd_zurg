@@ -289,6 +289,7 @@ UNRESPONSIVE = 'Mount unresponsive: [Errno 107] Transport endpoint is not connec
 
 class _HistoryRecorder:
     CAUSE_MOUNT_SELFHEAL = 'mount_selfheal'
+    CAUSE_MOUNT_DEFERRED_START = 'mount_deferred_start'
 
     def __init__(self):
         self.events = []
@@ -452,3 +453,69 @@ class TestMountSelfheal:
         assert ev['meta']['restarted'] is False
         # Streak survives a failed heal — the mount is still dead.
         assert scheduled_tasks._mount_unresponsive_counts['/data'] == 2
+
+
+# ---------------------------------------------------------------------------
+# Deferred mount retry — mounts skipped at startup (WebDAV timeout) get
+# retried by mount_liveness once the endpoint recovers
+# ---------------------------------------------------------------------------
+
+class TestDeferredMountRetry:
+
+    @pytest.fixture(autouse=True)
+    def _probe_env(self, tmp_path, monkeypatch):
+        """RD-only healthy-probe setup (mirrors test_rd_only_alive_success)
+        with retry_pending_mounts and history mocked to recorders."""
+        import rclone.rclone as rclone_mod
+
+        monkeypatch.setattr(
+            scheduled_tasks, '_check_local_library_health', lambda: None)
+        monkeypatch.setenv('BLACKHOLE_RCLONE_MOUNT', str(tmp_path))
+        monkeypatch.delenv('TORBOX_API_KEY', raising=False)
+        monkeypatch.delenv('TORBOX_WEBDAV_USER', raising=False)
+        monkeypatch.delenv('TORBOX_WEBDAV_PASS', raising=False)
+        monkeypatch.delenv('MOUNT_SELFHEAL_ENABLED', raising=False)
+        monkeypatch.setattr(os.path, 'ismount', lambda p: p == str(tmp_path))
+
+        self.retry_calls = []
+        self.retry_result = []
+        def fake_retry():
+            self.retry_calls.append(True)
+            return list(self.retry_result)
+        monkeypatch.setattr(rclone_mod, 'retry_pending_mounts', fake_retry)
+        self.history = _HistoryRecorder()
+        monkeypatch.setattr(scheduled_tasks, '_history', self.history)
+        yield
+
+    def test_retry_called_when_selfheal_enabled(self):
+        result = scheduled_tasks.mount_liveness_probe()
+        assert result['status'] == 'success'
+        assert len(self.retry_calls) == 1
+
+    def test_retry_skipped_when_selfheal_disabled(self, monkeypatch):
+        monkeypatch.setenv('MOUNT_SELFHEAL_ENABLED', 'false')
+        scheduled_tasks.mount_liveness_probe()
+        assert self.retry_calls == []
+
+    def test_started_mount_logs_repair_event(self):
+        self.retry_result = ['torbox']
+        scheduled_tasks.mount_liveness_probe()
+        events = [e for e in self.history.events
+                  if e['meta']['cause'] == 'mount_deferred_start']
+        assert len(events) == 1
+        ev = events[0]
+        assert ev['type'] == 'repair'
+        assert ev['title'] == 'Mount /data/torbox'
+        assert ev['meta']['mount'] == '/data/torbox'
+
+    def test_no_event_when_nothing_started(self):
+        scheduled_tasks.mount_liveness_probe()
+        assert self.history.events == []
+
+    def test_retry_exception_does_not_break_probe(self, monkeypatch):
+        import rclone.rclone as rclone_mod
+        def boom():
+            raise RuntimeError('rclone module exploded')
+        monkeypatch.setattr(rclone_mod, 'retry_pending_mounts', boom)
+        result = scheduled_tasks.mount_liveness_probe()
+        assert result['status'] == 'success'

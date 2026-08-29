@@ -11,6 +11,7 @@ isn't here, open a [GitHub issue](https://github.com/fjmerc/zurgarr/issues).
 - [Search results show `–` in the Cached column](#search-results-show---in-the-cached-column)
 - [Sonarr/Radarr keeps re-grabbing the same failed torrent](#sonarrradarr-keeps-re-grabbing-the-same-failed-torrent)
 - [Mount not available / empty `/data` directory](#mount-not-available--empty-data-directory)
+- [Mount missing after a host reboot ("Skipping rclone setup" in logs)](#mount-missing-after-a-host-reboot-skipping-rclone-setup-in-logs)
 - [TorBox mount fails to authenticate / 401 Invalid credentials](#torbox-mount-fails-to-authenticate--401-invalid-credentials)
 - [Docker Desktop: mount propagation error](#docker-desktop-mount-propagation-error)
 - [Plex not seeing debrid content](#plex-not-seeing-debrid-content)
@@ -148,6 +149,31 @@ import failures — check your arr's Activity → Queue tab for stuck items.
   ```
 - Check rclone logs: `docker logs zurgarr 2>&1 | grep rclone`
 - Verify your debrid API key is valid and the account is active.
+
+## Mount missing after a host reboot ("Skipping rclone setup" in logs)
+
+Your host rebooted (or crashed and came back), the container started, but
+one or more mounts under `/data` are missing and the logs show:
+
+```
+The Zurg WebDAV (...) URL ... is not accessible within the timeout period. Skipping rclone setup for ...
+```
+
+This happens when the container starts before the host's network/DNS is
+ready, so the WebDAV readiness probe times out and that mount's setup is
+skipped.
+
+As long as `MOUNT_SELFHEAL_ENABLED` is not set to `false` (default `true`),
+the mount liveness probe retries the skipped setup automatically — first
+retry within ~70 seconds, then at most once per 10 minutes per mount —
+and the mount comes up on its own once the endpoint is reachable. A
+successful deferred start appears in the Activity feed as a `repair`
+event ("Deferred rclone setup succeeded").
+
+If self-heal is disabled, restart the container once the network is up.
+If Plex runs on the host (not in a container), it may hold stale FUSE
+handles from before the mount disappeared — restart Plex after the mount
+returns if files still show as unavailable.
 
 ## TorBox mount fails to authenticate / 401 Invalid credentials
 

@@ -17,6 +17,61 @@ _rc_urls = {}
 # can monkeypatch a mock without touching the live URL.
 TORBOX_WEBDAV_URL = 'https://webdav.torbox.app/'
 
+# Mounts whose setup was skipped (WebDAV unreachable within the startup
+# timeout, or a per-mount configure error): {mount_name: retry_callable}.
+# A host crash-reboot can start the container before the network is up,
+# which used to leave the mount absent until a manual restart — the
+# scheduler's mount_liveness task drains this dict via
+# retry_pending_mounts() once the WebDAV comes back.
+#
+# Threading invariant: setup() runs on the main thread before the
+# scheduler is registered, and SIGHUP reload calls regenerate_config()
+# (not setup()) — so after startup, only the scheduler thread touches
+# these dicts.  If a future change re-runs setup() at runtime, add a lock.
+#
+# Known limitation: the retry callables close over setup()-time state
+# (zurg ports, mount names, WebDAV credentials).  A SIGHUP that changes
+# ZURG_PORT or credentials while a mount is pending won't reach the
+# closure — the retry keeps probing the old endpoint and the mount needs
+# a container restart, same as before this feature existed.
+_pending_mounts = {}
+_pending_last_retry = {}
+_PENDING_RETRY_COOLDOWN = 600     # min seconds between retries per mount
+# Short readiness probe for retries: the scheduler thread is calling, so a
+# still-down WebDAV must block it for seconds, not the 600s startup budget.
+_PENDING_RETRY_PROBE_TIMEOUT = 30
+
+
+def retry_pending_mounts():
+    """Retry rclone setup for mounts skipped at startup.
+
+    Called from the scheduler's mount_liveness task.  First attempt per
+    mount is immediate (no initial cooldown — the common case is the
+    WebDAV coming up minutes after boot); subsequent attempts are
+    throttled to one per ``_PENDING_RETRY_COOLDOWN``.  Returns the list
+    of mount names that came up.
+    """
+    started = []
+    for mn in list(_pending_mounts):
+        now = time.monotonic()
+        last = _pending_last_retry.get(mn)
+        if last is not None and now - last < _PENDING_RETRY_COOLDOWN:
+            continue
+        _pending_last_retry[mn] = now
+        retry = _pending_mounts[mn]
+        logger.info(f"Retrying skipped rclone setup for mount '{mn}'")
+        try:
+            retry(probe_timeout=_PENDING_RETRY_PROBE_TIMEOUT)
+        except Exception as e:
+            logger.error(f"Deferred rclone setup retry for '{mn}' failed: {e}")
+            continue
+        # The retry callable de-registers itself on success and
+        # re-registers on another WebDAV timeout — pending state is the
+        # source of truth for whether the mount actually came up.
+        if mn not in _pending_mounts:
+            started.append(mn)
+    return started
+
 
 def _is_mount_point(path):
     """True iff ``path`` is currently a mount point in this namespace.
@@ -361,6 +416,8 @@ def regenerate_config():
 def setup():
     refresh_globals(globals())
     _rc_urls.clear()
+    _pending_mounts.clear()
+    _pending_last_retry.clear()
     logger.info("Checking rclone flags")
 
     try:
@@ -408,7 +465,7 @@ def setup():
             else:
                 mount_names.append(TORBOX_MOUNT_NAME)
 
-        def _configure_mount(idx, mn):
+        def _configure_mount(idx, mn, probe_timeout=None):
             logger.info(f"Configuring rclone for {mn}")
             mount_path = f"/data/{mn}"
             # Peel every leftover mount layer (docker override bind, stale
@@ -553,8 +610,12 @@ def setup():
                 probe_method = "GET"
             if os.path.exists(f"/healthcheck/{mn}"):
                 os.rmdir(f"/healthcheck/{mn}")
+            probe_kwargs = {}
+            if probe_timeout is not None:
+                probe_kwargs['timeout'] = probe_timeout
             if wait_for_url(url, endpoint=probe_endpoint, auth=probe_auth,
-                            description=probe_label, method=probe_method):
+                            description=probe_label, method=probe_method,
+                            **probe_kwargs):
                 os.makedirs(f"/healthcheck/{mn}") # makdir for healthcheck. Don't like it, but it works for now...
                 logger.info(f"The {probe_label} URL {url}{probe_endpoint} is accessible. Starting rclone for {mn} (RC on port {rc_port})")
                 process_name = "rclone"
@@ -581,10 +642,31 @@ def setup():
                     # actually up, so a skipped/failed mount never leaves a
                     # dead localhost URL for the RC-refresh consumers.
                     _rc_urls[mn] = f"http://localhost:{rc_port}"
-                notify('mount_success', 'Rclone Mounted', f'Mount {mn} is ready')
+                    _pending_mounts.pop(mn, None)
+                    _pending_last_retry.pop(mn, None)
+                    notify('mount_success', 'Rclone Mounted', f'Mount {mn} is ready')
+                else:
+                    # WebDAV was up but the rclone process failed to spawn
+                    # (missing binary, Popen error).  Keep the mount pending
+                    # so the deferred retry keeps trying — and never send
+                    # mount_success for a mount that isn't running.
+                    logger.error(f"rclone process for {mn} failed to start despite {probe_label} being reachable")
+                    if not _register_pending(idx, mn):
+                        notify('health_error', 'Rclone Mount Failed', f'Mount {mn} failed: rclone process did not start', level='error')
             else:
                 logger.error(f"The {probe_label} URL {url}{probe_endpoint} is not accessible within the timeout period. Skipping rclone setup for {mn}")
-                notify('health_error', 'Rclone Mount Failed', f'Mount {mn} failed: Zurg WebDAV timeout', level='error')
+                if not _register_pending(idx, mn):
+                    notify('health_error', 'Rclone Mount Failed', f'Mount {mn} failed: {probe_label} unreachable within timeout', level='error')
+
+        def _register_pending(idx, mn):
+            # Returns True if the mount was already pending — callers use
+            # that to suppress duplicate failure notifications across
+            # retries of the same outage.
+            already = mn in _pending_mounts
+            _pending_mounts[mn] = (
+                lambda probe_timeout=None, idx=idx, mn=mn:
+                    _configure_mount(idx, mn, probe_timeout=probe_timeout))
+            return already
 
         # Per-mount isolation: a single mount failing (stale FUSE mountpoint
         # left by a prior container, an unreachable WebDAV) must not abort
@@ -595,7 +677,8 @@ def setup():
                 _configure_mount(idx, mn)
             except Exception as e:
                 logger.error(f"Error configuring rclone mount {mn!r}: {e}", exc_info=True)
-                notify('health_error', 'Rclone Mount Failed', f'Mount {mn} failed: {e}', level='error')
+                if not _register_pending(idx, mn):
+                    notify('health_error', 'Rclone Mount Failed', f'Mount {mn} failed: {e}', level='error')
                 continue
 
         logger.info("rclone startup complete")

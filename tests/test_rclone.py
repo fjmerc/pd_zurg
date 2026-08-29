@@ -532,3 +532,220 @@ class TestPerMountProcessHandler:
                 h.pre_restart()
             cleared = [c.args[0] for c in clear.call_args_list]
             assert cleared == ['/data/test_mount_RD', '/data/test_mount_AD']
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def _setup_mocks(monkeypatch, webdav_up=True):
+    """Patch every external of rclone.setup(); yield the interesting mocks.
+
+    Mirrors _run_setup but keeps the patch context open so tests can flip
+    ``wait_for_url`` and call ``retry_pending_mounts`` inside it.
+    """
+    with patch('rclone.rclone.ProcessHandler') as mock_ph, \
+         patch('rclone.rclone.wait_for_url', return_value=webdav_up) as wfu, \
+         patch('rclone.rclone.notify') as notify, \
+         patch('rclone.rclone.atomic_write', MagicMock()), \
+         patch('rclone.rclone.get_port_from_config', return_value='9999'), \
+         patch('rclone.rclone.refresh_globals'), \
+         patch('rclone.rclone.find_available_port', return_value=8080), \
+         patch('os.path.exists', return_value=False), \
+         patch('os.makedirs'), \
+         patch('subprocess.run'), \
+         patch('builtins.open', MagicMock()):
+
+        mock_handler = MagicMock()
+        mock_ph.return_value = mock_handler
+
+        import rclone.rclone as mod
+        monkeypatch.setattr(mod, 'RCLONEMN', 'test_mount')
+        monkeypatch.setattr(mod, 'RDAPIKEY', 'test_key')
+        monkeypatch.setattr(mod, 'ADAPIKEY', None)
+        monkeypatch.setattr(mod, 'NFSMOUNT', None)
+        monkeypatch.setattr(mod, 'NFSPORT', None)
+        monkeypatch.setattr(mod, 'PLEXDEBRID', None)
+        monkeypatch.setattr(mod, 'ZURGUSER', None)
+        monkeypatch.setattr(mod, 'ZURGPASS', None)
+        monkeypatch.setattr(mod, 'RCLONELOGLEVEL', 'NOTICE')
+        monkeypatch.setattr(mod, 'TORBOXAPIKEY', None)
+
+        yield {'mod': mod, 'wait_for_url': wfu, 'notify': notify,
+               'handler': mock_handler, 'ProcessHandler': mock_ph}
+
+
+class TestPendingRegistration:
+    """setup() must register skipped mounts for deferred retry."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_state(self):
+        import rclone.rclone as mod
+        mod._pending_mounts.clear()
+        mod._pending_last_retry.clear()
+        yield
+        mod._pending_mounts.clear()
+        mod._pending_last_retry.clear()
+
+    def test_webdav_timeout_registers_pending(self, rclone_env, monkeypatch):
+        with _setup_mocks(monkeypatch, webdav_up=False) as m:
+            m['mod'].setup()
+            assert 'test_mount' in m['mod']._pending_mounts
+            m['handler'].start_process.assert_not_called()
+            # The failure notification must name the actual probe target
+            # (probe_label), not hardcode "Zurg" — a TorBox WebDAV timeout
+            # otherwise sends users chasing the wrong component.
+            error_events = [c for c in m['notify'].call_args_list
+                            if c.args and c.args[0] == 'health_error']
+            assert len(error_events) == 1
+            assert '(test_mount)' in error_events[0].args[2]
+
+    def test_start_process_failure_keeps_pending(self, rclone_env, monkeypatch):
+        """WebDAV up but the rclone process fails to spawn: no success
+        notification, and the mount must stay pending so the retry loop
+        keeps trying — draining pending here would reintroduce the
+        never-retried incident this feature exists to fix."""
+        with _setup_mocks(monkeypatch, webdav_up=True) as m:
+            m['handler'].start_process.return_value = None
+            m['mod'].setup()
+            assert 'test_mount' in m['mod']._pending_mounts
+            success_events = [c for c in m['notify'].call_args_list
+                              if c.args and c.args[0] == 'mount_success']
+            assert success_events == []
+
+    def test_successful_setup_leaves_nothing_pending(self, rclone_env, monkeypatch):
+        with _setup_mocks(monkeypatch, webdav_up=True) as m:
+            m['mod'].setup()
+            assert m['mod']._pending_mounts == {}
+            m['handler'].start_process.assert_called_once()
+
+    def test_setup_clears_stale_pending_entries(self, rclone_env, monkeypatch):
+        """SIGHUP re-setup must discard closures from the previous setup()
+        run — they capture dead port/config state."""
+        import rclone.rclone as mod
+        mod._pending_mounts['ghost'] = lambda probe_timeout=None: None
+        mod._pending_last_retry['ghost'] = 123.0
+        with _setup_mocks(monkeypatch, webdav_up=True) as m:
+            m['mod'].setup()
+            assert 'ghost' not in m['mod']._pending_mounts
+            assert 'ghost' not in m['mod']._pending_last_retry
+
+    def test_configure_error_registers_pending(self, rclone_env, monkeypatch):
+        """A per-mount configure exception (e.g. unclearable mountpoint)
+        also lands in pending — the condition may be transient."""
+        with _setup_mocks(monkeypatch, webdav_up=True) as m, \
+             patch('rclone.rclone._clear_leftover_mounts', return_value=False):
+            m['mod'].setup()
+            assert 'test_mount' in m['mod']._pending_mounts
+
+    def test_retry_starts_mount_once_webdav_recovers(self, rclone_env, monkeypatch):
+        """The incident scenario end-to-end: WebDAV down at boot (skip),
+        reachable later — retry_pending_mounts starts rclone with the
+        short probe timeout and drains the pending entry."""
+        with _setup_mocks(monkeypatch, webdav_up=False) as m:
+            m['mod'].setup()
+            assert 'test_mount' in m['mod']._pending_mounts
+
+            m['wait_for_url'].return_value = True
+            started = m['mod'].retry_pending_mounts()
+
+            assert started == ['test_mount']
+            assert m['mod']._pending_mounts == {}
+            m['handler'].start_process.assert_called_once()
+            retry_probe = m['wait_for_url'].call_args_list[-1]
+            assert retry_probe.kwargs.get('timeout') == \
+                m['mod']._PENDING_RETRY_PROBE_TIMEOUT
+
+    def test_repeat_retry_failures_do_not_renotify(self, rclone_env, monkeypatch):
+        """One health_error notification per outage, not one per retry —
+        a day-long WebDAV outage must not fire ~144 error notifications."""
+        with _setup_mocks(monkeypatch, webdav_up=False) as m:
+            m['mod'].setup()
+            m['mod'].retry_pending_mounts()  # first attempt is immediate
+            error_events = [c for c in m['notify'].call_args_list
+                            if c.args and c.args[0] == 'health_error']
+            assert len(error_events) == 1
+            assert 'test_mount' in m['mod']._pending_mounts
+
+
+class TestRetryPendingMounts:
+    """Deferred-start self-heal for mounts skipped at startup.
+
+    The Aug 2026 incident: a host crash-reboot started the container
+    before the network was up, Zurg's WebDAV missed the 600s window,
+    and the RD mount stayed absent for 17h because "Skipping rclone
+    setup" had no retry path.  ``retry_pending_mounts`` closes that gap.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_state(self):
+        import rclone.rclone as mod
+        mod._pending_mounts.clear()
+        mod._pending_last_retry.clear()
+        yield
+        mod._pending_mounts.clear()
+        mod._pending_last_retry.clear()
+
+    def test_noop_when_nothing_pending(self):
+        import rclone.rclone as mod
+        assert mod.retry_pending_mounts() == []
+
+    def test_first_attempt_is_immediate_and_reports_started(self):
+        """A freshly registered pending mount is retried on the very first
+        call (no initial cooldown), with the short probe timeout; success
+        (the callable de-registers itself) is reported back."""
+        import rclone.rclone as mod
+        calls = []
+
+        def fake_retry(probe_timeout=None):
+            calls.append(probe_timeout)
+            mod._pending_mounts.pop('mnt_rd', None)
+
+        mod._pending_mounts['mnt_rd'] = fake_retry
+        started = mod.retry_pending_mounts()
+        assert started == ['mnt_rd']
+        assert calls == [mod._PENDING_RETRY_PROBE_TIMEOUT]
+        assert 'mnt_rd' not in mod._pending_mounts
+
+    def test_failure_keeps_mount_pending(self):
+        import rclone.rclone as mod
+
+        def boom(probe_timeout=None):
+            raise OSError('mountpoint could not be cleared')
+
+        mod._pending_mounts['mnt_rd'] = boom
+        assert mod.retry_pending_mounts() == []
+        assert 'mnt_rd' in mod._pending_mounts
+
+    def test_still_unreachable_keeps_mount_pending(self):
+        """The retry ran but the WebDAV was still down — the callable
+        re-registers itself (mirrors the production skip branch) and the
+        mount is not reported as started."""
+        import rclone.rclone as mod
+
+        def still_down(probe_timeout=None):
+            mod._pending_mounts['mnt_rd'] = still_down
+
+        mod._pending_mounts['mnt_rd'] = still_down
+        assert mod.retry_pending_mounts() == []
+        assert 'mnt_rd' in mod._pending_mounts
+
+    def test_cooldown_throttles_repeat_attempts(self, monkeypatch):
+        import rclone.rclone as mod
+        calls = []
+
+        def still_down(probe_timeout=None):
+            calls.append(probe_timeout)
+            mod._pending_mounts['mnt_rd'] = still_down
+
+        mod._pending_mounts['mnt_rd'] = still_down
+
+        fake_now = [1000.0]
+        monkeypatch.setattr(mod.time, 'monotonic', lambda: fake_now[0])
+        mod.retry_pending_mounts()
+        mod.retry_pending_mounts()
+        assert len(calls) == 1  # second call inside cooldown — throttled
+
+        fake_now[0] += mod._PENDING_RETRY_COOLDOWN + 1
+        mod.retry_pending_mounts()
+        assert len(calls) == 2  # cooldown elapsed — retried again

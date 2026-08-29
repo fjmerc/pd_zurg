@@ -160,6 +160,13 @@ def test_mount_selfheal_restart_failed():
     assert 'operator attention needed' in s
 
 
+def test_mount_deferred_start():
+    ev = _ev('mount_deferred_start', mount='/data/torbox')
+    s = format_event(ev)['short']
+    assert 'Deferred rclone setup succeeded' in s
+    assert '/data/torbox' in s
+
+
 def test_blackhole_new_import_with_count():
     ev = _ev('blackhole_new_import', count=5, release='Big.Pack.2024')
     assert 'Blackhole import: 5 files from Big.Pack.2024' in format_event(ev)['short']

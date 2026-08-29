@@ -121,6 +121,9 @@ CAUSE_LIBRARY_SYMLINK_CLEANUP = 'library_symlink_cleanup'
 # mount_liveness detected a dead FUSE mount (ENOTCONN corpse) and
 # automatically unmounted + restarted the owning rclone process.
 CAUSE_MOUNT_SELFHEAL = 'mount_selfheal'
+# A mount skipped at startup (WebDAV unreachable within the timeout) was
+# successfully set up later by the mount_liveness deferred retry.
+CAUSE_MOUNT_DEFERRED_START = 'mount_deferred_start'
 
 
 def init(config_dir='/config'):

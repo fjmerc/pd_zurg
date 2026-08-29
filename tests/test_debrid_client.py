@@ -10,6 +10,8 @@ from utils.debrid_client import (
     AllDebridClient,
     TorBoxClient,
     get_debrid_client,
+    find_torrents_by_title_multi,
+    delete_torrents_multi,
     MAX_BATCH_DELETE,
     _SAFE_ID,
 )
@@ -791,3 +793,112 @@ class TestBatchCap:
 
     def test_max_batch_delete_is_50(self):
         assert MAX_BATCH_DELETE == 50
+
+
+# ---------------------------------------------------------------------------
+# Multi-provider discovery / deletion (cross-provider remove)
+# ---------------------------------------------------------------------------
+
+class TestFindTorrentsByTitleMulti:
+    """find_torrents_by_title_multi queries every configured provider."""
+
+    def _fake_client(self, matches=None, raises=None):
+        client = MagicMock()
+        if raises is not None:
+            client.find_torrents_by_title.side_effect = raises
+        else:
+            client.find_torrents_by_title.return_value = matches or []
+        client._sanitize_error.side_effect = lambda e: f'sanitized:{e}'
+        return client
+
+    def test_tags_each_match_with_its_provider(self):
+        rd_c = self._fake_client([{'id': '1', 'filename': 'A.mkv'}])
+        tb_c = self._fake_client([{'id': '99', 'filename': 'B.mkv'}])
+        with patch('utils.debrid_client._all_configured_clients',
+                   return_value=[('realdebrid', rd_c), ('torbox', tb_c)]):
+            matches, errors = find_torrents_by_title_multi({'foo'})
+        assert errors == {}
+        by_id = {m['id']: m['service'] for m in matches}
+        assert by_id == {'1': 'realdebrid', '99': 'torbox'}
+
+    def test_finds_item_on_secondary_provider_only(self):
+        # RD (priority) has nothing; TB carries the item — the exact bug.
+        rd_c = self._fake_client([])
+        tb_c = self._fake_client([{'id': '84839152', 'filename': 'The Odyssey.mkv'}])
+        with patch('utils.debrid_client._all_configured_clients',
+                   return_value=[('realdebrid', rd_c), ('torbox', tb_c)]):
+            matches, errors = find_torrents_by_title_multi({'the odyssey'}, target_year=2026)
+        assert len(matches) == 1
+        assert matches[0]['service'] == 'torbox'
+        tb_c.find_torrents_by_title.assert_called_once_with({'the odyssey'}, target_year=2026)
+
+    def test_one_provider_failure_does_not_abort_others(self):
+        rd_c = self._fake_client(raises=RuntimeError('rd down'))
+        tb_c = self._fake_client([{'id': '99', 'filename': 'B.mkv'}])
+        with patch('utils.debrid_client._all_configured_clients',
+                   return_value=[('realdebrid', rd_c), ('torbox', tb_c)]):
+            matches, errors = find_torrents_by_title_multi({'foo'})
+        assert [m['id'] for m in matches] == ['99']
+        assert 'realdebrid' in errors and 'rd down' in errors['realdebrid']
+
+    def test_no_configured_providers(self):
+        with patch('utils.debrid_client._all_configured_clients', return_value=[]):
+            matches, errors = find_torrents_by_title_multi({'foo'})
+        assert matches == [] and errors == {}
+
+
+class TestDeleteTorrentsMulti:
+    """delete_torrents_multi routes each id to its own provider."""
+
+    def test_routes_each_id_to_its_provider(self):
+        rd_c = MagicMock(); rd_c.delete_torrent.return_value = True
+        tb_c = MagicMock(); tb_c.delete_torrent.return_value = True
+        clients = {'realdebrid': (rd_c, 'realdebrid'), 'torbox': (tb_c, 'torbox')}
+        with patch('utils.debrid_client.get_debrid_client',
+                   side_effect=lambda service=None, api_key=None: clients[service]):
+            deleted, failed = delete_torrents_multi([
+                {'id': '1', 'service': 'realdebrid'},
+                {'id': '99', 'service': 'torbox'},
+            ])
+        assert deleted == 2 and failed == []
+        rd_c.delete_torrent.assert_called_once_with('1')
+        tb_c.delete_torrent.assert_called_once_with('99')
+
+    def test_reports_provider_side_failures(self):
+        tb_c = MagicMock(); tb_c.delete_torrent.return_value = False
+        with patch('utils.debrid_client.get_debrid_client',
+                   side_effect=lambda service=None, api_key=None: (tb_c, service)):
+            deleted, failed = delete_torrents_multi([{'id': '99', 'service': 'torbox'}])
+        assert deleted == 0 and failed == ['99']
+
+    def test_unconfigured_provider_marks_ids_failed(self):
+        with patch('utils.debrid_client.get_debrid_client',
+                   side_effect=lambda service=None, api_key=None: (None, None)):
+            deleted, failed = delete_torrents_multi([{'id': '5', 'service': 'torbox'}])
+        assert deleted == 0 and failed == ['5']
+
+
+class TestHasConfiguredDebrid:
+    """has_configured_debrid gates on the secrets-aware client path."""
+
+    def test_true_when_any_client_configured(self):
+        c = MagicMock(); c.configured = True
+        with patch('utils.debrid_client._all_configured_clients',
+                   return_value=[('torbox', c)]):
+            from utils.debrid_client import has_configured_debrid
+            assert has_configured_debrid() is True
+
+    def test_false_when_none_configured(self):
+        with patch('utils.debrid_client._all_configured_clients', return_value=[]):
+            from utils.debrid_client import has_configured_debrid
+            assert has_configured_debrid() is False
+
+
+class TestSafeIdLengthCap:
+
+    def test_rejects_oversized_id(self):
+        assert _SAFE_ID.match('A' * 128)
+        assert not _SAFE_ID.match('A' * 129)
+
+    def test_rejects_empty_id(self):
+        assert not _SAFE_ID.match('')

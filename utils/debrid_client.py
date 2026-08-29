@@ -20,8 +20,10 @@ logger = get_logger()
 
 _TIMEOUT = 15
 
-# Torrent IDs must be alphanumeric (with hyphens/underscores allowed)
-_SAFE_ID = re.compile(r'^[a-zA-Z0-9_-]+$')
+# Torrent IDs must be alphanumeric (with hyphens/underscores allowed).
+# Real provider IDs are short (RD ~13 chars, TB numeric, AD numeric); the
+# 128-char cap keeps a crafted oversized id out of logs and request URLs.
+_SAFE_ID = re.compile(r'^[a-zA-Z0-9_-]{1,128}$')
 
 MAX_BATCH_DELETE = 50
 
@@ -792,3 +794,95 @@ def get_debrid_client(service=None, api_key=None):
         return tb, 'torbox'
 
     return None, None
+
+
+def _all_configured_clients():
+    """Return ``[(service_name, client), ...]`` for every provider keyed.
+
+    Order follows ``_SERVICE_CLASSES`` insertion (RD, AD, TB) so a combined
+    torrent list matches the single-provider priority order users already
+    see elsewhere.
+    """
+    clients = []
+    for svc, cls in _SERVICE_CLASSES.items():
+        client = cls()
+        if client.configured:
+            clients.append((svc, client))
+    return clients
+
+
+def has_configured_debrid():
+    """True when at least one provider has a usable key.
+
+    Uses the same client-instantiation path as the actual query
+    (``load_secret_or_env``, which honors Docker secrets), so it must be
+    used for pre-flight gates instead of env-only checks — otherwise a
+    secrets-only deployment gets a false "no provider configured".
+    """
+    return bool(_all_configured_clients())
+
+
+def find_torrents_by_title_multi(normalized_titles, target_year=None):
+    """Find matching torrents across ALL configured debrid providers.
+
+    Unlike ``get_debrid_client()`` — which returns only the single priority
+    provider — this queries every configured account, so a torrent living
+    on a secondary provider (e.g. TorBox in an RD+TB setup) is still
+    discoverable/removable from the library UI.  Each returned match carries
+    a ``service`` field naming the provider it was found on, so the caller
+    can route the eventual delete to the right account.
+
+    Returns ``(matches, errors)``:
+      - ``matches``: list of dicts ``{id, filename, hash, parsed_title,
+        year, service}``
+      - ``errors``: ``{service: sanitized_message}`` for providers whose
+        listing call raised.  A partial failure does NOT abort the others —
+        an RD outage must not block removing a TB item, and vice versa.
+    """
+    matches = []
+    errors = {}
+    for svc, client in _all_configured_clients():
+        try:
+            found = client.find_torrents_by_title(
+                normalized_titles, target_year=target_year)
+        except Exception as e:  # noqa: BLE001 - isolate one provider's failure
+            errors[svc] = client._sanitize_error(e)
+            continue
+        for m in found:
+            m['service'] = svc
+            matches.append(m)
+    return matches, errors
+
+
+def delete_torrents_multi(items):
+    """Delete torrents grouped by their owning provider.
+
+    Args:
+        items: iterable of ``{'id': <torrent id>, 'service': <provider>}``.
+            Each id is routed to a client for its own ``service`` (via
+            ``get_debrid_client(service=...)``) — never the priority
+            fallback — so an id found on TorBox is deleted from TorBox and
+            can't be misdirected to an unrelated RD torrent of the same
+            id shape.
+
+    Returns ``(deleted, failed)`` where ``failed`` lists the torrent-id
+    strings that did not delete (unconfigured provider or provider-side
+    failure).
+    """
+    by_service = {}
+    for it in items:
+        by_service.setdefault(it['service'], []).append(str(it['id']))
+
+    deleted = 0
+    failed = []
+    for svc, ids in by_service.items():
+        client, _name = get_debrid_client(service=svc)
+        if client is None:
+            failed.extend(ids)
+            continue
+        for tid in ids:
+            if client.delete_torrent(tid):
+                deleted += 1
+            else:
+                failed.append(tid)
+    return deleted, failed

@@ -4211,16 +4211,22 @@ function _postRemove(payload) {
 
 var _pendingConfirmCleanup = null;
 
-function _showDebridConfirmation(torrents, title, service, onConfirm, onCancel) {
+function _showDebridConfirmation(torrents, title, onConfirm, onCancel) {
   if (_pendingConfirmCleanup) { _pendingConfirmCleanup(); _pendingConfirmCleanup = null; }
   var el = document.getElementById('transfer-msg');
   if (!el) { onCancel(); return; }
+  var svcSet = {};
+  for (var s = 0; s < torrents.length; s++) { if (torrents[s].service) svcSet[torrents[s].service] = 1; }
+  var svcNames = Object.keys(svcSet);
+  var acctLabel = svcNames.length === 1 ? ('your ' + svcNames[0] + ' account')
+    : (svcNames.length > 1 ? 'your debrid accounts (' + svcNames.join(', ') + ')' : 'your debrid account');
   var html = '<div class="confirm-panel" role="alertdialog" aria-labelledby="confirm-panel-title">';
   html += '<div class="confirm-title" id="confirm-panel-title">Permanently delete ' + esc(String(torrents.length)) + ' debrid torrent' + (torrents.length !== 1 ? 's' : '') + ' for ' + esc(title) + '?</div>';
-  html += '<div style="font-size:.82em;color:var(--text2);margin-bottom:8px">The following will be removed from your ' + esc(service || 'debrid') + ' account:</div>';
+  html += '<div style="font-size:.82em;color:var(--text2);margin-bottom:8px">The following will be removed from ' + esc(acctLabel) + ':</div>';
   html += '<ul class="confirm-list">';
   for (var i = 0; i < torrents.length && i < 10; i++) {
-    html += '<li>' + esc(torrents[i].filename || torrents[i].id || '(unknown)') + '</li>';
+    var badge = torrents[i].service ? ' <span style="color:var(--text3)">[' + esc(torrents[i].service) + ']</span>' : '';
+    html += '<li>' + esc(torrents[i].filename || torrents[i].id || '(unknown)') + badge + '</li>';
   }
   if (torrents.length > 10) html += '<li style="color:var(--text3)">... and ' + (torrents.length - 10) + ' more</li>';
   html += '</ul>';
@@ -4261,24 +4267,32 @@ function _postRemoveDebrid(title, year) {
       return false;
     }
     if (!res.d.count) {
-      _showMsg('No debrid torrents found for this title.', 'error');
+      var em = 'No debrid torrents found for this title.';
+      if (res.d.errors && Object.keys(res.d.errors).length) {
+        em += ' (some providers could not be queried: ' + Object.keys(res.d.errors).join(', ') + ')';
+      }
+      _showMsg(em, 'error');
       return false;
     }
     var torrents = res.d.torrents || [];
-    var service = res.d.service || '';
     return new Promise(function(resolve) {
-      _showDebridConfirmation(torrents, title, service, function() {
+      _showDebridConfirmation(torrents, title, function() {
         _showMsgHtml('<span class="scanning-dot"></span>Removing debrid torrents...');
-        var ids = torrents.map(function(t) { return t.id; });
+        var items = torrents.map(function(t) { return {id: t.id, service: t.service}; });
         fetch('/api/library/remove-debrid/confirm', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({torrent_ids: ids, title: title, service: service})
+          body: JSON.stringify({items: items, title: title})
         }).then(function(r2) {
           return r2.json().then(function(d2) { return {ok: r2.ok, d: d2}; });
         }).then(function(res2) {
           if (!res2.ok || res2.d.status === 'error') {
             _showMsg('Error: ' + (res2.d.error || res2.d.message || 'Deletion failed'), 'error');
+            resolve(false);
+          } else if (res2.d.status === 'partial') {
+            var nFailed = (res2.d.failed || []).length;
+            _showMsg('Removed ' + (res2.d.deleted || 0) + ' torrent(s), but ' + nFailed + ' could not be deleted — check provider status and retry.', 'error');
+            _scheduleRefresh(2000);
             resolve(false);
           } else {
             _showMsg('Removed ' + (res2.d.deleted || 0) + ' torrent(s). To restore, re-add the torrents to your debrid account.', 'success');

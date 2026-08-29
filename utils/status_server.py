@@ -2424,10 +2424,11 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     self._send_json_response(400, json.dumps({'error': 'title required'}))
                     return
 
-                from utils.debrid_client import get_debrid_client
+                from utils.debrid_client import (
+                    find_torrents_by_title_multi, has_configured_debrid,
+                )
                 from utils.library import normalize_title
-                client, service_name = get_debrid_client()
-                if client is None:
+                if not has_configured_debrid():
                     self._send_json_response(400, json.dumps({
                         'error': 'No debrid provider configured (RD_API_KEY, AD_API_KEY, or TORBOX_API_KEY required)'
                     }))
@@ -2448,22 +2449,19 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 _sc = get_scanner()
                 accept_norms = {norm} | (_sc.aliases_for(norm) if _sc else set())
 
-                try:
-                    matches = client.find_torrents_by_title(accept_norms, target_year=year)
-                except Exception as e:
-                    logger.error(f"[remove-debrid] Failed to query debrid provider: {e}")
-                    self._send_json_response(502, json.dumps({
-                        'error': 'Failed to query debrid provider API'
-                    }))
-                    return
+                # Query EVERY configured provider — not just the priority one —
+                # so items living on a secondary account (e.g. TorBox in an
+                # RD+TB setup) are still removable. Each match carries its own
+                # 'service'; per-provider errors are surfaced but don't abort.
+                matches, errors = find_torrents_by_title_multi(accept_norms, target_year=year)
 
                 self._send_json_response(200, json.dumps({
                     'status': 'found',
-                    'service': service_name,
                     'title': title,
                     'normalized_title': norm,
                     'torrents': matches,
                     'count': len(matches),
+                    'errors': errors,
                 }))
             except json.JSONDecodeError:
                 self._send_json_response(400, json.dumps({'error': 'Invalid JSON'}))
@@ -2483,52 +2481,56 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 if not isinstance(values, dict):
                     self._send_json_response(400, json.dumps({'error': 'Expected JSON object'}))
                     return
-                torrent_ids = values.get('torrent_ids', [])
-                if not isinstance(torrent_ids, list) or not torrent_ids:
-                    self._send_json_response(400, json.dumps({'error': 'torrent_ids list required'}))
+                items = values.get('items', [])
+                if not isinstance(items, list) or not items:
+                    self._send_json_response(400, json.dumps({'error': 'items list required'}))
                     return
-                if not all(isinstance(t, (str, int)) for t in torrent_ids):
-                    self._send_json_response(400, json.dumps({'error': 'torrent_ids must contain strings or integers'}))
-                    return
-                from utils.debrid_client import get_debrid_client, MAX_BATCH_DELETE
-                if len(torrent_ids) > MAX_BATCH_DELETE:
+                from utils.debrid_client import (
+                    delete_torrents_multi, MAX_BATCH_DELETE,
+                    _SERVICE_CLASSES, _SAFE_ID,
+                )
+                if len(items) > MAX_BATCH_DELETE:
                     self._send_json_response(400, json.dumps({
                         'error': f'Maximum {MAX_BATCH_DELETE} torrents per request'
                     }))
                     return
+
+                # Each item names the provider its torrent lives on, so the
+                # delete is routed to that account (not the priority fallback).
+                norm_items = []
+                for it in items:
+                    if not isinstance(it, dict):
+                        self._send_json_response(400, json.dumps({'error': 'each item must be an object'}))
+                        return
+                    tid = it.get('id')
+                    svc = it.get('service')
+                    if not isinstance(tid, (str, int)) or not _SAFE_ID.match(str(tid)):
+                        self._send_json_response(400, json.dumps({'error': 'invalid torrent id'}))
+                        return
+                    if svc not in _SERVICE_CLASSES:
+                        self._send_json_response(400, json.dumps({'error': f'unknown service: {svc}'}))
+                        return
+                    norm_items.append({'id': str(tid), 'service': svc})
+
                 title = values.get('title', '').strip()
-                requested_service = values.get('service', '').strip()
 
-                client, service_name = get_debrid_client()
-                if client is None:
-                    self._send_json_response(400, json.dumps({
-                        'error': 'No debrid provider configured'
-                    }))
-                    return
-
-                if requested_service and requested_service != service_name:
-                    self._send_json_response(409, json.dumps({
-                        'error': f'Provider mismatch: found with {requested_service}, '
-                                 f'but current provider is {service_name}'
-                    }))
-                    return
-
-                deleted = 0
-                failed = []
-                for tid in torrent_ids:
-                    tid_str = str(tid)
-                    if client.delete_torrent(tid_str):
-                        deleted += 1
-                    else:
-                        failed.append(tid_str)
+                deleted, failed = delete_torrents_multi(norm_items)
 
                 # Trigger library refresh — Zurg auto-detects torrent deletion
                 # within its check_for_changes_every_secs cycle (typically 10s),
                 # then rclone mount updates after RCLONE_DIR_CACHE_TIME expires.
-                from utils.library import get_scanner
-                scanner = get_scanner()
-                if scanner:
-                    scanner.refresh()
+                # Isolated from the delete result: a refresh failure must never
+                # turn an already-completed deletion into a 500 the user reads
+                # as failure (and then re-attempts).
+                try:
+                    from utils.library import get_scanner
+                    scanner = get_scanner()
+                    if scanner:
+                        scanner.refresh()
+                except Exception:
+                    logger.warning(
+                        "[remove-debrid/confirm] library refresh after delete failed",
+                        exc_info=True)
 
                 if deleted > 0 and failed:
                     status = 'partial'
@@ -2539,9 +2541,8 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
 
                 result = {
                     'status': status,
-                    'service': service_name,
                     'deleted': deleted,
-                    'message': f'Removed {deleted} torrent(s) from {service_name}',
+                    'message': f'Removed {deleted} torrent(s)',
                 }
                 if title:
                     result['title'] = title

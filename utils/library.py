@@ -150,6 +150,15 @@ def _resolve_nfs_rescan_delay():
         return 0
     return max(0, min(delay, _NFS_RESCAN_DELAY_MAX))
 
+# Consecutive empty local-library scans before warning that local content
+# has never been seen this container lifetime.  Covers the stale-bind-at-boot
+# case (docker binds the local library path before the host's network share
+# mounts): the drop alert can't fire because local was never True, so without
+# this the condition only ever surfaces as an hourly INFO line.
+# Intentionally not env-tunable: it only shifts when the one-shot warning
+# fires (~2h after boot at the hourly cadence), not any behavior.
+_LOCAL_EMPTY_ALERT_SCANS = 3
+
 # Folders to skip during library scans (non-media content)
 _SKIP_FOLDERS = {
     'plex versions', 'subs', 'subtitles', 'featurettes',
@@ -2689,6 +2698,7 @@ class LibraryScanner:
             self._pending_warning_hours = 24
         self._last_had_local = None    # None=unknown, True=had local content
         self._local_drop_alerted = False
+        self._local_empty_scans = 0    # consecutive scans with zero local items
 
         # Memoized capability: once we detect that Zurg does not honor
         # `Depth: infinity`, skip the doomed PROPFIND on every subsequent
@@ -6362,6 +6372,7 @@ class LibraryScanner:
         has_local_movies = any(m.get('source') in ('local', 'both') for m in movies)
         has_local_shows = any(s.get('source') in ('local', 'both') for s in shows)
         if not has_local_movies and not has_local_shows:
+            self._local_empty_scans += 1
             if self._last_had_local is True and not self._local_drop_alerted:
                 logger.warning("[library] Local library content dropped to zero — "
                                "network mount may have failed")
@@ -6374,6 +6385,30 @@ class LibraryScanner:
                 except Exception as exc:
                     logger.debug(f"[library] Failed to send mount-drop notification: {exc}")
                 self._local_drop_alerted = True
+            elif (self._last_had_local is None and not self._local_drop_alerted
+                    and self._local_empty_scans >= _LOCAL_EMPTY_ALERT_SCANS):
+                # Never seen local content this container lifetime: likely a
+                # stale bind (host mounted the network share after the
+                # container started) — the drop alert above can never fire.
+                logger.warning(
+                    "[library] Local library has shown no content since startup "
+                    "(%d scans). If it should have content, the bind mount may "
+                    "be stale — restart the container, or add :rslave "
+                    "propagation to the local library binds.",
+                    self._local_empty_scans)
+                try:
+                    from utils.notifications import notify
+                    notify('health_error', 'Local Library Never Seen',
+                           'The local library has shown no content since the '
+                           'container started. If it should have content, the '
+                           'host may have mounted the network share after the '
+                           'container started (stale bind). Restart the '
+                           'container, or add :rslave propagation to the '
+                           'local library binds.',
+                           level='warning')
+                except Exception as exc:
+                    logger.debug(f"[library] Failed to send stale-bind notification: {exc}")
+                self._local_drop_alerted = True
             logger.info("[library] Skipping debrid symlink creation — local library appears empty "
                         "(network mount may not be ready)")
             return
@@ -6381,6 +6416,7 @@ class LibraryScanner:
         # Local content present — update baseline and reset alert state
         self._last_had_local = True
         self._local_drop_alerted = False
+        self._local_empty_scans = 0
 
         real_mount = os.path.realpath(rclone_mount)
 

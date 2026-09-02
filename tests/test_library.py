@@ -846,6 +846,7 @@ class TestLibraryScannerScanDebrid:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
         # Point at a non-writable subpath so any accidental persist is a
@@ -958,6 +959,7 @@ class TestLibraryScannerScanDebrid:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
         # Point at a non-writable subpath so any accidental persist is a
@@ -1188,6 +1190,7 @@ class TestLibraryScannerScanLocal:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
         # Point at a non-writable subpath so any accidental persist is a
@@ -1671,6 +1674,7 @@ class TestLibraryScannerScanCrossRef:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
         # Point at a non-writable subpath so any accidental persist is a
@@ -1714,6 +1718,7 @@ class TestLibraryScannerScanCrossRef:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
         # Point at a non-writable subpath so any accidental persist is a
@@ -1751,6 +1756,7 @@ class TestLibraryScannerScanCrossRef:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
         # Point at a non-writable subpath so any accidental persist is a
@@ -1793,6 +1799,7 @@ class TestLibraryScannerScanCrossRef:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
         # Point at a non-writable subpath so any accidental persist is a
@@ -2009,6 +2016,7 @@ class TestCreateDebridSymlinksSkipsObfuscated:
         os.makedirs(scanner._local_tv_path)
         scanner._last_had_local = True
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._last_symlinked_files = {}
         scanner._pending_rescan_prior_ids = {}
         scanner._discover_torbox_mount = lambda: None
@@ -2102,6 +2110,7 @@ class TestCreateDebridSymlinksPhantomSource:
         os.makedirs(scanner._local_tv_path)
         scanner._last_had_local = True
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._last_symlinked_files = {}
         scanner._pending_rescan_prior_ids = {}
         scanner._discover_torbox_mount = lambda: None
@@ -2179,6 +2188,7 @@ class TestCreateDebridSymlinksBlocklistReleaseFolder:
         os.makedirs(scanner._local_tv_path)
         scanner._last_had_local = True
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._last_symlinked_files = {}
         scanner._pending_rescan_prior_ids = {}
         scanner._discover_torbox_mount = lambda: None
@@ -2575,6 +2585,7 @@ class TestMergeStepCanonicalFallback:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
         scanner._capabilities_path = '/dev/null/library_capabilities.json'
@@ -2990,6 +3001,7 @@ class TestSeasonDataInScanResults:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
         # Point at a non-writable subpath so any accidental persist is a
@@ -3102,6 +3114,7 @@ class TestEpisodeLevelCrossRef:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
         # Point at a non-writable subpath so any accidental persist is a
@@ -3326,6 +3339,7 @@ class TestLibraryScannerGetData:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
         # Point at a non-writable subpath so any accidental persist is a
@@ -3451,6 +3465,7 @@ class TestLibraryScannerRefresh:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
         # Point at a non-writable subpath so any accidental persist is a
@@ -5548,6 +5563,7 @@ class TestSeasonAwareMergeVeto:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
         scanner._capabilities_path = '/dev/null/library_capabilities.json'
@@ -5892,6 +5908,7 @@ class TestWebDAVUnsupportedMemoization:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
         # Point at a non-writable subpath so any accidental persist is a
@@ -6167,6 +6184,7 @@ class TestWebDAVCapabilityPersistence:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
         scanner._capabilities_path = capabilities_path
@@ -6397,6 +6415,7 @@ class TestWebDAVCrossCategoryDetection:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
         scanner._capabilities_path = capabilities_path
@@ -7576,6 +7595,7 @@ class TestScanMountTvMarkerFallback:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
         scanner._capabilities_path = '/dev/null/library_capabilities.json'
@@ -7657,6 +7677,7 @@ class TestScanMountPathSwapOnHeavierFolder:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
         scanner._capabilities_path = '/dev/null/library_capabilities.json'

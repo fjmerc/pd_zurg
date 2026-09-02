@@ -294,6 +294,7 @@ def _make_scanner(mount_path, local_tv_path, monkeypatch):
     scanner._path_lock = threading.Lock()
     scanner._last_had_local = None
     scanner._local_drop_alerted = False
+    scanner._local_empty_scans = 0
     return scanner
 
 
@@ -466,6 +467,7 @@ class TestScanReadLocalMergeGuard:
         scanner._pending_warning_hours = 24
         scanner._last_had_local = None
         scanner._local_drop_alerted = False
+        scanner._local_empty_scans = 0
         scanner._webdav_unsupported = False
         scanner._webdav_unsupported_logged = False
         scanner._capabilities_path = '/dev/null/library_capabilities.json'

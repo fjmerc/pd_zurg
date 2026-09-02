@@ -45,7 +45,7 @@ ALL_EVENTS = {
     # Safety
     'blocklist_added',            # Torrent added to blocklist
     'arr_deleted',                # Movie/series deleted from Sonarr/Radarr
-    'health_error',               # Process crash, mount failure
+    'health_error',               # Process crash, mount failure, stale-bind/empty-library warnings
     'debrid_filtered',            # Debrid filter-block detected (and remediated if AUTO_REMEDIATE)
     'debrid_rescued',             # Filter-blocked content auto-rehosted on the alt debrid (plan 39 phase 3)
     # Repair

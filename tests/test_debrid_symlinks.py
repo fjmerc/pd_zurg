@@ -32,6 +32,7 @@ def _make_scanner(mount_path, local_tv_path, monkeypatch, local_movies_path=None
     scanner._path_lock = threading.Lock()
     scanner._last_had_local = None
     scanner._local_drop_alerted = False
+    scanner._local_empty_scans = 0
     return scanner
 
 
@@ -1024,3 +1025,61 @@ class TestYearQualifiedMatching:
         wrong = os.path.join(local_movies, 'The Grudge (2004)', 'The.Grudge.2020.mkv')
         assert os.path.islink(correct), f"Expected symlink at {correct}"
         assert not os.path.exists(wrong), f"Should NOT have created symlink in 2004 folder"
+
+
+class TestLocalLibraryEmptyAlerts:
+    """Alerting when the local library scan finds zero local content."""
+
+    def _scanner(self, tmp_dir, monkeypatch):
+        mount = os.path.join(tmp_dir, 'mount')
+        local_tv = os.path.join(tmp_dir, 'tv')
+        os.makedirs(local_tv, exist_ok=True)
+        _setup_env(monkeypatch, mount, '/mnt/debrid')
+        return _make_scanner(mount, local_tv, monkeypatch)
+
+    def test_drop_to_zero_alerts_immediately(self, tmp_dir, monkeypatch):
+        """True -> empty transition fires the error alert on the first scan."""
+        scanner = self._scanner(tmp_dir, monkeypatch)
+        scanner._last_had_local = True
+        with patch('utils.notifications.notify') as mock_notify:
+            scanner._create_debrid_symlinks([], [], {})
+        assert mock_notify.call_count == 1
+        assert mock_notify.call_args.kwargs.get('level') == 'error'
+        assert scanner._local_drop_alerted is True
+
+    def test_never_seen_local_alerts_after_threshold(self, tmp_dir, monkeypatch):
+        """Local configured but never seen since startup -> warning after N scans.
+
+        This is the stale-bind-at-boot case: docker binds the local library
+        path before the network share mounts, so the scan is empty from the
+        very first run and the drop alert (True->False) can never fire.
+        """
+        scanner = self._scanner(tmp_dir, monkeypatch)
+        with patch('utils.notifications.notify') as mock_notify:
+            for _ in range(library._LOCAL_EMPTY_ALERT_SCANS - 1):
+                scanner._create_debrid_symlinks([], [], {})
+            assert mock_notify.call_count == 0, "must not alert before threshold"
+            scanner._create_debrid_symlinks([], [], {})
+        assert mock_notify.call_count == 1
+        assert mock_notify.call_args.kwargs.get('level') == 'warning'
+
+    def test_never_seen_alert_fires_once(self, tmp_dir, monkeypatch):
+        scanner = self._scanner(tmp_dir, monkeypatch)
+        with patch('utils.notifications.notify') as mock_notify:
+            for _ in range(library._LOCAL_EMPTY_ALERT_SCANS + 3):
+                scanner._create_debrid_symlinks([], [], {})
+        assert mock_notify.call_count == 1
+
+    def test_local_content_resets_empty_counter(self, tmp_dir, monkeypatch):
+        """A scan that finds local content resets the never-seen counter."""
+        scanner = self._scanner(tmp_dir, monkeypatch)
+        with patch('utils.notifications.notify') as mock_notify:
+            for _ in range(library._LOCAL_EMPTY_ALERT_SCANS - 1):
+                scanner._create_debrid_symlinks([], [], {})
+            scanner._create_debrid_symlinks([], [_LOCAL_MOVIE], {})
+            assert scanner._local_empty_scans == 0
+            assert scanner._last_had_local is True
+            # One more empty scan: now it's a drop (True->False), error level
+            scanner._create_debrid_symlinks([], [], {})
+        assert mock_notify.call_count == 1
+        assert mock_notify.call_args.kwargs.get('level') == 'error'

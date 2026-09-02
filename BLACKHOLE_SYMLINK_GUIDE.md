@@ -304,11 +304,11 @@ services:
       - log:/log
       - rd:/zurg/RD
       - /mnt/remote/realdebrid:/data:shared      # rclone mount
-      - /opt/blackhole:/watch                      # PARENT dir — Zurgarr sees all labels
-      - /opt/completed:/completed                  # PARENT dir — Zurgarr writes all labels
+      - /opt/blackhole:/watch:rslave               # PARENT dir — Zurgarr sees all labels
+      - /opt/completed:/completed:rslave           # PARENT dir — Zurgarr writes all labels
       # Local library for dedup (read-only)
-      - /mnt/truenas/data/media/tv:/data/media/tv:ro
-      - /mnt/truenas/data/media/movies:/data/media/movies:ro
+      - /mnt/truenas/data/media/tv:/data/media/tv:ro,rslave
+      - /mnt/truenas/data/media/movies:/data/media/movies:ro,rslave
     environment:
       - BLACKHOLE_ENABLED=true
       - BLACKHOLE_DIR=/watch
@@ -345,6 +345,8 @@ services:
 ```
 
 > **Note:** Use `:rslave` mount propagation for the debrid FUSE mount. This ensures the container sees mount changes if rclone reconnects. Without it, the mount may appear empty after a brief disconnection.
+>
+> The same applies to any bind whose host source is itself a network mount (NFS/SMB) — the local media library and the blackhole/completed dirs above. If docker starts a container before the host has mounted the share (a common race after a host reboot), a plain bind captures the bare underlying directory and never sees the real share; `:rslave` lets the host-side mount propagate into the running container. See [TROUBLESHOOTING — Library shows only debrid content after a host reboot](TROUBLESHOOTING.md#library-shows-only-debrid-content-after-a-host-reboot-local-library-appears-empty).
 
 #### Radarr
 

@@ -12,6 +12,7 @@ isn't here, open a [GitHub issue](https://github.com/fjmerc/zurgarr/issues).
 - [Sonarr/Radarr keeps re-grabbing the same failed torrent](#sonarrradarr-keeps-re-grabbing-the-same-failed-torrent)
 - [Mount not available / empty `/data` directory](#mount-not-available--empty-data-directory)
 - [Mount missing after a host reboot ("Skipping rclone setup" in logs)](#mount-missing-after-a-host-reboot-skipping-rclone-setup-in-logs)
+- [Library shows only debrid content after a host reboot (local library appears empty)](#library-shows-only-debrid-content-after-a-host-reboot-local-library-appears-empty)
 - [TorBox mount fails to authenticate / 401 Invalid credentials](#torbox-mount-fails-to-authenticate--401-invalid-credentials)
 - [Docker Desktop: mount propagation error](#docker-desktop-mount-propagation-error)
 - [Plex not seeing debrid content](#plex-not-seeing-debrid-content)
@@ -174,6 +175,47 @@ If self-heal is disabled, restart the container once the network is up.
 If Plex runs on the host (not in a container), it may hold stale FUSE
 handles from before the mount disappeared — restart Plex after the mount
 returns if files still show as unavailable.
+
+## Library shows only debrid content after a host reboot (local library appears empty)
+
+The host rebooted, everything looks healthy, but the Library page shows
+only debrid-sourced content — shows and movies you have as real local
+files are missing, or a show with a full local run displays just one or
+two debrid episodes. The log prints this every scan:
+
+```
+[library] Skipping debrid symlink creation — local library appears empty (network mount may not be ready)
+```
+
+and after a few scans you get a "Local Library Never Seen" warning
+notification (if notifications are enabled).
+
+This happens when the local library path
+(`BLACKHOLE_LOCAL_LIBRARY_TV`/`_MOVIES`) is bind-mounted from a host
+directory that is itself a network mount (NFS/SMB), and docker starts
+the container before that share is mounted after boot. The bind then
+captures the bare underlying directory — and bind mounts don't follow
+later host remounts, so the container is stuck looking at an empty (or
+stale) directory even though the host sees the share fine.
+
+**Immediate fix:** restart the container once the host share is mounted.
+
+**Durable fix:** add `:rslave` propagation to the local library binds
+(and any other binds whose host source is a network mount, such as the
+blackhole/completed dirs) so host-side remounts propagate into the
+running container:
+
+```yaml
+    volumes:
+      - /mnt/nas/media/tv:/local_media/tv:rslave
+      - /mnt/nas/media/movies:/local_media/movies:rslave
+```
+
+You can confirm the stale state before restarting: compare
+`stat -c %i /path/on/host` with
+`docker exec <container> stat -c %i /local_media/tv` — different inode
+numbers mean the container is bound to a different filesystem object
+than the host is showing.
 
 ## TorBox mount fails to authenticate / 401 Invalid credentials
 

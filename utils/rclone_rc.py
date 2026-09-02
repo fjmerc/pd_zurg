@@ -46,9 +46,11 @@ def refresh_dir(dir_path='', recursive=False, exclude_mounts=None):
     mount's ``acregmin``/``acregmax``/``acdirmin``/``acdirmax`` timers.
 
     Args:
-        dir_path: Mount-relative directory. Empty string refreshes the mount
-            root (each top-level category dir — ``movies``, ``shows``,
-            ``__all__`` — gets re-listed).
+        dir_path: Mount-relative directory, or a list of them (rclone's RC
+            accepts ``dir``, ``dir2``, ``dir3``, ... in one call). Empty
+            string (or empty list) refreshes the mount root (each top-level
+            category dir — ``movies``, ``shows``, ``__all__`` — gets
+            re-listed).
         recursive: Walk into subdirectories. Leave ``False`` for hot paths;
             recursive=True is expensive on large libraries.
         exclude_mounts: Optional iterable of mount names to skip. Use this to
@@ -74,8 +76,9 @@ def refresh_dir(dir_path='', recursive=False, exclude_mounts=None):
     # JSON bool — passing {"recursive": true} raises
     # `value must be string "recursive"=true` (confirmed rclone 1.73.2).
     payload = {'recursive': 'true' if recursive else 'false'}
-    if dir_path:
-        payload['dir'] = dir_path
+    paths = [dir_path] if isinstance(dir_path, str) else list(dir_path)
+    for i, p in enumerate(pp for pp in paths if pp):
+        payload['dir' if i == 0 else f'dir{i + 1}'] = p
 
     success = False
     for rc_url in urls:
@@ -83,7 +86,8 @@ def refresh_dir(dir_path='', recursive=False, exclude_mounts=None):
             result = _post(rc_url, '/vfs/refresh', payload)
             success = True
             logger.debug("[rclone-rc] Refreshed %s on %s: %s",
-                         dir_path or '<root>', rc_url, result.get('result'))
+                         ', '.join(payload.get(k) for k in payload if k.startswith('dir')) or '<root>',
+                         rc_url, result.get('result'))
         except (urllib.error.URLError, OSError, ValueError) as e:
             logger.debug("[rclone-rc] Refresh failed for %s: %s", rc_url, e)
     return success

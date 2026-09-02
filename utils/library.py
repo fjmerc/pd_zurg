@@ -3231,13 +3231,7 @@ class LibraryScanner:
                     if is_unsupported:
                         self._webdav_unsupported_logged = True
                 try:
-                    from utils.rclone_rc import refresh_dir
-                    from base import TORBOX_MOUNT_NAME
-                    # Skip the TorBox mount: it's enumerated below via the
-                    # mylist API, so a recursive PROPFIND walk over it here is
-                    # pure collateral and trips WebDAV listing rate-limits.
-                    refresh_dir('', recursive=True,
-                                exclude_mounts={TORBOX_MOUNT_NAME})
+                    self._refresh_mount_categories()
                 except Exception as e:
                     logger.debug(f"[library] RC refresh before FUSE scan failed: {e}")
                 debrid_movies, debrid_shows = self._scan_mount(self._mount_path, deadline)
@@ -7118,6 +7112,34 @@ class LibraryScanner:
         truncated. Match the naming convention so new virtual dirs in
         future Zurg releases are skipped automatically."""
         return name.startswith('__') and name.endswith('__')
+
+    def _refresh_mount_categories(self):
+        """RC-refresh rclone's dir cache ahead of a FUSE scan.
+
+        A recursive refresh of the mount root would walk into Zurg's
+        virtual dirs too — and ``__downloads__`` (Zurg v1.0.0) 500s on
+        listing, logging an rclone IO error + Zurg router errors every
+        scan. Instead: refresh the root listing itself non-recursively
+        (no virtual-dir contents are listed), then recurse only into the
+        real categories. Mirrors ``_scan_mount``'s ``__all__`` fallback
+        for category-less mounts. Skips the TorBox mount: it's enumerated
+        via the mylist API, so a recursive PROPFIND walk over it is pure
+        collateral and trips WebDAV listing rate-limits.
+        """
+        from utils.rclone_rc import refresh_dir
+        from base import TORBOX_MOUNT_NAME
+        exclude = {TORBOX_MOUNT_NAME}
+        refresh_dir('', recursive=False, exclude_mounts=exclude)
+        try:
+            with os.scandir(self._mount_path) as it:
+                names = [e.name for e in it if e.is_dir(follow_symlinks=False)]
+        except OSError:
+            return
+        cats = [n for n in names if not self._is_internal_category(n)]
+        if not cats:
+            cats = [n for n in names if n == '__all__']
+        if cats:
+            refresh_dir(sorted(cats), recursive=True, exclude_mounts=exclude)
 
     def _scan_mount(self, mount_path, deadline=None, source_debrid=None, flat_layout=False):
         """Scan all category directories on the mount and aggregate by title.

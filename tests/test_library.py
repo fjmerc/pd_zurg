@@ -1121,6 +1121,47 @@ class TestLibraryScannerScanDebrid:
         assert result["movies"][0]["title"] == "Good Movie"
         assert scanner._last_scan_mount_truncated is False
 
+    def test_pre_scan_refresh_skips_dunder_dirs(self, tmp_dir, monkeypatch):
+        # The RC refresh ahead of a FUSE scan must not recurse into Zurg
+        # virtual dirs — __downloads__ 500s on listing (Zurg v1.0.0).
+        for d in ("shows", "movies", "__all__", "__downloads__", "__unplayable__"):
+            os.makedirs(os.path.join(tmp_dir, d))
+
+        calls = []
+
+        def fake_refresh(dir_path='', recursive=False, exclude_mounts=None):
+            calls.append((dir_path, recursive))
+            return True
+
+        monkeypatch.setattr('utils.rclone_rc.refresh_dir', fake_refresh)
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._mount_path = tmp_dir
+        scanner._refresh_mount_categories()
+
+        assert ('', False) in calls
+        assert (['movies', 'shows'], True) in calls
+        flat = [d for dp, _ in calls for d in ([dp] if isinstance(dp, str) else dp)]
+        assert '__downloads__' not in flat
+        assert '__unplayable__' not in flat
+
+    def test_pre_scan_refresh_falls_back_to_all(self, tmp_dir, monkeypatch):
+        # Category-less mount: only __all__ exists — mirror the scan
+        # fallback and refresh it, or the dir cache never updates.
+        os.makedirs(os.path.join(tmp_dir, "__all__"))
+
+        calls = []
+
+        def fake_refresh(dir_path='', recursive=False, exclude_mounts=None):
+            calls.append((dir_path, recursive))
+            return True
+
+        monkeypatch.setattr('utils.rclone_rc.refresh_dir', fake_refresh)
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._mount_path = tmp_dir
+        scanner._refresh_mount_categories()
+
+        assert (['__all__'], True) in calls
+
     def test_scan_falls_back_to_all_when_no_categories(self, tmp_dir, monkeypatch):
         # Only __all__ exists — should be scanned as fallback
         all_dir = os.path.join(tmp_dir, "__all__")

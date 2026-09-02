@@ -7109,8 +7109,15 @@ class LibraryScanner:
 
     # Category names that indicate TV/show content
     _SHOW_CATEGORIES = {'shows', 'tv', 'anime', 'series', 'television'}
-    # Internal Zurg directories to always skip
-    _SKIP_CATEGORIES = {'__all__', '__unplayable__'}
+    @staticmethod
+    def _is_internal_category(name):
+        """Zurg virtual directories (``__all__``, ``__unplayable__``,
+        v1.0.0's ``__downloads__``, ...) are dunder-named. They duplicate
+        category content or aren't library content at all — and some 500
+        on listing (``__downloads__``), which would flag every scan as
+        truncated. Match the naming convention so new virtual dirs in
+        future Zurg releases are skipped automatically."""
+        return name.startswith('__') and name.endswith('__')
 
     def _scan_mount(self, mount_path, deadline=None, source_debrid=None, flat_layout=False):
         """Scan all category directories on the mount and aggregate by title.
@@ -7163,7 +7170,7 @@ class LibraryScanner:
                 self._last_scan_mount_truncated = True
                 return [], []
 
-            non_special = [c for c in categories if c not in self._SKIP_CATEGORIES]
+            non_special = [c for c in categories if not self._is_internal_category(c)]
             scan_dirs = non_special if non_special else [c for c in categories if c == '__all__']
 
             if not scan_dirs:
@@ -7602,7 +7609,7 @@ class LibraryScanner:
             if e['is_collection'] and e['name'] and e['href'].rstrip('/') not in _root_hrefs:
                 all_cats.append(e['name'])
 
-        non_special = [c for c in all_cats if c not in self._SKIP_CATEGORIES]
+        non_special = [c for c in all_cats if not self._is_internal_category(c)]
         scan_cats = non_special if non_special else [c for c in all_cats if c == '__all__']
         if not scan_cats:
             logger.warning("[library] WebDAV: no scannable categories found")

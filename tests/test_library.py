@@ -1088,6 +1088,39 @@ class TestLibraryScannerScanDebrid:
         assert "Good Movie" in all_titles
         assert "Bad File" not in all_titles
 
+    def test_scan_skips_downloads_category(self, tmp_dir, monkeypatch):
+        # Zurg v1.0.0 advertises a __downloads__ virtual dir at the mount
+        # root; any dunder-named internal dir must be skipped, not scanned.
+        movies_dir = os.path.join(tmp_dir, "movies")
+        downloads_dir = os.path.join(tmp_dir, "__downloads__")
+        os.makedirs(os.path.join(movies_dir, "Good Movie (2023)"))
+        os.makedirs(os.path.join(downloads_dir, "Decoy Movie (2022)"))
+
+        scanner = self._make_scanner(tmp_dir, monkeypatch)
+        result = scanner.scan()
+
+        all_titles = {m["title"] for m in result["movies"]} | {s["title"] for s in result["shows"]}
+        assert "Good Movie" in all_titles
+        assert "Decoy Movie" not in all_titles
+
+    def test_unlistable_dunder_dir_does_not_truncate_scan(self, tmp_dir, monkeypatch):
+        # Prod failure mode: listing __downloads__ raises IO error (Zurg 500
+        # via FUSE). Since it's skipped, the scan must not be flagged partial.
+        movies_dir = os.path.join(tmp_dir, "movies")
+        downloads_dir = os.path.join(tmp_dir, "__downloads__")
+        os.makedirs(os.path.join(movies_dir, "Good Movie (2023)"))
+        os.makedirs(downloads_dir)
+        os.chmod(downloads_dir, 0o000)
+        try:
+            scanner = self._make_scanner(tmp_dir, monkeypatch)
+            result = scanner.scan()
+        finally:
+            os.chmod(downloads_dir, 0o755)
+
+        assert len(result["movies"]) == 1
+        assert result["movies"][0]["title"] == "Good Movie"
+        assert scanner._last_scan_mount_truncated is False
+
     def test_scan_falls_back_to_all_when_no_categories(self, tmp_dir, monkeypatch):
         # Only __all__ exists — should be scanned as fallback
         all_dir = os.path.join(tmp_dir, "__all__")

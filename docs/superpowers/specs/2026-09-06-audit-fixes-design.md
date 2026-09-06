@@ -130,19 +130,27 @@ debrid-only episodes (and unrelated debrid-only seasons of the same show) get de
 seconds after a search that may take hours; if the re-grab fails, those episodes have no
 copy anywhere, and the hourly gap-fill re-search masks the loss.
 
-Fix (server-side scoping — defense in depth, not just JS):
+Fix (server-side scoping — defense in depth, not just JS). *Amended 2026-09-06 during
+plan writing, after reading the real code:*
 
-- The client sends, with the remove-debrid request for a show, the episode set confirmed
-  `both`-source at request time (`safe_episodes`: list of `SxxEyy` keys).
-- The server maps each title-matched torrent to the episodes it backs by parsing
-  `files[].name` for SxxEyy patterns (per the TorBox mylist gotcha, the real folder is
-  the first component of `files[].name` — the parse works on file paths, not the display
-  `name`).
-- A torrent is deleted **only if every episode it backs is in `safe_episodes`**. A
-  torrent backing any episode outside the set (season pack spanning debrid-only
-  episodes, unparseable file names, an entirely different season) is kept, and the
-  response reports it as "kept — still the only copy of SxxEyy…" so the confirm dialog
-  and result toast are truthful.
+- **The server derives the unsafe set itself** — `LibraryScanner.debrid_only_episodes(norm)`
+  returns the (season, episode) keys present in the debrid path index with no local
+  counterpart (aliases and year-qualified sibling norms included). Nothing is trusted
+  from the client; this is authoritative and mirrors the safety rule the scheduled
+  `_enforce_preferences` already applies (`has_both and not has_debrid_only`,
+  `library.py:4267-4286`).
+- **Episode claims are parsed from the torrent's own name**, not `files[].name`:
+  `DebridClientBase.list_torrents()` carries no per-file data, and adding per-torrent
+  file-listing API calls would violate the TB request-throttling rules. Claims parse as
+  episode-specific (`SxxEyy`, multi-ep, ranges), season-pack (`S01`, `Season 1`,
+  `S01-S03`), or no-claim (whole-show / unparseable) — no-claim **fails closed** (kept
+  whenever any debrid-only episode exists).
+- A torrent is deleted **only if its claim touches no debrid-only episode**. Kept
+  torrents are reported with a `kept_reason` ("only debrid copy of SxxEyy…") so the
+  confirm dialog and result toast are truthful. The confirm endpoint re-derives the
+  whole decision server-side against a fresh provider listing (requested ids absent
+  from the fresh listing are refused, fail closed); `type` (`show`/`movie`) becomes a
+  required field on confirm.
 - The auto-chain (search-then-remove) stays: with scoping it is safe. The surviving
   duplicates are cleaned up later by the existing scheduled
   `enforce_source_preferences` pass once downloads land — no new polling machinery.

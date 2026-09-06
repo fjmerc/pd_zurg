@@ -2565,7 +2565,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                             year = None
                     norm = normalize_title(title)
                     accept_norms = {norm} | _sc.aliases_for(norm)
-                    fresh, _errs = find_torrents_by_title_multi(
+                    fresh, fresh_errs = find_torrents_by_title_multi(
                         accept_norms, target_year=year)
                     unsafe = _sc.debrid_only_episodes(norm)
                     deletable, kept = filter_safe_torrent_deletes(fresh, unsafe)
@@ -2579,6 +2579,15 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                         elif key in kept_by_key:
                             skipped.append({'id': it['id'], 'service': it['service'],
                                             'reason': kept_by_key[key]['kept_reason']})
+                        elif it['service'] in fresh_errs:
+                            # A transient provider outage during the fresh
+                            # re-listing must not be conflated with "this id
+                            # doesn't exist" — both refuse the delete (fail
+                            # closed), but the reason should point at the
+                            # outage so a retry is the obvious next step.
+                            skipped.append({'id': it['id'], 'service': it['service'],
+                                            'reason': f'provider {it["service"]} could not '
+                                                      'be queried — refused (fail closed)'})
                         else:
                             skipped.append({'id': it['id'], 'service': it['service'],
                                             'reason': 'not found in a fresh provider '

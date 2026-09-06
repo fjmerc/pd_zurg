@@ -4303,11 +4303,24 @@ function _postRemoveDebrid(title, year, mediaType) {
           if (!res2.ok || res2.d.status === 'error') {
             _showMsg('Error: ' + (res2.d.error || res2.d.message || 'Deletion failed'), 'error');
             resolve(false);
+          } else if (res2.d.status === 'skipped') {
+            // Every requested item was refused server-side (sole debrid
+            // copy of an unwatched-for episode) — nothing was deleted.
+            // Must NOT read as success or save the preference.
+            _showMsg(res2.d.message || 'No torrents deleted — all requested items were kept.', 'error');
+            resolve(false);
           } else if (res2.d.status === 'partial') {
             var nFailed = (res2.d.failed || []).length;
             _showMsg('Removed ' + (res2.d.deleted || 0) + ' torrent(s), but ' + nFailed + ' could not be deleted — check provider status and retry.', 'error');
             _scheduleRefresh(2000);
             resolve(false);
+          } else if (res2.d.skipped && res2.d.skipped.length) {
+            // Partial success: some deleted, some kept as sole debrid
+            // copies — surface the server's message (carries the "N kept"
+            // suffix) instead of a generic success string.
+            _showMsg(res2.d.message || ('Removed ' + (res2.d.deleted || 0) + ' torrent(s).'), 'success');
+            _scheduleRefresh(2000);
+            resolve(true);
           } else {
             _showMsg('Removed ' + (res2.d.deleted || 0) + ' torrent(s). To restore, re-add the torrents to your debrid account.', 'success');
             _scheduleRefresh(2000);

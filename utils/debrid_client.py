@@ -861,10 +861,20 @@ def find_torrents_by_title_multi(normalized_titles, target_year=None):
 # anywhere. Claims are parsed from the torrent name; anything that can't
 # be parsed fails CLOSED (kept).
 
-_EP_GROUP_RE = re.compile(r'S(\d{1,2})((?:[E\-]E?\d{1,4})+)', re.IGNORECASE)
+# The episode group MUST start with E right after the season digits — a
+# bare "S01-03" (season range, no E) is NOT an episode claim. Without this
+# anchor, a season-1-3 pack like "The.Wire.S01-03.1080p" was misparsed as
+# episode claim {(1, 3)} — a wrong, narrow claim that let the pack be
+# deleted while it was the sole copy of e.g. S03E05 (audit fix-round-1
+# CRITICAL 1). Subsequent episodes may still chain via E or - (S01E05-06,
+# S01E04-E06).
+_EP_GROUP_RE = re.compile(r'S(\d{1,2})(E\d{1,4}(?:[E\-]E?\d{1,4})*)', re.IGNORECASE)
 _SEASON_ONLY_RE = re.compile(r'(?:^|[\s._\-\[])S(\d{1,2})(?![E\d])', re.IGNORECASE)
 _SEASON_WORD_RE = re.compile(r'Season[\s._\-]*(\d{1,2})', re.IGNORECASE)
 _SEASON_RANGE_RE = re.compile(r'S(\d{1,2})\s*[-–]\s*S(\d{1,2})', re.IGNORECASE)
+# Bare season range with no second "S" (e.g. "S01-03", "S1-3") — the "S01-
+# S03" form above requires a repeated S and would miss these.
+_SEASON_BARE_RANGE_RE = re.compile(r'S(\d{1,2})\s*[-–]\s*(\d{1,2})(?![E\d])', re.IGNORECASE)
 
 
 def _torrent_episode_claim(filename):
@@ -874,7 +884,12 @@ def _torrent_episode_claim(filename):
     - ``episodes``: set of (season, episode) for episode-specific releases
       (S01E04, S01E04E05, S01E04-E06).
     - ``seasons``: set of season ints claimed WITHOUT episode detail
-      (season packs: "S01.", "Season 1", "S01-S03").
+      (season packs: "S01.", "Season 1", "S01-S03", "S01-03") PLUS, for a
+      cross-season episode claim (e.g. "S01E20-S02E05"), every season in
+      [min, max] of the seasons touched — the middle episodes of such a
+      release (S01E21-24, S02E01-04 in that example) are never explicitly
+      named, so the whole span is treated as season-wide for blocking
+      purposes (audit fix-round-1 CRITICAL 2; simple and fail-safe).
     - both empty: whole-show pack or unparseable — caller must fail closed.
     """
     name = filename or ''
@@ -889,12 +904,20 @@ def _torrent_episode_claim(filename):
                 nums = list(range(lo, hi + 1))
         episodes.update((season, n) for n in nums)
 
+    ep_seasons = {s for s, _ in episodes}
     seasons = set()
+    if len(ep_seasons) > 1:
+        # Cross-season episode span — season-wide-block every season in
+        # between so the unnamed middle episodes stay protected.
+        seasons.update(range(min(ep_seasons), max(ep_seasons) + 1))
     for m in _SEASON_RANGE_RE.finditer(name):
         lo, hi = int(m.group(1)), int(m.group(2))
         if lo <= hi and (hi - lo) < 50:
             seasons.update(range(lo, hi + 1))
-    ep_seasons = {s for s, _ in episodes}
+    for m in _SEASON_BARE_RANGE_RE.finditer(name):
+        lo, hi = int(m.group(1)), int(m.group(2))
+        if lo <= hi and (hi - lo) < 50:
+            seasons.update(range(lo, hi + 1))
     for m in _SEASON_ONLY_RE.finditer(name):
         s = int(m.group(1))
         if s not in ep_seasons:

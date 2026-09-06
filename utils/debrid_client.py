@@ -943,6 +943,15 @@ def _torrent_episode_claim(filename):
         s = int(m.group(1))
         if s not in ep_seasons:
             seasons.add(s)
+    # Gap fill: two or more disjoint season-only claims with no episode
+    # claims at all (e.g. "Show S01 S03", "Show.S01.S03") parse as
+    # {1, 3} — leaving season 2 of what is really a "seasons 1 through 3"
+    # pack unprotected. Widen to the full span, same as the cross-season
+    # episode-claim and SxxEyy-SxxEzz handling above (audit finding #4).
+    if len(seasons) >= 2 and not episodes:
+        lo, hi = min(seasons), max(seasons)
+        if (hi - lo) < 50:
+            seasons.update(range(lo, hi + 1))
     return seasons, episodes
 
 

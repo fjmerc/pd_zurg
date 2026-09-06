@@ -47,8 +47,19 @@ def atomic_write(target_path, mode='w', encoding='utf-8', fsync=True):
         with os.fdopen(fd, **fdopen_kwargs) as tmp_file:
             yield tmp_file
             if fsync:
-                tmp_file.flush()
-                os.fsync(tmp_file.fileno())
+                # A caller that does `f.write(...); f.close()` inside the
+                # `with` block (rather than just writing and letting the
+                # context manager close it) already flushed to disk via
+                # close() — flush()/fileno() on the now-closed file object
+                # raise ValueError, which must not fail a write that has
+                # already succeeded. An OSError here is a real fsync
+                # failure and stays fatal (controller ruling: audit
+                # finding #7 — do not swallow it).
+                try:
+                    tmp_file.flush()
+                    os.fsync(tmp_file.fileno())
+                except ValueError:
+                    pass
 
         # Preserve original permissions
         if original_mode is not None:

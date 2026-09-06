@@ -4278,8 +4278,14 @@ function _postRemoveDebrid(title, year, mediaType) {
     var keptList = res.d.kept || [];
     if (!res.d.count) {
       if (keptList.length) {
-        _showMsg('Nothing deleted: all ' + keptList.length + ' matching torrent(s) are the only debrid copy of episodes with no local file yet. Retry after the downloads finish.', 'error');
-        return false;
+        // Every matching torrent was refused (sole debrid copy of an
+        // episode with no local file yet) — not an error, and the
+        // caller's preference IS still applicable: enforcement will
+        // finish the removal automatically once the downloads land.
+        // Resolve the truthy 'deferred' sentinel so applyPreference()
+        // saves the preference instead of discarding it.
+        _showMsg('Nothing deleted yet: ' + keptList.length + ' torrent(s) are the only debrid copy of episodes without a local file. They will be removed automatically once the downloads land.', 'info');
+        return 'deferred';
       }
       var em = 'No debrid torrents found for this title.';
       if (res.d.errors && Object.keys(res.d.errors).length) {
@@ -4305,10 +4311,12 @@ function _postRemoveDebrid(title, year, mediaType) {
             resolve(false);
           } else if (res2.d.status === 'skipped') {
             // Every requested item was refused server-side (sole debrid
-            // copy of an unwatched-for episode) — nothing was deleted.
-            // Must NOT read as success or save the preference.
-            _showMsg(res2.d.message || 'No torrents deleted — all requested items were kept.', 'error');
-            resolve(false);
+            // copy of an unwatched-for episode) — nothing was deleted
+            // yet, but the preference is still the right call: it will
+            // finish converging once the downloads land. Resolve the
+            // truthy 'deferred' sentinel so the caller saves the pref.
+            _showMsg(res2.d.message || 'Nothing deleted yet: all requested items are the only debrid copy of episodes without a local file. They will be removed automatically once the downloads land.', 'info');
+            resolve('deferred');
           } else if (res2.d.status === 'partial') {
             var nFailed = (res2.d.failed || []).length;
             _showMsg('Removed ' + (res2.d.deleted || 0) + ' torrent(s), but ' + nFailed + ' could not be deleted — check provider status and retry.', 'error');

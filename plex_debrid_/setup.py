@@ -59,13 +59,25 @@ def pd_setup():
     plex_debrid_env_path = './.env'
     
     if not os.path.exists(settings_file):
-        subprocess.run(
-            ["touch", ignored_file], check=True
-        )
+        try:
+            subprocess.run(["touch", ignored_file], check=True)
+        except (subprocess.CalledProcessError, OSError) as e:
+            # Under the old SIG_IGN reaping this could never raise (the
+            # child's exit status was reaped by the SIGCHLD handler
+            # before check=True could see it) — restore that limp-on
+            # behavior explicitly now that it can, rather than aborting
+            # all of pd_setup over a non-essential touch (audit finding #8).
+            logger.error(f"pd_setup: 'touch {ignored_file}' failed: {e}")
     if not os.path.exists(settings_file):
-        subprocess.run(
-            ["cp", "./plex_debrid_/settings-default.json", settings_file], check=True
-        )
+        try:
+            subprocess.run(
+                ["cp", "./plex_debrid_/settings-default.json", settings_file],
+                check=True,
+            )
+        except (subprocess.CalledProcessError, OSError) as e:
+            logger.error(
+                f"pd_setup: 'cp settings-default.json {settings_file}' failed: {e}"
+            )
 
     if not (TRAKTCLIENTID and TRAKTCLIENTSECRET):
         client_id = "0183a05ad97098d87287fe46da4ae286f434f32e8e951caad4cc147c947d79a3"

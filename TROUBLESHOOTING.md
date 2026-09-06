@@ -344,23 +344,36 @@ increase `FFPROBE_STUCK_TIMEOUT` (default 300s).
 
 State-changing requests (library refresh, delete, settings save, etc.)
 verify the browser's `Origin` header against the request's `Host`
-header — a CSRF guard that blocks a malicious page from firing those
-endpoints using your browser's saved credentials. If Zurgarr is served
-through a reverse proxy or accessed by a hostname different from the
-one the container sees on `Host` (e.g. `https://zurgarr.example.com` in
-front of `http://192.168.1.8:8080`), the Origin won't match and the
-request is rejected even though you're the legitimate operator.
+header (or `X-Forwarded-Host`, if your proxy sends it) — a CSRF guard
+that blocks a malicious page from firing those endpoints using your
+browser's saved credentials. If Zurgarr is served through a reverse
+proxy or accessed by a hostname different from the one the container
+sees on `Host` (e.g. `https://zurgarr.example.com` in front of
+`http://192.168.1.8:8080`), the Origin won't match and the request is
+rejected even though you're the legitimate operator.
 
-Set `STATUS_UI_TRUSTED_ORIGINS` to the public origin(s) the dashboard
-is actually accessed from — `scheme://host[:port]`, comma-separated for
-more than one (e.g. `https://zurgarr.example.com,https://zurgarr.lan`).
-The match is case-insensitive, but use lowercase and omit default ports
-(`:443` for `https`, `:80` for `http`) to match what browsers actually
-send in the `Origin` header. Then reload config: Settings → **Save &
-Reload**, or send the container a `SIGHUP`.
+A proxy that sets `proxy_set_header X-Forwarded-Host $host` (or
+equivalent) is enough on its own — the guard accepts a match against
+either header, so no further config is needed. Only set
+`STATUS_UI_TRUSTED_ORIGINS` if your proxy does not forward the original
+hostname at all: the public origin(s) the dashboard is actually
+accessed from — `scheme://host[:port]`, comma-separated for more than
+one (e.g. `https://zurgarr.example.com,https://zurgarr.lan`). The match
+is case-insensitive, but use lowercase and omit default ports (`:443`
+for `https`, `:80` for `http`) to match what browsers actually send in
+the `Origin` header. Then reload config: Settings → **Save & Reload**,
+or send the container a `SIGHUP`.
 
 Direct IP:port access (no proxy, no hostname rewrite) needs no entry —
 Origin and Host already match.
+
+**If you're already locked out** (every POST/DELETE — including the
+Settings-save button — 403s with "cross-origin request rejected"), the
+Settings page can't save you out of it: the save action is itself a
+blocked POST. Edit `STATUS_UI_TRUSTED_ORIGINS` directly in the `.env`
+file on the host, then reload without going through the UI: `docker
+kill -s HUP <container>` (the container picks up the new value via its
+`SIGHUP` handler — no restart needed).
 
 ## I lost my config after a rebuild / restore from an old backup
 

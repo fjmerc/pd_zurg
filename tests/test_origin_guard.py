@@ -117,3 +117,36 @@ def test_delete_method_guarded(server):
                             {'Origin': 'http://evil.example.com'})
     assert status == 403
     assert 'cross-origin' in body.get('error', '').lower()
+
+
+def test_malformed_origin_rejected_cleanly(server):
+    """Unparseable Origin (unbalanced '[') must not crash urlparse —
+    it fails closed with a clean 403, not a traceback (finding #1)."""
+    status, body = _post(server, '/api/library/refresh',
+                          {'Origin': 'http://['})
+    assert status == 403
+    assert 'cross-origin' in body.get('error', '').lower()
+
+
+def test_malformed_referer_treated_as_absent(server):
+    """Unparseable Referer (unbalanced brackets) with no Origin must not
+    crash urlparse — it is treated like an absent Referer, i.e. passes
+    the guard through to the STATUS_UI_AUTH check (finding #1)."""
+    status, body = _post(server, '/api/library/refresh',
+                          {'Referer': 'http://a[b]c/x'})
+    assert status == 403
+    assert 'status_ui_auth' in body.get('error', '').lower()
+
+
+def test_forwarded_host_accepted_for_proxy(server):
+    """A proxy that rewrites Host but forwards the original hostname via
+    X-Forwarded-Host must not lock the operator out (finding #2).
+    Browsers cannot attach X-Forwarded-* to a CSRF form post, so
+    accepting it here doesn't reopen the CSRF hole."""
+    status, body = _post(server, '/api/library/refresh', {
+        'Origin': 'https://zurgarr.example.com',
+        'Host': 'internal-backend:8080',
+        'X-Forwarded-Host': 'zurgarr.example.com, internal-backend:8080',
+    })
+    assert status == 403
+    assert 'status_ui_auth' in body.get('error', '').lower()

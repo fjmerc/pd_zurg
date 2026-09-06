@@ -3483,18 +3483,31 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
         """Reject browser-initiated cross-site state changes (CSRF).
         Basic auth is attached automatically by browsers, and a
         text/plain form submission parses as JSON — so Origin (falling
-        back to Referer) must match Host or be explicitly allow-listed
+        back to Referer) must match Host (or X-Forwarded-Host, for
+        proxies that don't rewrite Host) or be explicitly allow-listed
         via STATUS_UI_TRUSTED_ORIGINS (reverse-proxy deployments).
         Requests with neither header (curl, scripts) are allowed.
         Comparison is case-insensitive on both sides — Host header
         casing varies, and STATUS_UI_TRUSTED_ORIGINS may be entered
-        with mixed case."""
+        with mixed case.
+
+        Both urlparse calls are wrapped: Origin/Referer are
+        attacker-controlled and unbalanced brackets (e.g. 'http://[')
+        raise ValueError. An unparseable Referer is treated like an
+        absent one (fail open, matching the no-header case — browsers
+        never send a malformed Referer, so this only affects
+        non-browser callers). An unparseable Origin fails closed —
+        a browser always sends a well-formed Origin, so a malformed
+        one is never a legitimate same-origin request."""
         origin = self.headers.get('Origin')
         if origin is None:
             ref = self.headers.get('Referer')
             if not ref:
                 return True
-            p = urlparse(ref)
+            try:
+                p = urlparse(ref)
+            except ValueError:
+                return True
             if not p.scheme or not p.netloc:
                 return True
             origin = f'{p.scheme}://{p.netloc}'
@@ -3503,8 +3516,17 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             return False
         if origin in {o.lower() for o in self.trusted_origins}:
             return True
+        try:
+            origin_netloc = urlparse(origin).netloc
+        except ValueError:
+            return False
         host = self.headers.get('Host', '').lower()
-        return bool(host) and urlparse(origin).netloc == host
+        if host and origin_netloc == host:
+            return True
+        fwd_host = self.headers.get('X-Forwarded-Host', '')
+        if fwd_host:
+            fwd_host = fwd_host.split(',')[0].strip().lower()
+        return bool(fwd_host) and origin_netloc == fwd_host
 
     def _reject_cross_origin(self):
         self._send_json_response(403, json.dumps({

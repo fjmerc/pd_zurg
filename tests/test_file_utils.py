@@ -131,3 +131,28 @@ class TestAtomicWrite:
         with atomic_write(str(target)) as f:
             f.write('{"k": 2}')
         assert target.read_text() == '{"k": 2}'
+
+    def test_atomic_write_survives_caller_closing_handle(self, tmp_path):
+        """Audit finding #7: a caller that does `f.write(...); f.close()`
+        inside the `with` block already flushed to disk via close() —
+        the subsequent flush()/fsync() on the now-closed file object
+        must not raise ValueError out of the context manager, and the
+        write must still land."""
+        target = tmp_path / 'state.json'
+        with atomic_write(str(target)) as f:
+            f.write('{"k": 3}')
+            f.close()
+        assert target.read_text() == '{"k": 3}'
+
+    def test_atomic_write_oserror_on_fsync_stays_fatal(self, tmp_path, monkeypatch):
+        """Controller ruling: only ValueError (closed-file) is swallowed.
+        A real OSError from fsync must still propagate."""
+        def broken_fsync(fd):
+            raise OSError("simulated disk fsync failure")
+
+        monkeypatch.setattr(os, 'fsync', broken_fsync)
+        target = tmp_path / 'state.json'
+        with pytest.raises(OSError):
+            with atomic_write(str(target)) as f:
+                f.write('{"k": 4}')
+        assert not target.exists()

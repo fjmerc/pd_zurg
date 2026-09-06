@@ -3903,19 +3903,36 @@ class LibraryScanner:
             return set(self._alias_norms.get(normalized_title, ()))
 
     def debrid_only_episodes(self, norm):
-        """(season, episode) keys that exist on debrid with NO local copy
-        for a normalized title, aliases and year-qualified sibling norms
-        ("show (2007)") included. Used to scope debrid deletion — an
-        episode returned here must never lose its torrent. Errs toward
-        returning MORE episodes (safe direction: more kept torrents)."""
-        accept = {norm} | self.aliases_for(norm)
-        qual_prefixes = tuple(f'{n} (' for n in accept)
+        """(season, episode) keys that exist on debrid with NO REAL local
+        copy for a normalized title, aliases and year-qualified sibling
+        norms ("show (2007)") included. Used to scope debrid deletion —
+        an episode returned here must never lose its torrent. Errs toward
+        returning MORE episodes (safe direction: more kept torrents).
+
+        A debrid symlink recorded in `_local_path_index` does NOT count
+        as a real local copy (audit finding #5) — treating it as one let
+        the enforcement path's own switch-to-debrid symlinks make their
+        backing torrent look safe to delete, leaving a broken symlink
+        with no copy anywhere. This mirrors the explicit
+        `not os.path.islink(local_p)` guard used by preference
+        enforcement (~line 4138) — the two must agree on what "real
+        local copy" means.
+
+        `accept`/`_path_index` are read under a single `_path_lock` hold
+        (audit finding #6) rather than via a separate `aliases_for()`
+        call followed by a second lock acquisition — the previous
+        two-lock version could pair an alias set from before a scan with
+        a `_path_index` from after it, missing episodes reachable only
+        through an alias introduced by that scan."""
         out = set()
         with self._path_lock:
+            accept = {norm} | set(self._alias_norms.get(norm, ()))
+            qual_prefixes = tuple(f'{n} (' for n in accept)
             for key in self._path_index:
                 n, s, e = key
                 if n in accept or n.startswith(qual_prefixes):
-                    if key not in self._local_path_index:
+                    lp = self._local_path_index.get(key)
+                    if not lp or os.path.islink(lp):
                         out.add((s, e))
         return out
 

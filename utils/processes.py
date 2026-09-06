@@ -240,7 +240,21 @@ def _reap_orphans():
     handler has been polled, so subprocess has already claimed the statuses
     it owns. Accepted residual race: a managed child exiting between its
     poll() and this drain gets reaped here and later logs exit code 0 —
-    restart behavior is unaffected. Never raises."""
+    restart behavior is unaffected. Never raises.
+
+    Wider caveat (audit finding #8): waitpid(-1) reaps ANY of this
+    process's children, not just orphans — it can steal the exit status
+    of a short-lived child spawned via subprocess.run()/check_call() on
+    a completely different thread (e.g. a one-off `touch`/`cp` in
+    pd_setup) if that child happens to exit in the window between this
+    drain and the run() call's own waitpid. When that race fires, the
+    racing subprocess.run() gets ECHILD from its own wait and Python's
+    subprocess module reports returncode 0 rather than raising — so a
+    returncode of 0 from a run()/check_call() call anywhere in the
+    process is not fully trustworthy evidence of success while this
+    monitor is active on another thread. This is a known, accepted gap:
+    minimal-reap (drain only, no status bookkeeping) was an explicit
+    owner decision rather than building a PID-aware reaper."""
     try:
         while True:
             pid, _status = os.waitpid(-1, os.WNOHANG)

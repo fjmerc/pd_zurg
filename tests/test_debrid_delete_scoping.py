@@ -97,6 +97,35 @@ class TestTorrentEpisodeClaim:
         assert eps == {(1, 4), (1, 5), (1, 6)}
         assert seasons == set()
 
+    def test_disjoint_season_only_claims_fill_gap(self):
+        """Audit finding #4: 'Show.S01.S03.Complete' has two season-only
+        claims (1 and 3) with no episode detail — the middle season (2)
+        of what is really a 1-3 pack must not be left unclaimed/
+        unprotected."""
+        seasons, eps = _torrent_episode_claim('Show.S01.S03.Complete')
+        assert seasons >= {1, 2, 3}
+        assert eps == set()
+
+    def test_space_separated_disjoint_seasons_fill_gap(self):
+        seasons, eps = _torrent_episode_claim('Show S01 S03')
+        assert seasons >= {1, 2, 3}
+        assert eps == set()
+
+    def test_separator_mangled_season_range_fills_gap(self):
+        """'S01_S03' doesn't match the dedicated 'S01-S03' range regex
+        (underscore, not hyphen) and falls through to two independent
+        season-only matches — still must be gap-filled."""
+        seasons, eps = _torrent_episode_claim('Show.S01_S03.Complete')
+        assert seasons >= {1, 2, 3}
+        assert eps == set()
+
+    def test_single_episode_claim_unaffected_by_gap_fill(self):
+        """Regression: a plain single-episode release must not trip the
+        new gap-fill logic (it has zero season-only claims)."""
+        seasons, eps = _torrent_episode_claim('Show.S01E01.mkv')
+        assert eps == {(1, 1)}
+        assert seasons == set()
+
 
 class TestFilterSafeTorrentDeletes:
     def test_duplicate_episode_deletable(self):
@@ -158,6 +187,15 @@ class TestFilterSafeTorrentDeletes:
             [_m('Show.S04E01-S04E10.mkv')], unsafe_episodes={(4, 5)})
         assert deletable == [] and len(kept) == 1
 
+    def test_disjoint_season_pack_kept_when_gap_season_unsafe(self):
+        """Audit finding #4: 'Show.S01.S03.Complete' claims seasons {1,3}
+        on the surface, but season 2 (in the gap) must be protected too —
+        the pack is kept when a season-2 episode is unsafe, even though
+        2 is never literally named in the release."""
+        deletable, kept = filter_safe_torrent_deletes(
+            [_m('Show.S01.S03.Complete')], unsafe_episodes={(2, 4)})
+        assert deletable == [] and len(kept) == 1
+
     def test_audit_regression_scenario(self):
         """S1E1-5 both-source, S1E6-8 debrid-only: nothing backing E6-8
         may be deleted."""
@@ -184,6 +222,35 @@ def test_debrid_only_episodes_from_indexes():
     }
     scanner._local_path_index = {('myshow', 1, 1): '/l/e1'}
     assert scanner.debrid_only_episodes('myshow') == {(1, 6), (2, 1)}
+
+
+def test_debrid_only_episodes_excludes_symlinked_local_copy(tmp_path):
+    """Audit finding #5: a debrid symlink recorded in
+    `_local_path_index` (e.g. from switch-to-debrid) is NOT a real local
+    copy — its episode must still be reported as debrid-only so its
+    backing torrent is never deleted, leaving a broken symlink."""
+    from utils.library import LibraryScanner
+
+    real_file = tmp_path / 'e1.mkv'
+    real_file.write_bytes(b'x')
+    symlink_target = tmp_path / 'debrid_e2.mkv'
+    symlink_target.write_bytes(b'x')
+    symlink_path = tmp_path / 'e2.mkv'
+    symlink_path.symlink_to(symlink_target)
+
+    scanner = LibraryScanner.__new__(LibraryScanner)  # no full init
+    scanner._path_lock = threading.Lock()
+    scanner._alias_norms = {}
+    scanner._path_index = {
+        ('myshow', 1, 1): '/d/e1', ('myshow', 1, 2): '/d/e2',
+    }
+    scanner._local_path_index = {
+        ('myshow', 1, 1): str(real_file),   # real file — safe
+        ('myshow', 1, 2): str(symlink_path),  # symlink — NOT safe
+    }
+    result = scanner.debrid_only_episodes('myshow')
+    assert (1, 2) in result
+    assert (1, 1) not in result
 
 
 # --- Endpoint contract test (step 8) ------------------------------------

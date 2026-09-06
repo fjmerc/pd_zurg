@@ -2455,11 +2455,27 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 # 'service'; per-provider errors are surfaced but don't abort.
                 matches, errors = find_torrents_by_title_multi(accept_norms, target_year=year)
 
+                # Scope show deletions: never offer torrents that (may) back
+                # episodes with no local copy (audit finding #2).
+                media_type = str(values.get('type', '')).strip()
+                kept = []
+                if media_type == 'show':
+                    if _sc is None:
+                        self._send_json_response(503, json.dumps({
+                            'error': 'Library scanner not initialized — cannot '
+                                     'verify which torrents are safe to delete'
+                        }))
+                        return
+                    from utils.debrid_client import filter_safe_torrent_deletes
+                    unsafe = _sc.debrid_only_episodes(norm)
+                    matches, kept = filter_safe_torrent_deletes(matches, unsafe)
+
                 self._send_json_response(200, json.dumps({
                     'status': 'found',
                     'title': title,
                     'normalized_title': norm,
                     'torrents': matches,
+                    'kept': kept,
                     'count': len(matches),
                     'errors': errors,
                 }))
@@ -2513,6 +2529,69 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     norm_items.append({'id': str(tid), 'service': svc})
 
                 title = values.get('title', '').strip()
+                media_type = str(values.get('type', '')).strip()
+                if media_type not in ('show', 'movie'):
+                    self._send_json_response(400, json.dumps({
+                        'error': "type ('show' or 'movie') is required"
+                    }))
+                    return
+
+                skipped = []
+                if media_type == 'show':
+                    # Re-derive safety server-side — the item list is
+                    # client-supplied and stale by at least one round trip.
+                    # Fail closed on every gap (audit finding #2).
+                    if not title:
+                        self._send_json_response(400, json.dumps({
+                            'error': 'title is required for show deletions'
+                        }))
+                        return
+                    from utils.library import get_scanner, normalize_title
+                    from utils.debrid_client import (
+                        find_torrents_by_title_multi, filter_safe_torrent_deletes,
+                    )
+                    _sc = get_scanner()
+                    if _sc is None:
+                        self._send_json_response(503, json.dumps({
+                            'error': 'Library scanner not initialized — cannot '
+                                     'verify which torrents are safe to delete'
+                        }))
+                        return
+                    year = values.get('year')
+                    if year is not None:
+                        try:
+                            year = int(year)
+                        except (ValueError, TypeError):
+                            year = None
+                    norm = normalize_title(title)
+                    accept_norms = {norm} | _sc.aliases_for(norm)
+                    fresh, _errs = find_torrents_by_title_multi(
+                        accept_norms, target_year=year)
+                    unsafe = _sc.debrid_only_episodes(norm)
+                    deletable, kept = filter_safe_torrent_deletes(fresh, unsafe)
+                    allowed = {(m['service'], str(m['id'])) for m in deletable}
+                    kept_by_key = {(m['service'], str(m['id'])): m for m in kept}
+                    verified = []
+                    for it in norm_items:
+                        key = (it['service'], it['id'])
+                        if key in allowed:
+                            verified.append(it)
+                        elif key in kept_by_key:
+                            skipped.append({'id': it['id'], 'service': it['service'],
+                                            'reason': kept_by_key[key]['kept_reason']})
+                        else:
+                            skipped.append({'id': it['id'], 'service': it['service'],
+                                            'reason': 'not found in a fresh provider '
+                                                      'listing — refused (fail closed)'})
+                    norm_items = verified
+                    if not norm_items:
+                        self._send_json_response(200, json.dumps({
+                            'status': 'skipped', 'deleted': 0, 'skipped': skipped,
+                            'message': 'No torrents deleted — every requested item '
+                                       'is (or may be) the only copy of episodes '
+                                       'with no local file yet.',
+                        }))
+                        return
 
                 deleted, failed = delete_torrents_multi(norm_items)
 
@@ -2549,6 +2628,9 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 if failed:
                     result['failed'] = failed
                     result['message'] += f' ({len(failed)} failed)'
+                if skipped:
+                    result['skipped'] = skipped
+                    result['message'] += f' ({len(skipped)} kept — sole debrid copy)'
 
                 status_code = 200 if deleted > 0 else 400
                 self._send_json_response(status_code, json.dumps(result))

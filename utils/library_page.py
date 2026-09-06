@@ -3510,7 +3510,7 @@ function applyPreference() {
     }
     // Case 2: only both-source episodes — remove debrid copies
     if (totalDlEps === 0 && totalBothEps > 0) {
-      _postRemoveDebrid(_detailItem.title, _detailItem.year).then(function(ok) {
+      _postRemoveDebrid(_detailItem.title, _detailItem.year, 'show').then(function(ok) {
         if (ok) _savePref(nk, pref);
       }).catch(function(e) {
         _showMsg('Operation failed: ' + e, 'error');
@@ -3520,11 +3520,11 @@ function applyPreference() {
     // Case 3: mixed — download debrid-only, then remove debrid for both-source
     var svcLabel2 = _svcNames[showSvc] || showSvc;
     showConfirm('Switch to Local', 'Switch ' + totalDlEps + ' episode(s) to local via ' + svcLabel2
-      + ' and remove ' + totalBothEps + ' debrid duplicate(s)?').then(function(confirmed) {
+      + ' and remove debrid duplicates? Torrents still needed by episodes without a local copy are kept automatically.').then(function(confirmed) {
       if (!confirmed) return;
       _runSequential(dlTasks).then(function(ok) {
         if (!ok) return false;
-        return _postRemoveDebrid(_detailItem.title, _detailItem.year);
+        return _postRemoveDebrid(_detailItem.title, _detailItem.year, 'show');
       }).then(function(ok) {
         if (ok) _savePref(nk, pref);
       }).catch(function(e) {
@@ -4058,7 +4058,7 @@ function applyMoviePreference() {
 
   } else if (pref === 'prefer-local' && _detailItem.source === 'both') {
     // Movie exists in both — remove debrid copy
-    _postRemoveDebrid(_detailItem.title, _detailItem.year).then(function(ok) {
+    _postRemoveDebrid(_detailItem.title, _detailItem.year, 'movie').then(function(ok) {
       if (ok) _savePref(nk, pref);
     });
 
@@ -4211,7 +4211,7 @@ function _postRemove(payload) {
 
 var _pendingConfirmCleanup = null;
 
-function _showDebridConfirmation(torrents, title, onConfirm, onCancel) {
+function _showDebridConfirmation(torrents, keptList, title, onConfirm, onCancel) {
   if (_pendingConfirmCleanup) { _pendingConfirmCleanup(); _pendingConfirmCleanup = null; }
   var el = document.getElementById('transfer-msg');
   if (!el) { onCancel(); return; }
@@ -4230,6 +4230,15 @@ function _showDebridConfirmation(torrents, title, onConfirm, onCancel) {
   }
   if (torrents.length > 10) html += '<li style="color:var(--text3)">... and ' + (torrents.length - 10) + ' more</li>';
   html += '</ul>';
+  if (keptList && keptList.length) {
+    html += '<div style="font-size:.82em;color:var(--text2);margin:6px 0 2px">' + esc(String(keptList.length)) + ' torrent(s) kept (only debrid copy of episodes not yet local):</div>';
+    html += '<ul class="confirm-list">';
+    for (var k = 0; k < keptList.length && k < 5; k++) {
+      html += '<li style="color:var(--text3)">' + esc(keptList[k].filename || keptList[k].id) + ' — ' + esc(keptList[k].kept_reason || '') + '</li>';
+    }
+    if (keptList.length > 5) html += '<li style="color:var(--text3)">... and ' + (keptList.length - 5) + ' more</li>';
+    html += '</ul>';
+  }
   html += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
   html += '<button class="btn btn-danger filled" id="confirm-delete-btn">Delete Permanently</button>';
   html += '<button class="btn btn-ghost" id="cancel-delete-btn">Cancel</button>';
@@ -4248,12 +4257,12 @@ function _showDebridConfirmation(torrents, title, onConfirm, onCancel) {
   el.scrollIntoView({behavior: 'smooth', block: 'nearest'});
 }
 
-function _postRemoveDebrid(title, year) {
+function _postRemoveDebrid(title, year, mediaType) {
   if (_actionInFlight) return Promise.resolve(false);
   _actionInFlight = true;
   _setActionsDisabled(true);
   _showMsgHtml('<span class="scanning-dot"></span>Finding debrid torrents...');
-  var payload = {title: title};
+  var payload = {title: title, type: mediaType || 'show'};
   if (year) payload.year = year;
   return fetch('/api/library/remove-debrid', {
     method: 'POST',
@@ -4266,7 +4275,12 @@ function _postRemoveDebrid(title, year) {
       _showMsg('Error: ' + (res.d.error || 'Unknown error'), 'error');
       return false;
     }
+    var keptList = res.d.kept || [];
     if (!res.d.count) {
+      if (keptList.length) {
+        _showMsg('Nothing deleted: all ' + keptList.length + ' matching torrent(s) are the only debrid copy of episodes with no local file yet. Retry after the downloads finish.', 'error');
+        return false;
+      }
       var em = 'No debrid torrents found for this title.';
       if (res.d.errors && Object.keys(res.d.errors).length) {
         em += ' (some providers could not be queried: ' + Object.keys(res.d.errors).join(', ') + ')';
@@ -4276,13 +4290,13 @@ function _postRemoveDebrid(title, year) {
     }
     var torrents = res.d.torrents || [];
     return new Promise(function(resolve) {
-      _showDebridConfirmation(torrents, title, function() {
+      _showDebridConfirmation(torrents, keptList, title, function() {
         _showMsgHtml('<span class="scanning-dot"></span>Removing debrid torrents...');
         var items = torrents.map(function(t) { return {id: t.id, service: t.service}; });
         fetch('/api/library/remove-debrid/confirm', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({items: items, title: title})
+          body: JSON.stringify({items: items, title: title, type: mediaType || 'show', year: year || null})
         }).then(function(r2) {
           return r2.json().then(function(d2) { return {ok: r2.ok, d: d2}; });
         }).then(function(res2) {

@@ -854,6 +854,96 @@ def find_torrents_by_title_multi(normalized_titles, target_year=None):
     return matches, errors
 
 
+# --- Episode-scoped deletion safety (audit finding #2) -----------------
+# A title-level match may include the SOLE debrid copy of episodes that
+# have no local file yet. Deleting those seconds after triggering an
+# async arr search (minutes-to-hours) leaves the episode with no copy
+# anywhere. Claims are parsed from the torrent name; anything that can't
+# be parsed fails CLOSED (kept).
+
+_EP_GROUP_RE = re.compile(r'S(\d{1,2})((?:[E\-]E?\d{1,4})+)', re.IGNORECASE)
+_SEASON_ONLY_RE = re.compile(r'(?:^|[\s._\-\[])S(\d{1,2})(?![E\d])', re.IGNORECASE)
+_SEASON_WORD_RE = re.compile(r'Season[\s._\-]*(\d{1,2})', re.IGNORECASE)
+_SEASON_RANGE_RE = re.compile(r'S(\d{1,2})\s*[-–]\s*S(\d{1,2})', re.IGNORECASE)
+
+
+def _torrent_episode_claim(filename):
+    """Parse which (season, episode) pairs / whole seasons a release name
+    claims. Returns ``(seasons, episodes)``:
+
+    - ``episodes``: set of (season, episode) for episode-specific releases
+      (S01E04, S01E04E05, S01E04-E06).
+    - ``seasons``: set of season ints claimed WITHOUT episode detail
+      (season packs: "S01.", "Season 1", "S01-S03").
+    - both empty: whole-show pack or unparseable — caller must fail closed.
+    """
+    name = filename or ''
+    episodes = set()
+    for m in _EP_GROUP_RE.finditer(name):
+        season = int(m.group(1))
+        ep_str = m.group(2)
+        nums = [int(x) for x in re.findall(r'\d+', ep_str)]
+        if len(nums) == 2 and '-' in ep_str:
+            lo, hi = nums
+            if lo <= hi and (hi - lo) < 100:
+                nums = list(range(lo, hi + 1))
+        episodes.update((season, n) for n in nums)
+
+    seasons = set()
+    for m in _SEASON_RANGE_RE.finditer(name):
+        lo, hi = int(m.group(1)), int(m.group(2))
+        if lo <= hi and (hi - lo) < 50:
+            seasons.update(range(lo, hi + 1))
+    ep_seasons = {s for s, _ in episodes}
+    for m in _SEASON_ONLY_RE.finditer(name):
+        s = int(m.group(1))
+        if s not in ep_seasons:
+            seasons.add(s)
+    for m in _SEASON_WORD_RE.finditer(name):
+        s = int(m.group(1))
+        if s not in ep_seasons:
+            seasons.add(s)
+    return seasons, episodes
+
+
+def filter_safe_torrent_deletes(matches, unsafe_episodes):
+    """Split title-matched torrents into ``(deletable, kept)``.
+
+    ``unsafe_episodes`` is a set of (season, episode) that exist ONLY on
+    debrid — no local copy. A torrent is kept when it (possibly) backs any
+    unsafe episode:
+
+    - episode-specific claim: kept iff it claims an unsafe episode
+    - season-pack claim: kept iff any unsafe episode is in a claimed season
+    - no claim (whole-show / unparseable): kept iff ANY unsafe episode
+      exists (fail closed)
+
+    Kept entries get a ``kept_reason`` string for the UI.
+    """
+    unsafe = set(unsafe_episodes)
+    deletable, kept = [], []
+    for m in matches:
+        seasons, episodes = _torrent_episode_claim(m.get('filename', ''))
+        if episodes:
+            blocking = episodes & unsafe
+            blocking |= {u for u in unsafe if u[0] in seasons}
+        elif seasons:
+            blocking = {u for u in unsafe if u[0] in seasons}
+        else:
+            blocking = set(unsafe)
+        if blocking:
+            entry = dict(m)
+            shown = ', '.join(f'S{s:02d}E{e:02d}'
+                              for s, e in sorted(blocking)[:5])
+            if len(blocking) > 5:
+                shown += f' (+{len(blocking) - 5} more)'
+            entry['kept_reason'] = f'only debrid copy of {shown}'
+            kept.append(entry)
+        else:
+            deletable.append(m)
+    return deletable, kept
+
+
 def delete_torrents_multi(items):
     """Delete torrents grouped by their owning provider.
 

@@ -3902,6 +3902,23 @@ class LibraryScanner:
         with self._path_lock:
             return set(self._alias_norms.get(normalized_title, ()))
 
+    def debrid_only_episodes(self, norm):
+        """(season, episode) keys that exist on debrid with NO local copy
+        for a normalized title, aliases and year-qualified sibling norms
+        ("show (2007)") included. Used to scope debrid deletion — an
+        episode returned here must never lose its torrent. Errs toward
+        returning MORE episodes (safe direction: more kept torrents)."""
+        accept = {norm} | self.aliases_for(norm)
+        qual_prefixes = tuple(f'{n} (' for n in accept)
+        out = set()
+        with self._path_lock:
+            for key in self._path_index:
+                n, s, e = key
+                if n in accept or n.startswith(qual_prefixes):
+                    if key not in self._local_path_index:
+                        out.add((s, e))
+        return out
+
     def get_episode_path(self, normalized_title, season, episode):
         """Get debrid mount path for an episode."""
         with self._path_lock:

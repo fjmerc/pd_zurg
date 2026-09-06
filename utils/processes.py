@@ -190,10 +190,13 @@ def _handle_restart(entry, logger):
     if handler._first_restart_time and (now - handler._first_restart_time) > policy.window_seconds:
         handler._restart_count = 0
         handler._first_restart_time = None
+        handler._exhausted_notified = False
 
     if handler._restart_count >= policy.max_restarts:
-        logger.error(f"{desc} has exceeded max restarts ({policy.max_restarts}). Not restarting.")
-        _on_restart_exhausted(desc, handler._restart_count, policy.max_restarts)
+        if not handler._exhausted_notified:
+            logger.error(f"{desc} has exceeded max restarts ({policy.max_restarts}). Not restarting.")
+            _on_restart_exhausted(desc, handler._restart_count, policy.max_restarts)
+            handler._exhausted_notified = True
         return
 
     if handler._first_restart_time is None:
@@ -223,7 +226,12 @@ def _handle_restart(entry, logger):
             return
         if handler.restart_policy is None:
             return
-        handler.restart_process(run_pre_restart=False)
+        # Process was dead at collection time but may have been restarted
+        # by config reload or restart_service during the backoff delay.
+        # Never double-start.
+        if handler.process and handler.process.poll() is None:
+            return
+        handler.restart_process(run_pre_restart=False, restore_policy=False)
 
 
 def _monitor_loop(logger):
@@ -347,6 +355,7 @@ def restart_service(service_name, key_type=None):
                 # Reset restart counter for clean restart
                 handler._restart_count = 0
                 handler._first_restart_time = None
+                handler._exhausted_notified = False
 
                 # Re-launch
                 handler.restart_process()
@@ -370,6 +379,9 @@ class ProcessHandler:
         self.restart_policy = None
         self._restart_count = 0
         self._first_restart_time = None
+        # Latch so restart-exhaustion notifies once, not on every 10s
+        # monitor tick (finding #6). Cleared wherever _restart_count resets.
+        self._exhausted_notified = False
         # Stored for restart_process()
         self._command = None
         self._config_dir = None
@@ -406,10 +418,13 @@ class ProcessHandler:
             self._suppress_logging = suppress_logging
             self.restart_policy = restart_policy
 
+            # DEVNULL when suppressed — a PIPE nobody drains deadlocks the
+            # child at ~64KB while poll()/healthcheck stay green (finding #7).
+            _stream = subprocess.DEVNULL if suppress_logging else subprocess.PIPE
             self.process = subprocess.Popen(
                 command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=_stream,
+                stderr=_stream,
                 start_new_session=True,
                 cwd=config_dir,
                 universal_newlines=True,
@@ -441,8 +456,15 @@ class ProcessHandler:
             desc = f"{self._process_name} w/ {self._key_type}" if self._key_type else self._process_name
             self.logger.error(f"pre-restart hook for {desc} failed: {e}")
 
-    def restart_process(self, run_pre_restart=True):
-        """Stop logging threads and re-launch the process with the same parameters."""
+    def restart_process(self, run_pre_restart=True, restore_policy=True):
+        """Stop logging threads and re-launch the process with the same parameters.
+
+        Args:
+            run_pre_restart: Whether to run the pre_restart hook (default True).
+            restore_policy: Whether to restore restart_policy if it was cleared
+                by stop_process() (default True). When False (e.g., from monitor),
+                preserves the current policy and restart counters.
+        """
         if self._command is None:
             self.logger.error("Cannot restart: no command recorded from initial start")
             return
@@ -458,12 +480,26 @@ class ProcessHandler:
         if run_pre_restart:
             self.run_pre_restart()
 
+        # Re-arm supervision just before spawn — after potentially slow hooks
+        # complete but before the spawn attempt. This delays arming past slow
+        # pre_restart hooks (e.g., rclone stale-mount clearing) so a concurrent
+        # monitor tick can't see armed policy + hook delay and queue a duplicate.
+        # stop_process() clears restart_policy to suppress the monitor during an
+        # intentional stop; a relaunch must re-arm supervision or the process is
+        # unmonitored until container restart (finding #4).
+        if restore_policy and self.restart_policy is None:
+            self.restart_policy = RestartPolicy()
+            self._restart_count = 0
+            self._first_restart_time = None
+            self._exhausted_notified = False
+
         try:
             self.logger.info(f"Restarting {desc}")
+            _stream = subprocess.DEVNULL if self._suppress_logging else subprocess.PIPE
             self.process = subprocess.Popen(
                 self._command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=_stream,
+                stderr=_stream,
                 start_new_session=True,
                 cwd=self._config_dir,
                 universal_newlines=True,

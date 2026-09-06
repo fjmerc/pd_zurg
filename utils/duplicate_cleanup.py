@@ -168,7 +168,7 @@ def setup():
             else:
                 logger.debug(f"Application environment variable '{var_name}' is set.")
 
-        if all(app_env_variables.values()) and DUPECLEAN is not None:
+        if all(app_env_variables.values()) and str(DUPECLEAN).lower() == 'true':
             from utils.task_scheduler import scheduler
             interval = get_interval_seconds()
             logger.info(f"Duplicate cleanup interval: {format_time(cleanup_interval())}")

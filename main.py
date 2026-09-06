@@ -104,13 +104,13 @@ def main():
         try:
             z.setup.zurg_setup()
             z_updater = z.update.ZurgUpdate()
-            z_updater.auto_update('Zurg', bool(ZURGUPDATE))
+            z_updater.auto_update('Zurg', str(ZURGUPDATE).lower() == 'true')
         except Exception as e:
             logger.error(f"Error in Zurg setup: {e}", exc_info=True)
 
         if RCLONEMN:
             try:
-                if DUPECLEAN:
+                if str(DUPECLEAN).lower() == 'true':
                     duplicate_cleanup.setup()
                 rclone.setup()
             except Exception as e:
@@ -120,7 +120,7 @@ def main():
         try:
             p.setup.pd_setup()
             pd_updater = p.update.PlexDebridUpdate()
-            if PDUPDATE and PDREPO:
+            if str(PDUPDATE).lower() == 'true' and PDREPO:
                 pd_updater.auto_update('plex_debrid', True)
             elif PDREPO:
                 p.download.get_latest_release()

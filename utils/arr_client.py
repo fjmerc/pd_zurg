@@ -2445,6 +2445,13 @@ class OverseerrClient(_ArrClientBase):
             return {'status': 'error', 'message': f'Failed to request {title} in Overseerr'}
 
         season_str = ', '.join(f'S{s:02d}' for s in seasons)
+        if _history:
+            _history.log_event('search_triggered', f'Overseerr request: {title}',
+                               source='arr',
+                               detail=f'Requested {title} {season_str} in Overseerr',
+                               meta={'cause': 'user_triggered_search',
+                                     'arr_service': 'overseerr'},
+                               media_title=title)
         return {
             'status': 'requested',
             'service': 'overseerr',
@@ -2472,6 +2479,13 @@ class OverseerrClient(_ArrClientBase):
         if result is None:
             return {'status': 'error', 'message': f'Failed to request {title} in Overseerr'}
 
+        if _history:
+            _history.log_event('search_triggered', f'Overseerr request: {title}',
+                               source='arr',
+                               detail=f'Requested {title} in Overseerr',
+                               meta={'cause': 'user_triggered_search',
+                                     'arr_service': 'overseerr'},
+                               media_title=title)
         return {
             'status': 'requested',
             'service': 'overseerr',

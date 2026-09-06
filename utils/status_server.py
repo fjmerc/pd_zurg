@@ -1455,6 +1455,27 @@ def get_dashboard_html():
     return html
 
 
+def _emit_source_switch(title, from_src, to_src, count, media_type, detail):
+    """History + notification for a user-triggered source change. Mirrors
+    the scheduled enforce_source_preferences emissions (library.py) so
+    manual UI actions are equally observable. Never raises."""
+    try:
+        from utils import history as _hist
+        _hist.log_event('switched_source', title, source='library',
+                        detail=detail,
+                        meta={'cause': 'preference_source_switch',
+                              'from': from_src, 'to': to_src,
+                              'count': count, 'media_type': media_type,
+                              'trigger': 'user'})
+    except Exception:
+        pass
+    try:
+        from utils.notifications import notify
+        notify('library_refresh', f"Source switch: {title}", detail)
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # HTTP Handler
 # ---------------------------------------------------------------------------
@@ -2208,6 +2229,9 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                         scanner = get_scanner()
                         if scanner:
                             scanner.refresh()
+                        _emit_source_switch(
+                            title, 'local', 'debrid', len(ep_nums), 'show',
+                            f"Removed {len(ep_nums)} local episode(s) via Sonarr — now debrid-only")
                     status_code = 200 if result.get('status') != 'error' else 400
                     self._send_json_response(status_code, json.dumps(result))
                     return
@@ -2219,6 +2243,9 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                         scanner = get_scanner()
                         if scanner:
                             scanner.refresh()
+                        _emit_source_switch(
+                            title, 'local', 'debrid', 1, 'movie',
+                            "Removed local movie via Radarr — now debrid-only")
                     status_code = 200 if result.get('status') != 'error' else 400
                     self._send_json_response(status_code, json.dumps(result))
                     return
@@ -2267,6 +2294,9 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                 if result.get('removed', 0) > 0:
                     cleared = [{'season': int(ep.get('season', 0)), 'episode': int(ep.get('episode', 0))} for ep in episodes]
                     clear_pending(norm, cleared)
+                    _emit_source_switch(
+                        title, 'local', 'debrid', result.get('removed', 0), 'show',
+                        f"Deleted {result.get('removed', 0)} local file(s) — now debrid-only")
                 scanner.refresh()
                 self._send_json_response(200, json.dumps(result))
             except json.JSONDecodeError:
@@ -2397,6 +2427,9 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                     ]
                     if cleared_eps:
                         clear_pending(norm, cleared_eps)
+                    _emit_source_switch(
+                        title, 'local', 'debrid', result.get('switched', 0), 'show',
+                        f"Switched {result.get('switched', 0)} episode(s) to debrid symlinks")
 
                 scanner.refresh()
                 status_code = 200 if result.get('switched', 0) > 0 else 400
@@ -2604,6 +2637,12 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
 
                 deleted, failed = delete_torrents_multi(norm_items)
 
+                if deleted > 0:
+                    _emit_source_switch(
+                        title or 'Debrid torrents', 'debrid', 'local', deleted,
+                        media_type or 'show',
+                        f"Removed {deleted} debrid torrent(s) via Library UI")
+
                 # Trigger library refresh — Zurg auto-detects torrent deletion
                 # within its check_for_changes_every_secs cycle (typically 10s),
                 # then rclone mount updates after RCLONE_DIR_CACHE_TIME expires.
@@ -2774,6 +2813,15 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
                                         meta={'cause': 'arr_deleted_user',
                                               'arr_service': service_name,
                                               'reason': 'user_request'})
+                    except Exception:
+                        pass
+                    try:
+                        from utils.notifications import notify
+                        notify('arr_deleted', f'Deleted: {title}',
+                               f'{title} deleted from {service_name.capitalize()} '
+                               f'via Library UI (files, debrid torrents, and '
+                               f'symlinks cleaned up)',
+                               level='warning')
                     except Exception:
                         pass
                     if cleanup:

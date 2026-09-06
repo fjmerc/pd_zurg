@@ -348,6 +348,12 @@ def _write_zurg_remote(file_handle, section_name, zurg_config_path):
         if obscured_password:
             file_handle.write(f"user = {ZURGUSER}\n")
             file_handle.write(f"pass = {obscured_password}\n")
+        else:
+            logger.error(
+                f"[rclone] Failed to obscure Zurg password — writing "
+                f"[{section_name}] WITHOUT credentials. rclone will get 401 "
+                f"from Zurg and this mount will fail until the container is "
+                f"restarted with a working `rclone obscure`.")
     return port
 
 

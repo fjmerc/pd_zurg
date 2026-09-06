@@ -234,6 +234,24 @@ def _handle_restart(entry, logger):
         handler.restart_process(run_pre_restart=False, restore_policy=False)
 
 
+def _reap_orphans():
+    """Drain zombie children reparented to PID 1 (orphaned grandchildren
+    of managed processes). Called each monitor tick AFTER every registered
+    handler has been polled, so subprocess has already claimed the statuses
+    it owns. Accepted residual race: a managed child exiting between its
+    poll() and this drain gets reaped here and later logs exit code 0 —
+    restart behavior is unaffected. Never raises."""
+    try:
+        while True:
+            pid, _status = os.waitpid(-1, os.WNOHANG)
+            if pid == 0:
+                break
+    except ChildProcessError:
+        pass  # no children at all
+    except OSError:
+        pass
+
+
 def _monitor_loop(logger):
     """Poll registered processes and restart any that have died."""
     logger.info("Process monitor started")
@@ -265,6 +283,8 @@ def _monitor_loop(logger):
                         f"Process monitor: restart of "
                         f"{entry['process_name']} failed: {e}", exc_info=True
                     )
+
+            _reap_orphans()
 
         _monitor_stop_event.wait(10)
     logger.info("Process monitor stopped")

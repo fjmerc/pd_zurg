@@ -147,7 +147,9 @@ def zurg_setup():
                     os.environ['ZURG_CURRENT_VERSION'] = version
                     logger.info(f"Found Zurg version {version} in {dir_path}")
                 else:
-                    logger.error("Error checking Zurg version")
+                    logger.error(
+                        f"Error checking Zurg version (exit "
+                        f"{result.returncode}): {result.stderr.strip()}")
             except Exception as e:
                 logger.error(f"Exception occurred while checking Zurg version: {e}")
         else:

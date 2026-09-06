@@ -162,7 +162,12 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGHUP, handle_sighup)
-    # Auto-reap zombie children without a handler that conflicts with subprocess.Popen
-    signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    # SIGCHLD must stay at SIG_DFL. SIG_IGN makes the kernel auto-reap
+    # children, and CPython's subprocess then maps waitpid ECHILD to
+    # returncode 0 for EVERY child — check=True never raises, the umount
+    # fallback never runs, and crashes log as clean exits. Orphaned
+    # grandchildren reparented to PID 1 are drained by
+    # processes._reap_orphans() in the monitor loop instead.
+    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
 
     main()

@@ -1483,6 +1483,7 @@ def _emit_source_switch(title, from_src, to_src, count, media_type, detail):
 class StatusHandler(http.server.BaseHTTPRequestHandler):
     status_data_ref = None
     auth_credentials = None
+    trusted_origins = frozenset()
 
     def handle_one_request(self):
         """Wrap ``BaseHTTPRequestHandler.handle_one_request`` so client
@@ -1543,8 +1544,11 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
         elif self.path.startswith('/api/logs'):
             parsed = urlparse(self.path)
             params = parse_qs(parsed.query)
-            lines = int(params.get('lines', ['100'])[0])
-            lines = min(lines, 1000)  # Cap at 1000
+            try:
+                lines = int(params.get('lines', ['100'])[0])
+            except (ValueError, TypeError):
+                lines = 100
+            lines = max(1, min(lines, 1000))
             level = params.get('level', [None])[0]
             log_lines = read_log_lines(lines=lines, level=level)
             self._send_json_response(200, json.dumps(log_lines))
@@ -1864,6 +1868,10 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
+        if not self._origin_allowed():
+            self._reject_cross_origin()
+            return
+
         # POST endpoints always require auth
         if not self.auth_credentials:
             self._send_json_response(403, json.dumps({
@@ -3320,6 +3328,10 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_DELETE(self):
+        if not self._origin_allowed():
+            self._reject_cross_origin()
+            return
+
         if not self.auth_credentials:
             self._send_json_response(403, json.dumps({
                 'error': 'This endpoint requires STATUS_UI_AUTH to be configured'
@@ -3467,6 +3479,38 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _origin_allowed(self):
+        """Reject browser-initiated cross-site state changes (CSRF).
+        Basic auth is attached automatically by browsers, and a
+        text/plain form submission parses as JSON — so Origin (falling
+        back to Referer) must match Host or be explicitly allow-listed
+        via STATUS_UI_TRUSTED_ORIGINS (reverse-proxy deployments).
+        Requests with neither header (curl, scripts) are allowed."""
+        origin = self.headers.get('Origin')
+        if origin is None:
+            ref = self.headers.get('Referer')
+            if not ref:
+                return True
+            p = urlparse(ref)
+            if not p.scheme or not p.netloc:
+                return True
+            origin = f'{p.scheme}://{p.netloc}'
+        origin = origin.rstrip('/')
+        if origin == 'null':
+            return False
+        if origin in self.trusted_origins:
+            return True
+        host = self.headers.get('Host', '')
+        return bool(host) and urlparse(origin).netloc == host
+
+    def _reject_cross_origin(self):
+        self._send_json_response(403, json.dumps({
+            'error': 'cross-origin request rejected. If the dashboard is '
+                     'served behind a reverse proxy or a different hostname, '
+                     'add its public origin (e.g. https://zurgarr.example.com) '
+                     'to STATUS_UI_TRUSTED_ORIGINS.'
+        }))
+
     def _is_authenticated(self):
         """Return True if the request passes Basic auth or auth is not
         configured. Pure check — sends no response. Callers decide how to
@@ -3518,6 +3562,9 @@ def setup():
 
     StatusHandler.status_data_ref = status_data
     StatusHandler.auth_credentials = auth if auth and ':' in auth else None
+    trusted = os.environ.get('STATUS_UI_TRUSTED_ORIGINS', '')
+    StatusHandler.trusted_origins = frozenset(
+        o.strip().rstrip('/') for o in trusted.split(',') if o.strip())
 
     # Initialize library scanner
     try:

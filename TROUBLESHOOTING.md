@@ -19,6 +19,7 @@ isn't here, open a [GitHub issue](https://github.com/fjmerc/zurgarr/issues).
 - [New shows/movies only appear in Plex after a manual scan](#new-showsmovies-only-appear-in-plex-after-a-manual-scan)
 - [Blackhole: symlinks created but broken](#blackhole-symlinks-created-but-broken)
 - [Stuck ffprobe processes](#stuck-ffprobe-processes)
+- [Dashboard buttons fail with "cross-origin request rejected" behind a reverse proxy](#dashboard-buttons-fail-with-cross-origin-request-rejected-behind-a-reverse-proxy)
 - [I lost my config after a rebuild / restore from an old backup](#i-lost-my-config-after-a-rebuild--restore-from-an-old-backup)
 - [Migrating from pd_zurg](#migrating-from-pd_zurg)
 
@@ -338,6 +339,26 @@ for detailed diagnostics.
 Normal when Plex scans expired debrid links — the monitor handles it
 automatically. If you see false positives during large library scans,
 increase `FFPROBE_STUCK_TIMEOUT` (default 300s).
+
+## Dashboard buttons fail with "cross-origin request rejected" behind a reverse proxy
+
+State-changing requests (library refresh, delete, settings save, etc.)
+verify the browser's `Origin` header against the request's `Host`
+header — a CSRF guard that blocks a malicious page from firing those
+endpoints using your browser's saved credentials. If Zurgarr is served
+through a reverse proxy or accessed by a hostname different from the
+one the container sees on `Host` (e.g. `https://zurgarr.example.com` in
+front of `http://192.168.1.8:8080`), the Origin won't match and the
+request is rejected even though you're the legitimate operator.
+
+Set `STATUS_UI_TRUSTED_ORIGINS` to the public origin(s) the dashboard
+is actually accessed from — `scheme://host[:port]`, comma-separated for
+more than one (e.g. `https://zurgarr.example.com,https://zurgarr.lan`).
+Then reload config: Settings → **Save & Reload**, or send the container
+a `SIGHUP`.
+
+Direct IP:port access (no proxy, no hostname rewrite) needs no entry —
+Origin and Host already match.
 
 ## I lost my config after a rebuild / restore from an old backup
 

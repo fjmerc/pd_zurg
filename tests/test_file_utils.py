@@ -95,3 +95,22 @@ class TestAtomicWrite:
             f.write('')
         with open(path) as f:
             assert f.read() == ''
+
+    def test_atomic_write_fsyncs_by_default(self, tmp_path, monkeypatch):
+        synced = []
+        real_fsync = os.fsync
+        monkeypatch.setattr(os, 'fsync', lambda fd: (synced.append(fd), real_fsync(fd))[1])
+        target = tmp_path / 'state.json'
+        with atomic_write(str(target)) as f:
+            f.write('{"k": 1}')
+        assert len(synced) >= 2, 'expected file fsync + directory fsync'
+        assert target.read_text() == '{"k": 1}'
+
+    def test_atomic_write_fsync_false_skips(self, tmp_path, monkeypatch):
+        synced = []
+        monkeypatch.setattr(os, 'fsync', lambda fd: synced.append(fd))
+        target = tmp_path / 'cache.json'
+        with atomic_write(str(target), fsync=False) as f:
+            f.write('x')
+        assert synced == []
+        assert target.read_text() == 'x'

@@ -452,7 +452,7 @@ def _load_cache():
 
 def _save_cache(cache):
     os.makedirs(os.path.dirname(_CACHE_PATH), exist_ok=True)
-    with atomic_write(_CACHE_PATH) as f:
+    with atomic_write(_CACHE_PATH, fsync=False) as f:
         json.dump(cache, f, indent=2)
 
 

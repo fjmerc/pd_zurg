@@ -48,6 +48,7 @@ SERVICE_DEPENDENCIES = {
     },
     'status_ui': {
         'STATUS_UI_ENABLED', 'STATUS_UI_PORT', 'STATUS_UI_AUTH',
+        'STATUS_UI_TRUSTED_ORIGINS',
     },
 }
 
@@ -298,6 +299,9 @@ def _reload_once():
                 from utils.status_server import StatusHandler
                 auth = os.environ.get('STATUS_UI_AUTH')
                 StatusHandler.auth_credentials = auth if auth and ':' in auth else None
+                trusted = os.environ.get('STATUS_UI_TRUSTED_ORIGINS', '')
+                StatusHandler.trusted_origins = frozenset(
+                    o.strip().rstrip('/') for o in trusted.split(',') if o.strip())
                 logger.info("[reload] Status UI auth credentials updated")
             except Exception as e:
                 logger.error(f"[reload] Failed to update Status UI auth: {e}")

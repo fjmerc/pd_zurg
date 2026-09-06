@@ -7,12 +7,19 @@ from contextlib import contextmanager
 
 
 @contextmanager
-def atomic_write(target_path, mode='w', encoding='utf-8'):
+def atomic_write(target_path, mode='w', encoding='utf-8', fsync=True):
     """Context manager for crash-safe atomic file writes.
 
     Writes to a temporary file in the same directory, then atomically
     renames to the target path on success. If an exception occurs,
     the temp file is cleaned up and the original file is untouched.
+
+    By default, the temp file's contents and the containing directory
+    are both fsync'd before/after the rename so the write survives a
+    crash or power loss, not just concurrent readers. Pass
+    ``fsync=False`` only for rebuildable caches where the extra fsync
+    cost isn't worth it (e.g. a hot-path TMDB metadata cache that can
+    just be re-fetched).
 
     Usage:
         with atomic_write('/path/to/config.yml') as f:
@@ -39,6 +46,9 @@ def atomic_write(target_path, mode='w', encoding='utf-8'):
             fdopen_kwargs['encoding'] = encoding
         with os.fdopen(fd, **fdopen_kwargs) as tmp_file:
             yield tmp_file
+            if fsync:
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
 
         # Preserve original permissions
         if original_mode is not None:
@@ -46,6 +56,15 @@ def atomic_write(target_path, mode='w', encoding='utf-8'):
 
         # Atomic rename
         os.replace(tmp_path, target_path)
+
+        # Persist the rename itself — os.replace is atomic for concurrent
+        # readers but not durable across power loss without a dir fsync.
+        if fsync:
+            dir_fd = os.open(target_dir, os.O_DIRECTORY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
     except BaseException:
         # Clean up temp file on error
         try:

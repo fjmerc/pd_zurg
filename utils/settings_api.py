@@ -265,6 +265,10 @@ ENV_SCHEMA = [
             ('STATUS_UI_AUTH', 'Authentication', 'string', False,
              'Basic auth credentials (username:password). '
              'If you forget this password, edit /config/.env on the host volume to recover'),
+            ('STATUS_UI_TRUSTED_ORIGINS', 'Trusted origins', 'string', False,
+             'Comma-separated origins allowed to make state-changing requests when the '
+             'dashboard is served behind a reverse proxy (e.g. https://zurgarr.example.com). '
+             'Direct IP:port access needs no entry.'),
         ],
     },
     {

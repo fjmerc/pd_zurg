@@ -260,6 +260,7 @@ Sweep cadence (`DEBRID_HEALTH_INTERVAL`, default 12h) is a power-user override r
 | `STATUS_UI_ENABLED` | Enable the status web dashboard | `false` |
 | `STATUS_UI_PORT` | Dashboard port | `8080` |
 | `STATUS_UI_AUTH` | `user:password`. **Required** for the settings editor | |
+| `STATUS_UI_TRUSTED_ORIGINS` | Comma-separated origins allowed to make state-changing requests when the dashboard is served behind a reverse proxy (e.g. `https://zurgarr.example.com`). Direct IP:port access needs no entry | (empty) |
 | `FFPROBE_MONITOR_ENABLED` | Detect stuck ffprobe processes on debrid mounts | `true` |
 | `FFPROBE_STUCK_TIMEOUT` | Seconds before ffprobe is considered stuck | `300` |
 | `FFPROBE_POLL_INTERVAL` | Seconds between ffprobe monitor scans | `30` |

@@ -72,6 +72,31 @@ class TestTorrentEpisodeClaim:
         _, eps = _torrent_episode_claim('1923.S01E06.mkv')
         assert eps == {(1, 6)}
 
+    def test_same_season_sxxeyy_span_season_blocks(self):
+        """Fix-round-2: 'S04E01-S04E10' is two separate _EP_GROUP_RE
+        matches ({(4,1),(4,10)}) with the middle (E2-E9) unclaimed, and
+        being same-season the round-1 cross-season widening never
+        triggers — a dedicated SxxEyy-SxxEzz pattern must season-block
+        the whole season regardless."""
+        seasons, eps = _torrent_episode_claim('Show.S04E01-S04E10.mkv')
+        assert 4 in seasons
+        assert eps == {(4, 1), (4, 10)}
+
+    def test_cross_season_sxxeyy_span_still_covers_both_seasons(self):
+        """Fix-round-2 regression: the new SxxEyy-SxxEzz pattern must not
+        disturb the round-1 cross-season widening."""
+        seasons, _ = _torrent_episode_claim('Show.S01E20-S02E05.mkv')
+        assert 1 in seasons and 2 in seasons
+
+    def test_single_season_explicit_range_has_no_season_wide_block(self):
+        """Fix-round-2 regression: a plain single-season explicit range
+        (S01E04-E06, no repeated 'S') must NOT be season-blocked — it
+        stays a precise, fully-deletable episode claim when all its
+        episodes are safe."""
+        seasons, eps = _torrent_episode_claim('Show.S01E04-E06.mkv')
+        assert eps == {(1, 4), (1, 5), (1, 6)}
+        assert seasons == set()
+
 
 class TestFilterSafeTorrentDeletes:
     def test_duplicate_episode_deletable(self):
@@ -124,6 +149,14 @@ class TestFilterSafeTorrentDeletes:
         deletable2, kept2 = filter_safe_torrent_deletes(
             [_m('Show.S01E20-S02E05.mkv')], unsafe_episodes={(2, 3)})
         assert deletable2 == [] and len(kept2) == 1
+
+    def test_same_season_sxxeyy_span_kept_when_middle_episode_unsafe(self):
+        """Fix-round-2: 'S04E01-S04E10' must be kept when the unnamed
+        middle (E5) is the sole debrid copy — it's a single-season claim
+        so round-1's cross-season widening alone would miss this."""
+        deletable, kept = filter_safe_torrent_deletes(
+            [_m('Show.S04E01-S04E10.mkv')], unsafe_episodes={(4, 5)})
+        assert deletable == [] and len(kept) == 1
 
     def test_audit_regression_scenario(self):
         """S1E1-5 both-source, S1E6-8 debrid-only: nothing backing E6-8

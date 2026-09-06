@@ -875,6 +875,17 @@ _SEASON_RANGE_RE = re.compile(r'S(\d{1,2})\s*[-–]\s*S(\d{1,2})', re.IGNORECASE
 # Bare season range with no second "S" (e.g. "S01-03", "S1-3") — the "S01-
 # S03" form above requires a repeated S and would miss these.
 _SEASON_BARE_RANGE_RE = re.compile(r'S(\d{1,2})\s*[-–]\s*(\d{1,2})(?![E\d])', re.IGNORECASE)
+# SxxEyy-SxxEzz spans (e.g. "S04E01-S04E10"): _EP_GROUP_RE only ever
+# matches the leading "SxxEyy" of these (its repeat group can't cross a
+# literal "S"), so "S04E01-S04E10" parsed as two disjoint episode claims
+# {(4,1),(4,10)} with everything in between (E2-E9) unclaimed — and,
+# being same-season, the cross-season widening above never triggers
+# either (audit fix-round-2). Matching this pattern season-blocks the
+# whole season for BOTH the same-season case (conservative but simple)
+# and the cross-season case (redundant with the round-1 widening, which
+# is harmless).
+_SAME_SEASON_EP_SPAN_RE = re.compile(
+    r'S(\d{1,2})E\d{1,4}\s*[-–]\s*S(\d{1,2})E\d{1,4}', re.IGNORECASE)
 
 
 def _torrent_episode_claim(filename):
@@ -885,11 +896,12 @@ def _torrent_episode_claim(filename):
       (S01E04, S01E04E05, S01E04-E06).
     - ``seasons``: set of season ints claimed WITHOUT episode detail
       (season packs: "S01.", "Season 1", "S01-S03", "S01-03") PLUS, for a
-      cross-season episode claim (e.g. "S01E20-S02E05"), every season in
-      [min, max] of the seasons touched — the middle episodes of such a
-      release (S01E21-24, S02E01-04 in that example) are never explicitly
-      named, so the whole span is treated as season-wide for blocking
-      purposes (audit fix-round-1 CRITICAL 2; simple and fail-safe).
+      cross-season episode claim (e.g. "S01E20-S02E05") or an explicit
+      SxxEyy-SxxEzz span (e.g. "S04E01-S04E10", including same-season),
+      every season in [min, max] of the seasons touched — the middle
+      episodes of such a release are never individually named, so the
+      whole span is treated as season-wide for blocking purposes (audit
+      fix-round-1 CRITICAL 2 / fix-round-2; simple and fail-safe).
     - both empty: whole-show pack or unparseable — caller must fail closed.
     """
     name = filename or ''
@@ -917,6 +929,11 @@ def _torrent_episode_claim(filename):
     for m in _SEASON_BARE_RANGE_RE.finditer(name):
         lo, hi = int(m.group(1)), int(m.group(2))
         if lo <= hi and (hi - lo) < 50:
+            seasons.update(range(lo, hi + 1))
+    for m in _SAME_SEASON_EP_SPAN_RE.finditer(name):
+        s1, s2 = int(m.group(1)), int(m.group(2))
+        lo, hi = min(s1, s2), max(s1, s2)
+        if (hi - lo) < 50:
             seasons.update(range(lo, hi + 1))
     for m in _SEASON_ONLY_RE.finditer(name):
         s = int(m.group(1))

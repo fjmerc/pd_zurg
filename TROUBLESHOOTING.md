@@ -16,6 +16,7 @@ isn't here, open a [GitHub issue](https://github.com/fjmerc/zurgarr/issues).
 - [TorBox mount fails to authenticate / 401 Invalid credentials](#torbox-mount-fails-to-authenticate--401-invalid-credentials)
 - [Docker Desktop: mount propagation error](#docker-desktop-mount-propagation-error)
 - [Plex not seeing debrid content](#plex-not-seeing-debrid-content)
+- [New shows/movies only appear in Plex after a manual scan](#new-showsmovies-only-appear-in-plex-after-a-manual-scan)
 - [Blackhole: symlinks created but broken](#blackhole-symlinks-created-but-broken)
 - [Stuck ffprobe processes](#stuck-ffprobe-processes)
 - [I lost my config after a rebuild / restore from an old backup](#i-lost-my-config-after-a-rebuild--restore-from-an-old-backup)
@@ -261,6 +262,34 @@ needs. Options:
   Zurgarr's healthcheck is passing first.
 - Try `PLEX_REFRESH=true` with `PLEX_MOUNT_DIR` set to the mount path
   **as Plex sees it** (not the path inside the Zurgarr container).
+
+## New shows/movies only appear in Plex after a manual scan
+
+Symptom: content downloads fine and shows up in Sonarr/Radarr (and on
+disk), but Plex doesn't show it until you manually scan the library.
+It's intermittent — some titles appear on their own, others don't.
+
+Cause: nothing was telling Plex to scan. Content the library scanner
+symlinks into the arr's media folder is discovered by a Sonarr/Radarr
+*disk rescan* (`RescanSeries`/`RescanMovie`), not an import — so the
+arr's own "Update Library" Plex connection (which only fires on import)
+never triggers for it. Zurg's `on_library_update` hook only covers
+RealDebrid content, not the separate TorBox rclone mount. And Plex's own
+"scan my library automatically" relies on filesystem change events that
+don't propagate through rclone/FUSE mounts. So TorBox/scanner-delivered
+titles land on disk with no scan trigger — while content Sonarr/Radarr
+genuinely *imports* still refreshes Plex via the arr connection, which is
+why it looks intermittent.
+
+Fix: set `PLEX_REFRESH=true` (plus `PLEX_ADDRESS` and `PLEX_TOKEN`). The
+library scanner then asks Plex to refresh the affected sections (show
+sections when shows were symlinked, movie sections for movies) after it
+creates the symlinks — once per scan cycle, only when something new was
+added. Plex's scanner is incremental, so it only processes changed files.
+
+Stopgap without this: enable Plex's "Scan my library periodically" on the
+TV/Movie libraries so scanner-delivered content is picked up on a
+schedule instead of never.
 
 ## Sonarr says `hasFile=false` right after a scan but imports correctly a minute later
 

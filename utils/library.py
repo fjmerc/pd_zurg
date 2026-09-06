@@ -150,6 +150,40 @@ def _resolve_nfs_rescan_delay():
         return 0
     return max(0, min(delay, _NFS_RESCAN_DELAY_MAX))
 
+
+def _maybe_refresh_plex(symlinked_shows, symlinked_movies):
+    """Ask Plex to rescan the sections that just received scanner-symlinked
+    content.
+
+    Content the scanner symlinks in is discovered by an arr *rescan* (not an
+    import), so the arr's own "update Plex library" connection never fires; and
+    Zurg's ``on_library_update`` hook only covers RealDebrid, not TorBox.  This
+    is the only trigger that refreshes Plex for scanner/TorBox-delivered titles.
+
+    Gated by ``PLEX_REFRESH`` (same switch as Zurg's RD hook) and only fires for
+    the media types that actually got new symlinks.  Best-effort: never raises
+    into the scan loop.
+    """
+    if str(os.environ.get('PLEX_REFRESH', '')).lower() != 'true':
+        return
+    if not symlinked_shows and not symlinked_movies:
+        return
+    # Independent per-media-type calls so a failure refreshing show sections
+    # can't skip the movie refresh (mirrors the Sonarr/Radarr rescan parity
+    # this method already keeps).
+    if symlinked_shows:
+        try:
+            from utils.plex_refresh import refresh_plex_sections
+            refresh_plex_sections('show')
+        except Exception as e:
+            logger.warning(f"[library] Plex show-section refresh failed: {e}")
+    if symlinked_movies:
+        try:
+            from utils.plex_refresh import refresh_plex_sections
+            refresh_plex_sections('movie')
+        except Exception as e:
+            logger.warning(f"[library] Plex movie-section refresh failed: {e}")
+
 # Consecutive empty local-library scans before warning that local content
 # has never been seen this container lifetime.  Covers the stale-bind-at-boot
 # case (docker binds the local library path before the host's network share
@@ -7100,6 +7134,12 @@ class LibraryScanner:
                         logger.warning(f"[library] Radarr rescan failed for {title}: {e}")
                 elif radarr_map:
                     logger.warning(f"[library] Could not match '{title}' to a Radarr movie — rescan skipped")
+
+            # Tell Plex to rescan the affected sections.  The arr rescans above
+            # are disk rescans, not imports, so the arr's own Plex connection
+            # never fires for scanner-delivered content; this is the trigger
+            # that makes it visible in Plex without a manual scan.
+            _maybe_refresh_plex(symlinked_shows, symlinked_movies)
 
     # Category names that indicate TV/show content
     _SHOW_CATEGORIES = {'shows', 'tv', 'anime', 'series', 'television'}

@@ -197,11 +197,17 @@ def validate_config():
             "Must be 'local' (default) or 'zurg'."
         )
 
-    if _is_truthy(PLEXREFRESH) and not PLEXTOKEN:
-        result.error(
-            "PLEX_REFRESH=true but PLEX_TOKEN is not set. "
-            "Plex library refresh requires Plex API access."
-        )
+    if _is_truthy(PLEXREFRESH):
+        if not PLEXTOKEN:
+            result.error(
+                "PLEX_REFRESH=true but PLEX_TOKEN is not set. "
+                "Plex library refresh requires Plex API access."
+            )
+        if not PLEXADD:
+            result.error(
+                "PLEX_REFRESH=true but PLEX_ADDRESS is not set. "
+                "Plex library refresh requires the Plex server address."
+            )
 
     blackhole_enabled = os.environ.get('BLACKHOLE_ENABLED', 'false').lower() == 'true'
     if blackhole_enabled and not RDAPIKEY and not ADAPIKEY:

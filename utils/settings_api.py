@@ -768,11 +768,17 @@ def validate_env_values(values):
             "Must be 'local' (default) or 'zurg'."
         )
 
-    if _truthy('PLEX_REFRESH') and not values.get('PLEX_TOKEN'):
-        errors.append(
-            'PLEX_REFRESH=true but PLEX_TOKEN is not set. '
-            'Plex library refresh requires Plex API access.'
-        )
+    if _truthy('PLEX_REFRESH'):
+        if not values.get('PLEX_TOKEN'):
+            errors.append(
+                'PLEX_REFRESH=true but PLEX_TOKEN is not set. '
+                'Plex library refresh requires Plex API access.'
+            )
+        if not values.get('PLEX_ADDRESS'):
+            errors.append(
+                'PLEX_REFRESH=true but PLEX_ADDRESS is not set. '
+                'Plex library refresh requires the Plex server address.'
+            )
 
     blackhole_enabled = _truthy('BLACKHOLE_ENABLED')
     if blackhole_enabled:

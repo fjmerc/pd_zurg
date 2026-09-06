@@ -112,7 +112,7 @@ mount you need the two `TORBOX_WEBDAV_*` vars as well.
 
 | Variable | Description | Default |
 |---|---|---|
-| `PLEX_REFRESH` | Auto-refresh Plex libraries after mount changes | `false` |
+| `PLEX_REFRESH` | Auto-refresh Plex libraries. Enables both Zurg's `on_library_update` hook (RealDebrid content) and the library scanner's Plex section refresh after it symlinks new debrid content (covers TorBox/scanner-delivered titles). Requires `PLEX_ADDRESS` and `PLEX_TOKEN`. | `false` |
 | `PLEX_MOUNT_DIR` | Mount path as Plex sees it (for library refresh) | |
 | `DUPLICATE_CLEANUP` | Automated Plex duplicate detection + cleanup | `false` |
 | `CLEANUP_INTERVAL` | Hours between duplicate cleanup runs | `24` |

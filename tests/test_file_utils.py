@@ -114,3 +114,20 @@ class TestAtomicWrite:
             f.write('x')
         assert synced == []
         assert target.read_text() == 'x'
+
+    def test_atomic_write_dir_fsync_failure_is_best_effort(self, tmp_path, monkeypatch):
+        """A dir-fsync failure (e.g. O_DIRECTORY/EINVAL on some CIFS/NFS
+        mounts) must not turn an already-successful write into a
+        reported failure — the rename has already landed by that point."""
+        real_open = os.open
+
+        def flaky_open(path, flags, *a, **kw):
+            if flags & os.O_DIRECTORY:
+                raise OSError("simulated network-share O_DIRECTORY failure")
+            return real_open(path, flags, *a, **kw)
+
+        monkeypatch.setattr(os, 'open', flaky_open)
+        target = tmp_path / 'state.json'
+        with atomic_write(str(target)) as f:
+            f.write('{"k": 2}')
+        assert target.read_text() == '{"k": 2}'

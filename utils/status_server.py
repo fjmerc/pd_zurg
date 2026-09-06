@@ -3485,7 +3485,10 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
         text/plain form submission parses as JSON — so Origin (falling
         back to Referer) must match Host or be explicitly allow-listed
         via STATUS_UI_TRUSTED_ORIGINS (reverse-proxy deployments).
-        Requests with neither header (curl, scripts) are allowed."""
+        Requests with neither header (curl, scripts) are allowed.
+        Comparison is case-insensitive on both sides — Host header
+        casing varies, and STATUS_UI_TRUSTED_ORIGINS may be entered
+        with mixed case."""
         origin = self.headers.get('Origin')
         if origin is None:
             ref = self.headers.get('Referer')
@@ -3495,12 +3498,12 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
             if not p.scheme or not p.netloc:
                 return True
             origin = f'{p.scheme}://{p.netloc}'
-        origin = origin.rstrip('/')
+        origin = origin.rstrip('/').lower()
         if origin == 'null':
             return False
-        if origin in self.trusted_origins:
+        if origin in {o.lower() for o in self.trusted_origins}:
             return True
-        host = self.headers.get('Host', '')
+        host = self.headers.get('Host', '').lower()
         return bool(host) and urlparse(origin).netloc == host
 
     def _reject_cross_origin(self):
@@ -3564,7 +3567,7 @@ def setup():
     StatusHandler.auth_credentials = auth if auth and ':' in auth else None
     trusted = os.environ.get('STATUS_UI_TRUSTED_ORIGINS', '')
     StatusHandler.trusted_origins = frozenset(
-        o.strip().rstrip('/') for o in trusted.split(',') if o.strip())
+        o.strip().rstrip('/').lower() for o in trusted.split(',') if o.strip())
 
     # Initialize library scanner
     try:

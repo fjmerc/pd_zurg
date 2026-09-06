@@ -301,10 +301,10 @@ def _reload_once():
                 StatusHandler.auth_credentials = auth if auth and ':' in auth else None
                 trusted = os.environ.get('STATUS_UI_TRUSTED_ORIGINS', '')
                 StatusHandler.trusted_origins = frozenset(
-                    o.strip().rstrip('/') for o in trusted.split(',') if o.strip())
-                logger.info("[reload] Status UI auth credentials updated")
+                    o.strip().rstrip('/').lower() for o in trusted.split(',') if o.strip())
+                logger.info("[reload] Status UI auth credentials and trusted origins updated")
             except Exception as e:
-                logger.error(f"[reload] Failed to update Status UI auth: {e}")
+                logger.error(f"[reload] Failed to update Status UI auth/trusted origins: {e}")
 
         logger.info("[reload] Config reload complete")
         _notify_reload(changed, services)

@@ -59,12 +59,20 @@ def atomic_write(target_path, mode='w', encoding='utf-8', fsync=True):
 
         # Persist the rename itself — os.replace is atomic for concurrent
         # readers but not durable across power loss without a dir fsync.
+        # Best-effort: the rename has already landed on disk by this
+        # point, so a dir-fsync failure (e.g. O_DIRECTORY/EINVAL on some
+        # CIFS/NFS mounts — /config is a network share in some
+        # deployments) must not turn a successful write into a reported
+        # failure.
         if fsync:
-            dir_fd = os.open(target_dir, os.O_DIRECTORY)
             try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+                dir_fd = os.open(target_dir, os.O_DIRECTORY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
     except BaseException:
         # Clean up temp file on error
         try:

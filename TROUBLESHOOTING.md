@@ -354,8 +354,10 @@ request is rejected even though you're the legitimate operator.
 Set `STATUS_UI_TRUSTED_ORIGINS` to the public origin(s) the dashboard
 is actually accessed from — `scheme://host[:port]`, comma-separated for
 more than one (e.g. `https://zurgarr.example.com,https://zurgarr.lan`).
-Then reload config: Settings → **Save & Reload**, or send the container
-a `SIGHUP`.
+The match is case-insensitive, but use lowercase and omit default ports
+(`:443` for `https`, `:80` for `http`) to match what browsers actually
+send in the `Origin` header. Then reload config: Settings → **Save &
+Reload**, or send the container a `SIGHUP`.
 
 Direct IP:port access (no proxy, no hostname rewrite) needs no entry —
 Origin and Host already match.

@@ -458,15 +458,23 @@ window.onKbEscape=function(){
   if(s&&s.value){s.value='';loadActivity(1);return;}
 };
 
-/* Preselect the type filter from the URL (?type=...) so deep links from
-   other pages — e.g. the System page Debrid Health cards' "View activity"
-   button (?type=debrid) — land on a pre-filtered view. */
+/* Preselect filters from the URL so deep links from other pages land on a
+   pre-filtered view: ?type=... (e.g. the System page Debrid Health cards'
+   "View activity" button, ?type=debrid) and ?q=... (the show/movie detail
+   Activity panel's "View all in Activity" link, pre-filling title search). */
 (function(){
-  var t=new URLSearchParams(window.location.search).get('type');
-  if(!t)return;
-  var sel=document.getElementById('activity-type');
-  for(var i=0;i<sel.options.length;i++){
-    if(sel.options[i].value===t){sel.value=t;break;}
+  var params=new URLSearchParams(window.location.search);
+  var t=params.get('type');
+  if(t){
+    var sel=document.getElementById('activity-type');
+    for(var i=0;i<sel.options.length;i++){
+      if(sel.options[i].value===t){sel.value=t;break;}
+    }
+  }
+  var q=params.get('q');
+  if(q){
+    var s=document.getElementById('activity-search');
+    if(s)s.value=q;
   }
 })();
 

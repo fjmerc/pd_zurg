@@ -233,28 +233,30 @@ __NAV_HTML__
 /* History sidebar — rendered as a full-width section below seasons */
 .history-sidebar{border:1px solid var(--border);border-radius:8px;background:var(--card);padding:12px 14px;margin-top:18px}
 .history-sidebar h3{font-size:.95em;font-weight:600;margin:0 0 10px;color:var(--text)}
-.hs-empty{font-size:.82em;color:var(--text3);padding:8px 0}
+.hs-empty{font-size:.85em;color:var(--text3);padding:8px 0}
 /* Timeline rail */
 .hs-timeline{position:relative;padding-left:20px}
 .hs-timeline::before{content:'';position:absolute;left:6px;top:4px;bottom:4px;width:2px;background:var(--border2);border-radius:1px}
 .hs-day-group{margin-bottom:12px}
 .hs-day-group:last-child{margin-bottom:0}
-.hs-day-label{font-size:.72em;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.hs-day-label{font-size:.75em;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
 /* Event items */
-.hs-event{position:relative;padding:4px 0;font-size:.8em}
-.hs-event::before{content:'';position:absolute;left:-17px;top:9px;width:8px;height:8px;border-radius:50%;border:2px solid var(--border2);background:var(--bg)}
+.hs-event{position:relative;padding:4px 0;font-size:.85em}
+.hs-event::before{content:'';position:absolute;left:-17px;top:10px;width:8px;height:8px;border-radius:50%;border:2px solid var(--border2);background:var(--bg)}
 .hs-event.hs-cat-acquisition::before{border-color:var(--green);background:var(--green)}
 .hs-event.hs-cat-failure::before{border-color:var(--red);background:var(--red)}
 .hs-event.hs-cat-action::before{border-color:var(--blue);background:var(--blue)}
 .hs-event.hs-cat-management::before{border-color:var(--yellow);background:var(--yellow)}
-.hs-event.hs-cat-failure{border-left:2px solid var(--red);padding-left:6px;margin-left:-8px}
 .hs-event-icon{display:inline-block;width:16px;text-align:center;margin-right:2px;font-size:.9em}
 .hs-event-type{font-weight:500;color:var(--text)}
-.hs-event-episode{display:inline-block;padding:1px 5px;border-radius:3px;font-size:.78em;font-weight:600;background:var(--border);color:var(--text2);margin-left:4px}
+.hs-event-episode{display:inline-block;padding:1px 5px;border-radius:3px;font-size:.85em;font-weight:600;background:var(--border);color:var(--text);margin-left:4px}
 .hs-event-detail{color:var(--text2);font-size:.92em;margin-top:1px;word-break:break-word}
-.hs-event-time{color:var(--text3);font-size:.82em;font-family:monospace}
-.hs-event-count{display:inline-block;padding:0 5px;border-radius:3px;font-size:.78em;font-weight:600;background:var(--border2);color:var(--text);margin-left:4px;font-family:monospace}
+.hs-event-time{color:var(--text3);font-size:.85em;font-family:monospace}
+.hs-event-count{display:inline-block;padding:0 5px;border-radius:3px;font-size:.85em;font-weight:600;background:var(--border2);color:var(--text);margin-left:4px;font-family:monospace}
 .hs-event.hs-run{opacity:.95}
+.hs-more{display:inline-block;margin-top:8px;font-size:.85em;color:var(--blue);text-decoration:none}
+.hs-more:hover{text-decoration:underline}
+.hs-retry{background:none;border:none;color:var(--blue);cursor:pointer;font:inherit;padding:0;margin-left:6px;text-decoration:underline}
 
 /* Season accordion */
 .season-section{border:1px solid var(--border);border-radius:8px;margin-bottom:8px;overflow:hidden}
@@ -2710,7 +2712,7 @@ function _renderMovieDetail(movie, meta) {
   html += '<div class="detail-body"><div class="detail-main">';
   html += _renderCastSection(meta);
   html += '<div id="transfer-msg" aria-live="polite"></div>';
-  html += '<div class="history-sidebar" id="history-sidebar-content"><h3>Activity</h3><div class="hs-empty">Loading\u2026</div></div>';
+  html += '<div class="history-sidebar" id="history-sidebar-content"><h3>Activity</h3><div class="hs-empty" role="status">Loading\u2026</div></div>';
   html += '</div>';
   html += '</div>';
   html += '</div>';
@@ -3153,7 +3155,7 @@ function _renderShowDetail(show, meta) {
   }
 
   html += '<div id="transfer-msg" aria-live="polite"></div>';
-  html += '<div class="history-sidebar" id="history-sidebar-content"><h3>Activity</h3><div class="hs-empty">Loading\u2026</div></div>';
+  html += '<div class="history-sidebar" id="history-sidebar-content"><h3>Activity</h3><div class="hs-empty" role="status">Loading\u2026</div></div>';
   html += '</div>';
   html += '</div>';
   html += '</div>';
@@ -3253,8 +3255,23 @@ function _loadHistorySidebar() {
     .catch(function() {
       if (gen !== _historySidebarGen) return;
       var c = document.getElementById('history-sidebar-content');
-      if (c) c.innerHTML = '<h3>Activity</h3><div class="hs-empty" style="color:var(--red)">⚠ Failed to load</div>';
+      if (c) c.innerHTML = '<h3>Activity</h3><div class="hs-empty" role="status" style="color:var(--red)">⚠ Activity failed to load.'
+        + '<button type="button" class="hs-retry" onclick="_retryHistorySidebar()">Retry</button></div>';
     });
+}
+
+function _retryHistorySidebar() {
+  var c = document.getElementById('history-sidebar-content');
+  if (!c) return;
+  c.innerHTML = '<h3>Activity</h3><div class="hs-empty" role="status">Loading…</div>';
+  _loadHistorySidebar();
+}
+
+// Absolute local timestamp for <time> tooltips — the row text stays relative
+// ("3h ago"), but troubleshooting needs the exact moment on hover.
+function _absHistoryTime(ts) {
+  var d = new Date(ts);
+  return isNaN(d.getTime()) ? '' : d.toLocaleString();
 }
 
 // Plan 33: surface quality-compromise grabs inline on the detail view so
@@ -3298,7 +3315,8 @@ function _renderHistorySidebar(container, events) {
     if (!_HS_EXCLUDE[events[i].type]) filtered.push(events[i]);
   }
   if (!filtered.length) {
-    container.innerHTML = '<h3>Activity</h3><div class="hs-empty">No activity recorded yet</div>';
+    container.innerHTML = '<h3>Activity</h3><div class="hs-empty" role="status">No activity for this title yet — '
+      + 'grabs, downloads, and source switches will appear here.</div>';
     return;
   }
   // Events arrive newest-first.  Collapse runs of adjacent events that share
@@ -3325,9 +3343,9 @@ function _renderHistorySidebar(container, events) {
       last.firstTs = ev.ts;
       continue;
     }
-    // Start a new run if the prior event chains.  (Using a lookahead keeps
-    // the run contiguous even when a single other event briefly interrupts
-    // \u2014 we don't support gapped merges on purpose; simpler is better.)
+    // Runs merge strictly-adjacent events only \u2014 a single interrupting
+    // event of another kind breaks the run.  Gapped merges are unsupported
+    // on purpose; simpler is better.
     collapsed.push({kind: 'run', groupKey: fmt.groupKey, events: [ev],
                     firstTs: ev.ts, lastTs: ev.ts, short: fmt.short});
   }
@@ -3353,7 +3371,7 @@ function _renderHistorySidebar(container, events) {
     }
     groups[groups.length - 1].items.push(items[k]);
   }
-  var h = '<h3>Activity</h3><div class="hs-timeline">';
+  var h = '<h3>Activity</h3><div class="hs-timeline" role="list">';
   for (var g = 0; g < groups.length; g++) {
     h += '<div class="hs-day-group"><div class="hs-day-label">' + esc(groups[g].label) + '</div>';
     for (var j = 0; j < groups[g].items.length; j++) {
@@ -3364,11 +3382,12 @@ function _renderHistorySidebar(container, events) {
         var icon = _HS_ICONS[sev.type] || '\u2022';
         var label = _HS_LABELS[sev.type] || sev.type.replace(/_/g, ' ');
         var fmtOne = window._formatActivityEvent ? window._formatActivityEvent(sev) : {short: sev.detail||''};
-        h += '<div class="hs-event hs-cat-' + escAttr(cat) + '">';
-        h += '<span class="hs-event-icon">' + esc(icon) + '</span>';
+        h += '<div class="hs-event hs-cat-' + escAttr(cat) + '" role="listitem">';
+        h += '<span class="hs-event-icon" aria-hidden="true">' + esc(icon) + '</span>';
         h += '<span class="hs-event-type">' + esc(label) + '</span>';
         if (sev.episode) h += '<span class="hs-event-episode">' + esc(sev.episode) + '</span>';
-        h += ' <span class="hs-event-time">' + esc(_timeAgoHistory(sev.ts)) + '</span>';
+        h += ' <time class="hs-event-time" datetime="' + escAttr(sev.ts || '') + '" title="'
+          + escAttr(_absHistoryTime(sev.ts)) + '">' + esc(_timeAgoHistory(sev.ts)) + '</time>';
         if (fmtOne.short) h += '<div class="hs-event-detail">' + esc(fmtOne.short) + '</div>';
         h += '</div>';
       } else {
@@ -3378,12 +3397,15 @@ function _renderHistorySidebar(container, events) {
         var ricon = _HS_ICONS[rev.type] || '\u2022';
         var rlabel = _HS_LABELS[rev.type] || rev.type.replace(/_/g, ' ');
         var span = _spanHuman(run.firstTs, run.lastTs);
-        h += '<div class="hs-event hs-cat-' + escAttr(rcat) + ' hs-run">';
-        h += '<span class="hs-event-icon">' + esc(ricon) + '</span>';
+        var runTip = _absHistoryTime(run.firstTs) + ' \u2013 ' + _absHistoryTime(run.lastTs);
+        h += '<div class="hs-event hs-cat-' + escAttr(rcat) + ' hs-run" role="listitem">';
+        h += '<span class="hs-event-icon" aria-hidden="true">' + esc(ricon) + '</span>';
         h += '<span class="hs-event-type">' + esc(rlabel) + '</span>';
         h += ' <span class="hs-event-count">' + run.events.length + '\u00d7</span>';
-        if (span) h += ' <span class="hs-event-time">over ' + esc(span) + '</span>';
-        else      h += ' <span class="hs-event-time">' + esc(_timeAgoHistory(run.lastTs)) + '</span>';
+        if (span) h += ' <time class="hs-event-time" datetime="' + escAttr(run.lastTs || '') + '" title="'
+          + escAttr(runTip) + '">over ' + esc(span) + '</time>';
+        else      h += ' <time class="hs-event-time" datetime="' + escAttr(run.lastTs || '') + '" title="'
+          + escAttr(_absHistoryTime(run.lastTs)) + '">' + esc(_timeAgoHistory(run.lastTs)) + '</time>';
         if (run.short) h += '<div class="hs-event-detail">' + esc(run.short) + '</div>';
         h += '</div>';
       }
@@ -3391,6 +3413,13 @@ function _renderHistorySidebar(container, events) {
     h += '</div>';
   }
   h += '</div>';
+  // The fetch caps at 30 events; when the cap is hit there is almost
+  // certainly more history \u2014 open the door to the full Activity page,
+  // pre-filtered to this title via its ?q= deep link.
+  if (events.length >= 30 && _detailItem) {
+    h += '<a class="hs-more" href="/activity?q=' + escAttr(encodeURIComponent(_detailItem.title))
+      + '">View all in Activity \u2192</a>';
+  }
   container.innerHTML = h;
 }
 
